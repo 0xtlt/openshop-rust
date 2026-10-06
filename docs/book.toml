@@ -1,0 +1,12 @@
+[book]
+title = "OpenShop"
+description = "Build Shopify integrations in Rust with background flows, configurable service providers, and an embedded admin UI."
+language = "en"
+src = "src"
+
+[output.html]
+git-repository-url = "https://github.com/0xtlt/openshop-rust"
+edit-url-template = "https://github.com/0xtlt/openshop-rust/edit/main/docs/{path}"
+
+[output.html.playground]
+runnable = false

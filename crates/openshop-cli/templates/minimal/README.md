@@ -1,0 +1,35 @@
+# __APP_NAME__
+
+A Shopify integration built with [OpenShop](https://github.com/0xtlt/openshop-rust).
+
+## Develop
+
+```bash
+docker compose up -d          # PostgreSQL
+cp .env.example .env          # then fill in the Shopify credentials
+openshop dev                  # or: cargo run -- dev
+```
+
+`dev` pushes the database schema, then serves the API, the embedded admin UI,
+a worker and the cron scheduler from one process on `http://localhost:3000`.
+Run it through `shopify app dev` to open the app inside a development store.
+
+## Test
+
+```bash
+cargo test                    # unit tests
+cargo test -- --ignored       # tests that need PostgreSQL
+```
+
+## Deploy
+
+```bash
+cargo run --release -- migrate    # apply ./migrations
+cargo run --release -- start      # web process: API, admin UI, scheduler
+cargo run --release -- worker     # one or more workers
+```
+
+Set `OPENSHOP_ENV=production` and `ENCRYPTION_KEY` in production. Schema
+changes live in `./migrations`: run `cargo run -- migrate generate` after
+upgrading OpenShop, or `cargo run -- migrate generate --name=<name>` to add
+your own tables.

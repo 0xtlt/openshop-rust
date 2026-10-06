@@ -1,0 +1,4 @@
+target/
+.shopify/
+.env
+.git/

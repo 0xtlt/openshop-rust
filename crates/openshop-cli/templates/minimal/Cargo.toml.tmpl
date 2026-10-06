@@ -1,0 +1,26 @@
+[package]
+name = "__PACKAGE_NAME__"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+openshop = { __OPENSHOP_SOURCE__ }
+schemars = "1"
+serde = { version = "1", features = ["derive"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+
+[dev-dependencies]
+openshop = { __OPENSHOP_SOURCE__, features = ["testing"] }
+
+# MCP token hashing (scrypt) is very slow without optimizations.
+[profile.dev.package.scrypt]
+opt-level = 3
+
+[profile.dev.package.salsa20]
+opt-level = 3
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "debuginfo"

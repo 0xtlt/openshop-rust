@@ -1,0 +1,17 @@
+[package]
+name = "openshop-demo"
+description = "Demo application exercising every OpenShop building block."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+openshop.workspace = true
+schemars.workspace = true
+serde.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+openshop = { workspace = true, features = ["testing"] }

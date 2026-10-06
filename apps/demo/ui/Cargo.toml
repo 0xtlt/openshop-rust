@@ -1,0 +1,24 @@
+[package]
+name = "openshop-demo-ui"
+description = "Admin UI bundle of the OpenShop demo app: the built-in screens plus its custom pages."
+version = "0.0.12-beta.0"
+edition = "2024"
+rust-version = "1.88"
+license = "MIT"
+publish = false
+
+# Built with trunk for wasm32; kept out of the server workspace on purpose.
+[workspace]
+
+[dependencies]
+openshop-ui = { path = "../../../crates/openshop-ui" }
+
+leptos = "0.8"
+serde = { version = "1", features = ["derive"] }
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

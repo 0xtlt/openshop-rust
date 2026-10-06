@@ -1,0 +1,63 @@
+[package]
+name = "openshop"
+description = "Shopify integration framework with flows, providers, an embedded admin UI, and background workers."
+keywords = ["shopify", "framework", "axum", "postgres", "workflow"]
+categories = ["web-programming", "asynchronous"]
+readme = "../../README.md"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+include = ["src/**", "migrations/**", "ui-dist/**", "build.rs", "Cargo.toml"]
+
+[features]
+default = ["embedded-ui", "schema"]
+# Embed the prebuilt WebAssembly admin UI (`ui-dist/`) in the binary.
+embedded-ui = ["dep:rust-embed"]
+# Derive flow input validation and JSON Schema from Rust types (`Flow::input::<T>()`).
+schema = ["dep:schemars"]
+# Test harness: isolated databases, fake providers, signed requests.
+testing = []
+
+[dependencies]
+openshop-shared.workspace = true
+
+aes-gcm.workspace = true
+anyhow.workspace = true
+axum.workspace = true
+base64.workspace = true
+chrono.workspace = true
+croner.workspace = true
+futures.workspace = true
+hex.workspace = true
+hmac.workspace = true
+indexmap.workspace = true
+mime_guess.workspace = true
+rand.workspace = true
+regex.workspace = true
+reqwest.workspace = true
+rust-embed = { workspace = true, optional = true }
+schemars = { workspace = true, optional = true }
+scrypt.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+sqlx.workspace = true
+subtle.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tower-http.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+url.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+openshop = { path = ".", features = ["testing"] }
+tokio = { workspace = true, features = ["test-util"] }
+
+[lints.rust]
+unsafe_code = "deny"

@@ -1,0 +1,515 @@
+//! `POST /webhooks`: HMAC verification, topic dispatch and the handler context.
+
+mod common;
+
+use std::sync::{Arc, Mutex};
+
+use common::noop_flow;
+use openshop::db::schema::FlowRun;
+use openshop::testing::{TestContext, TestOptions, sign_webhook_body};
+use openshop::{
+    DispatchFlowParams, OpenShopBuilder, OpenShopConfig, ShopifyAppConfig, ShopifyConfig, Value, Webhook,
+    WebhookContext, bail, json,
+};
+use reqwest::Response;
+
+const SECRET: &str = "test-secret";
+
+/// The context a handler was called with, without its `app`.
+#[derive(Debug, Clone, PartialEq)]
+struct Delivery {
+    topic: String,
+    shop: String,
+    shopify_app: String,
+    api_version: String,
+    payload: Value,
+}
+
+/// Records the deliveries a webhook handler receives.
+#[derive(Clone, Default)]
+struct Recorder(Arc<Mutex<Vec<Delivery>>>);
+
+impl Recorder {
+    fn webhook(&self) -> Webhook {
+        let recorder = self.clone();
+        Webhook::new(move |ctx: WebhookContext| {
+            let recorder = recorder.clone();
+            async move {
+                recorder.0.lock().unwrap().push(Delivery {
+                    topic: ctx.topic,
+                    shop: ctx.shop,
+                    shopify_app: ctx.shopify_app,
+                    api_version: ctx.api_version,
+                    payload: ctx.payload,
+                });
+                Ok(())
+            }
+        })
+    }
+
+    fn deliveries(&self) -> Vec<Delivery> {
+        self.0.lock().unwrap().clone()
+    }
+
+    fn count(&self) -> usize {
+        self.0.lock().unwrap().len()
+    }
+}
+
+fn builder() -> OpenShopBuilder {
+    OpenShopConfig::builder().flow(noop_flow("wh-flow"))
+}
+
+fn orders_create_config(recorder: &Recorder) -> OpenShopConfig {
+    builder().webhook("ORDERS_CREATE", recorder.webhook()).build().unwrap()
+}
+
+fn multi_shopify(secret_a: &str, secret_b: &str) -> ShopifyConfig {
+    let apps = [("clientA", "client-a", secret_a), ("clientB", "client-b", secret_b)]
+        .into_iter()
+        .map(|(handle, slug, secret)| {
+            let app = ShopifyAppConfig::Keys {
+                api_key: format!("{slug}-key"),
+                api_secret: secret.to_string(),
+                app_url: Some(format!("https://{slug}.example.test")),
+            };
+            (handle.to_string(), app)
+        })
+        .collect();
+    ShopifyConfig {
+        scopes: Some("read_products".to_string()),
+        apps: Some(apps),
+    }
+}
+
+fn multi_app_config(recorder: &Recorder) -> OpenShopConfig {
+    builder()
+        .shopify(multi_shopify("client-a-secret", "client-b-secret"))
+        .webhook("ORDERS_CREATE", recorder.webhook())
+        .build()
+        .unwrap()
+}
+
+async fn post_webhook(ctx: &TestContext, topic: &str, shop: &str, body: &str, hmac: &str) -> Response {
+    ctx.http
+        .post(format!("{}/webhooks", ctx.url))
+        .header("content-type", "application/json")
+        .header("x-shopify-hmac-sha256", hmac)
+        .header("x-shopify-topic", topic)
+        .header("x-shopify-shop-domain", shop)
+        .header("x-shopify-api-version", "2024-01")
+        .body(body.to_string())
+        .send()
+        .await
+        .unwrap()
+}
+
+/// A delivery signed with the single-app secret.
+async fn deliver(ctx: &TestContext, topic: &str, shop: &str, body: &str) -> Response {
+    post_webhook(ctx, topic, shop, body, &sign_webhook_body(body, SECRET)).await
+}
+
+async fn assert_ok(response: Response) {
+    assert_eq!(response.status(), 200);
+    assert_eq!(response.json::<Value>().await.unwrap(), json!({ "ok": true }));
+}
+
+async fn assert_error(response: Response, status: u16, error: &str) {
+    assert_eq!(response.status().as_u16(), status);
+    assert_eq!(response.json::<Value>().await.unwrap(), json!({ "error": error }));
+}
+
+async fn flow_runs(ctx: &TestContext) -> Vec<FlowRun> {
+    sqlx::query_as("SELECT * FROM flow_runs ORDER BY created_at")
+        .fetch_all(&ctx.db)
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn post_webhooks_with_invalid_hmac_returns_401() {
+    let recorder = Recorder::default();
+    let ctx = TestContext::new(orders_create_config(&recorder)).await.unwrap();
+
+    let response = post_webhook(&ctx, "orders/create", "test.myshopify.com", "{}", "invalid").await;
+    assert_error(response, 401, "Invalid webhook HMAC").await;
+    assert_eq!(recorder.count(), 0);
+    ctx.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn post_webhooks_rejects_missing_forged_or_mismatched_signatures() {
+    let recorder = Recorder::default();
+    let ctx = TestContext::new(orders_create_config(&recorder)).await.unwrap();
+    let body = r#"{"id":1,"total":"10.00"}"#;
+    let valid = sign_webhook_body(body, SECRET);
+
+    let response = ctx
+        .http
+        .post(format!("{}/webhooks", ctx.url))
+        .header("x-shopify-topic", "orders/create")
+        .header("x-shopify-shop-domain", "test.myshopify.com")
+        .body(body)
+        .send()
+        .await
+        .unwrap();
+    assert_error(response, 401, "Invalid webhook HMAC").await;
+
+    for hmac in [
+        String::new(),
+        sign_webhook_body(body, "another-secret"),
+        sign_webhook_body(body, ""),
+        // Signature of another payload.
+        sign_webhook_body(r#"{"id":2,"total":"10.00"}"#, SECRET),
+        // A valid signature with trailing garbage, or cut short.
+        format!("{valid}AA"),
+        valid[..valid.len() - 2].to_string(),
+        valid.to_lowercase(),
+    ] {
+        let response = post_webhook(&ctx, "orders/create", "test.myshopify.com", body, &hmac).await;
+        assert_error(response, 401, "Invalid webhook HMAC").await;
+    }
+
+    // The signature covers the exact bytes of the body, not its JSON value.
+    let reformatted = r#"{"id": 1, "total": "10.00"}"#;
+    let response = post_webhook(&ctx, "orders/create", "test.myshopify.com", reformatted, &valid).await;
+    assert_error(response, 401, "Invalid webhook HMAC").await;
+
+    assert_eq!(recorder.count(), 0);
+    ctx.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn post_webhooks_with_unknown_topic_returns_200_without_invoking_handler() {
+    let recorder = Recorder::default();
+    let ctx = TestContext::new(orders_create_config(&recorder)).await.unwrap();
+
+    assert_ok(deliver(&ctx, "products/update", "test.myshopify.com", r#"{"id":1}"#).await).await;
+    // The body is only parsed for a registered topic.
+    assert_ok(deliver(&ctx, "products/update", "test.myshopify.com", "not json").await).await;
+    assert_ok(deliver(&ctx, "", "test.myshopify.com", r#"{"id":1}"#).await).await;
+
+    assert_eq!(recorder.count(), 0);
+    ctx.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn post_webhooks_invokes_handler_for_registered_topic() {
+    let recorder = Recorder::default();
+    let ctx = TestContext::new(orders_create_config(&recorder)).await.unwrap();
+    let body = r#"{"id":999,"name":"order"}"#;
+
+    assert_ok(deliver(&ctx, "orders/create", "shop-hooks.myshopify.com", body).await).await;
+
+    assert_eq!(
+        recorder.deliveries(),
+        vec![Delivery {
+            topic: "orders/create".to_string(),
+            shop: "shop-hooks.myshopify.com".to_string(),
+            shopify_app: "default".to_string(),
+            api_version: "2024-01".to_string(),
+            payload: json!({ "id": 999, "name": "order" }),
+        }]
+    );
+    ctx.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn post_webhooks_normalizes_the_topic_to_find_the_handler() {
+    let orders = Recorder::default();
+    let uninstalled = Recorder::default();
+    let config = builder()
+        .webhook("ORDERS_CREATE", orders.webhook())
+        .webhook("APP_UNINSTALLED", uninstalled.webhook())
+        .build()
+        .unwrap();
+    let ctx = TestContext::new(config).await.unwrap();
+
+    for topic in ["orders/create", "ORDERS_CREATE", "Orders/Create", "orders_create"] {
+        assert_ok(deliver(&ctx, topic, "test.myshopify.com", "{}").await).await;
+    }
+    assert_ok(deliver(&ctx, "app/uninstalled", "test.myshopify.com", "{}").await).await;
+    // Close, but another topic.
+    assert_ok(deliver(&ctx, "orders/created", "test.myshopify.com", "{}").await).await;
+    assert_ok(deliver(&ctx, "orders/create/extra", "test.myshopify.com", "{}").await).await;
+
+    // Handlers see the topic exactly as Shopify sent it.
+    let topics: Vec<String> = orders.deliveries().into_iter().map(|delivery| delivery.topic).collect();
+    assert_eq!(
+        topics,
+        ["orders/create", "ORDERS_CREATE", "Orders/Create", "orders_create"]
+    );
+    assert_eq!(uninstalled.count(), 1);
+    ctx.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn post_webhooks_prefers_a_handler_registered_under_the_raw_topic() {
+    let raw = Recorder::default();
+    let normalized = Recorder::default();
+    let config = builder()
+        .webhook("ORDERS_CREATE", normalized.webhook())
+        .webhook("orders/create", raw.webhook())
+        .webhook("products/update", raw.webhook())
+        .build()
+        .unwrap();
+    let ctx = TestContext::new(config).await.unwrap();
+
+    assert_ok(deliver(&ctx, "orders/create", "test.myshopify.com", "{}").await).await;
+    assert_eq!((raw.count(), normalized.count()), (1, 0));
+
+    assert_ok(deliver(&ctx, "ORDERS_CREATE", "test.myshopify.com", "{}").await).await;
+    assert_eq!((raw.count(), normalized.count()), (1, 1));
+
+    // Normalization only goes one way: `products/update` is not found from `PRODUCTS_UPDATE`.
+    assert_ok(deliver(&ctx, "products/update", "test.myshopify.com", "{}").await).await;
+    assert_ok(deliver(&ctx, "PRODUCTS_UPDATE", "test.myshopify.com", "{}").await).await;
+    assert_eq!((raw.count(), normalized.count()), (2, 1));
+    ctx.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn post_webhooks_with_invalid_json_returns_400() {
+    let recorder = Recorder::default();
+    let ctx = TestContext::new(orders_create_config(&recorder)).await.unwrap();
+
+    for body in ["not json", "", "{\"id\":", "{'id':1}"] {
+        let response = deliver(&ctx, "orders/create", "test.myshopify.com", body).await;
+        assert_error(response, 400, "Invalid JSON body").await;
+    }
+    assert_eq!(recorder.count(), 0);
+
+    // Any JSON value is a payload.
+    assert_ok(deliver(&ctx, "orders/create", "test.myshopify.com", "[1,2]").await).await;
+    assert_eq!(recorder.deliveries()[0].payload, json!([1, 2]));
+    ctx.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn post_webhooks_still_returns_200_when_the_handler_fails() {
+    let recorder = Recorder::default();
+    let config = builder()
+        .webhook(
+            "ORDERS_CREATE",
+            Webhook::new(|_ctx: WebhookContext| async move { bail!("handler exploded") }),
+        )
+        .webhook(
+            "ORDERS_UPDATED",
+            Webhook::new(|ctx: WebhookContext| async move {
+                if ctx.payload["panic"] == true {
+                    panic!("handler panicked");
+                }
+                Ok(())
+            }),
+        )
+        .webhook("ORDERS_PAID", recorder.webhook())
+        .build()
+        .unwrap();
+    let ctx = TestContext::new(config).await.unwrap();
+
+    assert_ok(deliver(&ctx, "orders/create", "test.myshopify.com", "{}").await).await;
+    assert_ok(deliver(&ctx, "orders/updated", "test.myshopify.com", r#"{"panic":true}"#).await).await;
+
+    // The server keeps serving after a failed handler.
+    assert_ok(deliver(&ctx, "orders/paid", "test.myshopify.com", "{}").await).await;
+    assert_eq!(recorder.count(), 1);
+    ctx.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn post_webhooks_does_not_require_or_accept_a_session_token() {
+    let recorder = Recorder::default();
+    let ctx = TestContext::new(orders_create_config(&recorder)).await.unwrap();
+    let body = r#"{"id":1}"#;
+
+    // A valid session token is no substitute for the signature.
+    let response = ctx
+        .post("/webhooks")
+        .header("x-shopify-topic", "orders/create")
+        .header("x-shopify-shop-domain", "test.myshopify.com")
+        .body(body)
+        .send()
+        .await
+        .unwrap();
+    assert_error(response, 401, "Invalid webhook HMAC").await;
+    assert_eq!(recorder.count(), 0);
+
+    // The trailing-slash alias is no way around the signature either.
+    let response = ctx
+        .post("/webhooks/")
+        .header("x-shopify-hmac-sha256", "invalid")
+        .header("x-shopify-topic", "orders/create")
+        .body(body)
+        .send()
+        .await
+        .unwrap();
+    assert!(!response.status().is_success());
+    assert_eq!(recorder.count(), 0);
+
+    assert_ok(deliver(&ctx, "orders/create", "test.myshopify.com", body).await).await;
+    assert_eq!(recorder.count(), 1);
+    ctx.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn post_webhooks_handler_can_dispatch_a_flow_through_the_app() {
+    let config = builder()
+        .webhook(
+            "ORDERS_CREATE",
+            Webhook::new(|ctx: WebhookContext| async move {
+                ctx.app
+                    .dispatch_flow(
+                        DispatchFlowParams::new("wh-flow", ctx.shop.clone())
+                            .input(json!({ "orderId": ctx.payload["id"], "topic": ctx.topic }))
+                            .shopify_app(ctx.shopify_app.clone()),
+                    )
+                    .await?;
+                Ok(())
+            }),
+        )
+        .build()
+        .unwrap();
+    let ctx = TestContext::new(config).await.unwrap();
+
+    assert_ok(deliver(&ctx, "orders/create", "shop-hooks.myshopify.com", r#"{"id":4242}"#).await).await;
+
+    let runs = flow_runs(&ctx).await;
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0].flow_name, "wh-flow");
+    assert_eq!(runs[0].shop, "shop-hooks.myshopify.com");
+    assert_eq!(runs[0].app_handle, "default");
+    assert_eq!(runs[0].status, "pending");
+    assert_eq!(
+        runs[0].input,
+        Some(json!({ "orderId": 4242, "topic": "orders/create" }))
+    );
+
+    // The flow rejects concurrent runs: the handler error is swallowed and Shopify still gets a 200.
+    assert_ok(deliver(&ctx, "orders/create", "shop-hooks.myshopify.com", r#"{"id":4243}"#).await).await;
+    assert_eq!(flow_runs(&ctx).await.len(), 1);
+    ctx.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn post_webhooks_resolves_the_matching_shopify_app_from_hmac() {
+    let recorder = Recorder::default();
+    let ctx = TestContext::new(multi_app_config(&recorder)).await.unwrap();
+    let body = r#"{"id":1000,"name":"order"}"#;
+
+    let hmac = sign_webhook_body(body, "client-b-secret");
+    let response = post_webhook(&ctx, "orders/create", "client-b-shop.myshopify.com", body, &hmac).await;
+    assert_ok(response).await;
+    let hmac = sign_webhook_body(body, "client-a-secret");
+    let response = post_webhook(&ctx, "orders/create", "client-a-shop.myshopify.com", body, &hmac).await;
+    assert_ok(response).await;
+
+    let received: Vec<(String, String)> = recorder
+        .deliveries()
+        .into_iter()
+        .map(|delivery| (delivery.shopify_app, delivery.shop))
+        .collect();
+    assert_eq!(
+        received,
+        [
+            ("clientB".to_string(), "client-b-shop.myshopify.com".to_string()),
+            ("clientA".to_string(), "client-a-shop.myshopify.com".to_string()),
+        ]
+    );
+    ctx.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn post_webhooks_in_multi_app_mode_rejects_signatures_matching_no_app() {
+    let recorder = Recorder::default();
+    let ctx = TestContext::new(multi_app_config(&recorder)).await.unwrap();
+    let body = r#"{"id":1000}"#;
+
+    // `test-secret` is the environment secret of single-app mode; it is not an app here.
+    for secret in [SECRET, "client-c-secret", "client-a-secre", "client-a-key"] {
+        let hmac = sign_webhook_body(body, secret);
+        let response = post_webhook(&ctx, "orders/create", "client-a-shop.myshopify.com", body, &hmac).await;
+        assert_error(response, 401, "Invalid webhook HMAC").await;
+    }
+    assert_eq!(recorder.count(), 0);
+    ctx.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn post_webhooks_in_multi_app_mode_rejects_a_signature_matching_several_apps() {
+    let recorder = Recorder::default();
+    let config = builder()
+        .shopify(multi_shopify("shared-secret", "shared-secret"))
+        .webhook("ORDERS_CREATE", recorder.webhook())
+        .build()
+        .unwrap();
+    let ctx = TestContext::new(config).await.unwrap();
+    let body = r#"{"id":1000}"#;
+
+    let hmac = sign_webhook_body(body, "shared-secret");
+    let response = post_webhook(&ctx, "orders/create", "shop.myshopify.com", body, &hmac).await;
+    assert_error(response, 401, "Invalid webhook HMAC").await;
+    assert_eq!(recorder.count(), 0);
+    ctx.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn post_webhooks_handler_dispatches_flows_for_the_resolved_app() {
+    let config = builder()
+        .shopify(multi_shopify("client-a-secret", "client-b-secret"))
+        .webhook(
+            "ORDERS_CREATE",
+            Webhook::new(|ctx: WebhookContext| async move {
+                ctx.app
+                    .dispatch_flow(DispatchFlowParams::new("wh-flow", ctx.shop).shopify_app(ctx.shopify_app))
+                    .await?;
+                Ok(())
+            }),
+        )
+        .build()
+        .unwrap();
+    let ctx = TestContext::new(config).await.unwrap();
+    let body = r#"{"id":1}"#;
+    let shop = "same-shop.myshopify.com";
+
+    for secret in ["client-b-secret", "client-a-secret"] {
+        let response = post_webhook(&ctx, "orders/create", shop, body, &sign_webhook_body(body, secret)).await;
+        assert_ok(response).await;
+    }
+
+    // Same shop, same flow: one run per app, neither blocked by the other.
+    let mut runs: Vec<(String, String)> = flow_runs(&ctx)
+        .await
+        .into_iter()
+        .map(|run| (run.app_handle, run.shop))
+        .collect();
+    runs.sort();
+    assert_eq!(
+        runs,
+        [
+            ("clientA".to_string(), shop.to_string()),
+            ("clientB".to_string(), shop.to_string()),
+        ]
+    );
+    ctx.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn post_webhooks_without_shopify_api_secret_returns_500() {
+    let recorder = Recorder::default();
+    for secret in ["", "   "] {
+        let options = TestOptions {
+            secret: secret.to_string(),
+            ..Default::default()
+        };
+        let ctx = TestContext::with_options(orders_create_config(&recorder), options)
+            .await
+            .unwrap();
+
+        for hmac in ["anything".to_string(), sign_webhook_body("{}", secret)] {
+            let response = post_webhook(&ctx, "orders/create", "test.myshopify.com", "{}", &hmac).await;
+            assert_error(response, 500, "SHOPIFY_API_SECRET is not configured").await;
+        }
+        ctx.shutdown().await.unwrap();
+    }
+    assert_eq!(recorder.count(), 0);
+}

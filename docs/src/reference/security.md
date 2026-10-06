@@ -1,0 +1,100 @@
+# Security
+
+## Required production controls
+
+1. Set `OPENSHOP_ENV=production` and a random 64-character hexadecimal
+   `ENCRYPTION_KEY`, and keep the key stable.
+2. Terminate HTTPS before OpenShop and set `HOST` to the public HTTPS origin.
+3. Use a dedicated PostgreSQL role with access only to the OpenShop database.
+4. Run committed migrations before web and workers; do not grant runtime
+   processes schema-generation privileges.
+5. Restrict logs, backups, and admin access because they may contain merchant
+   and operational data.
+
+Generate an encryption key once:
+
+```bash
+openssl rand -hex 32
+```
+
+## Encryption at rest
+
+Provider configurations and Shopify access tokens are encrypted with
+AES-256-GCM when the key is present. Each value gets a random 12-byte IV and a
+16-byte authentication tag.
+
+| Value | Stored form |
+| --- | --- |
+| Provider configuration (`provider_configs.config`) | `{ "__encrypted": "aes-256-gcm", "payload": "<iv>:<tag>:<ciphertext>" }`, hex-encoded |
+| Access token (`installations.access_token`) | `enc:aes-256-gcm:<iv>:<tag>:<ciphertext>`, hex-encoded |
+
+Values written without a key stay readable: a configuration that is not an
+encrypted envelope and a token without the `enc:aes-256-gcm:` prefix are
+returned as stored.
+
+| Situation | Behavior |
+| --- | --- |
+| No key, development | Values are stored in plaintext. A warning is logged once: `[openshop] ENCRYPTION_KEY not set — provider credentials stored in plaintext`. |
+| No key, production | Writes, and reads of encrypted values, fail with `ENCRYPTION_KEY must be set in production`. |
+| Key that is not 64 hex characters | Writes, and reads of encrypted values, fail with `ENCRYPTION_KEY must be 64 hex characters (32 bytes)`. |
+| Encrypted value, no key, development | Reads fail with `Cannot decrypt provider config: ENCRYPTION_KEY not set` or `Cannot decrypt secret: ENCRYPTION_KEY not set`. |
+| Wrong key or corrupted value | Reads fail with `Unable to decrypt: data is corrupted or the key is wrong`. |
+
+The key is checked when a value is first encrypted or decrypted, not when the
+process starts. Rotating the key requires decrypting and re-encrypting existing
+values; replacing it without a migration makes stored secrets unreadable.
+
+MCP tokens are never stored: OpenShop keeps a salted scrypt hash and a
+display fingerprint. See [MCP](mcp.md#tokens).
+
+## Authentication boundaries
+
+- `/api/*` trusts only a verified Shopify session token issued to a staff user.
+- `/webhooks` verifies the raw body with a matching Shopify app secret.
+- `/proxy/*` accepts App Proxy HMAC or a Customer Account JWT.
+- `/ext/*` accepts only a Customer Account JWT.
+- `/routes/*` uses the authentication contract declared by each route. A route
+  is built with `ServerRoute::public()` or `ServerRoute::authenticated(…)`;
+  there is no implicit default.
+- `/mcp` accepts only OpenShop-issued MCP tokens and applies explicit grants.
+
+Signatures and token hashes are compared in constant time. An app proxy
+signature must be exactly the hexadecimal digest; a valid signature followed by
+other characters is rejected.
+
+See [Authentication](authentication.md) for request formats.
+
+## Multi-app isolation
+
+Framework state is scoped by `(app_handle, shop)`. Every application query against
+custom tables must still apply its own tenant filter. `define_model()` adds
+`shop`, but it does not automatically add a `WHERE shop = …` clause.
+
+## MCP permissions
+
+Give tokens the smallest required permission set, use expirations, and revoke
+unused tokens. High-risk custom tools should declare their risk level and a
+confirmation hint. Audit logs record capability, token, target shop, outcome,
+and duration; they do not replace external security monitoring.
+
+## Proxy and webhook handlers
+
+- Treat request bodies and Shopify payloads as untrusted input.
+- Validate input before provider or database writes.
+- Make webhook and retryable flow side effects idempotent.
+- Trust the verified context identity, not duplicated query/body fields.
+- Do not return secrets or raw upstream error bodies to clients.
+
+Request bodies are limited to 2 MB by default (`413` above that); change the
+limit with `.max_request_body_bytes(…)`. The MCP endpoint has its own limit of
+1,000,000 bytes.
+
+## Embedded admin exposure
+
+The production UI shell requires a valid installed shop launch. It is sent with
+`Content-Security-Policy: frame-ancestors https://<shop> https://admin.shopify.com;`
+and `Cache-Control: no-store`. Every response carries
+`X-Robots-Tag: noindex, nofollow, noarchive, nosnippet`, and `/robots.txt`
+disallows all crawling; the app host is not a public website. Asset requests
+whose path would leave the UI directory are answered with `404`. Keep the
+documentation deployment separate from the application deployment.

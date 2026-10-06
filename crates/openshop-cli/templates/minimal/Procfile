@@ -1,0 +1,3 @@
+release: app migrate
+web: app start
+worker: app worker --concurrency=5

@@ -1,0 +1,31 @@
+//! `worker`: executes queued flow runs.
+
+use anyhow::Result;
+
+use super::{database_url, shutdown_signal};
+use crate::app::{OpenShop, OpenShopConfig};
+use crate::engine::Worker;
+use crate::runtime::RuntimeEnv;
+use crate::types::PartialWorkerConfig;
+
+pub async fn start_worker(config: OpenShopConfig, concurrency: Option<usize>) -> Result<()> {
+    println!("[openshop] Starting worker...");
+    println!("[openshop] Database migrations are manual. Run `migrate` before starting production processes.");
+
+    let pool = crate::db::connect_to(&database_url()).await?;
+    let app = OpenShop::new(config, pool, RuntimeEnv::from_env())?;
+    println!("[openshop] Loaded config: {} flows", app.config().flows.len());
+
+    let worker = Worker::new(
+        app,
+        PartialWorkerConfig {
+            concurrency,
+            ..Default::default()
+        },
+    );
+    worker.start().await;
+
+    shutdown_signal().await;
+    worker.stop().await;
+    Ok(())
+}

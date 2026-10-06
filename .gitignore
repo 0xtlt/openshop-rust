@@ -1,0 +1,11 @@
+target/
+target-agents/
+.env
+.shopify/
+shopify.app.*.toml
+.DS_Store
+docs/book/
+crates/openshop-ui/target/
+crates/openshop-ui/dist/
+apps/demo/ui/target/
+apps/demo/ui/dist/
