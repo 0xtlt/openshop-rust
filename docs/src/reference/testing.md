@@ -216,6 +216,13 @@ index (zero-based), then the implementation, then `rejects`, then `returns`. A
 fake without any rule returns `null`. `ctx.fakes.method(…)` panics for an
 unknown provider or method; `ctx.fakes.get(…)` returns an `Option` instead.
 
+`ctx.fakes.for_call(PUSH)` returns the fake of a
+[typed call](providers.md#typed-calls), the same one as
+`ctx.fakes.method("warehouse", "push")`. Give it a result of the type the call
+returns: `connectors.invoke(…)` refuses the default `null` with
+`Invalid result from "warehouse.push": …`, unless the call returns `()` or an
+`Option`.
+
 Each `FakeCall` contains `args`, `returned_value`, `thrown_error`, and
 `timestamp`. `reset()` clears behavior and history for one method;
 `ctx.reset_fakes()` resets every provider fake.

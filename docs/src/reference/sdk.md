@@ -121,6 +121,11 @@ Each provider method receives the stored provider configuration as its first
 argument. Flow connectors supply that argument automatically:
 `ctx.connectors.call("warehouse", "push", "gid://shopify/Order/1").await?`.
 
+`ProviderCall<A, R>`, `Provider::handle`, `Provider::typed_checker`, and
+`Connectors::invoke` are the typed form of the same thing: the config becomes a
+struct, and the method name, arguments and result are checked by the compiler.
+See [Typed calls](providers.md#typed-calls).
+
 OpenShop does not ship an HTTP client for your own services. Add the one you
 prefer to your `Cargo.toml`.
 

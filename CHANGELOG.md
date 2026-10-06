@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- Typed provider calls: a `ProviderCall<A, R>` constant shared by the provider
+  (`Provider::handle`) and its callers (`Connectors::invoke`), with the saved
+  configuration deserialized into a struct. `Provider::typed_checker` does the
+  same for the connection check, and `FakeProviders::for_call` returns the fake
+  of a call.
+- `OpenShopBuilder::providers`, `flows` and `with`.
+
 ## 0.0.12-beta.0
 
 Initial Rust implementation, at feature parity with OpenShop (TypeScript)

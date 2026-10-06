@@ -28,6 +28,17 @@ Consequences:
   `Invalid input for flow "<name>":`.
 - Route parameters are written `:name`. The file-style `[name]` is accepted.
 
+The TypeScript version infers `connectors.warehouse.push(data)` from the
+provider definitions. Rust has no equivalent inference across a registry, so
+connectors are reached by name. Two additions close most of that gap and make
+larger configurations easier to split:
+
+- `ProviderCall<A, R>` constants with `Provider::handle`,
+  `Provider::typed_checker` and `Connectors::invoke`: the saved config is a
+  `serde` struct, and the method name, arguments and result are checked by the
+  compiler. See [Typed calls](providers.md#typed-calls).
+- `.providers([…])`, `.flows([…])` and `.with(register)` on the builder.
+
 ## Engine
 
 - A running step is interrupted as soon as its run is canceled, and is recorded

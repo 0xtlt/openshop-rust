@@ -1,5 +1,6 @@
 //! Provider connectors: provider methods bound to a shop's stored configuration.
 
+use std::borrow::Borrow;
 use std::future::Future;
 use std::sync::Arc;
 
@@ -12,7 +13,7 @@ use serde_json::Value;
 
 use crate::app::OpenShop;
 use crate::server::shop_domain::normalize_shop_domain;
-use crate::types::{RouteShopContext, RouteShopInput};
+use crate::types::{ProviderCall, RouteShopContext, RouteShopInput};
 
 pub type ConnectorMethod = Arc<dyn Fn(Value) -> BoxFuture<'static, Result<Value>> + Send + Sync>;
 
@@ -80,6 +81,21 @@ impl Connectors {
 
     pub async fn call_as<T: DeserializeOwned>(&self, provider: &str, method: &str, args: impl Serialize) -> Result<T> {
         self.get(provider)?.call_as(method, args).await
+    }
+
+    /// Calls the method behind a typed [`ProviderCall`].
+    ///
+    /// `args` is a reference to the argument type of the call, or to what it
+    /// borrows as: `&[T]` for a `Vec<T>`, `&str` for a `String`.
+    pub async fn invoke<A, R, B>(&self, call: ProviderCall<A, R>, args: &B) -> Result<R>
+    where
+        A: Borrow<B>,
+        B: Serialize + ?Sized,
+        R: DeserializeOwned,
+    {
+        let (provider, method) = (call.provider(), call.method());
+        let result = self.call(provider, method, args).await?;
+        serde_json::from_value(result).map_err(|error| anyhow!("Invalid result from \"{provider}.{method}\": {error}"))
     }
 }
 

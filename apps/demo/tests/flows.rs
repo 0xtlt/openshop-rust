@@ -2,6 +2,7 @@ mod common;
 
 use openshop::engine::RunFlowResult;
 use openshop::json;
+use openshop_demo::providers::warehouse::PUSH;
 
 #[tokio::test]
 async fn lists_flows() {
@@ -20,7 +21,7 @@ async fn lists_flows() {
 #[tokio::test]
 async fn runs_sync_orders_with_faked_warehouse() {
     let ctx = common::context().await;
-    let push = ctx.fakes.method("warehouse", "push");
+    let push = ctx.fakes.for_call(PUSH);
     push.returns(false);
 
     let result = ctx.run_flow("syncOrders", json!({ "limit": 5 })).await.unwrap();
@@ -38,7 +39,7 @@ async fn runs_sync_orders_with_faked_warehouse() {
 #[tokio::test]
 async fn handles_warehouse_failure() {
     let ctx = common::context().await;
-    ctx.fakes.method("warehouse", "push").rejects("503 Service Unavailable");
+    ctx.fakes.for_call(PUSH).rejects("503 Service Unavailable");
 
     let result = ctx.run_flow("syncOrders", json!({ "limit": 1 })).await.unwrap();
 
@@ -60,7 +61,7 @@ async fn rejects_invalid_input() {
             RunFlowResult::Failed { ref error, .. } if error.starts_with("Invalid input for flow \"syncOrders\"")
         ));
     }
-    assert!(!ctx.fakes.method("warehouse", "push").called());
+    assert!(!ctx.fakes.for_call(PUSH).called());
     ctx.shutdown().await.unwrap();
 }
 

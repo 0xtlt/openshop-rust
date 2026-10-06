@@ -49,7 +49,7 @@ Use this reference before moving behavior across OpenShop boundaries.
 - Give every step a name that is stable across deployments and unique within a run.
 - A canceled or timed-out step is dropped at its next `.await`. Use `ctx.signal` (a `CancellationToken`) in work that does not yield or that you spawn.
 - Keep provider and Function fields validated with `openshop::validators` or a closure passed to `FieldDef::validate`.
-- Register provider methods with `typed_method` so arguments and results go through serde, and call them with `ctx.connectors.call(..)` or `call_as::<T>(..)` rather than building connector objects by hand.
+- Prefer typed provider calls: declare a `ProviderCall<A, R>` constant next to the provider, implement it with `Provider::handle(CALL, |config: MyConfig, args| ..)` and call it with `ctx.connectors.invoke(CALL, &args)`. The compiler then checks the method name, the arguments and the result. `typed_method` with `ctx.connectors.call(..)` / `call_as::<T>(..)` remains for calls whose name is only known at run time.
 
 ## UI Rules
 

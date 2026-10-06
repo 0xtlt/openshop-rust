@@ -10,7 +10,7 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::server::connectors::{Connector, ConnectorMethod, Connectors};
-use crate::types::Provider;
+use crate::types::{Provider, ProviderCall};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct FakeCall {
@@ -148,6 +148,11 @@ impl FakeProviders {
 
     pub fn get(&self, provider: &str, method: &str) -> Option<&FakeMethod> {
         self.providers.get(provider)?.get(method)
+    }
+
+    /// The fake of a typed call. Panics when the provider or method is not configured.
+    pub fn for_call<A, R>(&self, call: ProviderCall<A, R>) -> &FakeMethod {
+        self.method(call.provider(), call.method())
     }
 
     /// Connectors whose methods are the fakes.

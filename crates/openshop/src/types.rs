@@ -1,11 +1,13 @@
 //! Definitions that make up an OpenShop application: providers, flows, crons,
 //! webhooks, Shopify Functions, app proxies, server routes and MCP capabilities.
 
+use std::fmt;
 use std::future::Future;
+use std::marker::PhantomData;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use futures::future::BoxFuture;
 use indexmap::IndexMap;
 use serde::de::DeserializeOwned;
@@ -196,6 +198,72 @@ pub type ProviderChecker = Arc<dyn Fn(JsonMap) -> BoxFuture<'static, Result<bool
 /// Reshapes submitted provider data before validation. Must return a JSON object.
 pub type ProviderTransformer = Arc<dyn Fn(JsonMap) -> Value + Send + Sync>;
 
+/// A typed reference to a provider method: the provider it belongs to, its
+/// name, and the types of its arguments (`A`) and of its result (`R`).
+///
+/// Declare it once as a constant, implement it with [`Provider::handle`] and
+/// call it with [`Connectors::invoke`]. The names are then written in a single
+/// place, and the compiler checks the arguments and the result of every call.
+///
+/// ```
+/// use openshop::ProviderCall;
+///
+/// const PUSH: ProviderCall<Vec<String>, usize> = ProviderCall::new("warehouse", "push");
+/// assert_eq!(PUSH.provider(), "warehouse");
+/// assert_eq!(PUSH.method(), "push");
+/// ```
+///
+/// `provider` is the key the provider is registered under: its own name with
+/// `.provider(..)`, or the key given to `.provider_as(..)`. Building the
+/// configuration fails when they differ.
+pub struct ProviderCall<A, R> {
+    provider: &'static str,
+    method: &'static str,
+    types: PhantomData<fn(A) -> R>,
+}
+
+impl<A, R> ProviderCall<A, R> {
+    pub const fn new(provider: &'static str, method: &'static str) -> Self {
+        Self {
+            provider,
+            method,
+            types: PhantomData,
+        }
+    }
+
+    pub const fn provider(&self) -> &'static str {
+        self.provider
+    }
+
+    pub const fn method(&self) -> &'static str {
+        self.method
+    }
+}
+
+impl<A, R> Clone for ProviderCall<A, R> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<A, R> Copy for ProviderCall<A, R> {}
+
+impl<A, R> fmt::Debug for ProviderCall<A, R> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ProviderCall")
+            .field("provider", &self.provider)
+            .field("method", &self.method)
+            .finish()
+    }
+}
+
+/// The stored configuration of a provider as the type its methods expect.
+fn typed_provider_config<C: DeserializeOwned>(provider: &str, config: JsonMap) -> Result<C> {
+    serde_json::from_value(Value::Object(config))
+        .map_err(|error| anyhow!("Invalid configuration for provider \"{provider}\": {error}"))
+}
+
 /// An external service with per-shop credentials and callable methods.
 #[derive(Clone)]
 pub struct Provider {
@@ -204,6 +272,8 @@ pub struct Provider {
     pub transformer: Option<ProviderTransformer>,
     pub checker: Option<ProviderChecker>,
     pub methods: IndexMap<String, ProviderMethod>,
+    /// Provider and method named by each call registered with [`Provider::handle`].
+    pub(crate) typed_calls: Vec<(&'static str, &'static str)>,
 }
 
 impl Provider {
@@ -214,6 +284,7 @@ impl Provider {
             transformer: None,
             checker: None,
             methods: IndexMap::new(),
+            typed_calls: Vec::new(),
         }
     }
 
@@ -234,6 +305,22 @@ impl Provider {
     {
         self.checker = Some(Arc::new(move |config| Box::pin(checker(config))));
         self
+    }
+
+    /// Like [`Provider::checker`], with the configuration deserialized into `C`.
+    pub fn typed_checker<C, F, Fut>(self, checker: F) -> Self
+    where
+        C: DeserializeOwned + Send + 'static,
+        F: Fn(C) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<bool>> + Send + 'static,
+    {
+        let provider = self.name.clone();
+        let checker = Arc::new(checker);
+        self.checker(move |config| {
+            let checker = checker.clone();
+            let config = typed_provider_config(&provider, config);
+            async move { checker(config?).await }
+        })
     }
 
     /// Registers a method taking the shop configuration and raw JSON arguments.
@@ -266,6 +353,34 @@ impl Provider {
             async move {
                 let args: A = serde_json::from_value(args)
                     .map_err(|error| anyhow::anyhow!("Invalid arguments for \"{label}\": {error}"))?;
+                Ok(serde_json::to_value(method(config, args).await?)?)
+            }
+        })
+    }
+
+    /// Implements a typed [`ProviderCall`]: the method receives the shop
+    /// configuration deserialized into `C` and the arguments of the call.
+    ///
+    /// `C` is any `serde` type matching the fields of the provider. Name its
+    /// fields after them, usually with `#[serde(rename_all = "camelCase")]`, and
+    /// use `Option` for optional fields.
+    pub fn handle<C, A, R, F, Fut>(mut self, call: ProviderCall<A, R>, method: F) -> Self
+    where
+        C: DeserializeOwned + Send + 'static,
+        A: DeserializeOwned + Send + 'static,
+        R: Serialize + 'static,
+        F: Fn(C, A) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<R>> + Send + 'static,
+    {
+        let (provider, name) = (call.provider(), call.method());
+        self.typed_calls.push((provider, name));
+        let method = Arc::new(method);
+        self.method(name, move |config, args| {
+            let method = method.clone();
+            async move {
+                let config: C = typed_provider_config(provider, config)?;
+                let args: A = serde_json::from_value(args)
+                    .map_err(|error| anyhow!("Invalid arguments for \"{provider}.{name}\": {error}"))?;
                 Ok(serde_json::to_value(method(config, args).await?)?)
             }
         })

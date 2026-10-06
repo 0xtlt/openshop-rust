@@ -126,6 +126,7 @@ The saved config is the first argument of each provider method.
 | --- | --- | --- |
 | `.method(name, f)` | `Fn(JsonMap, Value) -> impl Future<Output = Result<Value>>` | Raw JSON. |
 | `.typed_method(name, f)` | `Fn(JsonMap, A) -> impl Future<Output = Result<R>>` | `A: DeserializeOwned`, `R: Serialize`. Arguments that do not deserialize fail with `Invalid arguments for "<name>": …`. |
+| `.handle(call, f)` | `Fn(C, A) -> impl Future<Output = Result<R>>` | Typed configuration, arguments and result, named by a `ProviderCall`. See [Typed calls](#typed-calls). |
 
 Flows call the method through `ctx.connectors` without the config argument:
 
@@ -151,6 +152,7 @@ async fn push(ctx: &FlowContext, rows: &[JsonMap]) -> Result<u64> {
 | --- | --- |
 | `connectors.call(provider, method, args)` | `Result<Value>` |
 | `connectors.call_as::<T>(provider, method, args)` | `Result<T>` |
+| `connectors.invoke(call, &args)` | `Result<R>` for a `ProviderCall<A, R>`. See [Typed calls](#typed-calls). |
 | `connectors.get(provider)` | `Result<&Connector>`, with the same `call` / `call_as` plus `has(method)` and `method_names()` |
 | `connectors.names()` | Iterator over the provider keys |
 
@@ -167,9 +169,106 @@ Connectors are also available outside flows: `ctx.connectors` in admin
 functions, `ctx.for_shop(…)` in server routes, and
 `app.connectors(shop, shopify_app)` everywhere else.
 
+## Typed calls
+
+`.method` and `.typed_method` name a method with a string and receive the saved
+config as a JSON object, so a misspelled name or key only fails when the call
+happens. A `ProviderCall` constant moves those checks to compile time. It
+carries the provider key, the method name, and the types of the arguments and
+of the result, and it is shared by the provider that implements the method and
+by the code that calls it:
+
+```rust,ignore
+use openshop::{FieldDef, FlowContext, Provider, ProviderCall, Result, validators};
+use serde::{Deserialize, Serialize};
+
+/// The saved config, named after the fields of the provider.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WarehouseConfig {
+    pub api_url: String,
+    pub api_key: String,
+    pub batch_size: Option<u32>,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct Order {
+    pub id: String,
+}
+
+pub const PUSH: ProviderCall<Vec<Order>, usize> = ProviderCall::new("warehouse", "push");
+
+pub fn warehouse() -> Provider {
+    Provider::new("warehouse")
+        .field("apiUrl", FieldDef::text("API URL").validate(validators::url()))
+        .field("apiKey", FieldDef::password("API key"))
+        .field(
+            "batchSize",
+            FieldDef::number("Batch size").optional().validate(validators::integer_min(1)),
+        )
+        .typed_checker(|config: WarehouseConfig| async move {
+            // Call `{api_url}/health` with your HTTP client and report the outcome.
+            Ok(!config.api_key.is_empty())
+        })
+        .handle(PUSH, |config: WarehouseConfig, orders| async move {
+            // POST `orders` to `{api_url}/orders` in batches of `batch_size`.
+            let batches = orders.chunks(config.batch_size.unwrap_or(100) as usize).count();
+            println!("{} orders to {} in {batches} batches", orders.len(), config.api_url);
+            Ok(orders.len())
+        })
+}
+
+async fn push(ctx: &FlowContext, orders: &[Order]) -> Result<usize> {
+    ctx.connectors.invoke(PUSH, orders).await
+}
+```
+
+| API | Signature | Notes |
+| --- | --- | --- |
+| `ProviderCall::<A, R>::new(provider, method)` | `const fn` | `provider` is the key the provider is registered under. `.provider()` and `.method()` return the two names. |
+| `.handle(call, f)` | `f: Fn(C, A) -> impl Future<Output = Result<R>>` | Registers `call.method()`. `C: DeserializeOwned`. |
+| `.typed_checker(f)` | `f: Fn(C) -> impl Future<Output = Result<bool>>` | The [checker](#checker) with a typed config. |
+| `connectors.invoke(call, &args)` | `Result<R>` | `args` is a reference to `A`, or to what `A` borrows as: `&[T]` for a `Vec<T>`, `&str` for a `String`. |
+
+`A` and `R` are used on both sides of the call, so they implement both
+`Serialize` and `Deserialize`. Use `()` for a method without arguments:
+`connectors.invoke(PING, &())`.
+
+The config type `C` is any `serde` type whose fields are the fields of the
+provider:
+
+| Field | Rust type |
+| --- | --- |
+| `text`, `password`, `select` | `String` |
+| `number` | An integer or float type. A whole number is saved as an integer; add `validators::integer_min(…)` when the type is an integer, so that `2.5` is refused when the config is saved. |
+| `checkbox` | `bool` |
+| Optional field | `Option<T>`: a blank optional value is not saved. |
+
+What is and is not checked:
+
+- The compiler checks the name of the method and the types of the arguments
+  and of the result at every `invoke`.
+- `build()` checks that each call names the key its provider is registered
+  under. With `.provider_as("mainWarehouse", warehouse())` it fails with
+  `[openshop] Invalid config: providers.mainWarehouse.methods.push implements a call declared for provider "warehouse"; declare it as ProviderCall::new("mainWarehouse", "push")`.
+- Whether the provider is registered at all, and whether the shop saved its
+  config, is only known when the call happens. A config that does not fit `C`,
+  such as the empty object of a shop that saved nothing, fails with
+  `Invalid configuration for provider "warehouse": missing field `apiUrl``
+  before the method runs.
+
+A typed call is still an ordinary method. `connectors.call("warehouse", "push", …)`
+reaches it, with arguments that do not deserialize refused as
+`Invalid arguments for "warehouse.push": …`, and tests replace it with a
+[fake](testing.md#configure-provider-fakes). A result that is not an `R`, for
+example the `null` of a fake without a rule, fails with
+`Invalid result from "warehouse.push": …`.
+
 ## Checker
 
-`.checker(…)` takes a `Fn(JsonMap) -> impl Future<Output = Result<bool>>`. The
+`.checker(…)` takes a `Fn(JsonMap) -> impl Future<Output = Result<bool>>`;
+`.typed_checker(…)` takes the config as a [typed value](#typed-calls) instead,
+and answers with an error when the saved config does not fit the type. The
 admin check endpoint saves `lastCheckedAt` and `lastCheckOk` only when a config
 row already exists. A checker error produces `{ ok: false, error }` with HTTP
 500; returning `false` produces `{ ok: false }` with HTTP 200. A provider

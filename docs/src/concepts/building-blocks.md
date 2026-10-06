@@ -61,6 +61,12 @@ with `Unknown provider "warehouse"`, and a method registered with
 `typed_method` rejects arguments it cannot deserialize. A test that runs the
 flow catches both; see [Test an app](../guides/test-app.md).
 
+A [`ProviderCall`](../reference/providers.md#typed-calls) constant narrows that
+gap. Declared next to the provider and used by its callers, it fixes the method
+name and the types of the arguments and of the result, which the compiler then
+checks at every call. Whether the provider is registered and configured for the
+shop remains a run-time question.
+
 Code that needs the running application receives it as a value. Every handler
 context carries `ctx.app`, an `OpenShop` handle that exposes `dispatch_flow()`,
 the database pool, and the connectors and Shopify client of any shop:

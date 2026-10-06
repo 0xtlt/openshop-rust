@@ -2,6 +2,8 @@ use openshop::{Flow, Value, json};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use crate::providers::warehouse::{PUSH, WarehouseRecord};
+
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct SyncOrdersInput {
     #[schemars(range(min = 1))]
@@ -80,19 +82,17 @@ pub fn sync_orders() -> Flow {
             format!("Fetched {} orders", orders.len()),
         );
 
-        let transformed: Vec<Value> = ctx
+        let transformed: Vec<WarehouseRecord> = ctx
             .step
             .run("transform-data", || async {
                 let exported_at = openshop::runtime::time::to_iso(&openshop::chrono::Utc::now());
                 Ok(orders
                     .iter()
-                    .map(|order| {
-                        json!({
-                            "ref": order.name,
-                            "amount": order.total,
-                            "lineCount": order.items,
-                            "exportedAt": exported_at,
-                        })
+                    .map(|order| WarehouseRecord {
+                        reference: order.name.clone(),
+                        amount: order.total.clone(),
+                        line_count: order.items,
+                        exported_at: exported_at.clone(),
                     })
                     .collect())
             })
@@ -102,7 +102,7 @@ pub fn sync_orders() -> Flow {
             .run("send-to-warehouse", || async {
                 ctx.logger
                     .info(json!({ "records": transformed.len() }), "Sending to warehouse API...");
-                ctx.connectors.call("warehouse", "push", &transformed).await?;
+                ctx.connectors.invoke(PUSH, &transformed).await?;
                 ctx.logger.info(json!({}), "Successfully sent to warehouse");
                 Ok(())
             })

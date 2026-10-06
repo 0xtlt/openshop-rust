@@ -104,6 +104,11 @@ impl OpenShopBuilder {
         self
     }
 
+    /// Registers several providers, each under its own name.
+    pub fn providers(self, providers: impl IntoIterator<Item = Provider>) -> Self {
+        providers.into_iter().fold(self, Self::provider)
+    }
+
     /// Registers a flow under its own name.
     pub fn flow(self, flow: Flow) -> Self {
         let key = flow.name.clone();
@@ -113,6 +118,18 @@ impl OpenShopBuilder {
     pub fn flow_as(mut self, key: impl Into<String>, flow: Flow) -> Self {
         self.config.flows.insert(key.into(), flow);
         self
+    }
+
+    /// Registers several flows, each under its own name.
+    pub fn flows(self, flows: impl IntoIterator<Item = Flow>) -> Self {
+        flows.into_iter().fold(self, Self::flow)
+    }
+
+    /// Applies a function to the builder, so that a module can register
+    /// everything it defines (flows, routes, pages…) in one place:
+    /// `.with(reviews::register)`.
+    pub fn with(self, register: impl FnOnce(Self) -> Self) -> Self {
+        register(self)
     }
 
     pub fn function(mut self, key: impl Into<String>, function: FunctionDefinition) -> Self {

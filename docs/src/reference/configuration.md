@@ -54,8 +54,11 @@ durable work from a webhook, a proxy, a server route, or an admin function. See
 | --- | --- | --- |
 | `.provider(provider)` | `Provider`, registered under `provider.name` | No providers |
 | `.provider_as(key, provider)` | Key and `Provider` | — |
+| `.providers(providers)` | Iterator of `Provider`, each registered under its own name | — |
 | `.flow(flow)` | `Flow`, registered under `flow.name` | No flows |
 | `.flow_as(key, flow)` | Key and `Flow` | — |
+| `.flows(flows)` | Iterator of `Flow`, each registered under its own name | — |
+| `.with(register)` | `FnOnce(OpenShopBuilder) -> OpenShopBuilder` | — |
 | `.shopify(config)` | `ShopifyConfig` | Single app resolved from env and Shopify TOML |
 | `.function(key, definition)` | Key and `FunctionDefinition` | No functions |
 | `.mcp(config)` | `McpConfig` | Core MCP capabilities enabled; no custom capabilities |
@@ -151,6 +154,36 @@ or a TOML file without `client_id` stops the process at startup.
 
 See [Multi-app configuration](environment-variables.md#multi-app-configuration)
 for how variables you read yourself interact with `.env`.
+
+## Split the registration
+
+`.providers([…])` and `.flows([…])` register several definitions at once, each
+under its own name. `.with(register)` hands the builder to a function, so that
+a module registers everything it defines and `config()` stays short:
+
+```rust,ignore
+use openshop::{OpenShopBuilder, OpenShopConfig, Result};
+
+// src/reviews/mod.rs
+pub fn register(builder: OpenShopBuilder) -> OpenShopBuilder {
+    builder
+        .flow(moderate_reviews())
+        .proxy("/reviews", list_reviews())
+        .admin_page(reviews_page())
+}
+
+// src/main.rs
+fn config() -> Result<OpenShopConfig> {
+    OpenShopConfig::builder()
+        .providers([warehouse(), erp()])
+        .flows([sync_orders(), sync_products()])
+        .with(reviews::register)
+        .build()
+}
+```
+
+Registration order is kept, and a later registration under the same key
+replaces the earlier one, as with the singular methods.
 
 ## Flows
 

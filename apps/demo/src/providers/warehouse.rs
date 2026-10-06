@@ -1,8 +1,30 @@
-use openshop::{FieldDef, JsonMap, Provider, Value, json, validators};
+use openshop::{FieldDef, Provider, ProviderCall, validators};
+use serde::{Deserialize, Serialize};
 
-fn api_url(config: &JsonMap) -> &str {
-    config.get("apiUrl").and_then(Value::as_str).unwrap_or("unconfigured")
+/// What a merchant saves for the warehouse, named after the fields below.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WarehouseConfig {
+    pub api_url: String,
+    pub api_key: String,
+    pub batch_size: u32,
 }
+
+/// One order as the warehouse expects it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WarehouseRecord {
+    #[serde(rename = "ref")]
+    pub reference: String,
+    pub amount: String,
+    pub line_count: usize,
+    pub exported_at: String,
+}
+
+/// Sends records to the warehouse; `true` once they are accepted.
+pub const PUSH: ProviderCall<Vec<WarehouseRecord>, bool> = ProviderCall::new("warehouse", "push");
+/// Removes a record by its reference.
+pub const DELETE: ProviderCall<String, ()> = ProviderCall::new("warehouse", "delete");
 
 pub fn warehouse() -> Provider {
     Provider::new("warehouse")
@@ -24,19 +46,18 @@ pub fn warehouse() -> Provider {
                 .placeholder("100")
                 .validate(validators::number_range(1.0, 1000.0)),
         )
-        .checker(|config| async move {
-            let Some(url) = config.get("apiUrl").and_then(Value::as_str) else {
-                return Ok(false);
-            };
-            println!("[warehouse] Checking connection to {url}...");
+        .typed_checker(|config: WarehouseConfig| async move {
+            println!("[warehouse] Checking connection to {}...", config.api_url);
             Ok(true)
         })
-        .typed_method("push", |config, data: Vec<JsonMap>| async move {
-            println!("[warehouse] Pushing {} records to {}", data.len(), api_url(&config));
+        .handle(PUSH, |config: WarehouseConfig, records| async move {
+            for batch in records.chunks(config.batch_size.max(1) as usize) {
+                println!("[warehouse] Pushing {} records to {}", batch.len(), config.api_url);
+            }
             Ok(true)
         })
-        .method("delete", |config, id| async move {
-            println!("[warehouse] Deleting {id} from {}", api_url(&config));
-            Ok(json!(null))
+        .handle(DELETE, |config: WarehouseConfig, reference| async move {
+            println!("[warehouse] Deleting {reference} from {}", config.api_url);
+            Ok(())
         })
 }

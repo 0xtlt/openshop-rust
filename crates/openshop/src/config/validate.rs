@@ -123,6 +123,13 @@ pub fn validate_openshop_config(config: &OpenShopConfig) -> Result<()> {
         for (field_name, field) in &provider.fields {
             validate_field(field, &format!("providers.{key}.ui.fields.{field_name}"))?;
         }
+        for (call_provider, method) in &provider.typed_calls {
+            if call_provider != key {
+                fail!(
+                    "providers.{key}.methods.{method} implements a call declared for provider \"{call_provider}\"; declare it as ProviderCall::new(\"{key}\", \"{method}\")"
+                );
+            }
+        }
     }
 
     for (key, flow) in &config.flows {
