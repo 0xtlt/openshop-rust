@@ -492,7 +492,8 @@ async fn a_step_interrupted_by_the_flow_timeout_is_marked_failed() {
             })
             .await
     })
-    .timeout(Duration::from_millis(100));
+    // Long enough for the step to be recorded as running before the flow is interrupted.
+    .timeout(Duration::from_secs(1));
     let test = TestApp::new(create_config([flow])).await;
     let run_id = dispatch_without_retry(&test).await;
 
@@ -502,9 +503,9 @@ async fn a_step_interrupted_by_the_flow_timeout_is_marked_failed() {
     // The step row is closed in the background once its future is dropped.
     let step = within(async {
         loop {
-            let steps = find_steps(&test, run_id).await;
-            if steps[0].status != "running" {
-                break steps.into_iter().next().unwrap();
+            let recorded = find_steps(&test, run_id).await.into_iter().next();
+            if let Some(step) = recorded.filter(|step| step.status != "running") {
+                break step;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
