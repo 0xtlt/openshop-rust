@@ -96,35 +96,43 @@ it accepts are created with:
 
 ## `Provider::new(name)`
 
-Defines provider fields, validation, health checking, and connector methods.
+A provider is a struct: `#[derive(ProviderConfig)]` makes its fields the
+configuration form, and `#[provider("name")]` makes the public `async` methods
+of its `impl` block the methods flows call.
 
 ```rust,ignore
-use openshop::{FieldDef, Provider, Value, json, validators};
+use openshop::{ProviderConfig, Result, provider, validators};
 
-pub fn warehouse() -> Provider {
-    Provider::new("warehouse")
-        .field("endpoint", FieldDef::text("Endpoint").validate(validators::url()))
-        .field("token", FieldDef::password("Token").validate(validators::non_empty()))
-        .checker(|config| async move {
-            // Call the service's health endpoint with your HTTP client.
-            Ok(config.get("endpoint").and_then(Value::as_str).is_some())
-        })
-        .typed_method("push", |config, order_id: String| async move {
-            let endpoint = config.get("endpoint").and_then(Value::as_str).unwrap_or_default();
-            // POST the order to `{endpoint}/orders` with the stored token.
-            Ok(json!({ "accepted": true, "orderId": order_id, "endpoint": endpoint }))
-        })
+#[derive(ProviderConfig)]
+pub struct Warehouse {
+    #[field(label = "Endpoint", validate = validators::url())]
+    endpoint: String,
+    #[field(label = "Token", password, validate = validators::non_empty())]
+    token: String,
+}
+
+#[provider("warehouse")]
+impl Warehouse {
+    #[checker]
+    async fn check(&self) -> Result<bool> {
+        // Call the service's health endpoint with your HTTP client.
+        Ok(!self.token.is_empty())
+    }
+
+    pub async fn push(&self, order_id: String) -> Result<bool> {
+        // POST the order to `{endpoint}/orders` with the stored token.
+        println!("{order_id} to {}", self.endpoint);
+        Ok(true)
+    }
 }
 ```
 
-Each provider method receives the stored provider configuration as its first
-argument. Flow connectors supply that argument automatically:
-`ctx.connectors.call("warehouse", "push", "gid://shopify/Order/1").await?`.
-
-`ProviderCall<A, R>`, `Provider::handle`, `Provider::typed_checker`, and
-`Connectors::invoke` are the typed form of the same thing: the config becomes a
-struct, and the method name, arguments and result are checked by the compiler.
-See [Typed calls](providers.md#typed-calls).
+Register `Warehouse::provider()`. In a method, `self` is the configuration
+the shop saved; flows call it with
+`Warehouse::on(&ctx.connectors).push("gid://shopify/Order/1".to_string()).await?`.
+`Provider::new(name)` builds a provider without a struct, with `.field(…)`,
+`.method(…)` and `.checker(…)`; `ProviderCall<A, R>` is the typed reference to
+a method that both forms share. See [Providers](providers.md).
 
 OpenShop does not ship an HTTP client for your own services. Add the one you
 prefer to your `Cargo.toml`.

@@ -93,7 +93,18 @@ impl Connectors {
         B: Serialize + ?Sized,
         R: DeserializeOwned,
     {
-        let (provider, method) = (call.provider(), call.method());
+        self.invoke_by_name(call.provider(), call.method(), args).await
+    }
+
+    /// Calls a method by its names and reads its result as `R`. Used by the
+    /// connectors `#[provider]` generates, which check the arguments themselves.
+    #[doc(hidden)]
+    pub async fn invoke_by_name<R: DeserializeOwned>(
+        &self,
+        provider: &str,
+        method: &str,
+        args: impl Serialize,
+    ) -> Result<R> {
         let result = self.call(provider, method, args).await?;
         serde_json::from_value(result).map_err(|error| anyhow!("Invalid result from \"{provider}.{method}\": {error}"))
     }

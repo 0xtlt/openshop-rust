@@ -24,7 +24,7 @@ Before editing:
 ## Core Rules
 
 - Use `cargo` for workspace commands. `crates/openshop-ui` is a separate workspace built with `trunk`.
-- Follow the existing builder style at public boundaries: `OpenShopConfig::builder()`, `Flow::new(..).input::<T>()`, `Provider::new(..).typed_method(..)`.
+- Follow the existing builder style at public boundaries: `OpenShopConfig::builder()`, `Flow::new(..).input::<T>()`, provider structs with `#[derive(ProviderConfig)]` and `#[provider(..)]`, models with `#[derive(Model)]`.
 - Treat hand-indexed `serde_json::Value` as a last resort where a shape is known; prefer `graphql!` for Shopify operations, serde types, `graphql_as::<T>()`, `call_as::<T>()`, and `ctx.input::<T>()`.
 - Return errors with `?` and `openshop::Result`; do not `unwrap()` or `expect()` values that come from Shopify, providers, requests, or the database. Engine errors are typed and recovered with `downcast_ref`.
 - Do not add `unsafe`: the framework crate denies `unsafe_code` and the CLI forbids it.

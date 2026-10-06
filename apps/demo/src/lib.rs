@@ -60,7 +60,7 @@ fn mcp() -> McpConfig {
 
 pub fn config() -> Result<OpenShopConfig> {
     OpenShopConfig::builder()
-        .provider(providers::warehouse::warehouse())
+        .provider(providers::warehouse::Warehouse::provider())
         .flow(flows::sync_orders::sync_orders())
         .flow(flows::count_variants::count_variants())
         .function("volumeDiscount", functions::volume_discount::volume_discount())

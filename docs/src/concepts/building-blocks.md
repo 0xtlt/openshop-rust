@@ -6,16 +6,16 @@ order syncs, inventory updates, and reconciliation jobs.
 
 ## Providers become configured connectors
 
-A **provider definition** describes an external service. It declares editable
-configuration fields and methods such as `push`. A method is a closure that
-receives the saved configuration and the call arguments: `|config, orders| …`.
+A **provider definition** describes an external service. It is a struct: its
+fields are the editable configuration, and its public methods, such as `push`,
+are what flows can do with a saved configuration, which they read as `&self`.
 OpenShop uses the fields to render a form in the embedded admin.
 
 A merchant saves a different configuration for each shop. When work runs,
 OpenShop loads that shop's configuration and binds it to the provider methods.
 The resulting **connector** is called with the arguments only, as in
-`ctx.connectors.call("warehouse", "push", &orders)`: application code does not
-have to retrieve or pass credentials on every call.
+`Warehouse::on(&ctx.connectors).push(&orders)`: application code does not have
+to retrieve or pass credentials on every call.
 
 The provider definition belongs to the codebase. The saved provider
 configuration belongs to an app/shop pair. The connector belongs to the current
@@ -53,19 +53,19 @@ src/main.rs                   OpenShopConfig::builder() registers providers,
 as a whole and returns the configuration, and `openshop::cli::run(config)`
 turns it into the commands of your binary.
 
-A flow does not import the provider it uses. It reaches the connector by
-provider and method name, so definitions depend neither on each other nor on
-the final configuration. Those names are resolved when the call happens, not
-when the project compiles: calling a provider that is not registered fails
-with `Unknown provider "warehouse"`, and a method registered with
-`typed_method` rejects arguments it cannot deserialize. A test that runs the
-flow catches both; see [Test an app](../guides/test-app.md).
+A flow names the provider struct it calls, and the compiler checks the method,
+its arguments and its result. The call still goes through the connectors of
+the shop rather than to the struct directly: that is what binds the saved
+configuration, and what lets a test replace the provider with a fake. Whether
+the provider is registered and configured for the shop is therefore a run-time
+question: an unregistered provider fails with `Unknown provider "warehouse"`,
+and a shop without configuration with
+`Invalid configuration for provider "warehouse": missing field …`. A test that
+runs the flow catches both; see [Test an app](../guides/test-app.md).
 
-A [`ProviderCall`](../reference/providers.md#typed-calls) constant narrows that
-gap. Declared next to the provider and used by its callers, it fixes the method
-name and the types of the arguments and of the result, which the compiler then
-checks at every call. Whether the provider is registered and configured for the
-shop remains a run-time question.
+A method can also be reached by name, with
+`ctx.connectors.call("warehouse", "push", &orders)`, when the provider or the
+method is only known at run time. Nothing is checked at compile time then.
 
 Code that needs the running application receives it as a value. Every handler
 context carries `ctx.app`, an `OpenShop` handle that exposes `dispatch_flow()`,

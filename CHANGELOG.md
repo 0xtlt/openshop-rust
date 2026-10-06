@@ -7,6 +7,11 @@
   configuration deserialized into a struct. `Provider::typed_checker` does the
   same for the connection check, and `FakeProviders::for_call` returns the fake
   of a call.
+- Providers as structs: `#[derive(ProviderConfig)]` makes the fields of a
+  struct the configuration form, and `#[provider("name")]` on its `impl` block
+  makes its public `async` methods the methods of the provider, with the
+  saved configuration as `self`. Flows call them with
+  `Warehouse::on(&ctx.connectors).push(&orders)`.
 - `OpenShopBuilder::providers`, `flows` and `with`.
 - Typed GraphQL: `graphql!("…", name = value)` checks a Shopify Admin
   operation against the schema at compile time and types its variables and its

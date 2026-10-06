@@ -137,6 +137,73 @@ pub use types::*;
 /// `New<Struct>`, the values an insertion takes.
 pub use openshop_macros::Model;
 
+/// Makes a struct the configuration of a provider: its fields are the fields
+/// of the form a merchant fills, and the struct is what the methods of the
+/// provider receive.
+///
+/// ```
+/// use openshop::{ProviderConfig, Result, provider, validators};
+///
+/// #[derive(ProviderConfig)]
+/// pub struct Warehouse {
+///     #[field(label = "API URL", validate = validators::url())]
+///     api_url: String,
+///     #[field(label = "API key", password)]
+///     api_key: String,
+///     #[field(label = "Batch size")]
+///     batch_size: Option<u32>,
+/// }
+///
+/// #[provider("warehouse")]
+/// impl Warehouse {
+///     /// Sends orders and returns how many were accepted.
+///     pub async fn push(&self, orders: Vec<String>) -> Result<usize> {
+///         // Call `self.api_url` with `self.api_key`.
+///         Ok(orders.len().min(self.batch_size.unwrap_or(100) as usize))
+///     }
+/// }
+///
+/// # async fn example(ctx: openshop::FlowContext, orders: Vec<String>) -> Result<()> {
+/// // Registered with `.provider(Warehouse::provider())`, then, in a flow:
+/// let accepted: usize = Warehouse::on(&ctx.connectors).push(&orders).await?;
+/// # let _ = accepted;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// A field is saved under its name in camel case (`api_url` as `apiUrl`). Its
+/// type picks the input: `String` for text, `bool` for a checkbox, a number
+/// type for a number, and an `Option` makes it optional. Options go in
+/// `#[field(…)]`: `label = "…"` (required), `placeholder = "…"`, `password`,
+/// `select("Label" = "value", …)`, `validate = <validator>` and `name = "…"`
+/// for another key.
+///
+/// The derive also implements `Deserialize` from the saved configuration: do
+/// not derive it yourself.
+pub use openshop_macros::ProviderConfig;
+
+/// Makes the `impl` block of a [`ProviderConfig`](macro@ProviderConfig) struct
+/// a provider: `#[provider("warehouse")]`.
+///
+/// Every public `async fn(&self, …) -> Result<…>` becomes a method of the
+/// provider. `&self` is the configuration the shop saved; the arguments and
+/// the result travel as JSON, so their types implement `Serialize` and
+/// `Deserialize`. Private methods and associated functions stay ordinary
+/// helpers. A method marked `#[checker]`, `async fn(&self) -> Result<bool>`,
+/// is the connection check of the admin.
+///
+/// The block gains:
+///
+/// - `Struct::provider()`, the [`Provider`] to register with `.provider(…)`;
+/// - `Struct::on(&connectors)`, whose methods mirror the public ones and run
+///   them with the configuration of the shop: `Warehouse::on(&ctx.connectors)
+///   .push(&orders)`. An argument is taken by value or by reference;
+/// - one constant per method, `Warehouse::PUSH`, a [`ProviderCall`] for
+///   [`Connectors::invoke`] and for the fakes of a test.
+///
+/// See [`ProviderConfig`](macro@ProviderConfig) for an example.
+pub use openshop_macros::provider;
+
 /// Builds a typed Shopify Admin GraphQL operation, checked at compile time.
 ///
 /// The operation is checked against Shopify's schema while the crate

@@ -31,7 +31,7 @@ sources change. Run it through `shopify app dev` to open the app in a store.
 ## What an application looks like
 
 ```rust
-use openshop::{FieldDef, Flow, OpenShopConfig, Provider, ProviderCall, Result, graphql, validators};
+use openshop::{Flow, OpenShopConfig, ProviderConfig, Result, graphql, provider, validators};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -47,25 +47,22 @@ struct Order {
     name: String,
 }
 
-/// What a merchant saves for the warehouse, named after the fields below.
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct WarehouseConfig {
+/// A provider is a struct: its fields are the form a merchant fills per shop…
+#[derive(ProviderConfig)]
+struct Warehouse {
+    #[field(label = "API URL", validate = validators::url())]
     api_url: String,
+    #[field(label = "API Key", password, validate = validators::non_empty())]
     api_key: String,
 }
 
-/// Declared once, shared by the provider and its callers.
-const PUSH: ProviderCall<Vec<Order>, usize> = ProviderCall::new("warehouse", "push");
-
-fn warehouse() -> Provider {
-    Provider::new("warehouse")
-        .field("apiUrl", FieldDef::text("API URL").validate(validators::url()))
-        .field("apiKey", FieldDef::password("API Key").validate(validators::non_empty()))
-        .handle(PUSH, |config: WarehouseConfig, orders| async move {
-            // call the service at `config.api_url` with `config.api_key`
-            Ok(orders.len())
-        })
+/// …and its public methods are what flows can call, with that configuration as `self`.
+#[provider("warehouse")]
+impl Warehouse {
+    pub async fn push(&self, orders: Vec<Order>) -> Result<usize> {
+        // call the service at `self.api_url` with `self.api_key`
+        Ok(orders.len())
+    }
 }
 
 fn sync_orders() -> Flow {
@@ -92,7 +89,7 @@ fn sync_orders() -> Flow {
         ctx.step
             .run("send-to-warehouse", || async {
                 // Checked by the compiler: a `Vec<Order>` in, a `usize` out.
-                ctx.connectors.invoke(PUSH, &orders).await?;
+                Warehouse::on(&ctx.connectors).push(&orders).await?;
                 Ok(())
             })
             .await
@@ -102,7 +99,7 @@ fn sync_orders() -> Flow {
 
 fn config() -> Result<OpenShopConfig> {
     OpenShopConfig::builder()
-        .provider(warehouse())
+        .provider(Warehouse::provider())
         .flow(sync_orders())
         .build()
 }
@@ -141,7 +138,8 @@ Rust conventions.
 | `defineOpenShop({ providers }).defineConfig({ … })` | `OpenShopConfig::builder()…build()` |
 | `defineFlow({ name, input: type({…}), run })` | `Flow::new(name, run).input::<T>()` with `serde` + `schemars` |
 | `await step('name', fn)` / `step.sleep` | `ctx.step.run("name", \|\| async { … }).await?` / `ctx.step.sleep` |
-| `connectors.warehouse.push(data)` | `ctx.connectors.invoke(PUSH, &data)` with a typed `ProviderCall`, or `ctx.connectors.call("warehouse", "push", data)` |
+| `defineProvider({ fields, methods })` | a struct with `#[derive(ProviderConfig)]` and `#[provider("name")]` on its `impl` block |
+| `connectors.warehouse.push(data)` | `Warehouse::on(&ctx.connectors).push(&data)`, or by name with `ctx.connectors.call("warehouse", "push", data)` |
 | `proxy/*.ts`, `routes/*.ts`, `admin/pages/**` discovered from files | `.proxy(path, …)`, `.route(path, …)`, `.admin_page(…)` on the builder |
 | `validate: type('string.url')` | `.validate(validators::url())` or any closure |
 | `openshop.config.ts` loaded by the `openshop` CLI | your own binary calling `openshop::cli::run(config)` |

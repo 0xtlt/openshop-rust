@@ -2,7 +2,7 @@ use openshop::{Flow, graphql, json};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::providers::warehouse::{PUSH, WarehouseRecord};
+use crate::providers::warehouse::{Warehouse, WarehouseRecord};
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct SyncOrdersInput {
@@ -94,7 +94,7 @@ pub fn sync_orders() -> Flow {
             .run("send-to-warehouse", || async {
                 ctx.logger
                     .info(json!({ "records": transformed.len() }), "Sending to warehouse API...");
-                ctx.connectors.invoke(PUSH, &transformed).await?;
+                Warehouse::on(&ctx.connectors).push(&transformed).await?;
                 ctx.logger.info(json!({}), "Successfully sent to warehouse");
                 Ok(())
             })

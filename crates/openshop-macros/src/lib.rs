@@ -2,6 +2,7 @@
 //! `openshop` crate, which re-exports them and documents them.
 
 mod model;
+mod provider;
 
 use std::collections::HashMap;
 use std::ffi::OsStr;
@@ -328,6 +329,35 @@ pub fn graphql(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
 pub fn derive_model(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
     let input = syn::parse_macro_input!(input as syn::DeriveInput);
     model::expand(input)
+        .unwrap_or_else(syn::Error::into_compile_error)
+        .into()
+}
+
+/// See `openshop::ProviderConfig`.
+#[proc_macro_derive(ProviderConfig, attributes(field))]
+pub fn derive_provider_config(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
+    let input = syn::parse_macro_input!(input as syn::DeriveInput);
+    provider::derive_config(input)
+        .unwrap_or_else(syn::Error::into_compile_error)
+        .into()
+}
+
+/// See `openshop::provider`.
+#[proc_macro_attribute]
+pub fn provider(arguments: proc_macro::TokenStream, item: proc_macro::TokenStream) -> proc_macro::TokenStream {
+    let name = match syn::parse::<LitStr>(arguments) {
+        Ok(name) => name,
+        Err(error) => {
+            return syn::Error::new(
+                error.span(),
+                "expected the name of the provider: `#[provider(\"warehouse\")]`",
+            )
+            .into_compile_error()
+            .into();
+        }
+    };
+    let item = syn::parse_macro_input!(item as syn::ItemImpl);
+    provider::provider(name, item)
         .unwrap_or_else(syn::Error::into_compile_error)
         .into()
 }

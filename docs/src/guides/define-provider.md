@@ -10,84 +10,92 @@ makes real HTTP requests. Use the service's development credentials first.
 
 ## 1. Create the provider
 
-The provider calls the warehouse over HTTP. Add an HTTP client to the
-`[dependencies]` of `Cargo.toml`. This is the version and feature set OpenShop
-itself uses, so nothing is compiled twice:
+The provider calls the warehouse over HTTP. Add an HTTP client and `serde` to
+the `[dependencies]` of `Cargo.toml`. This is the version and feature set
+OpenShop itself uses, so nothing is compiled twice:
 
 ```toml
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
 ```
 
-Create or replace `src/providers/warehouse.rs`:
+A provider is a struct. Its fields are the configuration a merchant saves, and
+its methods are what flows do with it. Replace `src/providers/warehouse.rs`:
 
 ```rust,ignore
-use openshop::{FieldDef, JsonMap, Provider, Value, bail, validators};
+use openshop::{ProviderConfig, Result, bail, provider, validators};
+use serde::{Deserialize, Serialize};
 
-fn text<'a>(config: &'a JsonMap, key: &str) -> &'a str {
-    config.get(key).and_then(Value::as_str).unwrap_or_default()
+#[derive(Serialize, Deserialize)]
+pub struct Order {
+    pub id: String,
 }
 
-pub fn warehouse() -> Provider {
-    Provider::new("warehouse")
-        .field("apiUrl", FieldDef::text("API URL").validate(validators::url()))
-        .field("apiKey", FieldDef::password("API key").validate(validators::non_empty()))
-        .field(
-            "batchSize",
-            FieldDef::number("Batch size").optional().validate(validators::integer_min(1)),
-        )
-        .transformer(|mut data| {
-            if let Some(Value::String(api_url)) = data.get("apiUrl").cloned() {
-                data.insert("apiUrl".into(), Value::from(api_url.trim_end_matches('/')));
-            }
-            Value::Object(data)
-        })
-        .checker(|config| async move {
-            let response = reqwest::Client::new()
-                .get(format!("{}/health", text(&config, "apiUrl")))
-                .bearer_auth(text(&config, "apiKey"))
-                .send()
-                .await?;
-            Ok(response.status().is_success())
-        })
-        .typed_method("push", |config, rows: Vec<Value>| async move {
-            let response = reqwest::Client::new()
-                .post(format!("{}/orders", text(&config, "apiUrl")))
-                .bearer_auth(text(&config, "apiKey"))
-                .json(&rows)
-                .send()
-                .await?;
+/// What a merchant saves for the warehouse.
+#[derive(ProviderConfig)]
+pub struct Warehouse {
+    #[field(label = "API URL", validate = validators::url())]
+    api_url: String,
+    #[field(label = "API key", password, validate = validators::non_empty())]
+    api_key: String,
+    #[field(label = "Batch size", validate = validators::integer_min(1))]
+    batch_size: Option<u32>,
+}
+
+#[provider("warehouse")]
+impl Warehouse {
+    /// The connection check of the provider page.
+    #[checker]
+    async fn check(&self) -> Result<bool> {
+        let response = self.request(reqwest::Method::GET, "health").send().await?;
+        Ok(response.status().is_success())
+    }
+
+    /// Sends orders to the warehouse and returns how many were sent.
+    pub async fn push(&self, orders: Vec<Order>) -> Result<usize> {
+        for batch in orders.chunks(self.batch_size.unwrap_or(100) as usize) {
+            let response = self.request(reqwest::Method::POST, "orders").json(batch).send().await?;
             if !response.status().is_success() {
                 bail!("Warehouse push failed: {}", response.status());
             }
-            Ok(())
-        })
+        }
+        Ok(orders.len())
+    }
+
+    /// A private method is a helper: flows cannot call it.
+    fn request(&self, method: reqwest::Method, path: &str) -> reqwest::RequestBuilder {
+        let url = format!("{}/{path}", self.api_url.trim_end_matches('/'));
+        reqwest::Client::new().request(method, url).bearer_auth(&self.api_key)
+    }
 }
 ```
 
 The generated project already declares the module in `src/providers/mod.rs`
 (`pub mod warehouse;`).
 
-The transformer removes trailing slashes from the URL. The field validators
-reject invalid URLs and empty API keys before configuration is saved. For the
-full save pipeline and optional fields, see [Providers](../reference/providers.md).
+`#[derive(ProviderConfig)]` turns the fields into the form of the provider
+page: a text input, a secret and an optional number. The validators reject
+invalid URLs and empty API keys before a configuration is saved.
+`#[provider("warehouse")]` makes the public `async` methods of the block the
+methods of the provider; inside them, `self` is the configuration of the shop
+the method runs for. For every option, see [Providers](../reference/providers.md).
 
 ## 2. Register it
 
-The generated `src/main.rs` already registers this provider. In another project,
-add it to the builder, keeping the other calls of your configuration:
+In `src/main.rs`, register the provider on the builder, keeping the other
+calls of your configuration. The generated project registers
+`providers::warehouse::warehouse()`: replace that line.
 
 ```rust,ignore
 fn config() -> Result<OpenShopConfig> {
     OpenShopConfig::builder()
-        .provider(providers::warehouse::warehouse())
+        .provider(providers::warehouse::Warehouse::provider())
         // ... flows, crons and other settings ...
         .build()
 }
 ```
 
-`.provider(..)` registers the provider under its own name, `warehouse`. Flows
-look connectors up by that name at run time: method arguments travel as JSON,
-and `typed_method` deserializes them into the type the method declares.
+The provider is registered under the name given to `#[provider]`, `warehouse`.
 
 ## 3. Save and check credentials
 
@@ -102,111 +110,35 @@ then shows it as connected, and a failed check shows an error. Returning
 
 ## 4. Call the connector
 
-Call the method inside a flow, through `ctx.connectors`:
+Call the method inside a flow, on the connectors of the shop:
 
 ```rust,ignore
-ctx.step
-    .run("push-orders", || async {
-        ctx.connectors
-            .call("warehouse", "push", json!([{ "id": "order-1" }]))
-            .await?;
-        Ok(())
-    })
-    .await?;
-```
-
-The provider method receives saved config as its first argument, but the
-connector call omits it and passes a single JSON-serializable argument. Use
-`call_as::<T>(..)` to deserialize the method's return value. If the call fails
-with `Unknown provider "warehouse"`, check the registration on the builder.
-
-## 5. Type the configuration and the calls
-
-The code above reads the config by key and calls the method by name, so a typo
-in `"apiUrl"` or `"push"` only shows when the flow runs. To let the compiler
-check them, describe the config with a struct and the method with a
-`ProviderCall` constant. Add `serde = { version = "1", features = ["derive"] }`
-to `Cargo.toml` if it is not there, then replace `src/providers/warehouse.rs`:
-
-```rust,ignore
-use openshop::{FieldDef, Provider, ProviderCall, Value, bail, validators};
-use serde::{Deserialize, Serialize};
-
-/// The saved config, named after the fields below.
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct WarehouseConfig {
-    pub api_url: String,
-    pub api_key: String,
-    pub batch_size: Option<u32>,
-}
-
-#[derive(Serialize, Deserialize)]
-pub struct Order {
-    pub id: String,
-}
-
-/// Sends orders to the warehouse and returns how many were sent.
-pub const PUSH: ProviderCall<Vec<Order>, usize> = ProviderCall::new("warehouse", "push");
-
-pub fn warehouse() -> Provider {
-    Provider::new("warehouse")
-        .field("apiUrl", FieldDef::text("API URL").validate(validators::url()))
-        .field("apiKey", FieldDef::password("API key").validate(validators::non_empty()))
-        .field(
-            "batchSize",
-            FieldDef::number("Batch size").optional().validate(validators::integer_min(1)),
-        )
-        .transformer(|mut data| {
-            if let Some(Value::String(api_url)) = data.get("apiUrl").cloned() {
-                data.insert("apiUrl".into(), Value::from(api_url.trim_end_matches('/')));
-            }
-            Value::Object(data)
-        })
-        .typed_checker(|config: WarehouseConfig| async move {
-            let response = reqwest::Client::new()
-                .get(format!("{}/health", config.api_url))
-                .bearer_auth(&config.api_key)
-                .send()
-                .await?;
-            Ok(response.status().is_success())
-        })
-        .handle(PUSH, |config: WarehouseConfig, orders| async move {
-            for batch in orders.chunks(config.batch_size.unwrap_or(100) as usize) {
-                let response = reqwest::Client::new()
-                    .post(format!("{}/orders", config.api_url))
-                    .bearer_auth(&config.api_key)
-                    .json(batch)
-                    .send()
-                    .await?;
-                if !response.status().is_success() {
-                    bail!("Warehouse push failed: {}", response.status());
-                }
-            }
-            Ok(orders.len())
-        })
-}
-```
-
-The flow then names the constant instead of two strings, and gets a `usize`
-back:
-
-```rust,ignore
-use crate::providers::warehouse::{Order, PUSH};
+use crate::providers::warehouse::{Order, Warehouse};
 
 let orders = vec![Order { id: "order-1".to_string() }];
 let sent = ctx
     .step
-    .run("push-orders", || async { ctx.connectors.invoke(PUSH, &orders).await })
+    .run("push-orders", || async { Warehouse::on(&ctx.connectors).push(&orders).await })
     .await?;
 ```
 
-Passing anything other than a `Vec<Order>` no longer compiles. Whether the shop
-saved its credentials is still a run-time question: without them the call
-fails with `Invalid configuration for provider "warehouse": missing field `apiUrl``.
-See [Typed calls](../reference/providers.md#typed-calls) for the rules.
+`Warehouse::on(&ctx.connectors)` has the public methods of the provider. They
+run with the configuration the shop saved, so the call passes the arguments
+only, and the compiler checks them: passing anything other than a
+`Vec<Order>` does not compile, and `sent` is a `usize`.
 
-## 6. Verify the integration
+Whether the shop saved its credentials is a run-time question: without them
+the call fails with
+`Invalid configuration for provider "warehouse": missing field `apiUrl``. If
+it fails with `Unknown provider "warehouse"`, check the registration on the
+builder.
+
+The flow of the generated project calls
+`ctx.connectors.call("warehouse", "push", &orders)`, by name. That still
+reaches the method, without the checks: the orders it passes must have the
+fields of `Order`.
+
+## 5. Verify the integration
 
 Run `cargo check`, then use [Sync orders with a flow](define-flow.md) to
 call the connector. Confirm the provider check succeeds, the flow completes, and

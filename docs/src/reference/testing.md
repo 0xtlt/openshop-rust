@@ -216,8 +216,9 @@ index (zero-based), then the implementation, then `rejects`, then `returns`. A
 fake without any rule returns `null`. `ctx.fakes.method(…)` panics for an
 unknown provider or method; `ctx.fakes.get(…)` returns an `Option` instead.
 
-`ctx.fakes.for_call(PUSH)` returns the fake of a
-[typed call](providers.md#typed-calls), the same one as
+`ctx.fakes.for_call(Warehouse::PUSH)` returns the fake of a method of a
+[provider struct](providers.md#the-methods), or of any
+[typed call](providers.md#typed-calls): the same one as
 `ctx.fakes.method("warehouse", "push")`. Give it a result of the type the call
 returns: `connectors.invoke(…)` refuses the default `null` with
 `Invalid result from "warehouse.push": …`, unless the call returns `()` or an

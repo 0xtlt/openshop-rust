@@ -258,6 +258,103 @@ impl<A, R> fmt::Debug for ProviderCall<A, R> {
     }
 }
 
+/// The saved configuration of a provider as a struct: its fields are the
+/// fields of the configuration form. Implemented by `#[derive(ProviderConfig)]`.
+pub trait ProviderConfig: Sized {
+    /// The fields of the form, in the order of the struct.
+    fn fields() -> FieldDefinitions;
+
+    /// Reads a saved configuration. The error names the field that does not fit.
+    fn from_config(config: JsonMap) -> std::result::Result<Self, String>;
+}
+
+/// A Rust type a field of a provider configuration can have.
+///
+/// | Rust | Field |
+/// | --- | --- |
+/// | `String` | `text`; `password` or `select` when the field says so |
+/// | `bool` | `checkbox` |
+/// | Integers and floats | `number` |
+/// | `Option<T>` | The field of `T`, optional |
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` is not a type a provider field can have",
+    note = "use `String`, `bool`, a number type, or an `Option` of them"
+)]
+pub trait ProviderField: DeserializeOwned {
+    /// Whether the form accepts the field left blank.
+    const OPTIONAL: bool = false;
+
+    /// The field of the form for a value of this type.
+    fn field(label: &str) -> FieldDef;
+}
+
+impl ProviderField for String {
+    fn field(label: &str) -> FieldDef {
+        FieldDef::text(label)
+    }
+}
+
+impl ProviderField for bool {
+    fn field(label: &str) -> FieldDef {
+        FieldDef::checkbox(label)
+    }
+}
+
+macro_rules! number_field {
+    ($($number:ty),+) => {$(
+        impl ProviderField for $number {
+            fn field(label: &str) -> FieldDef {
+                FieldDef::number(label)
+            }
+        }
+    )+};
+}
+
+number_field!(i8, i16, i32, i64, u8, u16, u32, u64, usize, isize, f32, f64);
+
+impl<T: ProviderField> ProviderField for Option<T> {
+    const OPTIONAL: bool = true;
+
+    fn field(label: &str) -> FieldDef {
+        T::field(label).optional()
+    }
+}
+
+/// Takes the value of a field out of a saved configuration. Used by the code
+/// `#[derive(ProviderConfig)]` generates.
+#[doc(hidden)]
+pub fn provider_field_value<T: DeserializeOwned>(config: &mut JsonMap, key: &str) -> std::result::Result<T, String> {
+    let value = config.remove(key).unwrap_or(Value::Null);
+    let missing = value.is_null();
+    serde_json::from_value(value).map_err(|error| {
+        if missing {
+            format!("missing field `{key}`")
+        } else {
+            format!("field `{key}`: {error}")
+        }
+    })
+}
+
+/// What a provider method returns: a `Result` whose error converts to
+/// [`anyhow::Error`]. Lets generated code name the success type.
+#[diagnostic::on_unimplemented(
+    message = "a provider method returns a `Result`, not `{Self}`",
+    note = "return `openshop::Result<T>`, with `T` the value the caller receives"
+)]
+pub trait MethodResult {
+    type Ok;
+
+    fn into_result(self) -> Result<Self::Ok>;
+}
+
+impl<T, E: Into<anyhow::Error>> MethodResult for std::result::Result<T, E> {
+    type Ok = T;
+
+    fn into_result(self) -> Result<T> {
+        self.map_err(Into::into)
+    }
+}
+
 /// The stored configuration of a provider as the type its methods expect.
 fn typed_provider_config<C: DeserializeOwned>(provider: &str, config: JsonMap) -> Result<C> {
     serde_json::from_value(Value::Object(config))
@@ -290,6 +387,12 @@ impl Provider {
 
     pub fn field(mut self, name: impl Into<String>, field: FieldDef) -> Self {
         self.fields.insert(name.into(), field);
+        self
+    }
+
+    /// Adds several fields, such as those of a [`ProviderConfig`] struct.
+    pub fn fields(mut self, fields: FieldDefinitions) -> Self {
+        self.fields.extend(fields);
         self
     }
 

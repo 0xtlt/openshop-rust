@@ -2,7 +2,127 @@
 
 To add a service, see [Connect an external service](../guides/define-provider.md).
 
-Providers describe external services used by flows.
+Providers describe external services used by flows. A provider is a struct:
+its fields are the configuration a merchant saves for a shop, and its methods
+are what flows do with that configuration.
+
+```rust,ignore
+use openshop::{FlowContext, ProviderConfig, Result, provider, validators};
+use serde::{Deserialize, Serialize};
+
+#[derive(Serialize, Deserialize)]
+pub struct Order {
+    pub id: String,
+}
+
+#[derive(ProviderConfig)]
+pub struct Warehouse {
+    #[field(label = "API URL", validate = validators::url())]
+    api_url: String,
+    #[field(label = "API key", password)]
+    api_key: String,
+    #[field(label = "Batch size", validate = validators::integer_min(1))]
+    batch_size: Option<u32>,
+}
+
+#[provider("warehouse")]
+impl Warehouse {
+    #[checker]
+    async fn check(&self) -> Result<bool> {
+        // Call `{api_url}/health` with your HTTP client and report the outcome.
+        Ok(!self.api_key.is_empty())
+    }
+
+    /// Sends orders and returns how many were accepted.
+    pub async fn push(&self, orders: Vec<Order>) -> Result<usize> {
+        // POST `orders` to `{api_url}/orders` in batches of `batch_size`.
+        let batches = orders.chunks(self.batch_size.unwrap_or(100) as usize).count();
+        println!("{} orders to {} in {batches} batches", orders.len(), self.api_url);
+        Ok(orders.len())
+    }
+}
+
+async fn push(ctx: &FlowContext, orders: &Vec<Order>) -> Result<usize> {
+    Warehouse::on(&ctx.connectors).push(orders).await
+}
+```
+
+Register it with `.provider(Warehouse::provider())` on the configuration
+builder, under the name given to `#[provider]`.
+
+## Provider structs
+
+### The configuration
+
+`#[derive(ProviderConfig)]` makes each field of the struct a field of the form
+shown in the admin. The value is saved under the name of the field in camel
+case: `api_url` is `apiUrl`.
+
+| Rust type | Input | |
+| --- | --- | --- |
+| `String` | Text | With `password`, a secret; with `select(…)`, a list of choices. |
+| `bool` | Checkbox | |
+| Integer and float types | Number | Add `validators::integer_min(…)` to an integer field, so that `2.5` is refused when the configuration is saved. |
+| `Option<T>` | The input of `T` | The field may be left blank. Every other field is required. |
+
+Options go in `#[field(…)]`:
+
+| Option | |
+| --- | --- |
+| `label = "API URL"` | The label of the input. Required. |
+| `placeholder = "https://…"` | |
+| `password` | A secret: never returned by the Admin API, and kept when the form is saved without it. |
+| `select("Europe" = "eu", "United States" = "us")` | A list of choices, each a label and the value saved. |
+| `validate = validators::url()` | A [validator](#validators). The value it returns is the one saved. |
+| `name = "endpoint"` | The key the value is saved under, instead of the field name in camel case. |
+
+A struct without fields, `struct Clock;`, is a provider without configuration.
+The derive also implements `Deserialize` from the saved configuration: do not
+derive it yourself. The same fields are available as
+`Warehouse::fields()`, and `Warehouse::from_config(map)` reads a saved
+configuration, through the `ProviderConfig` trait.
+
+### The methods
+
+`#[provider("warehouse")]` goes on the `impl` block of the struct. `&self` is
+the configuration of the shop the method runs for.
+
+| In the block | |
+| --- | --- |
+| `pub async fn name(&self, …) -> Result<T>` | A method of the provider. Its arguments and `T` travel as JSON: they implement `Serialize` and `Deserialize`. Arguments are taken by value. The error type is anything that converts to `anyhow::Error`. |
+| `#[checker] async fn check(&self) -> Result<bool>` | The [connection check](#checker) of the admin. At most one. |
+| A private method, a function without `&self` | An ordinary helper, not part of the provider. |
+
+The block keeps its methods: on a value, `warehouse.push(orders).await` runs
+the code directly, which is how a unit test exercises it. The macro adds:
+
+| Added | |
+| --- | --- |
+| `Warehouse::provider()` | The [`Provider`](#providers-without-a-struct) to register. It can still be extended, for example with `.transformer(…)`. |
+| `Warehouse::on(&connectors)` | The same public methods, run with the configuration the shop saved: `Warehouse::on(&ctx.connectors).push(&orders)`. An argument is passed by value or by reference. |
+| `Warehouse::PUSH`, one constant per method | A [`ProviderCall`](#typed-calls), for `connectors.invoke(…)` and for the [fake](testing.md#configure-provider-fakes) of a test: `ctx.fakes.for_call(Warehouse::PUSH)`. |
+
+Calls go through the connectors of the shop, so a test that fakes the provider
+replaces every one of them, and `connectors.call("warehouse", "push", …)` still
+reaches the method by name. A method with several arguments receives them as a
+JSON array, one without argument receives `null`.
+
+What is checked when:
+
+- The compiler checks the arguments and the result of
+  `Warehouse::on(..).push(..)`, and that the method exists.
+- `build()` checks that the provider is registered under its own name: with
+  `.provider_as("main", Warehouse::provider())` it fails, as described under
+  [Typed calls](#typed-calls).
+- Whether the shop saved its configuration is only known when the call
+  happens. Without it, the call fails with
+  `Invalid configuration for provider "warehouse": missing field `apiUrl``
+  before the method runs.
+
+## Providers without a struct
+
+The struct form is built on `Provider`, which can be used directly when the
+fields or the methods are only known at run time:
 
 ```rust,ignore
 use openshop::{FieldDef, JsonMap, Provider, Value, json};
@@ -12,20 +132,19 @@ pub fn warehouse() -> Provider {
         .field("apiUrl", FieldDef::text("API URL"))
         .field("apiKey", FieldDef::password("API key"))
         .checker(|config| async move {
-            // Call `{apiUrl}/health` with your HTTP client and report the outcome.
             Ok(config.get("apiUrl").and_then(Value::as_str).is_some())
         })
         .typed_method("push", |config, rows: Vec<JsonMap>| async move {
             let api_url = config.get("apiUrl").and_then(Value::as_str).unwrap_or_default();
-            // POST `rows` to `{api_url}/orders` with `apiKey` as bearer token.
             Ok(json!({ "accepted": rows.len(), "endpoint": api_url }))
         })
 }
 ```
 
-Register the provider with `.provider(warehouse())` on the configuration
-builder. It is stored under `provider.name`; `.provider_as(key, provider)` uses
-another key.
+Register it with `.provider(warehouse())`. It is stored under `provider.name`;
+`.provider_as(key, provider)` uses another key. The sections below describe
+this form: [field definitions](#field-definitions),
+[methods](#methods-and-connectors) and [typed calls](#typed-calls).
 
 ## Field definitions
 
@@ -176,7 +295,8 @@ config as a JSON object, so a misspelled name or key only fails when the call
 happens. A `ProviderCall` constant moves those checks to compile time. It
 carries the provider key, the method name, and the types of the arguments and
 of the result, and it is shared by the provider that implements the method and
-by the code that calls it:
+by the code that calls it. `#[provider]` declares one per method; with the
+builder, you declare them:
 
 ```rust,ignore
 use openshop::{FieldDef, FlowContext, Provider, ProviderCall, Result, validators};

@@ -33,10 +33,14 @@ provider definitions. Rust has no equivalent inference across a registry, so
 connectors are reached by name. Two additions close most of that gap and make
 larger configurations easier to split:
 
-- `ProviderCall<A, R>` constants with `Provider::handle`,
-  `Provider::typed_checker` and `Connectors::invoke`: the saved config is a
-  `serde` struct, and the method name, arguments and result are checked by the
-  compiler. See [Typed calls](providers.md#typed-calls).
+- A provider is a struct: `#[derive(ProviderConfig)]` makes its fields the
+  configuration form, and `#[provider("name")]` makes the methods of its `impl`
+  block the methods of the provider, called with
+  `Warehouse::on(&ctx.connectors).push(&orders)`. The compiler checks the
+  method, its arguments and its result. See [Providers](providers.md).
+- Underneath, `ProviderCall<A, R>` constants with `Provider::handle`,
+  `Provider::typed_checker` and `Connectors::invoke`, for a provider built
+  without a struct. See [Typed calls](providers.md#typed-calls).
 - `.providers([…])`, `.flows([…])` and `.with(register)` on the builder.
 
 ## Engine
