@@ -31,7 +31,7 @@ sources change. Run it through `shopify app dev` to open the app in a store.
 ## What an application looks like
 
 ```rust
-use openshop::{FieldDef, Flow, OpenShopConfig, Provider, ProviderCall, Result, json, serde_json, validators};
+use openshop::{FieldDef, Flow, OpenShopConfig, Provider, ProviderCall, Result, graphql, validators};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -76,14 +76,16 @@ fn sync_orders() -> Flow {
         let orders: Vec<Order> = ctx
             .step
             .run("fetch-orders", || async {
+                // Checked against Shopify's schema when the crate compiles; `data` is typed.
                 let data = ctx
                     .shopify
-                    .graphql(
+                    .execute(graphql!(
                         "query($first: Int!) { orders(first: $first) { nodes { id name } } }",
-                        Some(json!({ "first": input.limit })),
-                    )
+                        first = input.limit
+                    ))
                     .await?;
-                Ok(serde_json::from_value(data["orders"]["nodes"].clone())?)
+                let orders = data.orders.nodes.into_iter();
+                Ok(orders.map(|order| Order { id: order.id, name: order.name }).collect())
             })
             .await?;
 
@@ -146,7 +148,8 @@ Rust conventions.
 | `drizzle-kit` migrations in `./drizzle` | SQL migrations in `./migrations` (`migrate generate` / `migrate`) |
 | Preact admin UI built with Vite | Leptos admin UI compiled to WebAssembly and embedded in the binary |
 | `createTestContext()` from `openshop/test` | `openshop::testing::TestContext` (feature `testing`) |
-| GraphQL codegen, ESLint preset | not needed: responses are `serde` types or `serde_json::Value` |
+| `shopify.graphql(\`#graphql …\`)` typed by codegen | `ctx.shopify.execute(graphql!("…", var = value))`, checked and typed at compile time |
+| ESLint preset | not needed |
 
 The database tables, the encryption format of stored credentials and tokens,
 the MCP token format and every HTTP route are identical, so both runtimes can
@@ -159,8 +162,10 @@ robust; they are listed in [Differences](docs/src/reference/differences.md).
 | --- | --- |
 | `crates/openshop` | The framework: engine, server, MCP, testing harness, embedded UI assets |
 | `crates/openshop-shared` | Types and rules shared by the server and the WebAssembly UI |
+| `crates/openshop-graphql` | Shopify's Admin schema, and the checks and code generation behind `graphql!` |
+| `crates/openshop-macros` | The `graphql!` macro |
 | `crates/openshop-ui` | The admin UI (Leptos, built with trunk into `crates/openshop/ui-dist`) |
-| `crates/openshop-cli` | The `openshop` command: `init`, `init-ui` and `dev` |
+| `crates/openshop-cli` | The `openshop` command: `init`, `init-ui`, `dev` and `codegen` |
 | `apps/demo` | A demo app exercising every building block; `apps/demo/ui` is its admin UI bundle with a custom page |
 | `docs` | Documentation (mdBook) |
 

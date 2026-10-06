@@ -1,4 +1,4 @@
-use openshop::{Flow, Value, json};
+use openshop::{Flow, Value, bail, graphql, json};
 use schemars::JsonSchema;
 use serde::Deserialize;
 
@@ -8,73 +8,11 @@ pub struct CountVariantsInput {
     pub product_id: String,
 }
 
-const PRODUCT_FULL: &str = "#graphql
-  query GetProductFull($id: ID!) {
-    product(id: $id) {
-      id
-      title
-      handle
-      descriptionHtml
-      productType
-      vendor
-      status
-      tags
-      variantsCount {
-        count
-      }
-      totalInventory
-      createdAt
-      updatedAt
-      publishedAt
-      onlineStoreUrl
-      options {
-        name
-        values
-      }
-      media(first: 10) {
-        edges {
-          node {
-            ... on MediaImage {
-              id
-              image {
-                url
-                altText
-                width
-                height
-              }
-            }
-          }
-        }
-      }
-      variants(first: 20) {
-        edges {
-          node {
-            id
-            title
-            sku
-            price
-            compareAtPrice
-            inventoryQuantity
-            selectedOptions {
-              name
-              value
-            }
-          }
-        }
-      }
-      seo {
-        title
-        description
-      }
-    }
-  }
-";
-
 pub fn count_variants() -> Flow {
     Flow::new("countVariants", |ctx| async move {
         let input: CountVariantsInput = ctx.input()?;
 
-        let product: Value = ctx
+        let product = ctx
             .step
             .run("fetch-product", || async {
                 ctx.logger.info(
@@ -83,17 +21,84 @@ pub fn count_variants() -> Flow {
                 );
                 let data = ctx
                     .shopify
-                    .graphql(PRODUCT_FULL, Some(json!({ "id": input.product_id })))
+                    .execute(graphql!(
+                        "#graphql
+                          query GetProductFull($id: ID!) {
+                            product(id: $id) {
+                              id
+                              title
+                              handle
+                              descriptionHtml
+                              productType
+                              vendor
+                              status
+                              tags
+                              variantsCount {
+                                count
+                              }
+                              totalInventory
+                              createdAt
+                              updatedAt
+                              publishedAt
+                              onlineStoreUrl
+                              options {
+                                name
+                                values
+                              }
+                              media(first: 10) {
+                                edges {
+                                  node {
+                                    ... on MediaImage {
+                                      id
+                                      image {
+                                        url
+                                        altText
+                                        width
+                                        height
+                                      }
+                                    }
+                                  }
+                                }
+                              }
+                              variants(first: 20) {
+                                edges {
+                                  node {
+                                    id
+                                    title
+                                    sku
+                                    price
+                                    compareAtPrice
+                                    inventoryQuantity
+                                    selectedOptions {
+                                      name
+                                      value
+                                    }
+                                  }
+                                }
+                              }
+                              seo {
+                                title
+                                description
+                              }
+                            }
+                          }
+                        ",
+                        id = &input.product_id
+                    ))
                     .await?;
-                Ok(data.get("product").cloned().unwrap_or(Value::Null))
+                Ok(data.product)
             })
             .await?;
+        let Some(product) = product else {
+            bail!("Product {} does not exist", input.product_id);
+        };
+        let total_variants = product.variants_count.as_ref().map(|variants| variants.count);
 
         ctx.logger.info(
             json!({
-                "title": product.get("title"),
-                "variants": product.pointer("/variantsCount/count"),
-                "inventory": product.get("totalInventory"),
+                "title": product.title,
+                "variants": total_variants,
+                "inventory": product.total_inventory,
             }),
             "Product fetched",
         );
@@ -101,37 +106,36 @@ pub fn count_variants() -> Flow {
         let summary: Value = ctx
             .step
             .run("build-summary", || async {
-                let edges = |pointer: &str| product.pointer(pointer).and_then(Value::as_array);
-                let variant_skus: Option<Vec<Value>> = edges("/variants/edges").map(|variants| {
-                    variants
-                        .iter()
-                        .map(|edge| {
-                            json!({
-                                "title": edge.pointer("/node/title"),
-                                "sku": edge.pointer("/node/sku"),
-                                "price": edge.pointer("/node/price"),
-                                "inventory": edge.pointer("/node/inventoryQuantity"),
-                            })
+                let variant_skus: Vec<Value> = product
+                    .variants
+                    .edges
+                    .iter()
+                    .map(|edge| {
+                        json!({
+                            "title": edge.node.title,
+                            "sku": edge.node.sku,
+                            "price": edge.node.price,
+                            "inventory": edge.node.inventory_quantity,
                         })
-                        .collect()
-                });
+                    })
+                    .collect();
 
                 Ok(json!({
-                    "id": product.get("id"),
-                    "title": product.get("title"),
-                    "handle": product.get("handle"),
-                    "vendor": product.get("vendor"),
-                    "type": product.get("productType"),
-                    "status": product.get("status"),
-                    "tags": product.get("tags"),
-                    "totalVariants": product.pointer("/variantsCount/count"),
-                    "totalInventory": product.get("totalInventory"),
-                    "options": product.get("options"),
-                    "imageCount": edges("/media/edges").map_or(0, Vec::len),
+                    "id": product.id,
+                    "title": product.title,
+                    "handle": product.handle,
+                    "vendor": product.vendor,
+                    "type": product.product_type,
+                    "status": product.status,
+                    "tags": product.tags,
+                    "totalVariants": total_variants,
+                    "totalInventory": product.total_inventory,
+                    "options": product.options,
+                    "imageCount": product.media.edges.len(),
                     "variantSkus": variant_skus,
-                    "seo": product.get("seo"),
-                    "createdAt": product.get("createdAt"),
-                    "updatedAt": product.get("updatedAt"),
+                    "seo": product.seo,
+                    "createdAt": product.created_at,
+                    "updatedAt": product.updated_at,
                 }))
             })
             .await?;

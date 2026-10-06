@@ -151,8 +151,13 @@ larger configurations easier to split:
 
 ## Not ported
 
-- GraphQL code generation, the ESLint preset and the Vite plugins. GraphQL
-  responses are `serde_json::Value` or your own `serde` types.
+- The ESLint preset and the Vite plugins.
+- GraphQL code generation as a separate step. `graphql!` checks an operation
+  against Shopify's schema and types it when the crate compiles, so there is
+  no `.graphqlrc.ts`, no generated file and no watch mode, and `dev` has
+  nothing to generate. `openshop codegen` only downloads the schema of another
+  API version. Enum values are strings, and the types of an inline operation
+  have no name. See [Typed GraphQL](graphql.md).
 - `openshop build` and `openshop test` map to `cargo build --release` and
   `cargo test`.
 - The proxy test client's `.expect(schema)`; deserialize the response instead.

@@ -33,6 +33,7 @@
   - [Environment variables](reference/environment-variables.md)
   - [CLI commands](reference/cli.md)
   - [Public SDK](reference/sdk.md)
+  - [Typed GraphQL](reference/graphql.md)
   - [Flows](reference/flows.md)
   - [Providers](reference/providers.md)
   - [Database and migrations](reference/database.md)

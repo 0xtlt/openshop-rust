@@ -2,9 +2,50 @@
 
 Use this reference for Shopify Admin GraphQL operations in OpenShop app and framework code.
 
-There is no GraphQL code generation in the Rust version. A query is a string,
-the response is JSON, and nothing checks one against the other at compile time.
-The rules below keep that boundary small and tested.
+Write an operation known in advance with `graphql!`: it is checked against
+Shopify's Admin schema when the crate compiles, and its variables and its
+result are typed. `graphql()` and `graphql_as()` take any string and check
+nothing at compile time; keep them for operations built at run time, and
+follow the rules of the later sections for those.
+
+## Typed Operations
+
+```rust
+use openshop::{Result, ShopifyClient, graphql};
+
+pub async fn product_title(shopify: &ShopifyClient, id: &str) -> Result<String> {
+    let data = shopify
+        .execute(graphql!(
+            "#graphql
+              query GetProduct($id: ID!) {
+                product(id: $id) {
+                  id
+                  title
+                  totalInventory
+                }
+              }
+            ",
+            id = id
+        ))
+        .await?;
+    let product = data.product.ok_or_else(|| openshop::anyhow!("Product {id} not found"))?;
+    Ok(product.title)
+}
+```
+
+- Variables follow the operation as `name = value`. Required ones are mandatory; nullable ones and those with a default can be left out.
+- The result mirrors the selection: snake-case fields, `Option` for nullable fields and for fields under a fragment on another type, `Vec` for lists, `String` for IDs, enum values and Shopify's string-encoded scalars, `i64` for `Int`.
+- The result types derive `Serialize` and `Deserialize`: return them from `ctx.step.run()` directly.
+- The types of an inline operation have no name. To return them from a function, share an operation, or build typed input objects, use the module form: `graphql! { pub mod get_product = "…"; }`, then `get_product::Data`, `get_product::Variables` and `get_product::operation(variables)`.
+- Do not work around a compile error by switching to `graphql()`: fix the operation. The error names the field, argument or variable and the API version it was checked against.
+- The bundled schema is the one of `SHOPIFY_API_VERSION`. A client created for another version needs `openshop codegen --api-version=<version>` and the resulting `graphql/admin.schema.json` committed.
+- A test still scripts the answer with `MockTransport`. An answer that leaves out a non-null field fails with `Shopify's answer does not match the operation at …`.
+
+Reference: `docs/src/reference/graphql.md`.
+
+## Untyped Operations
+
+The rest of this page applies to `graphql()` and `graphql_as()`.
 
 ## Expected Pattern
 
@@ -117,8 +158,9 @@ struct WarehouseOrder {
 
 ## Test Every Operation
 
-Because the compiler does not check queries, each operation needs a test that
-runs it against a scripted response. `TestContext` routes Shopify calls to a
+The compiler does not check untyped queries, and does not check what a flow
+does with the result of a typed one: each operation needs a test that runs it
+against a scripted response. `TestContext` routes Shopify calls to a
 `MockTransport`:
 
 ```rust
@@ -170,6 +212,7 @@ async fn reads_a_product() {
 ## Framework Code
 
 When changing GraphQL support in `crates/openshop`:
+- `graphql!` is `crates/openshop-macros`; the schema format, the checks and the generated types are `crates/openshop-graphql`, tested against the bundled schema in `crates/openshop-graphql/tests/analyze.rs` and end to end in `crates/openshop/tests/graphql_typed.rs`. When `SHOPIFY_API_VERSION` changes, download the bundled schema again with `openshop codegen --api-version=<version> --out=crates/openshop-graphql/schema/admin-<version>.schema.json` and update the path in `schema.rs`.
 - The client lives in `crates/openshop/src/shopify/client.rs`. `SHOPIFY_API_VERSION` is the default Admin API version; `create_shopify_client(app, shop, shopify_app, Some(version))` selects another one.
 - Send every Shopify request through the `HttpTransport` trait (`crates/openshop/src/runtime/transport.rs`) so tests can replace it with `MockTransport`.
 - The error messages of `graphql()` are the same as in the TypeScript implementation. Keep them, or document the change in `docs/src/reference/differences.md`.

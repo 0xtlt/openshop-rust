@@ -64,6 +64,27 @@ derived from the type, so `ctx.input()` only sees a positive integer `limit`.
 `ctx.shopify.graphql()` returns the GraphQL data object, so the order list is
 `data["orders"]["nodes"]`. The saved checkpoint contains only that JSON array.
 
+Nothing checks that string when the project compiles. To have the operation
+checked against Shopify's schema and its result typed, write it with
+`graphql!`:
+
+```rust,ignore
+use openshop::graphql;
+
+let data = ctx
+    .shopify
+    .execute(graphql!(
+        "query($first: Int!) { orders(first: $first) { nodes { id name } } }",
+        first = input.limit
+    ))
+    .await?;
+let names: Vec<String> = data.orders.nodes.into_iter().map(|order| order.name).collect();
+```
+
+A misspelled field is then a compile error, and `data.orders.nodes` is a list
+of structs with an `id` and a `name`. See
+[Typed GraphQL](../reference/graphql.md).
+
 This fetches one recent batch. For a complete historical sync, add pagination and
 a durable cursor appropriate to your integration.
 

@@ -8,6 +8,12 @@
   same for the connection check, and `FakeProviders::for_call` returns the fake
   of a call.
 - `OpenShopBuilder::providers`, `flows` and `with`.
+- Typed GraphQL: `graphql!("…", name = value)` checks a Shopify Admin
+  operation against the schema at compile time and types its variables and its
+  result; `ShopifyClient::execute` runs it. The module form,
+  `graphql! { mod name = "…"; }`, names the generated types and input objects.
+  The Admin schema of the default API version is bundled; `openshop codegen`
+  downloads another one.
 
 ## 0.0.12-beta.0
 

@@ -1,4 +1,4 @@
-use openshop::{Flow, Value, json};
+use openshop::{Flow, graphql, json};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -18,31 +18,6 @@ struct WarehouseOrder {
     items: usize,
 }
 
-const RECENT_ORDERS: &str = "#graphql
-  query GetRecentOrders($first: Int!) {
-    orders(first: $first, sortKey: CREATED_AT, reverse: true) {
-      edges {
-        node {
-          id
-          customer {
-            displayName
-          }
-          name
-          totalPriceSet { shopMoney { amount currencyCode } }
-          lineItems(first: 5) { edges { node { title quantity } } }
-        }
-      }
-    }
-  }
-";
-
-fn text(node: &Value, pointer: &str) -> String {
-    node.pointer(pointer)
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_string()
-}
-
 pub fn sync_orders() -> Flow {
     Flow::new("syncOrders", |ctx| async move {
         let input: SyncOrdersInput = ctx.input()?;
@@ -55,23 +30,40 @@ pub fn sync_orders() -> Flow {
                     "Fetching latest orders from Shopify...",
                 );
 
+                // Checked against Shopify's schema when the crate compiles; `data` is typed.
                 let data = ctx
                     .shopify
-                    .graphql(RECENT_ORDERS, Some(json!({ "first": input.limit })))
+                    .execute(graphql!(
+                        "#graphql
+                          query GetRecentOrders($first: Int!) {
+                            orders(first: $first, sortKey: CREATED_AT, reverse: true) {
+                              edges {
+                                node {
+                                  id
+                                  customer {
+                                    displayName
+                                  }
+                                  name
+                                  totalPriceSet { shopMoney { amount currencyCode } }
+                                  lineItems(first: 5) { edges { node { title quantity } } }
+                                }
+                              }
+                            }
+                          }
+                        ",
+                        first = input.limit
+                    ))
                     .await?;
 
-                let edges = data.pointer("/orders/edges").and_then(Value::as_array);
-                Ok(edges
+                Ok(data
+                    .orders
+                    .edges
                     .into_iter()
-                    .flatten()
                     .map(|edge| WarehouseOrder {
-                        id: text(edge, "/node/id"),
-                        name: text(edge, "/node/name"),
-                        total: text(edge, "/node/totalPriceSet/shopMoney/currencyCode"),
-                        items: edge
-                            .pointer("/node/lineItems/edges")
-                            .and_then(Value::as_array)
-                            .map_or(0, Vec::len),
+                        id: edge.node.id,
+                        name: edge.node.name,
+                        total: edge.node.total_price_set.shop_money.currency_code,
+                        items: edge.node.line_items.edges.len(),
                     })
                     .collect())
             })

@@ -1,5 +1,6 @@
 //! `openshop`: scaffold and develop OpenShop applications.
 
+mod codegen;
 mod dev;
 mod init;
 mod restart;
@@ -16,6 +17,8 @@ const USAGE: &str = "
     init <dir>                  Scaffold a new OpenShop project
     init-ui [dir]               Scaffold the admin UI bundle for custom admin pages (default: ui)
     dev                         Start the app in dev mode and restart it when sources change
+    codegen                     Download the Shopify Admin GraphQL schema of another API version
+                                for graphql! (--api-version=YYYY-MM, --out=<file>)
     worker [--concurrency=N]    Start worker only (production, scalable)
     migrate                     Apply client-owned migrations from ./migrations
     migrate generate            Generate a new client-owned migration
@@ -36,8 +39,8 @@ const USAGE: &str = "
     openshop test
     openshop build && openshop start
 
-  Everything except `init`, `init-ui` and `dev` runs the application binary
-  through cargo in the current project.
+  Everything except `init`, `init-ui`, `dev` and `codegen` runs the application
+  binary through cargo in the current project.
 ";
 
 /// Runs cargo in the current directory and forwards its exit status.
@@ -61,6 +64,7 @@ async fn run(args: &[String]) -> Result<()> {
             Ok(())
         }
         Some("dev") => dev::start_dev(rest).await,
+        Some("codegen") => codegen::run_codegen(&std::env::current_dir()?, rest).await,
         Some("build") => cargo(&["build", "--release"], rest).await,
         Some("test") => cargo(&["test"], rest).await,
         Some("migrate") => cargo(&["run", "--", "migrate"], rest).await,

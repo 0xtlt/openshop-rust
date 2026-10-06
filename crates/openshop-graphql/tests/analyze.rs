@@ -1,0 +1,413 @@
+//! Operations checked against the bundled Shopify Admin schema: what is
+//! refused, with which message, and the shape of what is accepted.
+
+use openshop_graphql::{FieldBase, Operation, OperationKind, Scalar, Schema, Selection, VariableBase, analyze};
+
+fn check(source: &str) -> Operation {
+    analyze(Schema::bundled(), source).unwrap_or_else(|error| panic!("{error}\n{source}"))
+}
+
+fn refusal(source: &str) -> String {
+    match analyze(Schema::bundled(), source) {
+        Ok(_) => panic!("accepted: {source}"),
+        Err(error) => error.to_string(),
+    }
+}
+
+/// `key: Type` of each field, `?` marking those that may be absent.
+fn fields(selection: &Selection) -> Vec<String> {
+    selection
+        .fields
+        .iter()
+        .map(|field| {
+            format!(
+                "{}{}: {}",
+                field.key,
+                if field.conditional { "?" } else { "" },
+                field.ty
+            )
+        })
+        .collect()
+}
+
+fn child<'a>(selection: &'a Selection, key: &str) -> &'a Selection {
+    match selection
+        .fields
+        .iter()
+        .find(|field| field.key == key)
+        .map(|field| &field.base)
+    {
+        Some(FieldBase::Object(selection)) => selection,
+        _ => panic!("`{key}` is not a selection of `{}`", selection.type_name),
+    }
+}
+
+// ─── Accepted ────────────────────────────────────────────────────────
+
+#[test]
+fn describes_variables_and_nested_selections() {
+    let operation = check(
+        "query Recent($first: Int!, $query: String, $sortKey: OrderSortKeys = CREATED_AT) {
+           orders(first: $first, query: $query, sortKey: $sortKey) { nodes { id name note } }
+         }",
+    );
+
+    assert_eq!(operation.kind, OperationKind::Query);
+    assert_eq!(operation.name.as_deref(), Some("Recent"));
+    let variables: Vec<(&str, String, bool, VariableBase)> = operation
+        .variables
+        .iter()
+        .map(|variable| {
+            (
+                variable.name.as_str(),
+                variable.ty.to_string(),
+                variable.is_required(),
+                variable.base,
+            )
+        })
+        .collect();
+    assert_eq!(
+        variables,
+        [
+            ("first", "Int!".to_string(), true, VariableBase::Scalar(Scalar::Int)),
+            (
+                "query",
+                "String".to_string(),
+                false,
+                VariableBase::Scalar(Scalar::String)
+            ),
+            ("sortKey", "OrderSortKeys".to_string(), false, VariableBase::Enum),
+        ]
+    );
+
+    assert_eq!(operation.data.type_name, "QueryRoot");
+    assert_eq!(fields(&operation.data), ["orders: OrderConnection!"]);
+    let orders = child(&operation.data, "orders");
+    assert_eq!(fields(orders), ["nodes: [Order!]!"]);
+    let nodes = child(orders, "nodes");
+    assert_eq!(nodes.type_name, "Order");
+    assert_eq!(fields(nodes), ["id: ID!", "name: String!", "note: String"]);
+}
+
+#[test]
+fn accepts_the_shorthand_query_and_mutations() {
+    let operation = check("{ shop { name } }");
+    assert_eq!((operation.kind, operation.name), (OperationKind::Query, None));
+
+    let operation = check(
+        "mutation($metafields: [MetafieldsSetInput!]!) {
+           metafieldsSet(metafields: $metafields) { userErrors { message } }
+         }",
+    );
+    assert_eq!(operation.kind, OperationKind::Mutation);
+    assert_eq!(operation.data.type_name, "Mutation");
+    assert_eq!(operation.variables[0].base, VariableBase::Input);
+    assert_eq!(fields(&operation.data), ["metafieldsSet: MetafieldsSetPayload"]);
+}
+
+#[test]
+fn maps_scalars_to_their_json_form() {
+    let operation = check(
+        "{ shop { name } order(id: \"gid://shopify/Order/1\") {
+             createdAt
+             subtotalLineItemsQuantity
+             totalWeight
+             confirmed
+             metafield(key: \"k\") { jsonValue }
+             totalPriceSet { shopMoney { amount } }
+           } }",
+    );
+    let order = child(&operation.data, "order");
+    let scalar = |selection: &Selection, key: &str| match selection
+        .fields
+        .iter()
+        .find(|field| field.key == key)
+        .map(|field| &field.base)
+    {
+        Some(FieldBase::Scalar(scalar)) => *scalar,
+        _ => panic!("`{key}` is not a scalar"),
+    };
+    assert_eq!(scalar(order, "createdAt"), Scalar::String);
+    assert_eq!(scalar(order, "subtotalLineItemsQuantity"), Scalar::Int);
+    // `UnsignedInt64` travels as a string.
+    assert_eq!(scalar(order, "totalWeight"), Scalar::String);
+    assert_eq!(scalar(order, "confirmed"), Scalar::Boolean);
+    assert_eq!(scalar(child(order, "metafield"), "jsonValue"), Scalar::Json);
+    let money = child(child(order, "totalPriceSet"), "shopMoney");
+    assert_eq!(scalar(money, "amount"), Scalar::String);
+}
+
+#[test]
+fn merges_selections_of_the_same_field_and_marks_conditional_ones() {
+    let operation = check(
+        "query($withTags: Boolean!, $ids: [ID!]!) {
+           nodes(ids: $ids) {
+             id
+             __typename
+             ... on Node { id }
+             ... on Product { title handle ...ProductBits }
+             ... on Order { name tags @include(if: $withTags) }
+             ... on HasMetafields { metafield(key: \"k\") { value } }
+           }
+         }
+         fragment ProductBits on Product { title vendor featuredMedia { id } }",
+    );
+    let nodes = child(&operation.data, "nodes");
+    assert_eq!(nodes.type_name, "Node");
+    assert_eq!(
+        fields(nodes),
+        [
+            "id: ID!",
+            "__typename: String!",
+            "title?: String!",
+            "handle?: String!",
+            "vendor?: String!",
+            "featuredMedia?: Media",
+            "name?: String!",
+            "tags?: [String!]!",
+            "metafield?: Metafield",
+        ]
+    );
+
+    // On the object itself, a fragment on one of its interfaces always applies.
+    let operation = check(
+        "{ shop { ... on Node { id } ... on Shop { name } ...Meta } }
+         fragment Meta on HasMetafields { metafield(key: \"k\") { value } }",
+    );
+    assert_eq!(
+        fields(child(&operation.data, "shop")),
+        ["id: ID!", "name: String!", "metafield: Metafield"]
+    );
+
+    // The same field selected twice is one field with both selections.
+    let operation = check("{ shop { plan { publicDisplayName } plan { partnerDevelopment } name name } }");
+    let shop = child(&operation.data, "shop");
+    assert_eq!(fields(shop), ["plan: ShopPlan!", "name: String!"]);
+    assert_eq!(
+        fields(child(shop, "plan")),
+        ["publicDisplayName: String!", "partnerDevelopment: Boolean!"]
+    );
+}
+
+#[test]
+fn accepts_literals_of_every_kind() {
+    check(
+        "mutation {
+           metafieldsSet(metafields: [{ ownerId: \"gid://shopify/Product/1\", key: \"k\", value: \"v\", namespace: null }]) {
+             userErrors { message }
+           }
+         }",
+    );
+    check("{ orders(first: 5, reverse: true, sortKey: UPDATED_AT, query: \"status:open\") { nodes { id } } }");
+    // An integer where an ID is expected, and a variable with a default for a non-null argument.
+    check("query($id: ID = 1) { product(id: $id) { id } node(id: 2) { id } }");
+    // A single value where a list is expected.
+    check("{ nodes(ids: \"gid://shopify/Product/1\") { id } }");
+}
+
+// ─── Refused ─────────────────────────────────────────────────────────
+
+#[test]
+fn refuses_unknown_fields_and_arguments_with_a_suggestion() {
+    assert_eq!(
+        refusal("{ orders(first: 1) { nodes { id nam } } }"),
+        "Type `Order` has no field `nam` (did you mean `name`?) (line 1, column 33)"
+    );
+    assert_eq!(
+        refusal("{ orders(frist: 1) { nodes { id } } }"),
+        "Field `QueryRoot.orders` has no argument `frist` (did you mean `first`?) (line 1, column 3)"
+    );
+    assert_eq!(
+        refusal("{ shop { zzzzzz } }"),
+        "Type `Shop` has no field `zzzzzz` (line 1, column 10)"
+    );
+    assert_eq!(
+        refusal("{ shop { __typename(x: 1) } }"),
+        "Field `__typename` has no argument `x` (line 1, column 10)"
+    );
+}
+
+#[test]
+fn refuses_missing_arguments_and_selections() {
+    assert_eq!(
+        refusal("{ product { id } }"),
+        "Field `QueryRoot.product` requires the argument `id: ID!` (line 1, column 3)"
+    );
+    assert_eq!(
+        refusal("{ shop }"),
+        "Field `shop` has the type `Shop!`: select the subfields you need, `shop { … }` (line 1, column 3)"
+    );
+    assert_eq!(
+        refusal("{ shop { name { length } } }"),
+        "Field `name` has the type `String!`, which has no subfields (line 1, column 10)"
+    );
+}
+
+#[test]
+fn refuses_variables_that_do_not_fit() {
+    assert_eq!(
+        refusal("query($first: String!) { orders(first: $first) { nodes { id } } }"),
+        "Variable `$first` of type `String!` cannot be used for argument `first` of `QueryRoot.orders`, which expects `Int` (line 1, column 26)"
+    );
+    assert_eq!(
+        refusal("query($id: ID) { product(id: $id) { id } }"),
+        "Variable `$id` of type `ID` cannot be used for argument `id` of `QueryRoot.product`, which expects `ID!` (line 1, column 18)"
+    );
+    assert_eq!(
+        refusal("query($ids: [ID]!) { nodes(ids: $ids) { id } }"),
+        "Variable `$ids` of type `[ID]!` cannot be used for argument `ids` of `QueryRoot.nodes`, which expects `[ID!]!` (line 1, column 22)"
+    );
+    assert_eq!(
+        refusal("{ orders(first: $first) { nodes { id } } }"),
+        "Variable `$first` is not declared (line 1, column 3)"
+    );
+    assert_eq!(
+        refusal("query($first: Int!, $frist: Int) { orders(first: $firs) { nodes { id } } }"),
+        "Variable `$firs` is not declared (did you mean `first`?) (line 1, column 36)"
+    );
+    assert_eq!(
+        refusal("query($first: Int!, $after: String) { orders(first: $first) { nodes { id } } }"),
+        "Variable `$after` is declared but never used"
+    );
+    assert_eq!(
+        refusal("query($first: Int!, $first: Int!) { orders(first: $first) { nodes { id } } }"),
+        "Variable `$first` is declared twice (line 1, column 21)"
+    );
+    assert_eq!(
+        refusal("query($sort: OrderSortKey) { orders(first: 1, sortKey: $sort) { nodes { id } } }"),
+        "Variable `$sort` has the unknown type `OrderSortKey` (did you mean `OrderSortKeys`?) (line 1, column 7)"
+    );
+    assert_eq!(
+        refusal("query($order: Order) { shop { name } }"),
+        "Variable `$order` cannot have the type `Order`: `Order` is an object, not an input type (line 1, column 7)"
+    );
+    assert_eq!(
+        refusal("query($flag: String!) { shop { name @include(if: $flag) } }"),
+        "Variable `$flag` of type `String!` cannot be used for argument `if` of `@include`, which expects `Boolean!` (line 1, column 37)"
+    );
+}
+
+#[test]
+fn refuses_literals_that_do_not_fit() {
+    assert_eq!(
+        refusal("{ orders(first: \"1\") { nodes { id } } }"),
+        "a string is given for argument `first` of `QueryRoot.orders`, of type `Int` (line 1, column 3)"
+    );
+    assert_eq!(
+        refusal("{ orders(first: 1, reverse: 1) { nodes { id } } }"),
+        "an integer is given for argument `reverse` of `QueryRoot.orders`, of type `Boolean` (line 1, column 3)"
+    );
+    assert_eq!(
+        refusal("{ orders(first: 1, sortKey: CREATED) { nodes { id } } }"),
+        "`CREATED` is not a value of the enum `OrderSortKeys` (did you mean `CREATED_AT`?) (in argument `sortKey` of `QueryRoot.orders`) (line 1, column 3)"
+    );
+    assert_eq!(
+        refusal("{ orders(first: 1, sortKey: \"CREATED_AT\") { nodes { id } } }"),
+        "a string is given for argument `sortKey` of `QueryRoot.orders`, of type `OrderSortKeys` (line 1, column 3)"
+    );
+    assert_eq!(
+        refusal("{ orders(first: FIVE) { nodes { id } } }"),
+        "The enum value `FIVE` is given for argument `first` of `QueryRoot.orders`, of type `Int` (line 1, column 3)"
+    );
+    assert_eq!(
+        refusal("{ product(id: null) { id } }"),
+        "`null` is not allowed for argument `id` of `QueryRoot.product`, of type `ID!` (line 1, column 3)"
+    );
+    assert_eq!(
+        refusal("{ product(id: [\"a\"]) { id } }"),
+        "A list is given for argument `id` of `QueryRoot.product`, of type `ID!` (line 1, column 3)"
+    );
+    assert_eq!(
+        refusal("{ product(id: { value: 1 }) { id } }"),
+        "An object is given for argument `id` of `QueryRoot.product`, of type `ID!` (line 1, column 3)"
+    );
+}
+
+#[test]
+fn checks_input_object_literals() {
+    assert_eq!(
+        refusal(
+            "mutation { metafieldsSet(metafields: [{ ownerId: \"x\", key: \"k\", valeu: \"v\" }]) { userErrors { message } } }"
+        ),
+        "Input type `MetafieldsSetInput` has no field `valeu` (did you mean `value`?) (in argument `metafields` of `Mutation.metafieldsSet`) (line 1, column 12)"
+    );
+    assert_eq!(
+        refusal("mutation { metafieldsSet(metafields: [{ ownerId: \"x\", key: \"k\" }]) { userErrors { message } } }"),
+        "Input type `MetafieldsSetInput` requires the field `value: String!` (in argument `metafields` of `Mutation.metafieldsSet`) (line 1, column 12)"
+    );
+    assert_eq!(
+        refusal(
+            "mutation { metafieldsSet(metafields: [{ ownerId: \"x\", key: 1, value: \"v\" }]) { userErrors { message } } }"
+        ),
+        "an integer is given for field `key` of `MetafieldsSetInput`, of type `String!` (line 1, column 12)"
+    );
+}
+
+#[test]
+fn refuses_fragments_that_cannot_apply() {
+    assert_eq!(
+        refusal("{ shop { ... on Order { id } } }"),
+        "A fragment on `Order` never applies to a `Shop` (line 1, column 14)"
+    );
+    assert_eq!(
+        refusal("{ node(id: 1) { ... on Prodct { title } } }"),
+        "A fragment is on the unknown type `Prodct` (did you mean `Product`?) (line 1, column 21)"
+    );
+    assert_eq!(
+        refusal("{ shop { ... on ID { length } } }"),
+        "A fragment cannot be on `ID`, which is a scalar (line 1, column 14)"
+    );
+    assert_eq!(
+        refusal("{ shop { ...Missing } }"),
+        "Fragment `Missing` is not defined; a `graphql!` document contains the fragments it uses (line 1, column 13)"
+    );
+    assert_eq!(
+        refusal("{ shop { name } } fragment Unused on Shop { id }"),
+        "Fragment `Unused` is defined but never used (line 1, column 19)"
+    );
+    assert_eq!(
+        refusal("{ shop { ...A } } fragment A on Shop { name ...B } fragment B on Shop { ...A }"),
+        "Fragment `A` includes itself (line 1, column 76)"
+    );
+    assert_eq!(
+        refusal("{ shop { ...A } } fragment A on Shop { id } fragment A on Shop { name }"),
+        "Fragment `A` is defined twice (line 1, column 45)"
+    );
+}
+
+#[test]
+fn refuses_ambiguous_keys_and_unions_without_fragments() {
+    assert_eq!(
+        refusal("{ shop { name name: email } }"),
+        "`name` is selected twice with different fields or types (`name: String!` and `email: String!`); give one of them an alias (line 1, column 15)"
+    );
+    assert_eq!(
+        refusal(
+            "{ nodes(ids: []) { ... on Product { value: title } ... on Order { value: subtotalLineItemsQuantity } } }"
+        ),
+        "`value` is selected twice with different fields or types (`title: String!` and `subtotalLineItemsQuantity: Int!`); give one of them an alias (line 1, column 67)"
+    );
+    let message = refusal("{ order(id: 1) { metafield(key: \"k\") { reference { id } } } }");
+    assert!(
+        message.starts_with("`MetafieldReference` is a union: select `id` inside a fragment such as `... on "),
+        "{message}"
+    );
+}
+
+#[test]
+fn refuses_documents_that_are_not_one_operation() {
+    assert_eq!(
+        refusal("{ shop { name } } query Other { shop { id } }"),
+        "The document contains several operations; `graphql!` takes one (line 1, column 19)"
+    );
+    assert_eq!(
+        refusal("fragment A on Shop { id }"),
+        "The document contains no query or mutation"
+    );
+    assert_eq!(
+        refusal("subscription { shop { name } }"),
+        "Subscriptions are not supported (line 1, column 1)"
+    );
+    let message = refusal("{ shop { name }");
+    assert!(message.starts_with("Invalid GraphQL: "), "{message}");
+}

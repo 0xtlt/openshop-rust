@@ -10,6 +10,7 @@ contract. For a complete procedure, start with the [how-to guides](../guides/ind
 - [Environment variables](environment-variables.md) — defaults, requirements, and resolution order.
 - [CLI commands](cli.md) — commands, flags, and process behavior.
 - [Public SDK](sdk.md) — crate entry points, exports, and the Shopify GraphQL client.
+- [Typed GraphQL](graphql.md) — operations checked at compile time, result and variable types, schema versions.
 
 ## Background work and storage
 

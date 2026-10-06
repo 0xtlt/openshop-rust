@@ -267,6 +267,7 @@ async fn product_title(app: &OpenShop, id: &str) -> Result<Option<String>> {
 | `create_shopify_client(&app, shop, shopify_app, api_version)` | Same, with `api_version: Option<&str>`. `None` selects `SHOPIFY_API_VERSION`, currently `2026-04`. |
 | `client.graphql(query, variables)` | `variables: Option<Value>`. Returns Shopify's `data` object as a `Value`. |
 | `client.graphql_as::<T>(query, variables)` | Same, deserialized into `T: DeserializeOwned`. |
+| `client.execute(graphql!(…))` | An operation checked against Shopify's schema at compile time, with typed variables and a typed result. See [Typed GraphQL](graphql.md). |
 | `client.shop`, `client.shopify_app`, `client.api_version` | Public fields. |
 
 In flows and admin functions the client is already available as `ctx.shopify`.
@@ -287,9 +288,11 @@ In flows and admin functions the client is already available as `ctx.shopify`.
 Mutation-specific `userErrors` live inside `data` and are not raised
 automatically. Inspect them in application code.
 
-There is no GraphQL code generation. Responses are `serde_json::Value` or your
-own `serde` types, and a response that does not match the type passed to
-`graphql_as` is an error at run time.
+`graphql()` and `graphql_as()` take any string and are not checked when the
+crate compiles: a response that does not match the type passed to `graphql_as`
+is an error at run time. For an operation known in advance, use
+[`graphql!`](graphql.md), which checks it against Shopify's schema and types
+its result.
 
 Requests use a 10-second connect timeout and a 60-second total timeout.
 

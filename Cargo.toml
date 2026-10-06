@@ -3,6 +3,8 @@ resolver = "3"
 members = [
   "crates/openshop",
   "crates/openshop-shared",
+  "crates/openshop-graphql",
+  "crates/openshop-macros",
   "crates/openshop-cli",
   "apps/demo",
 ]
@@ -21,6 +23,8 @@ authors = ["Thomas Tastet"]
 [workspace.dependencies]
 openshop = { path = "crates/openshop", version = "0.0.12-beta.0" }
 openshop-shared = { path = "crates/openshop-shared", version = "0.0.12-beta.0" }
+openshop-graphql = { path = "crates/openshop-graphql", version = "0.0.12-beta.0" }
+openshop-macros = { path = "crates/openshop-macros", version = "0.0.12-beta.0" }
 
 aes-gcm = "0.10"
 anyhow = "1"
@@ -29,11 +33,14 @@ base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde", "std"] }
 croner = "3"
 futures = { version = "0.3", default-features = false, features = ["std", "alloc"] }
+graphql-parser = "0.4"
 hex = "0.4"
 hmac = "0.12"
 indexmap = { version = "2", features = ["serde"] }
 mime_guess = "2"
 notify = "8"
+proc-macro2 = "1"
+quote = "1"
 rand = "0.9"
 regex = "1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
@@ -42,9 +49,11 @@ schemars = "1"
 scrypt = { version = "0.11", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
+serde_path_to_error = "0.1"
 sha2 = "0.10"
 sqlx = { version = "0.8", default-features = false, features = ["chrono", "derive", "json", "postgres", "runtime-tokio", "tls-rustls-ring-webpki", "uuid"] }
 subtle = "2"
+syn = { version = "2", features = ["full"] }
 tokio = { version = "1", features = ["fs", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-util = "0.7"
 tower-http = { version = "0.6", features = ["compression-br", "compression-gzip", "cors"] }
