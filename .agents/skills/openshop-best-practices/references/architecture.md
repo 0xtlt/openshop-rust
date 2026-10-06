@@ -7,7 +7,7 @@ Use this reference before moving behavior across OpenShop boundaries.
 - `crates/openshop/src/engine`: flow execution, steps, scheduling, retries, aborts, and worker behavior.
 - `crates/openshop/src/server`: axum server, Shopify auth, webhooks, app proxy, Admin API routes (`server/api`), functions, MCP (`server/mcp`), crypto, logs, and shop isolation.
 - `crates/openshop/src/cli`: commands of an application binary: `dev`, `start`, `worker`, and `migrate`.
-- `crates/openshop/src/db`: connection pool, framework row types, `define_model`, and migrations.
+- `crates/openshop/src/db`: connection pool, framework row types, models (`#[derive(Model)]`, `define_model`), typed rows (`record.rs`), the schema snapshot and its comparison (`diff.rs`), and migrations.
 - `crates/openshop/src/admin`: server side of custom admin pages (access rules, loaders, actions).
 - `crates/openshop/src/config/validate.rs`: validation of an application definition.
 - `crates/openshop/src/runtime`: environment (`RuntimeEnv`), logging, and the outbound HTTP transport.
@@ -49,6 +49,7 @@ Use this reference before moving behavior across OpenShop boundaries.
 - Give every step a name that is stable across deployments and unique within a run.
 - A canceled or timed-out step is dropped at its next `.await`. Use `ctx.signal` (a `CancellationToken`) in work that does not yield or that you spawn.
 - Keep provider and Function fields validated with `openshop::validators` or a closure passed to `FieldDef::validate`.
+- Describe an application table with a `#[derive(Model)]` struct registered with `.model_of::<T>()`, and read and write it through `T::for_shop(&ctx.db, &ctx.shop)`: every operation is then limited to the shop. Use `all_shops` only for maintenance work, and filter on the app handle yourself when several apps share a table. After changing a model, run `cargo run -- migrate generate`, review the SQL and its warnings, declare renames with `#[model(renamed_from = "…")]`, and commit the migration with `migrations/schema.snapshot.json`. Link two models with `#[model(references(Other), on_delete = "…")]` on the id field and index that field; read the other side with a filter, or with a join written in SQL (`sqlx::query!` checks it at compile time when the project depends on `sqlx` with the `macros` feature and a database is reachable while compiling).
 - Prefer typed provider calls: declare a `ProviderCall<A, R>` constant next to the provider, implement it with `Provider::handle(CALL, |config: MyConfig, args| ..)` and call it with `ctx.connectors.invoke(CALL, &args)`. The compiler then checks the method name, the arguments and the result. `typed_method` with `ctx.connectors.call(..)` / `call_as::<T>(..)` remains for calls whose name is only known at run time.
 
 ## UI Rules

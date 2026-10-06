@@ -54,6 +54,7 @@ pub use serde;
 pub use serde_json::{self, Value, json};
 pub use sqlx::{self, PgPool};
 pub use tokio_util::sync::CancellationToken;
+pub use uuid::Uuid;
 
 pub use admin::{
     AdminActor, AdminFunction, AdminPage, AdminPublicError, AdminServerContext, define_admin_action,
@@ -62,7 +63,7 @@ pub use admin::{
 #[cfg(feature = "schema")]
 pub use admin::{define_typed_admin_action, define_typed_admin_loader};
 pub use app::{OpenShop, OpenShopBuilder, OpenShopConfig};
-pub use db::{Model, define_model};
+pub use db::{Model, Record, define_model};
 pub use engine::{
     DispatchFlowParams, DispatchFlowResult, FlowCanceledError, FlowConcurrencyError, FlowTimeoutError, RunFlowOptions,
     RunFlowResult, Scheduler, SleepSignal, StepExecutor, StepTimeoutError, Worker, cancel_run, dispatch_flow, run_flow,
@@ -73,6 +74,68 @@ pub use server::static_ui::UiAssets;
 pub use server::{ServerOptions, ShopSession, UiSource, create_server, start_api_server};
 pub use shopify::{GraphqlOperation, IntoVariable, ShopifyClient, create_shopify_client};
 pub use types::*;
+
+/// Maps a struct to an application table.
+///
+/// The struct is the single description of the table: its fields are the
+/// columns, used for the schema push in development, for the migrations that
+/// `migrate generate` writes, and for typed reads and writes.
+///
+/// ```
+/// use openshop::chrono::{DateTime, Utc};
+/// use openshop::{Model, Uuid};
+///
+/// #[derive(Debug, Clone, Model)]
+/// #[model(table = "reviews", index(shop, product_id))]
+/// pub struct Review {
+///     pub id: Uuid,
+///     pub shop: String,
+///     pub created_at: DateTime<Utc>,
+///     pub updated_at: DateTime<Utc>,
+///     pub product_id: String,
+///     pub rating: i32,
+///     pub note: Option<String>,
+///     #[model(default = "false")]
+///     pub approved: bool,
+/// }
+///
+/// # async fn example(db: openshop::PgPool, shop: &str) -> openshop::Result<()> {
+/// let reviews = Review::for_shop(&db, shop);
+/// let review = reviews
+///     .insert(NewReview {
+///         product_id: "gid://shopify/Product/1".to_string(),
+///         rating: 5,
+///         note: None,
+///         approved: None,
+///     })
+///     .await?;
+///
+/// let best = reviews
+///     .filter(Review::RATING.gte(4))
+///     .order_by(Review::CREATED_AT.desc())
+///     .limit(10)
+///     .all()
+///     .await?;
+/// # let _ = (review, best);
+/// # Ok(())
+/// # }
+/// ```
+///
+/// `id` is required. `shop`, `created_at` and `updated_at` are optional and
+/// get the conventional definitions; with a `shop` field the struct gets
+/// `for_shop` and `all_shops`, without one it gets `rows`. Register the model
+/// with `.model_of::<Review>()` on the configuration builder.
+///
+/// Struct options, in `#[model(…)]`: `table = "…"` (required),
+/// `index(field, …)`, `unique(field, …)`, each with an optional `name = "…"`,
+/// and `renamed_from = "…"`. Field options: `default = "<SQL>"`,
+/// `sql_type = "…"`, `column = "…"`, `renamed_from = "…"`, `index`, `unique`,
+/// and `references(OtherModel)` with an optional `on_delete = "cascade"` for a
+/// foreign key.
+///
+/// The derive implements [`Record`] and `sqlx::FromRow`, and declares
+/// `New<Struct>`, the values an insertion takes.
+pub use openshop_macros::Model;
 
 /// Builds a typed Shopify Admin GraphQL operation, checked at compile time.
 ///

@@ -131,17 +131,23 @@ larger configurations easier to split:
 
 - Migrations are SQL files in `./migrations`, applied in file-name order and
   recorded in the `__openshop_migrations` table. There is no Drizzle journal.
-- `migrate generate` writes what your project does not cover yet: the framework
-  schema, and a `CREATE TABLE` statement for each `define_model` table that no
-  migration creates. It does not diff columns: write `ALTER TABLE` migrations
-  yourself, starting from `migrate generate --name=<name>`, which adds an empty
-  file when nothing is missing.
-- `migrate check` fails when the framework schema or a registered model is not
-  covered.
+- A model is a struct with `#[derive(Model)]` instead of a Drizzle table. Its
+  typed rows cover insertion, lookup, filters on columns, ordering, update and
+  deletion, limited to a shop; there is no general query builder, and other
+  queries are SQL strings run with `sqlx`, which can check them at compile
+  time with `sqlx::query!`.
+- `#[model(references(Other))]` declares a foreign key, like `.references()`
+  in Drizzle. There are no relational queries: the other side of a reference
+  is read with a filter or a join.
+- `migrate generate` compares the models with `migrations/schema.snapshot.json`
+  and writes the difference, like `drizzle-kit generate` with its snapshots. It
+  never asks questions: a rename is declared with `renamed_from`, and a
+  statement that can lose data or fail is written with a warning.
+- `migrate check` fails when the framework schema is not covered or when the
+  models changed since the last generated migration.
 - A migration that was modified after being applied is rejected.
-- `dev` and the test harness create missing tables and indexes directly. They do
-  not alter existing columns.
-- `define_model` renders `CREATE TABLE` SQL for your own tables.
+- `dev` and the test harness create missing tables directly and add missing
+  columns and indexes. They do not rename, retype or drop anything.
 
 ## Environment
 

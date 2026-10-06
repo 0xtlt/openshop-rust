@@ -215,6 +215,11 @@ impl OpenShopBuilder {
         self
     }
 
+    /// Registers the table of a `#[derive(Model)]` struct.
+    pub fn model_of<M: crate::db::Record>(self) -> Self {
+        self.model(M::model())
+    }
+
     pub fn model(mut self, model: Model) -> Self {
         self.config.models.push(model);
         self

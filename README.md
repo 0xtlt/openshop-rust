@@ -145,7 +145,8 @@ Rust conventions.
 | `proxy/*.ts`, `routes/*.ts`, `admin/pages/**` discovered from files | `.proxy(path, …)`, `.route(path, …)`, `.admin_page(…)` on the builder |
 | `validate: type('string.url')` | `.validate(validators::url())` or any closure |
 | `openshop.config.ts` loaded by the `openshop` CLI | your own binary calling `openshop::cli::run(config)` |
-| `drizzle-kit` migrations in `./drizzle` | SQL migrations in `./migrations` (`migrate generate` / `migrate`) |
+| `defineModel('reviews', { … })` and Drizzle queries | `#[derive(Model)]` on a struct, with typed rows: `Review::for_shop(&db, &shop).filter(Review::RATING.gte(4))` |
+| `drizzle-kit` migrations in `./drizzle` | SQL migrations in `./migrations`, generated from what changed in the models (`migrate generate` / `migrate`) |
 | Preact admin UI built with Vite | Leptos admin UI compiled to WebAssembly and embedded in the binary |
 | `createTestContext()` from `openshop/test` | `openshop::testing::TestContext` (feature `testing`) |
 | `shopify.graphql(\`#graphql …\`)` typed by codegen | `ctx.shopify.execute(graphql!("…", var = value))`, checked and typed at compile time |

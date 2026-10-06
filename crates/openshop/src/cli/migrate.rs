@@ -5,8 +5,7 @@ use anyhow::{Result, bail};
 use super::database_url;
 use crate::app::OpenShopConfig;
 use crate::db::migrate::{
-    MigrationStatus, check_client_migrations_for, generate_client_migrations_for, get_client_migration_status,
-    migrate_schema,
+    MigrationStatus, check_client_migrations_for, generate_migrations, get_client_migration_status, migrate_schema,
 };
 use crate::runtime::RuntimeEnv;
 
@@ -37,12 +36,18 @@ pub async fn run_migrate(config: &OpenShopConfig, args: &[String]) -> Result<()>
 
     match args.first().map(String::as_str) {
         Some("generate") => {
-            let created = generate_client_migrations_for(cwd, &args[1..], env.production, &config.models)?;
-            if created.is_empty() {
+            let generated = generate_migrations(cwd, &args[1..], env.production, &config.models)?;
+            if generated.files.is_empty() && generated.snapshot.is_none() {
                 println!("[openshop] No schema changes, nothing to generate");
             }
-            for path in created {
+            for path in &generated.files {
                 println!("[openshop] Generated {}", path.display());
+            }
+            if let Some(snapshot) = &generated.snapshot {
+                println!("[openshop] Updated {}", snapshot.display());
+            }
+            for warning in &generated.warnings {
+                println!("[openshop] Review: {warning}");
             }
             Ok(())
         }

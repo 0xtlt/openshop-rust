@@ -24,16 +24,18 @@ Keep that line. `migrate generate` and `migrate check` read it to know which
 parts of the framework schema your project already covers. Files are applied in
 file-name order and recorded in the `__openshop_migrations` table.
 
-Your own tables go in additional files in the same directory. If you register
-application models with `.model(define_model(..))`, `dev` and the test harness
-create those tables directly, and `migrate generate` writes the migration that
-creates them elsewhere. See the
-[model reference](../reference/database.md#app-models) for model definitions.
+Your own tables are described by structs with `#[derive(Model)]`, registered
+with `.model_of::<..>()`. `dev` and the test harness create them directly, and
+`migrate generate` writes the migrations that create and change them
+elsewhere. See the [model reference](../reference/database.md#app-models).
+
+Next to the SQL files, `migrations/schema.snapshot.json` records the models as
+of the last generated migration. Commit it with them: the next generation
+compares the models with it.
 
 ## 2. Generate and review locally
 
-After upgrading OpenShop or registering a new model, run outside production
-mode:
+After upgrading OpenShop or changing a model, run outside production mode:
 
 ```bash
 cargo run -- migrate generate
@@ -41,13 +43,13 @@ cargo run -- migrate check
 ```
 
 `migrate generate` writes one file for each framework schema change that
-`migrations/` does not cover yet, and one file creating the tables of the
-registered models that no migration creates. It prints each path. When nothing
-is missing it prints `[openshop] No schema changes, nothing to generate`.
-`migrate check` fails while the framework schema or a registered model is not
-covered.
+`migrations/` does not cover yet, and one file with the statements that bring
+your tables in line with the models. It prints each path. When nothing is
+missing it prints `[openshop] No schema changes, nothing to generate`.
+`migrate check` fails while the framework schema or a model change is not
+covered; run it in CI.
 
-The file for new models is named `<timestamp>_models.sql`, or after `--name`:
+The file for your models is named `<timestamp>_models.sql`, or after `--name`:
 
 ```bash
 cargo run -- migrate generate --name=add_reviews
@@ -56,13 +58,18 @@ cargo run -- migrate generate --name=add_reviews
 For this model:
 
 ```rust,ignore
-use openshop::{Model, define_model};
+use openshop::chrono::{DateTime, Utc};
+use openshop::{Model, Uuid};
 
-pub fn reviews() -> Model {
-    define_model("reviews")
-        .column("product_id", "text NOT NULL")
-        .column("rating", "integer NOT NULL")
-        .index("reviews_shop_product_idx", &["shop", "product_id"])
+#[derive(Debug, Clone, Model)]
+#[model(table = "reviews", index(shop, product_id))]
+pub struct Review {
+    pub id: Uuid,
+    pub shop: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub product_id: String,
+    pub rating: i32,
 }
 ```
 
@@ -80,25 +87,45 @@ CREATE TABLE IF NOT EXISTS "reviews" (
   "product_id" text NOT NULL,
   "rating" integer NOT NULL
 );
-CREATE INDEX IF NOT EXISTS "reviews_shop_product_idx" ON "reviews" ("shop", "product_id");
+CREATE INDEX IF NOT EXISTS "reviews_shop_product_id_idx" ON "reviews" ("shop", "product_id");
 ```
 
-A model counts as covered once a migration contains a `CREATE TABLE` statement
-for its table. Columns are not compared: when you change a model that already
-has its table, `migrate generate --name=<name>` creates an empty migration, and
-the `ALTER TABLE` statements are yours to write.
+Change the struct later, for example by adding `pub note: Option<String>` and
+`pub author: String`, and the next generation writes only the difference:
 
-Review the new SQL under `migrations/`, especially destructive changes
-and required columns on existing tables. Commit those files with the code that
-needs them. `migrate check` does not compare the columns of your models with
-your SQL and does not decide whether a schema change is safe for your data.
+```sql
+ALTER TABLE "reviews" ADD COLUMN IF NOT EXISTS "note" text;
+
+-- WARNING: fails if reviews already has rows: author is NOT NULL without a default. Give it a default, or add it as nullable and backfill it first.
+ALTER TABLE "reviews" ADD COLUMN IF NOT EXISTS "author" text NOT NULL;
+```
+
+A statement that can lose data or fail on existing rows comes with such a
+warning, which `migrate generate` also prints. Three things need your
+attention:
+
+- **Renames.** A renamed field looks like one column dropped and another
+  added, which loses its data. Add `#[model(renamed_from = "old_name")]` to the
+  field, or to the struct for its table, before generating. See
+  [Renames](../reference/database.md#renames).
+- **Warnings.** Edit the file when the generated statement is not the one you
+  want: add a default, backfill before `SET NOT NULL`, change the cast of a
+  type change, clean up the rows that a new foreign key would refuse.
+- **Data.** Moving or transforming rows is never generated. Write it in the
+  same file, or in an empty one created with `--name` when nothing else
+  changed.
+
+Review the new SQL under `migrations/` and commit it, with the snapshot and
+the code that needs it. `migrate check` does not decide whether a schema change
+is safe for your data.
 
 Do not edit a migration after it has been applied: `migrate` compares checksums
 and refuses a modified file. Add a new migration instead.
 
 `dev` pushes the schema for local iteration. It creates missing tables and
-indexes and does not alter existing columns, so a changed column needs an
-`ALTER TABLE` migration applied with `cargo run -- migrate` even locally. A
+adds missing columns and indexes; it does not rename, retype or drop
+anything, so those changes need their migration applied with
+`cargo run -- migrate` even locally, or a fresh development database. A
 successful dev session is not proof that committed migrations can upgrade an
 existing database. Test the migration sequence on a separate database with the
 previous schema.

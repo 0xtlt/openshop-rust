@@ -64,7 +64,7 @@ pub fn config() -> Result<OpenShopConfig> {
         .flow(flows::sync_orders::sync_orders())
         .flow(flows::count_variants::count_variants())
         .function("volumeDiscount", functions::volume_discount::volume_discount())
-        .model(models::review::reviews())
+        .model_of::<models::review::Review>()
         .custom_pages([CustomAdminNavigationItem {
             label: "Reviews".to_string(),
             path: "/reviews".to_string(),

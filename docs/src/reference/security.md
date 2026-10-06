@@ -66,9 +66,11 @@ See [Authentication](authentication.md) for request formats.
 
 ## Multi-app isolation
 
-Framework state is scoped by `(app_handle, shop)`. Every application query against
-custom tables must still apply its own tenant filter. `define_model()` adds
-`shop`, but it does not automatically add a `WHERE shop = …` clause.
+Framework state is scoped by `(app_handle, shop)`. For custom tables, the rows
+returned by `Model::for_shop(db, shop)` are limited to that shop in every
+operation. Everything else must apply its own tenant filter: a query written
+with `sqlx`, `Model::all_shops(db)`, and the app handle when several apps
+share a table.
 
 ## MCP permissions
 

@@ -1,7 +1,9 @@
 //! PostgreSQL access: connection pool, framework tables, models and migrations.
 
+pub mod diff;
 pub mod migrate;
 pub mod model;
+pub mod record;
 pub mod schema;
 
 use std::time::Duration;
@@ -10,7 +12,8 @@ use anyhow::{Context, Result};
 use sqlx::PgPool;
 use sqlx::postgres::PgPoolOptions;
 
-pub use model::{Model, define_model};
+pub use model::{ColumnDef, ForeignKeyDef, IndexDef, Model, define_model};
+pub use record::{Bindable, Column, ColumnType, Condition, Order, Query, Record, Rows, SqlBuilder};
 
 fn env_number(name: &str, default: u64) -> u64 {
     std::env::var(name)

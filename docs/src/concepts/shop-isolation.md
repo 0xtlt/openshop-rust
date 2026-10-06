@@ -23,36 +23,40 @@ See [Authentication](../reference/authentication.md) for each surface's contract
 
 ## App-owned tables require app-owned filters
 
-`define_model()` adds a `shop` column by default. It does **not** automatically add
-an app handle or restrict queries: `ctx.db` is a plain `sqlx` connection pool.
-Application code must filter by the trusted identity from the runtime context.
+A model with a `shop` field gets rows that are limited to one shop:
+`Review::for_shop(&ctx.db, &ctx.shop)` only finds, updates and deletes the
+rows of that shop, and inserts into it. Pass the trusted identity from the
+runtime context, never a value sent by the client.
 
-For data that differs between apps installed on the same shop, add an app-handle
-column and include both values in reads, writes, and uniqueness constraints.
+That limit is the only one. `ctx.db` itself is a plain `sqlx` connection pool:
+a query written with `sqlx`, and `Review::all_shops(..)`, see every shop, and
+application code must filter them.
+
+For data that differs between apps installed on the same shop, add an
+app-handle column and include it in writes, reads, and uniqueness constraints.
 A `shop` filter alone cannot distinguish those installations.
 
 ```rust
-use openshop::{Model, define_model};
+use openshop::{Model, Uuid};
 
-pub fn reviews() -> Model {
-    define_model("reviews")
-        .column("app_handle", "text NOT NULL")
-        .column("product_id", "text NOT NULL")
-        .unique_index("reviews_app_shop_product_unique", &["app_handle", "shop", "product_id"])
+#[derive(Debug, Clone, Model)]
+#[model(table = "reviews", unique(app_handle, shop, product_id))]
+pub struct Review {
+    pub id: Uuid,
+    pub shop: String,
+    pub app_handle: String,
+    pub product_id: String,
 }
 ```
 
-A query on that table then binds both values from the context, here inside a
-flow:
+A query on that table then filters on both values from the context, here
+inside a flow:
 
 ```rust
-let (count,): (i64,) = openshop::sqlx::query_as(
-    "SELECT count(*) FROM reviews WHERE app_handle = $1 AND shop = $2",
-)
-.bind(&ctx.shopify_app)
-.bind(&ctx.shop)
-.fetch_one(&ctx.db)
-.await?;
+let count = Review::for_shop(&ctx.db, &ctx.shop)
+    .filter(Review::APP_HANDLE.eq(&ctx.shopify_app))
+    .count()
+    .await?;
 ```
 
 The same rule applies to custom admin loaders and actions: their `ctx.db` is

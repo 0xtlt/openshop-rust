@@ -61,9 +61,10 @@ single-app mode, the app handle is `default`. Multi-app deployments use the keys
 declared in `ShopifyConfig::apps`. This boundary applies to installations, flow
 runs, provider configuration, cron overrides, Functions, and MCP tokens.
 
-Application tables created with `define_model()` include a `shop` column by
-default, but application code is responsible for applying the correct shop
-filter to its own queries.
+An application table described by a `#[derive(Model)]` struct with a `shop`
+field is read and written through `Model::for_shop(db, shop)`, which limits
+every operation to that shop. Queries written with `sqlx` are not limited:
+application code is responsible for their shop filter.
 
 ## Scaling boundaries
 

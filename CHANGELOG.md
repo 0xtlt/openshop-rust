@@ -14,6 +14,18 @@
   `graphql! { mod name = "…"; }`, names the generated types and input objects.
   The Admin schema of the default API version is bundled; `openshop codegen`
   downloads another one.
+- `#[derive(Model)]`: a struct as the single description of an application
+  table, with typed rows (`Review::for_shop(&db, &shop)`) for insertion,
+  lookup, filters, ordering, update and deletion, limited to a shop.
+- `migrate generate` compares the models with `migrations/schema.snapshot.json`
+  and writes what changed: created and dropped tables, added, dropped, renamed
+  and altered columns, indexes. Statements that can lose data or fail come with
+  a warning. `migrate check` fails while a model change has no migration.
+- `#[model(references(Other), on_delete = "cascade")]` declares a foreign key.
+  Tables are created before their constraints, in any registration order, and
+  generated migrations add, drop and rename the constraints.
+- `dev` adds the columns, indexes and foreign keys a model gained to an
+  existing table.
 
 ## 0.0.12-beta.0
 

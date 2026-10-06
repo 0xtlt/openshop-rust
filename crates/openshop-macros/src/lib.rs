@@ -1,6 +1,8 @@
 //! Procedural macros of the OpenShop framework. Use them through the
 //! `openshop` crate, which re-exports them and documents them.
 
+mod model;
+
 use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
@@ -319,6 +321,15 @@ fn expand(input: Input) -> syn::Result<TokenStream> {
 pub fn graphql(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
     let input = syn::parse_macro_input!(input as Input);
     expand(input).unwrap_or_else(syn::Error::into_compile_error).into()
+}
+
+/// See `openshop::Model`.
+#[proc_macro_derive(Model, attributes(model))]
+pub fn derive_model(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
+    let input = syn::parse_macro_input!(input as syn::DeriveInput);
+    model::expand(input)
+        .unwrap_or_else(syn::Error::into_compile_error)
+        .into()
 }
 
 #[cfg(test)]

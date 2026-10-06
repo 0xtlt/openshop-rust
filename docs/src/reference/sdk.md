@@ -92,7 +92,7 @@ it accepts are created with:
 - `CronEntry::new(schedule, flow)` — see [Crons](configuration.md#crons);
 - `McpConfig::new()` — see [MCP](mcp.md);
 - `AdminPage::new(path)` — see [Custom admin pages](custom-admin-pages.md);
-- `define_model(table)` — see [Database](database.md#app-models).
+- `#[derive(Model)]` and `define_model(table)` — see [Database](database.md#app-models).
 
 ## `Provider::new(name)`
 
@@ -319,28 +319,31 @@ async fn five_star_reviews(db: &PgPool, shop: &str) -> Result<Vec<(String, i32)>
 
 The pool is created once per process. See [Database](database.md).
 
-## `define_model(table)`
+## `#[derive(Model)]` and `define_model(table)`
 
-Describes an application-owned PostgreSQL table. By default it adds an
-auto-generated UUID `id` primary key, a non-null `shop` column, and
-`created_at` / `updated_at` timestamps. Columns are added with their SQL
-definition, and indexes explicitly.
+`#[derive(Model)]` maps a struct to an application-owned PostgreSQL table: its
+fields are the columns, it gets typed rows limited to a shop, and
+`migrate generate` writes the migrations when it changes.
 
 ```rust,ignore
-use openshop::{Model, define_model};
+use openshop::chrono::{DateTime, Utc};
+use openshop::{Model, Uuid};
 
-pub fn reviews() -> Model {
-    define_model("reviews")
-        .column("product_id", "text NOT NULL")
-        .column("rating", "integer NOT NULL")
-        .without_updated_at()
+#[derive(Debug, Clone, Model)]
+#[model(table = "reviews")]
+pub struct Review {
+    pub id: Uuid,
+    pub shop: String,
+    pub created_at: DateTime<Utc>,
+    pub product_id: String,
+    pub rating: i32,
 }
 ```
 
-`.without_shop()`, `.without_created_at()`, and `.without_updated_at()` omit
-the corresponding generated column. Register the model with `.model(…)` so
-that `dev` and the test harness create the table. See
-[App models](database.md#app-models).
+Register it with `.model_of::<Review>()`, then read and write through
+`Review::for_shop(&ctx.db, &ctx.shop)`. `define_model(table)` describes a table
+without a struct, with its columns as SQL definitions, and is registered with
+`.model(…)`. See [App models](database.md#app-models).
 
 ## Runtime logging
 
