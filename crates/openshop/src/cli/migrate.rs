@@ -5,7 +5,7 @@ use anyhow::{Result, bail};
 use super::database_url;
 use crate::app::OpenShopConfig;
 use crate::db::migrate::{
-    MigrationStatus, check_client_migrations_for, generate_migrations, get_client_migration_status, migrate_schema,
+    MigrationStatus, check_migrations, generate_migrations, get_client_migration_status, migrate_schema,
 };
 use crate::runtime::RuntimeEnv;
 
@@ -52,7 +52,7 @@ pub async fn run_migrate(config: &OpenShopConfig, args: &[String]) -> Result<()>
             Ok(())
         }
         Some("check") => {
-            check_client_migrations_for(cwd, &config.models)?;
+            check_migrations(cwd, &config.models)?;
             println!("[openshop] Migrations cover the current schema");
             Ok(())
         }

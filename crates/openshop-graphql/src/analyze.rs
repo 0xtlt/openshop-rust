@@ -69,7 +69,8 @@ pub enum Scalar {
 }
 
 impl Scalar {
-    fn of(name: &str) -> Self {
+    /// How the scalar, or the enum, of this name travels.
+    pub(crate) fn of(name: &str) -> Self {
         match name {
             "Int" => Self::Int,
             "Float" => Self::Float,
@@ -208,13 +209,12 @@ pub fn analyze(schema: &Schema, source: &str) -> Result<Operation> {
     let mut analyzer = Analyzer {
         schema,
         fragments,
-        variables: BTreeMap::new(),
+        variables: Vec::new(),
         used_variables: BTreeSet::new(),
         used_fragments: BTreeSet::new(),
         fragment_stack: Vec::new(),
     };
 
-    let mut variables = Vec::new();
     for definition in definitions {
         let ty = type_ref(&definition.var_type);
         let base = match schema.get(ty.name()) {
@@ -244,29 +244,29 @@ pub fn analyze(schema: &Schema, source: &str) -> Result<Operation> {
                 );
             }
         };
-        let variable = Variable {
+        if analyzer
+            .variables
+            .iter()
+            .any(|declared| declared.name == definition.name)
+        {
+            return error_at(
+                definition.position,
+                format!("Variable `${}` is declared twice", definition.name),
+            );
+        }
+        analyzer.variables.push(Variable {
             name: definition.name.clone(),
             ty,
             has_default: definition.default_value.is_some(),
             base,
-        };
-        if analyzer
-            .variables
-            .insert(variable.name.clone(), variable.clone())
-            .is_some()
-        {
-            return error_at(
-                definition.position,
-                format!("Variable `${}` is declared twice", variable.name),
-            );
-        }
-        variables.push(variable);
+        });
     }
 
     analyzer.check_directives(directives)?;
     let data = analyzer.selection(root, &[selection_set], position)?;
 
-    if let Some(unused) = variables
+    if let Some(unused) = analyzer
+        .variables
         .iter()
         .find(|variable| !analyzer.used_variables.contains(&variable.name))
     {
@@ -286,7 +286,7 @@ pub fn analyze(schema: &Schema, source: &str) -> Result<Operation> {
     Ok(Operation {
         kind,
         name,
-        variables,
+        variables: analyzer.variables,
         data,
     })
 }
@@ -321,7 +321,8 @@ struct Pending<'a> {
 struct Analyzer<'a> {
     schema: &'a Schema,
     fragments: BTreeMap<&'a str, &'a ast::FragmentDefinition<'a, String>>,
-    variables: BTreeMap<String, Variable>,
+    /// The declared variables, in the order of the operation.
+    variables: Vec<Variable>,
     used_variables: BTreeSet<String>,
     used_fragments: BTreeSet<&'a str>,
     fragment_stack: Vec<&'a str>,
@@ -621,14 +622,13 @@ impl<'a> Analyzer<'a> {
         Ok(())
     }
 
-    fn variable(&mut self, name: &str, position: Pos) -> Result<Variable> {
-        let Some(variable) = self.variables.get(name).cloned() else {
+    /// The declared variable of this name, which is thereby used.
+    fn variable(&mut self, name: &str, position: Pos) -> Result<&Variable> {
+        let Some(variable) = self.variables.iter().find(|variable| variable.name == name) else {
+            let declared = self.variables.iter().map(|variable| variable.name.as_str());
             return error_at(
                 position,
-                format!(
-                    "Variable `${name}` is not declared{}",
-                    did_you_mean(name, self.variables.keys().map(String::as_str))
-                ),
+                format!("Variable `${name}` is not declared{}", did_you_mean(name, declared)),
             );
         };
         self.used_variables.insert(name.to_string());
@@ -641,7 +641,7 @@ impl<'a> Analyzer<'a> {
         match value {
             ast::Value::Variable(name) => {
                 let variable = self.variable(name, position)?;
-                if !variable_fits(&variable, expected) {
+                if !variable_fits(variable, expected) {
                     return error_at(
                         position,
                         format!(

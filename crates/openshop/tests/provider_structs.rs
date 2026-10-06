@@ -3,10 +3,11 @@
 
 mod common;
 
+use common::shop_connectors as connectors;
 use openshop::testing::TestContext;
 use openshop::{
-    Connectors, FieldDef, FieldOption, Flow, OpenShopConfig, Provider, ProviderConfig, Result, RunFlowResult, Value,
-    json, provider, validators,
+    FieldDef, FieldOption, Flow, OpenShopConfig, Provider, ProviderConfig, Result, RunFlowResult, Value, json,
+    provider, validators,
 };
 use serde::{Deserialize, Serialize};
 
@@ -117,18 +118,7 @@ async fn context() -> TestContext {
 }
 
 async fn save_config(ctx: &TestContext, config: Value) {
-    let response = ctx
-        .put("/api/providers/warehouse")
-        .json(&json!({ "config": config }))
-        .send()
-        .await
-        .unwrap();
-    let status = response.status();
-    assert_eq!(status, 200, "{}", response.text().await.unwrap());
-}
-
-async fn connectors(ctx: &TestContext) -> Connectors {
-    ctx.app.connectors(&ctx.shop, "default").await.unwrap()
+    common::save_provider_config(ctx, "warehouse", config).await;
 }
 
 /// The same form, written with the builder.
@@ -377,14 +367,7 @@ async fn the_form_validates_what_the_struct_expects() {
             json!({ "apiUrl": "https://warehouse.test", "apiKey": api_key, "useSandbox": false }),
         )
         .await;
-        let checked: Value = ctx
-            .post("/api/providers/warehouse/check")
-            .send()
-            .await
-            .unwrap()
-            .json()
-            .await
-            .unwrap();
+        let checked: Value = common::check_provider(&ctx, "warehouse").await;
         assert_eq!(checked, json!({ "ok": expected }), "{api_key}");
     }
 

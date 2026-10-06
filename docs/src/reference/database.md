@@ -493,6 +493,9 @@ models describe them today, records them, and writes nothing for them. Run it
 before changing a model. A table created by a hand-written migration is taken
 the same way, whatever the casing or quoting of its `CREATE TABLE`.
 
+Once the snapshot exists, it is the only reference: a model it does not record
+gets a `CREATE TABLE IF NOT EXISTS`, whatever the migration files contain.
+
 `migrate generate` refuses to run in production mode unless
 `--allow-generate-in-production` is given.
 
@@ -504,5 +507,5 @@ That push is refused in production mode with
 
 The same operations are available as functions in `openshop::db::migrate`:
 `migrate_schema`, `get_client_migration_status`, `generate_migrations`,
-`check_client_migrations_for`, and `push_schema`. The comparison itself is
+`check_migrations`, and `push_schema`. The comparison itself is
 `openshop::db::diff`.

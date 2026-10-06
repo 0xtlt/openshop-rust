@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use proc_macro2::{Ident, Span, TokenStream};
-use quote::{format_ident, quote};
+use quote::quote;
 
 use crate::analyze::{FieldBase, Operation, Scalar, SelectedField, Selection, Variable, VariableBase};
 use crate::schema::{InputValue, Schema, TypeDef, TypeRef};
@@ -23,7 +23,7 @@ const KEYWORDS: &[&str] = &[
 ];
 
 /// `lineItems` → `line_items`, `__typename` → `typename`, `HTMLBody` → `html_body`.
-pub fn snake_case(name: &str) -> String {
+fn snake_case(name: &str) -> String {
     let characters: Vec<char> = name.trim_matches('_').chars().collect();
     let mut snake = String::new();
     for (index, character) in characters.iter().enumerate() {
@@ -48,7 +48,7 @@ pub fn snake_case(name: &str) -> String {
 }
 
 /// `lineItems` → `LineItems`, `line_items` → `LineItems`, `__typename` → `Typename`.
-pub fn pascal_case(name: &str) -> String {
+fn pascal_case(name: &str) -> String {
     let mut pascal = String::new();
     let mut capitalize = true;
     for character in name.chars() {
@@ -64,8 +64,9 @@ pub fn pascal_case(name: &str) -> String {
     pascal
 }
 
-/// The Rust field for a GraphQL name: snake case, raw when it is a keyword.
-fn field_ident(name: &str, taken: &mut BTreeSet<String>) -> Ident {
+/// The Rust field for a GraphQL name: snake case, raw when it is a keyword,
+/// with the `serde` attribute that restores the name when it differs.
+fn field_ident(name: &str, taken: &mut BTreeSet<String>) -> (Ident, Option<TokenStream>) {
     let mut snake = snake_case(name);
     if UNRAWABLE.contains(&snake.as_str()) {
         snake.push('_');
@@ -73,11 +74,13 @@ fn field_ident(name: &str, taken: &mut BTreeSet<String>) -> Ident {
     while !taken.insert(snake.clone()) {
         snake.push('_');
     }
-    if KEYWORDS.contains(&snake.as_str()) {
+    let rename = (snake != name).then(|| quote!(#[serde(rename = #name)]));
+    let ident = if KEYWORDS.contains(&snake.as_str()) {
         Ident::new_raw(&snake, Span::call_site())
     } else {
         Ident::new(&snake, Span::call_site())
-    }
+    };
+    (ident, rename)
 }
 
 fn scalar_type(scalar: Scalar, krate: &TokenStream) -> TokenStream {
@@ -159,7 +162,7 @@ impl DataTypes<'_> {
     }
 
     fn field(&mut self, field: &SelectedField, parent: &str, taken: &mut BTreeSet<String>) -> TokenStream {
-        let ident = field_ident(&field.key, taken);
+        let (ident, rename) = field_ident(&field.key, taken);
         let base = match &field.base {
             FieldBase::Scalar(scalar) => scalar_type(*scalar, self.krate),
             FieldBase::Object(selection) => {
@@ -175,8 +178,6 @@ impl DataTypes<'_> {
             wrap(&field.ty, &base)
         };
 
-        let key = &field.key;
-        let rename = (ident.to_string().trim_start_matches("r#") != key).then(|| quote!(#[serde(rename = #key)]));
         let default = optional.then(|| quote!(#[serde(default)]));
         let doc = format!(" `{}: {}`", field.key, field.ty);
         quote! {
@@ -235,7 +236,7 @@ impl InputTypes<'_> {
                 quote!(#ident)
             }
             Some(TypeDef::Enum { .. }) => scalar_type(Scalar::String, self.krate),
-            _ => scalar_type(input_scalar(name), self.krate),
+            _ => scalar_type(Scalar::of(name), self.krate),
         }
     }
 
@@ -250,22 +251,12 @@ impl InputTypes<'_> {
                 if nested_directly && self.reaches(value.ty.name(), name) {
                     base = quote!(::std::boxed::Box<#base>);
                 }
-                input_field(field, value, &base, &mut taken)
+                input_field(field, &value.ty, value.is_required(), &base, &mut taken)
             })
             .collect();
 
-        let ident = Ident::new(name, Span::call_site());
-        let krate = self.krate;
-        let serde = serde_path(krate);
         let doc = format!(" The input object `{name}`. Fields left to `None` are not sent.");
-        self.items.push(quote! {
-            #[doc = #doc]
-            #[derive(Debug, Clone, PartialEq, Default, #krate::serde::Serialize)]
-            #[serde(crate = #serde)]
-            pub struct #ident {
-                #(#fields)*
-            }
-        });
+        self.items.push(input_struct(name, &doc, &fields, self.krate));
     }
 
     /// Whether a value of input type `from` can hold one of type `to` without a list in between.
@@ -292,16 +283,6 @@ impl InputTypes<'_> {
     }
 }
 
-fn input_scalar(name: &str) -> Scalar {
-    match name {
-        "Int" => Scalar::Int,
-        "Float" => Scalar::Float,
-        "Boolean" => Scalar::Boolean,
-        "JSON" => Scalar::Json,
-        _ => Scalar::String,
-    }
-}
-
 fn contains_list(ty: &TypeRef) -> bool {
     match ty {
         TypeRef::Named(_) => false,
@@ -312,25 +293,44 @@ fn contains_list(ty: &TypeRef) -> bool {
 
 /// A field of an input object or of the variables. A value that may be left
 /// out is an `Option` that is not sent when `None`.
-fn input_field(name: &str, value: &InputValue, base: &TokenStream, taken: &mut BTreeSet<String>) -> TokenStream {
-    let ident = field_ident(name, taken);
-    let rename = (ident.to_string().trim_start_matches("r#") != name).then(|| quote!(#[serde(rename = #name)]));
-    let doc = format!(" `{name}: {}`", value.ty);
-    if value.is_required() {
-        let ty = wrap(&value.ty, base);
+fn input_field(
+    name: &str,
+    ty: &TypeRef,
+    required: bool,
+    base: &TokenStream,
+    taken: &mut BTreeSet<String>,
+) -> TokenStream {
+    let (ident, rename) = field_ident(name, taken);
+    let doc = format!(" `{name}: {ty}`");
+    if required {
+        let ty = wrap(ty, base);
         quote! {
             #[doc = #doc]
             #rename
             pub #ident: #ty,
         }
     } else {
-        let ty = wrap(value.ty.nullable(), base);
         // `wrap` of a nullable type is already an `Option`.
+        let ty = wrap(ty.nullable(), base);
         quote! {
             #[doc = #doc]
             #rename
             #[serde(skip_serializing_if = "::core::option::Option::is_none")]
             pub #ident: #ty,
+        }
+    }
+}
+
+/// A struct that is only sent: an input object, or the variables.
+fn input_struct(name: &str, doc: &str, fields: &[TokenStream], krate: &TokenStream) -> TokenStream {
+    let ident = Ident::new(name, Span::call_site());
+    let serde = serde_path(krate);
+    quote! {
+        #[doc = #doc]
+        #[derive(Debug, Clone, PartialEq, Default, #krate::serde::Serialize)]
+        #[serde(crate = #serde)]
+        pub struct #ident {
+            #(#fields)*
         }
     }
 }
@@ -349,26 +349,21 @@ pub fn variables_types(schema: &Schema, operation: &Operation, krate: &TokenStre
         .iter()
         .map(|variable| {
             let base = inputs.named(variable.ty.name());
-            let value = InputValue {
-                ty: variable.ty.clone(),
-                has_default: variable.has_default,
-            };
-            input_field(&variable.name, &value, &base, &mut taken)
+            input_field(&variable.name, &variable.ty, variable.is_required(), &base, &mut taken)
         })
         .collect();
 
     let items = inputs.items;
-    let ident = format_ident!("{}", VARIABLES_TYPE);
-    let serde = serde_path(krate);
+    let variables = input_struct(
+        VARIABLES_TYPE,
+        " The variables of the operation. Those left to `None` are not sent.",
+        &fields,
+        krate,
+    );
     quote! {
         #(#items)*
 
-        /// The variables of the operation. Those left to `None` are not sent.
-        #[derive(Debug, Clone, PartialEq, Default, #krate::serde::Serialize)]
-        #[serde(crate = #serde)]
-        pub struct #ident {
-            #(#fields)*
-        }
+        #variables
     }
 }
 
@@ -398,9 +393,16 @@ mod tests {
     #[test]
     fn field_identifiers_avoid_keywords_and_duplicates() {
         let mut taken = BTreeSet::new();
-        assert_eq!(field_ident("type", &mut taken).to_string(), "r#type");
-        assert_eq!(field_ident("self", &mut taken).to_string(), "self_");
-        assert_eq!(field_ident("lineItems", &mut taken).to_string(), "line_items");
-        assert_eq!(field_ident("line_items", &mut taken).to_string(), "line_items_");
+        let mut field = |name: &str| {
+            let (ident, rename) = field_ident(name, &mut taken);
+            (ident.to_string(), rename.map(|attribute| attribute.to_string()))
+        };
+        // A raw identifier still has the name of the field: nothing to restore.
+        assert_eq!(field("type"), ("r#type".to_string(), None));
+        assert_eq!(field("id"), ("id".to_string(), None));
+        let renamed = |key: &str| Some(format!("# [serde (rename = \"{key}\")]"));
+        assert_eq!(field("self"), ("self_".to_string(), renamed("self")));
+        assert_eq!(field("lineItems"), ("line_items".to_string(), renamed("lineItems")));
+        assert_eq!(field("line_items"), ("line_items_".to_string(), renamed("line_items")));
     }
 }

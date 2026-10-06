@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use openshop::Value;
-use openshop::shopify::SHOPIFY_API_VERSION;
+use openshop::shopify::{SHOPIFY_API_VERSION, is_api_version};
 use openshop_graphql::{INTROSPECTION_QUERY, PROJECT_SCHEMA_PATH, Schema};
 
 /// Shopify's public copy of the Admin schema, as used by its own codegen preset.
@@ -17,13 +17,6 @@ pub struct CodegenOptions {
     pub out: PathBuf,
 }
 
-/// `YYYY-MM`, or `unstable`.
-fn is_api_version(version: &str) -> bool {
-    let bytes = version.as_bytes();
-    let dated = bytes.len() == 7 && bytes[4] == b'-' && bytes[..4].iter().chain(&bytes[5..]).all(u8::is_ascii_digit);
-    dated || version == "unstable"
-}
-
 pub fn parse_options(args: &[String]) -> Result<CodegenOptions> {
     let mut options = CodegenOptions {
         api_version: SHOPIFY_API_VERSION.to_string(),
@@ -31,7 +24,7 @@ pub fn parse_options(args: &[String]) -> Result<CodegenOptions> {
     };
     for arg in args {
         if let Some(version) = arg.strip_prefix("--api-version=") {
-            if !is_api_version(version) {
+            if !is_api_version(version) && version != "unstable" {
                 bail!("[openshop] --api-version must look like 2026-04, got \"{version}\"");
             }
             options.api_version = version.to_string();

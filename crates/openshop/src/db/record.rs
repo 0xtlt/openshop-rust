@@ -9,7 +9,7 @@ use std::marker::PhantomData;
 use anyhow::{Result, bail};
 use chrono::{DateTime, Utc};
 use serde_json::Value;
-use sqlx::postgres::PgRow;
+use sqlx::postgres::{PgHasArrayType, PgRow};
 use sqlx::{Encode, FromRow, PgPool, Postgres, QueryBuilder, Type};
 use uuid::Uuid;
 
@@ -208,22 +208,16 @@ impl<M, T: Bindable> Column<M, T> {
     pub fn lte(self, value: impl Into<T>) -> Condition<M> {
         self.compare("<=", value.into())
     }
+}
 
+impl<M, T: Bindable + PgHasArrayType> Column<M, T> {
     /// The column holds one of the values. No row matches an empty list.
     pub fn is_in<V: Into<T>>(self, values: impl IntoIterator<Item = V>) -> Condition<M> {
         let values: Vec<T> = values.into_iter().map(Into::into).collect();
+        // One array parameter: the statement is the same whatever the number of values.
         self.condition(move |query, column| {
-            if values.is_empty() {
-                query.push("FALSE");
-                return;
-            }
-            query.push(format!("{column} IN ("));
-            {
-                let mut list = query.separated(", ");
-                for value in values {
-                    list.push_bind(value);
-                }
-            }
+            query.push(format!("{column} = ANY("));
+            query.push_bind(values);
             query.push(")");
         })
     }
@@ -239,6 +233,10 @@ pub struct Condition<M> {
 pub struct Order<M> {
     sql: String,
     marker: PhantomData<fn() -> M>,
+}
+
+fn id_is<M>(id: Uuid) -> Condition<M> {
+    Column::<M, Uuid>::new("id").eq(id)
 }
 
 fn column_list<M: Record>() -> String {
@@ -308,9 +306,7 @@ impl<'a, M: Record> Rows<'a, M> {
 
     /// The row with this id, when it is one of these rows.
     pub async fn find(&self, id: Uuid) -> Result<Option<M>> {
-        let mut query = self.query();
-        query.conditions.push(Column::<M, Uuid>::new("id").eq(id));
-        query.first().await
+        self.filter(id_is(id)).first().await
     }
 
     /// Inserts a row and returns it as stored, with the values the database filled.
@@ -333,21 +329,14 @@ impl<'a, M: Record> Rows<'a, M> {
     pub async fn save(&self, row: &M) -> Result<Option<M>> {
         let mut query = SqlBuilder::new(format!("UPDATE {} SET ", quote(M::TABLE)));
         row.push_update(&mut query);
-        query.push(" WHERE \"id\" = ");
-        query.push_bind(row.id());
-        if let Some(shop) = &self.shop {
-            query.push(" AND \"shop\" = ");
-            query.push_bind(shop.clone());
-        }
+        Query::push_where(self.shop.clone(), vec![id_is::<M>(row.id())], &mut query);
         query.push(format!(" RETURNING {}", column_list::<M>()));
         Ok(query.build_query_as::<M>().fetch_optional(self.db).await?)
     }
 
     /// Deletes the row with this id. Returns whether it was one of these rows.
     pub async fn delete(&self, id: Uuid) -> Result<bool> {
-        let mut query = self.query();
-        query.conditions.push(Column::<M, Uuid>::new("id").eq(id));
-        Ok(query.delete().await? > 0)
+        Ok(self.filter(id_is(id)).delete().await? > 0)
     }
 }
 

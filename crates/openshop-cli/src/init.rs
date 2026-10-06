@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use openshop::db::migrate::generate_client_migrations;
+use openshop::db::migrate::generate_migrations;
 
 const OPENSHOP_VERSION: &str = env!("CARGO_PKG_VERSION");
 const OPENSHOP_REPOSITORY: &str = "https://github.com/0xtlt/openshop-rust";
@@ -248,7 +248,7 @@ pub fn run_init(cwd: &Path, args: &[String]) -> Result<InitResult> {
     }
 
     // The framework schema becomes the project's first, client-owned migration.
-    generate_client_migrations(&target_dir, &[], false)?;
+    generate_migrations(&target_dir, &[], false, &[])?;
 
     println!("[openshop] Created {app_name} in {}", target_dir.display());
     println!();

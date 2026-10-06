@@ -11,6 +11,12 @@ use crate::runtime::{HttpTransport, OutboundRequest};
 
 pub const SHOPIFY_API_VERSION: &str = "2026-04";
 
+/// Whether `value` is written like a dated Shopify API version: `2026-04`.
+pub fn is_api_version(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    bytes.len() == 7 && bytes[4] == b'-' && bytes[..4].iter().chain(&bytes[5..]).all(u8::is_ascii_digit)
+}
+
 #[derive(Clone)]
 pub struct ShopifyClient {
     pub shop: String,
@@ -62,7 +68,7 @@ impl ShopifyClient {
             );
         }
 
-        let payload = response.json()?;
+        let mut payload = response.json()?;
         if let Some(errors) = payload.get("errors").and_then(Value::as_array)
             && !errors.is_empty()
         {
@@ -73,7 +79,7 @@ impl ShopifyClient {
             bail!("[openshop] GraphQL errors: {}", messages.join("; "));
         }
 
-        Ok(payload.get("data").cloned().unwrap_or(Value::Null))
+        Ok(payload.get_mut("data").map(Value::take).unwrap_or(Value::Null))
     }
 
     /// Runs a query and deserializes the `data` object.

@@ -79,8 +79,10 @@ impl Connectors {
         self.get(provider)?.call(method, args).await
     }
 
+    /// Calls a method and deserializes its result.
     pub async fn call_as<T: DeserializeOwned>(&self, provider: &str, method: &str, args: impl Serialize) -> Result<T> {
-        self.get(provider)?.call_as(method, args).await
+        let result = self.call(provider, method, args).await?;
+        serde_json::from_value(result).map_err(|error| anyhow!("Invalid result from \"{provider}.{method}\": {error}"))
     }
 
     /// Calls the method behind a typed [`ProviderCall`].
@@ -93,20 +95,7 @@ impl Connectors {
         B: Serialize + ?Sized,
         R: DeserializeOwned,
     {
-        self.invoke_by_name(call.provider(), call.method(), args).await
-    }
-
-    /// Calls a method by its names and reads its result as `R`. Used by the
-    /// connectors `#[provider]` generates, which check the arguments themselves.
-    #[doc(hidden)]
-    pub async fn invoke_by_name<R: DeserializeOwned>(
-        &self,
-        provider: &str,
-        method: &str,
-        args: impl Serialize,
-    ) -> Result<R> {
-        let result = self.call(provider, method, args).await?;
-        serde_json::from_value(result).map_err(|error| anyhow!("Invalid result from \"{provider}.{method}\": {error}"))
+        self.call_as(call.provider(), call.method(), args).await
     }
 }
 

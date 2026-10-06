@@ -1,10 +1,11 @@
 //! `#[derive(Model)]`: a struct as the single description of a table, with
 //! typed rows, and migrations generated from what changed.
 
-use std::path::{Path, PathBuf};
+mod common;
 
 use chrono::{DateTime, Utc};
-use openshop::db::migrate::{check_client_migrations_for, generate_migrations, migrate_schema};
+use common::{TempProject, empty_database};
+use openshop::db::migrate::{check_migrations, generate_migrations, migrate_schema};
 use openshop::testing::TestDb;
 use openshop::{Model, OpenShopConfig, PgPool, Record, Value, json};
 use uuid::Uuid;
@@ -399,39 +400,6 @@ struct ReviewV2 {
     reply: Option<String>,
 }
 
-struct Project(PathBuf);
-
-impl Project {
-    fn new() -> Self {
-        let dir = std::env::temp_dir().join(format!("openshop-models-{}", Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
-        Self(dir)
-    }
-
-    fn path(&self) -> &Path {
-        &self.0
-    }
-}
-
-impl Drop for Project {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
-
-/// A database without any table, as before the first deployment.
-async fn empty_database() -> TestDb {
-    let db = TestDb::create().await.unwrap();
-    sqlx::raw_sql(&format!(
-        "DROP SCHEMA \"{0}\" CASCADE; CREATE SCHEMA \"{0}\"",
-        db.schema
-    ))
-    .execute(&db.pool)
-    .await
-    .unwrap();
-    db
-}
-
 async fn columns(pool: &PgPool, table: &str) -> Vec<String> {
     sqlx::query_scalar(
         "SELECT column_name::text || ' ' || data_type::text FROM information_schema.columns \
@@ -456,14 +424,14 @@ async fn indexes(pool: &PgPool, table: &str) -> Vec<String> {
 #[tokio::test]
 async fn generated_migrations_follow_the_models_from_one_release_to_the_next() {
     let db = empty_database().await;
-    let project = Project::new();
+    let project = TempProject::new();
 
     // First release: the framework schema and the table of the model.
     let first = generate_migrations(project.path(), &[], false, &[Review::model()]).unwrap();
     assert_eq!(first.files.len(), 2);
     assert!(first.warnings.is_empty());
     migrate_schema(&db.pool, project.path()).await.unwrap();
-    check_client_migrations_for(project.path(), &[Review::model()]).unwrap();
+    check_migrations(project.path(), &[Review::model()]).unwrap();
 
     let reviews = Review::for_shop(&db.pool, SHOP);
     let review = reviews.insert(new_review("p1", "ada", 5)).await.unwrap();
@@ -473,7 +441,7 @@ async fn generated_migrations_follow_the_models_from_one_release_to_the_next() {
     );
 
     // Second release: the struct changed, `check` refuses to go on without a migration.
-    let error = check_client_migrations_for(project.path(), &[ReviewV2::model()]).unwrap_err();
+    let error = check_migrations(project.path(), &[ReviewV2::model()]).unwrap_err();
     assert!(
         error
             .to_string()
@@ -523,7 +491,7 @@ async fn generated_migrations_follow_the_models_from_one_release_to_the_next() {
     let applied = migrate_schema(&db.pool, project.path()).await.unwrap();
     assert_eq!(applied.len(), 1);
     assert!(applied[0].ends_with("_reviews_v2"));
-    check_client_migrations_for(project.path(), &[ReviewV2::model()]).unwrap();
+    check_migrations(project.path(), &[ReviewV2::model()]).unwrap();
 
     // The table is the one the new struct describes, with its data.
     assert_eq!(
@@ -720,7 +688,7 @@ struct ReviewVoteV2 {
 #[tokio::test]
 async fn generated_migrations_carry_the_references() {
     let db = empty_database().await;
-    let project = Project::new();
+    let project = TempProject::new();
 
     let first = generate_migrations(project.path(), &[], false, &[ReviewVote::model(), Review::model()]).unwrap();
     assert!(first.warnings.is_empty());
@@ -759,7 +727,7 @@ async fn generated_migrations_carry_the_references() {
          ALTER TABLE \"review_votes\" DROP COLUMN IF EXISTS \"answers\";\n"
     );
     migrate_schema(&db.pool, project.path()).await.unwrap();
-    check_client_migrations_for(project.path(), &[ReviewVoteV2::model(), Review::model()]).unwrap();
+    check_migrations(project.path(), &[ReviewVoteV2::model(), Review::model()]).unwrap();
 
     assert_eq!(
         foreign_keys(&db.pool, "review_votes").await,

@@ -12,14 +12,15 @@
 //! models with it, so it needs no database.
 
 use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
 
 use anyhow::{Context, Result, bail};
 use chrono::Utc;
 use sha2::{Digest, Sha256};
 use sqlx::{Executor, PgPool};
 
-use super::diff::{self, Change, SNAPSHOT_FILE, SchemaSnapshot, TableSnapshot};
-use super::model::{Model, quote};
+use super::diff::{self, SNAPSHOT_FILE, SchemaSnapshot};
+use super::model::Model;
 
 pub const MIGRATIONS_DIR: &str = "migrations";
 const MIGRATIONS_TABLE: &str = "__openshop_migrations";
@@ -211,17 +212,12 @@ fn covered_framework_ids(files: &[MigrationFile]) -> Vec<String> {
         .collect()
 }
 
-fn missing_framework_migrations(folder: &Path) -> Result<Vec<&'static FrameworkMigration>> {
-    let files = if folder.exists() {
-        read_migration_files(folder)?
-    } else {
-        Vec::new()
-    };
-    let covered = covered_framework_ids(&files);
-    Ok(FRAMEWORK_MIGRATIONS
+fn missing_framework_migrations(files: &[MigrationFile]) -> Vec<&'static FrameworkMigration> {
+    let covered = covered_framework_ids(files);
+    FRAMEWORK_MIGRATIONS
         .iter()
         .filter(|migration| !covered.iter().any(|id| id == migration.id))
-        .collect())
+        .collect()
 }
 
 fn sanitize_name(name: &str) -> String {
@@ -244,53 +240,37 @@ fn sanitize_name(name: &str) -> String {
     }
 }
 
-/// Writes migrations for framework schema the project does not cover yet, plus an
-/// empty one when `--name=<name>` is given. Returns the created files.
-pub fn generate_client_migrations(cwd: &Path, args: &[String], production: bool) -> Result<Vec<PathBuf>> {
-    generate_client_migrations_for(cwd, args, production, &[])
-}
+const GENERATE_THEN_MIGRATE: &str =
+    "Run `openshop migrate generate`, review and commit the generated SQL, then run `openshop migrate`.";
 
-/// Models whose table is not created by any migration file.
-fn uncovered_models<'a>(folder: &Path, models: &'a [Model]) -> Result<Vec<&'a Model>> {
-    let files = if folder.exists() {
-        read_migration_files(folder)?
-    } else {
-        Vec::new()
-    };
-    Ok(models
+/// The names, in lower case, of the tables the migration files create.
+fn created_tables(files: &[MigrationFile]) -> Vec<String> {
+    static CREATE_TABLE: LazyLock<regex::Regex> = LazyLock::new(|| {
+        regex::Regex::new(r#"(?i)create\s+table\s+(?:if\s+not\s+exists\s+)?"?([a-z_][a-z0-9_$]*)"?[\s(]"#)
+            .expect("valid regex")
+    });
+    files
         .iter()
-        .filter(|model| {
-            let pattern = format!(
-                r#"(?i)create\s+table\s+(?:if\s+not\s+exists\s+)?"?{}"?[\s(]"#,
-                regex::escape(&model.table)
-            );
-            let creates_table = regex::Regex::new(&pattern).expect("valid regex");
-            !files.iter().any(|file| creates_table.is_match(&file.sql))
-        })
-        .collect())
+        .flat_map(|file| CREATE_TABLE.captures_iter(&file.sql))
+        .map(|captures| captures[1].to_lowercase())
+        .collect()
 }
 
-/// The snapshot the models are compared with. A project without one starts
-/// from the tables its migrations already create, taken as the models
-/// describe them today.
-///
-/// A table that a hand-written migration creates, and that the snapshot does
-/// not know, is taken the same way: generating does not create it again.
-fn baseline(folder: &Path, models: &[Model]) -> Result<(SchemaSnapshot, bool)> {
-    let recorded = SchemaSnapshot::read(folder)?;
-    let has_snapshot = recorded.is_some();
-    let mut snapshot = recorded.unwrap_or_default();
-
-    let uncovered = uncovered_models(folder, models)?;
-    for model in models {
-        let known = |name: &str| snapshot.tables.iter().any(|table| table.name == name);
-        let renamed = model.previous_name().is_some_and(known);
-        let created_by_hand = !uncovered.iter().any(|new| new.table == model.table);
-        if !known(&model.table) && !renamed && created_by_hand {
-            snapshot.tables.push(TableSnapshot::of(model));
-        }
+/// The snapshot the models are compared with, and whether the project has
+/// recorded one. A project that has none yet starts from the tables its
+/// migrations already create, generated or written by hand, taken as the
+/// models describe them today.
+fn baseline(folder: &Path, files: &[MigrationFile], models: &[Model]) -> Result<(SchemaSnapshot, bool)> {
+    if let Some(recorded) = SchemaSnapshot::read(folder)? {
+        return Ok((recorded, true));
     }
-    Ok((snapshot, has_snapshot))
+    let created = created_tables(files);
+    let existing: Vec<Model> = models
+        .iter()
+        .filter(|model| created.contains(&model.table.to_lowercase()))
+        .cloned()
+        .collect();
+    Ok((SchemaSnapshot::of(&existing), false))
 }
 
 /// What `migrate generate` wrote.
@@ -304,26 +284,16 @@ pub struct GeneratedMigrations {
     pub snapshot: Option<PathBuf>,
 }
 
-/// Like [`generate_client_migrations`], and also writes the statements that
-/// bring the application tables in line with `models`. Returns the created files.
-pub fn generate_client_migrations_for(
-    cwd: &Path,
-    args: &[String],
-    production: bool,
-    models: &[Model],
-) -> Result<Vec<PathBuf>> {
-    Ok(generate_migrations(cwd, args, production, models)?.files)
-}
-
 /// Writes the migrations a project is missing:
 ///
 /// - the framework schema it does not cover yet;
 /// - the statements that take the application tables from the schema snapshot
 ///   to `models`: created and dropped tables, added, dropped, renamed and
-///   altered columns, created and dropped indexes;
+///   altered columns, indexes and foreign keys;
 /// - an empty migration when `--name=<name>` is given and nothing changed.
 ///
-/// The snapshot is then updated to `models`.
+/// The snapshot is then updated to `models`: pass every model of the
+/// application, since a recorded table without a model is dropped.
 pub fn generate_migrations(
     cwd: &Path,
     args: &[String],
@@ -343,29 +313,26 @@ pub fn generate_migrations(
         .map(sanitize_name);
 
     let folder = cwd.join(MIGRATIONS_DIR);
-    let missing = missing_framework_migrations(&folder)?;
-    let (previous, has_snapshot) = baseline(&folder, models)?;
+    let files = read_migration_files(&folder)?;
+    let missing = missing_framework_migrations(&files);
+    let (previous, recorded) = baseline(&folder, &files, models)?;
     let changes = diff::diff(&previous, models);
-    let current = SchemaSnapshot::of(models);
     // A project without models and without snapshot does not get one.
-    let snapshot_json = (has_snapshot || !models.is_empty()).then(|| current.to_json());
-    let snapshot_path = folder.join(SNAPSHOT_FILE);
-    let snapshot_changed = snapshot_json
-        .as_ref()
-        .is_some_and(|json| std::fs::read_to_string(&snapshot_path).ok().as_ref() != Some(json));
+    let new_snapshot = (recorded || !models.is_empty())
+        .then(|| SchemaSnapshot::of(models).to_json())
+        .filter(|json| !recorded || *json != previous.to_json());
 
     let mut generated = GeneratedMigrations::default();
-    if missing.is_empty() && changes.is_empty() && name.is_none() && !snapshot_changed {
+    if missing.is_empty() && changes.is_empty() && name.is_none() && new_snapshot.is_none() {
         return Ok(generated);
     }
     std::fs::create_dir_all(&folder)?;
 
-    let existing = sql_file_names(&folder);
     let mut timestamp = Utc::now();
     let mut next_path = |suffix: &str| loop {
         let prefix = timestamp.format("%Y%m%d%H%M%S").to_string();
         timestamp += chrono::Duration::seconds(1);
-        if !existing.iter().any(|file| file.starts_with(&prefix)) {
+        if !files.iter().any(|file| file.tag.starts_with(&prefix)) {
             break folder.join(format!("{prefix}_{suffix}.sql"));
         }
     };
@@ -392,59 +359,57 @@ pub fn generate_migrations(
             ),
         )?;
         generated.files.push(path);
-        generated.warnings = changes.iter().filter_map(|change| change.warning.clone()).collect();
+        generated.warnings = changes
+            .iter()
+            .filter_map(|change| change.warning().map(str::to_string))
+            .collect();
     } else if let Some(name) = name {
         let path = next_path(&name);
         std::fs::write(&path, format!("-- {name}\n-- Write your schema changes below.\n"))?;
         generated.files.push(path);
     }
-    if let Some(json) = snapshot_json.filter(|_| snapshot_changed) {
-        std::fs::write(&snapshot_path, json)?;
-        generated.snapshot = Some(snapshot_path);
+    if let Some(json) = new_snapshot {
+        let path = folder.join(SNAPSHOT_FILE);
+        std::fs::write(&path, json)?;
+        generated.snapshot = Some(path);
     }
     Ok(generated)
 }
 
-/// Fails when migration files are unreadable or do not cover the framework schema.
-pub fn check_client_migrations(cwd: &Path) -> Result<()> {
-    check_client_migrations_for(cwd, &[])
-}
-
-/// The model changes no migration covers yet.
-fn pending_model_changes(folder: &Path, models: &[Model]) -> Result<Vec<Change>> {
-    let (previous, _) = baseline(folder, models)?;
-    Ok(diff::diff(&previous, models))
-}
-
-/// Like [`check_client_migrations`], and also fails when the application
-/// models changed since the last generated migration.
-pub fn check_client_migrations_for(cwd: &Path, models: &[Model]) -> Result<()> {
+/// Fails when the migration files do not cover the framework schema, or when
+/// `models` changed since the last generated migration.
+pub fn check_migrations(cwd: &Path, models: &[Model]) -> Result<()> {
     let folder = cwd.join(MIGRATIONS_DIR);
-    if !missing_framework_migrations(&folder)?.is_empty() {
-        bail!(
-            "[openshop] The current OpenShop schema is not covered by ./migrations. Run `openshop migrate generate`, review and commit the generated SQL, then run `openshop migrate`."
-        );
+    let files = read_migration_files(&folder)?;
+    if !missing_framework_migrations(&files).is_empty() {
+        bail!("[openshop] The current OpenShop schema is not covered by ./migrations. {GENERATE_THEN_MIGRATE}");
     }
-    let new_models = uncovered_models(&folder, models)?;
-    if !new_models.is_empty() && SchemaSnapshot::read(&folder)?.is_none() {
-        let tables: Vec<&str> = new_models.iter().map(|model| model.table.as_str()).collect();
+
+    let (previous, recorded) = baseline(&folder, &files, models)?;
+    let pending = diff::diff(&previous, models);
+    if pending.is_empty() {
+        return Ok(());
+    }
+    if !recorded {
+        // Without a snapshot, the only possible difference is a table no migration creates.
+        let tables: Vec<&str> = models
+            .iter()
+            .filter(|model| !previous.tables.iter().any(|table| table.table == model.table))
+            .map(|model| model.table.as_str())
+            .collect();
         bail!(
-            "[openshop] No migration creates the table of these models: {}. Run `openshop migrate generate`, review and commit the generated SQL, then run `openshop migrate`.",
+            "[openshop] No migration creates the table of these models: {}. {GENERATE_THEN_MIGRATE}",
             tables.join(", ")
         );
     }
-    let pending = pending_model_changes(&folder, models)?;
-    if !pending.is_empty() {
-        let changes: Vec<String> = diff::summarize(&pending)
-            .into_iter()
-            .map(|change| format!("\n  - {change}"))
-            .collect();
-        bail!(
-            "[openshop] The models changed since the last generated migration:{}\nRun `openshop migrate generate`, review and commit the generated SQL, then run `openshop migrate`.",
-            changes.concat()
-        );
-    }
-    Ok(())
+    let changes: Vec<String> = diff::summarize(&pending)
+        .into_iter()
+        .map(|change| format!("\n  - {change}"))
+        .collect();
+    bail!(
+        "[openshop] The models changed since the last generated migration:{}\n{GENERATE_THEN_MIGRATE}",
+        changes.concat()
+    );
 }
 
 /// Creates the framework tables and application models directly, without
@@ -456,59 +421,86 @@ pub async fn push_schema(pool: &PgPool, models: &[Model], production: bool) -> R
     for migration in FRAMEWORK_MIGRATIONS {
         sqlx::raw_sql(migration.sql).execute(pool).await?;
     }
-    for model in models {
-        sqlx::raw_sql(&model.create_table_sql()).execute(pool).await?;
+    if models.is_empty() {
+        return Ok(());
+    }
 
-        // A table created by an earlier push lacks what the model gained
-        // since. What cannot be added is left to a migration.
-        let table = quote(&model.table);
-        let add_column = |column: &super::model::ColumnDef| format!("ADD COLUMN IF NOT EXISTS {}", column.sql());
-        let every_column: Vec<String> = model.columns().iter().map(add_column).collect();
-        let together = format!("ALTER TABLE {table} {}", every_column.join(", "));
-        let mut statements: Vec<(String, String)> = Vec::new();
-        if !every_column.is_empty() && sqlx::raw_sql(&together).execute(pool).await.is_err() {
-            // One of them cannot be added: try each, to add the others and name it.
-            statements.extend(model.columns().iter().map(|column| {
-                (
-                    format!("the column {}", column.name),
-                    format!("ALTER TABLE {table} {}", add_column(column)),
-                )
-            }));
+    // Every table, then what a table created by an earlier push lacks, then
+    // the foreign keys, which need every table whatever the order of the models.
+    let mut steps: Vec<PushStep> = Vec::new();
+    for model in models {
+        steps.push(PushStep::required(model.create_table_sql()));
+        for column in model.columns() {
+            steps.push(PushStep::addition(
+                model,
+                format!("the column {}", column.name),
+                column.add_sql(&model.table),
+            ));
         }
-        statements.extend(
-            model
-                .indexes()
-                .iter()
-                .map(|index| (format!("the index {}", index.name), index.create_sql(&model.table))),
-        );
-        for (what, statement) in statements {
-            if let Err(error) = sqlx::raw_sql(&statement).execute(pool).await {
-                tracing::warn!(
-                    "[openshop] Could not add {what} to {}: {error}. Generate and apply a migration, or reset the development database.",
-                    model.table
-                );
-            }
+        for index in model.indexes() {
+            steps.push(PushStep::addition(
+                model,
+                format!("the index {}", index.name),
+                index.create_sql(&model.table),
+            ));
         }
     }
-    // Foreign keys wait until every table exists, whatever the order of the models.
     for model in models {
         for foreign_key in model.foreign_keys() {
-            let statement = foreign_key.add_if_missing_sql(&model.table);
-            if let Err(error) = sqlx::raw_sql(&statement).execute(pool).await {
-                tracing::warn!(
-                    "[openshop] Could not add the foreign key {} to {}: {error}. Check that the referenced model is registered, then generate and apply a migration or reset the development database.",
-                    foreign_key.name(&model.table),
-                    model.table
-                );
-            }
+            steps.push(PushStep::addition(
+                model,
+                format!("the foreign key {}", foreign_key.name(&model.table)),
+                foreign_key.add_if_missing_sql(&model.table),
+            ));
+        }
+    }
+
+    // A fresh database, or one that is up to date, takes everything in one round trip.
+    let together: Vec<&str> = steps.iter().map(|step| step.sql.as_str()).collect();
+    if sqlx::raw_sql(&together.join("\n")).execute(pool).await.is_ok() {
+        return Ok(());
+    }
+    // Something cannot be added to an existing table: apply the rest, and say what is left to a migration.
+    for step in steps {
+        match (sqlx::raw_sql(&step.sql).execute(pool).await, step.addition) {
+            (Ok(_), _) => {}
+            (Err(error), None) => return Err(error.into()),
+            (Err(error), Some((table, what))) => tracing::warn!(
+                "[openshop] Could not add {what} to {table}: {error}. Generate and apply a migration, or reset the development database."
+            ),
         }
     }
     Ok(())
 }
 
+/// One statement of the development push.
+struct PushStep {
+    sql: String,
+    /// The table and what the statement adds to it, when failing to add it is not fatal.
+    addition: Option<(String, String)>,
+}
+
+impl PushStep {
+    fn required(sql: String) -> Self {
+        Self { sql, addition: None }
+    }
+
+    fn addition(model: &Model, what: String, sql: String) -> Self {
+        Self {
+            sql,
+            addition: Some((model.table.clone(), what)),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Generates for an application without models and returns the files.
+    fn generate_framework(dir: &Path, args: &[String], production: bool) -> Result<Vec<PathBuf>> {
+        Ok(generate_migrations(dir, args, production, &[])?.files)
+    }
 
     fn temp_dir(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("openshop-migrate-{name}-{}", uuid::Uuid::new_v4()));
@@ -530,9 +522,9 @@ mod tests {
     #[test]
     fn generates_the_framework_schema_once() {
         let dir = temp_dir("generate");
-        assert!(check_client_migrations(&dir).is_err());
+        assert!(check_migrations(&dir, &[]).is_err());
 
-        let created = generate_client_migrations(&dir, &[], false).unwrap();
+        let created = generate_framework(&dir, &[], false).unwrap();
         assert_eq!(created.len(), FRAMEWORK_MIGRATIONS.len());
         let content = std::fs::read_to_string(&created[0]).unwrap();
         assert!(content.starts_with("-- openshop:framework 0001_openshop_init\n"));
@@ -545,15 +537,15 @@ mod tests {
                 .ends_with("_openshop_init.sql")
         );
 
-        check_client_migrations(&dir).unwrap();
-        assert!(generate_client_migrations(&dir, &[], false).unwrap().is_empty());
+        check_migrations(&dir, &[]).unwrap();
+        assert!(generate_framework(&dir, &[], false).unwrap().is_empty());
         std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]
     fn generates_named_empty_migrations_in_order() {
         let dir = temp_dir("named");
-        let created = generate_client_migrations(&dir, &["--name=Add Reviews!".to_string()], false).unwrap();
+        let created = generate_framework(&dir, &["--name=Add Reviews!".to_string()], false).unwrap();
         assert_eq!(created.len(), 2);
         let names: Vec<String> = created
             .iter()
@@ -579,37 +571,36 @@ mod tests {
                 .without_shop()
                 .column("value", "integer NOT NULL"),
         ];
-        generate_client_migrations(&dir, &[], false).unwrap();
-        let error = check_client_migrations_for(&dir, &models).unwrap_err().to_string();
+        generate_framework(&dir, &[], false).unwrap();
+        let error = check_migrations(&dir, &models).unwrap_err().to_string();
         assert!(error.contains("these models: reviews, review_votes"), "{error}");
 
-        let created = generate_client_migrations_for(&dir, &[], false, &models).unwrap();
+        let created = generate(&dir, &models).files;
         assert_eq!(created.len(), 1);
         assert!(created[0].to_string_lossy().ends_with("_models.sql"));
         let sql = std::fs::read_to_string(&created[0]).unwrap();
         assert!(sql.contains("CREATE TABLE IF NOT EXISTS \"reviews\""));
         assert!(sql.contains("CREATE TABLE IF NOT EXISTS \"review_votes\""));
 
-        check_client_migrations_for(&dir, &models).unwrap();
-        assert!(
-            generate_client_migrations_for(&dir, &[], false, &models)
-                .unwrap()
-                .is_empty()
-        );
+        check_migrations(&dir, &models).unwrap();
+        assert!(generate(&dir, &models).files.is_empty());
 
-        // A table created by hand-written SQL counts as covered, whatever its casing or quoting.
-        let folder = dir.join(MIGRATIONS_DIR);
+        // Once the models are recorded, a new one is created whatever the migrations contain.
         std::fs::write(
-            folder.join("99990101000000_orders.sql"),
+            dir.join(MIGRATIONS_DIR).join("99990101000000_orders.sql"),
             "create table orders (id uuid);",
         )
         .unwrap();
         let mut more = models.to_vec();
         more.extend([define_model("orders"), define_model("order_lines")]);
-        let created = generate_client_migrations_for(&dir, &["--name=order_lines".to_string()], false, &more).unwrap();
+        let created = generate_migrations(&dir, &["--name=orders".to_string()], false, &more)
+            .unwrap()
+            .files;
         assert_eq!(created.len(), 1);
         let sql = std::fs::read_to_string(&created[0]).unwrap();
-        assert!(sql.contains("\"order_lines\"") && !sql.contains("\"orders\""));
+        assert!(sql.contains("CREATE TABLE IF NOT EXISTS \"orders\""), "{sql}");
+        assert!(sql.contains("CREATE TABLE IF NOT EXISTS \"order_lines\""), "{sql}");
+        assert!(!sql.contains("\"reviews\""), "{sql}");
         std::fs::remove_dir_all(dir).ok();
     }
 
@@ -637,8 +628,8 @@ mod tests {
         assert!(first.warnings.is_empty());
         let snapshot = SchemaSnapshot::read(&folder).unwrap().unwrap();
         assert_eq!(snapshot.tables.len(), 1);
-        assert_eq!(snapshot.tables[0].name, "reviews");
-        check_client_migrations_for(&dir, std::slice::from_ref(&reviews)).unwrap();
+        assert_eq!(snapshot.tables[0].table, "reviews");
+        check_migrations(&dir, std::slice::from_ref(&reviews)).unwrap();
 
         // Nothing changed: nothing is written.
         assert_eq!(
@@ -652,7 +643,7 @@ mod tests {
             .with_column(ColumnDef::new("note", "text").nullable(true))
             .with_column(ColumnDef::new("author", "text"))
             .index("reviews_shop_idx", &["shop"]);
-        let error = check_client_migrations_for(&dir, std::slice::from_ref(&changed)).unwrap_err();
+        let error = check_migrations(&dir, std::slice::from_ref(&changed)).unwrap_err();
         assert_eq!(
             error.to_string(),
             "[openshop] The models changed since the last generated migration:\n  \
@@ -690,7 +681,7 @@ mod tests {
              \n\
              CREATE INDEX IF NOT EXISTS \"reviews_shop_idx\" ON \"reviews\" (\"shop\");\n"
         );
-        check_client_migrations_for(&dir, std::slice::from_ref(&changed)).unwrap();
+        check_migrations(&dir, std::slice::from_ref(&changed)).unwrap();
         assert_eq!(
             generate(&dir, std::slice::from_ref(&changed)),
             GeneratedMigrations::default()
@@ -705,6 +696,14 @@ mod tests {
                 .contains("DROP TABLE IF EXISTS \"reviews\";")
         );
         assert!(SchemaSnapshot::read(&folder).unwrap().unwrap().tables.is_empty());
+
+        // Registered again, it is created again: the earlier migrations do not count.
+        let fourth = generate(&dir, std::slice::from_ref(&reviews));
+        assert!(
+            std::fs::read_to_string(&fourth.files[0])
+                .unwrap()
+                .contains("CREATE TABLE IF NOT EXISTS \"reviews\"")
+        );
         std::fs::remove_dir_all(dir).ok();
     }
 
@@ -715,18 +714,26 @@ mod tests {
         // As generated before snapshots existed: a migration creates the table.
         let dir = temp_dir("adopt");
         let folder = dir.join(MIGRATIONS_DIR);
-        generate_client_migrations(&dir, &[], false).unwrap();
+        generate_framework(&dir, &[], false).unwrap();
         let reviews = define_model("reviews").with_column(ColumnDef::new("rating", "integer"));
         std::fs::write(
             folder.join("99990101000000_models.sql"),
             format!("{}\n", reviews.create_sql()),
         )
         .unwrap();
+        // A table created by hand counts too, whatever its casing or quoting.
+        std::fs::write(
+            folder.join("99990102000000_orders.sql"),
+            "create table Orders (id uuid);",
+        )
+        .unwrap();
+        let orders = define_model("orders");
+        let models = [reviews.clone(), orders.clone()];
         assert_eq!(SchemaSnapshot::read(&folder).unwrap(), None);
-        check_client_migrations_for(&dir, std::slice::from_ref(&reviews)).unwrap();
+        check_migrations(&dir, &models).unwrap();
 
         // Generating records the models without writing a migration.
-        let adopted = generate(&dir, std::slice::from_ref(&reviews));
+        let adopted = generate(&dir, &models);
         assert!(adopted.files.is_empty());
         assert_eq!(adopted.snapshot, Some(folder.join(SNAPSHOT_FILE)));
 
@@ -734,7 +741,7 @@ mod tests {
         let changed = define_model("reviews")
             .with_column(ColumnDef::new("rating", "bigint").renamed_from("stars"))
             .with_column(ColumnDef::new("note", "text").nullable(true));
-        let next = generate(&dir, &[changed]);
+        let next = generate(&dir, &[changed, orders]);
         let sql = std::fs::read_to_string(&next.files[0]).unwrap();
         assert!(
             sql.contains("ALTER COLUMN \"rating\" TYPE bigint USING \"rating\"::bigint;"),
@@ -777,9 +784,9 @@ mod tests {
     #[test]
     fn refuses_to_generate_in_production_without_the_flag() {
         let dir = temp_dir("production");
-        let error = generate_client_migrations(&dir, &[], true).unwrap_err().to_string();
+        let error = generate_framework(&dir, &[], true).unwrap_err().to_string();
         assert!(error.contains("Refusing to generate migrations in production"));
-        let created = generate_client_migrations(&dir, &["--allow-generate-in-production".to_string()], true).unwrap();
+        let created = generate_framework(&dir, &["--allow-generate-in-production".to_string()], true).unwrap();
         assert_eq!(created.len(), FRAMEWORK_MIGRATIONS.len());
         std::fs::remove_dir_all(dir).ok();
     }

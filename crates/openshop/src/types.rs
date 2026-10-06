@@ -361,6 +361,11 @@ fn typed_provider_config<C: DeserializeOwned>(provider: &str, config: JsonMap) -
         .map_err(|error| anyhow!("Invalid configuration for provider \"{provider}\": {error}"))
 }
 
+/// The arguments of a call as the type its method expects.
+fn typed_arguments<A: DeserializeOwned>(label: &str, args: Value) -> Result<A> {
+    serde_json::from_value(args).map_err(|error| anyhow!("Invalid arguments for \"{label}\": {error}"))
+}
+
 /// An external service with per-shop credentials and callable methods.
 #[derive(Clone)]
 pub struct Provider {
@@ -418,11 +423,9 @@ impl Provider {
         Fut: Future<Output = Result<bool>> + Send + 'static,
     {
         let provider = self.name.clone();
-        let checker = Arc::new(checker);
         self.checker(move |config| {
-            let checker = checker.clone();
-            let config = typed_provider_config(&provider, config);
-            async move { checker(config?).await }
+            let check = typed_provider_config(&provider, config).map(&checker);
+            async move { check?.await }
         })
     }
 
@@ -449,15 +452,9 @@ impl Provider {
     {
         let name = name.into();
         let label = name.clone();
-        let method = Arc::new(method);
         self.method(name, move |config, args| {
-            let method = method.clone();
-            let label = label.clone();
-            async move {
-                let args: A = serde_json::from_value(args)
-                    .map_err(|error| anyhow::anyhow!("Invalid arguments for \"{label}\": {error}"))?;
-                Ok(serde_json::to_value(method(config, args).await?)?)
-            }
+            let call = typed_arguments(&label, args).map(|args| method(config, args));
+            async move { Ok(serde_json::to_value(call?.await?)?) }
         })
     }
 
@@ -477,15 +474,11 @@ impl Provider {
     {
         let (provider, name) = (call.provider(), call.method());
         self.typed_calls.push((provider, name));
-        let method = Arc::new(method);
+        let label = format!("{provider}.{name}");
         self.method(name, move |config, args| {
-            let method = method.clone();
-            async move {
-                let config: C = typed_provider_config(provider, config)?;
-                let args: A = serde_json::from_value(args)
-                    .map_err(|error| anyhow!("Invalid arguments for \"{provider}.{name}\": {error}"))?;
-                Ok(serde_json::to_value(method(config, args).await?)?)
-            }
+            let call = typed_provider_config(provider, config)
+                .and_then(|config| Ok(method(config, typed_arguments(&label, args)?)));
+            async move { Ok(serde_json::to_value(call?.await?)?) }
         })
     }
 }

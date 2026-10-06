@@ -13,6 +13,7 @@ use crate::runtime::OutboundRequest;
 use crate::runtime::time::to_iso;
 use crate::server::api::run_logs::{RunLogOptions, get_filtered_run_logs};
 use crate::server::shop_domain::normalize_shop_domain;
+use crate::shopify::is_api_version;
 use crate::types::{
     JsonMap, McpExecutionContext, McpResourceContent, McpResourceDefinition, McpRiskLevel, McpToolDefinition,
 };
@@ -98,14 +99,6 @@ pub fn latest_stable_shopify_admin_api_version(now: DateTime<Utc>) -> String {
         }
     }
     format!("{}-10", year - 1)
-}
-
-fn is_api_version(value: &str) -> bool {
-    let bytes = value.as_bytes();
-    bytes.len() == 7
-        && bytes[4] == b'-'
-        && bytes[..4].iter().all(u8::is_ascii_digit)
-        && bytes[5..].iter().all(u8::is_ascii_digit)
 }
 
 fn api_version_input(input: &JsonMap) -> Result<String> {

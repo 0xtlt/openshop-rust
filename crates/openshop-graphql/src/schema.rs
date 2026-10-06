@@ -163,11 +163,6 @@ impl TypeDef {
     pub fn is_composite(&self) -> bool {
         matches!(self, Self::Object { .. } | Self::Interface { .. } | Self::Union { .. })
     }
-
-    /// Scalars, enums and input objects: types a variable can have.
-    pub fn is_input(&self) -> bool {
-        matches!(self, Self::Scalar | Self::Enum { .. } | Self::Input { .. })
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -6,7 +6,7 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
-use super::model::{ColumnDef, ForeignKeyDef, IndexDef, Model, quote};
+use super::model::{ColumnDef, ForeignKeyDef, Model, quote};
 
 /// The file, next to the migrations, that records the models as of the last
 /// generated migration.
@@ -14,40 +14,16 @@ pub const SNAPSHOT_FILE: &str = "schema.snapshot.json";
 
 const SNAPSHOT_VERSION: u32 = 1;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TableSnapshot {
-    pub name: String,
-    pub columns: Vec<ColumnDef>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub indexes: Vec<IndexDef>,
-    #[serde(rename = "foreignKeys", default, skip_serializing_if = "Vec::is_empty")]
-    pub foreign_keys: Vec<ForeignKeyDef>,
-}
-
-impl TableSnapshot {
-    pub fn of(model: &Model) -> Self {
-        Self {
-            name: model.table.clone(),
-            columns: model.columns().to_vec(),
-            indexes: model.indexes().to_vec(),
-            foreign_keys: model.foreign_keys().to_vec(),
-        }
-    }
-}
-
 /// The application tables as of the last generated migration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SchemaSnapshot {
     pub version: u32,
-    pub tables: Vec<TableSnapshot>,
+    pub tables: Vec<Model>,
 }
 
 impl Default for SchemaSnapshot {
     fn default() -> Self {
-        Self {
-            version: SNAPSHOT_VERSION,
-            tables: Vec::new(),
-        }
+        Self::of(&[])
     }
 }
 
@@ -55,7 +31,7 @@ impl SchemaSnapshot {
     pub fn of(models: &[Model]) -> Self {
         Self {
             version: SNAPSHOT_VERSION,
-            tables: models.iter().map(TableSnapshot::of).collect(),
+            tables: models.to_vec(),
         }
     }
 
@@ -88,64 +64,100 @@ impl SchemaSnapshot {
         json.push('\n');
         json
     }
-
-    /// The models are the ones the snapshot records.
-    pub fn matches(&self, models: &[Model]) -> bool {
-        diff(self, models).is_empty()
-    }
 }
 
-/// One statement of a generated migration.
+/// One step of a generated migration.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Change {
-    pub sql: String,
-    /// Why the statement deserves a second look before it is applied.
-    pub warning: Option<String>,
+pub enum Change {
+    /// A statement, with the reason it deserves a second look before it is
+    /// applied, when there is one.
+    Statement { sql: String, warning: Option<String> },
+    /// A change that cannot be written automatically: what to write by hand.
+    Manual(String),
 }
 
 impl Change {
     fn new(sql: impl Into<String>) -> Self {
-        Self {
+        Self::Statement {
             sql: sql.into(),
             warning: None,
         }
     }
 
     fn risky(sql: impl Into<String>, warning: impl Into<String>) -> Self {
-        Self {
+        Self::Statement {
             sql: sql.into(),
             warning: Some(warning.into()),
         }
     }
 
-    /// A change that cannot be written automatically: a comment in the migration.
-    fn manual(explanation: impl Into<String>) -> Self {
-        let explanation = explanation.into();
-        Self {
-            sql: format!("-- TODO: {explanation}"),
-            warning: Some(explanation),
+    /// What to review before the migration is applied.
+    pub fn warning(&self) -> Option<&str> {
+        match self {
+            Self::Statement { warning, .. } => warning.as_deref(),
+            Self::Manual(explanation) => Some(explanation),
+        }
+    }
+
+    /// The first line of the change, without its terminator: for messages.
+    fn summary(&self) -> &str {
+        match self {
+            Self::Statement { sql, .. } => sql
+                .lines()
+                .next()
+                .unwrap_or_default()
+                .trim_end_matches([';', '('])
+                .trim(),
+            Self::Manual(explanation) => explanation,
         }
     }
 }
 
 /// The statements of a migration, each preceded by its warning.
 pub fn render(changes: &[Change]) -> String {
-    let mut sql = String::new();
-    for change in changes {
-        if !sql.is_empty() {
-            sql.push('\n');
-        }
-        match &change.warning {
-            Some(warning) if !change.sql.starts_with("-- TODO: ") => {
-                sql.push_str(&format!("-- WARNING: {warning}\n{}\n", change.sql));
-            }
-            _ => {
-                sql.push_str(&change.sql);
-                sql.push('\n');
-            }
-        }
-    }
-    sql
+    let rendered: Vec<String> = changes
+        .iter()
+        .map(|change| match change {
+            Change::Statement {
+                sql,
+                warning: Some(warning),
+            } => format!("-- WARNING: {warning}\n{sql}\n"),
+            Change::Statement { sql, warning: None } => format!("{sql}\n"),
+            Change::Manual(explanation) => format!("-- TODO: {explanation}\n"),
+        })
+        .collect();
+    rendered.join("\n")
+}
+
+/// A short description of each change, for messages.
+pub fn summarize(changes: &[Change]) -> Vec<String> {
+    changes.iter().map(|change| change.summary().to_string()).collect()
+}
+
+/// What `current` continues among `before`: the item of the same name, else
+/// the one it was renamed from, unless that name is still in use.
+fn continued<'a, T>(
+    before: &'a [T],
+    name_of: impl Fn(&T) -> &str,
+    name: &str,
+    renamed_from: Option<&str>,
+    still_used: impl Fn(&str) -> bool,
+) -> Option<&'a T> {
+    let same_name = before.iter().find(|item| name_of(item) == name);
+    same_name.or_else(|| {
+        let previous = renamed_from.filter(|previous| !still_used(previous))?;
+        before.iter().find(|item| name_of(item) == previous)
+    })
+}
+
+/// Old and new names of what was renamed.
+type Renames<'a> = Vec<(&'a str, &'a str)>;
+
+fn renamed<'a>(renames: &Renames<'a>, name: &'a str) -> &'a str {
+    renames
+        .iter()
+        .find(|(old, _)| *old == name)
+        .map_or(name, |(_, new)| new)
 }
 
 /// The statements that take a column from `before` to `after`, the name set aside.
@@ -184,7 +196,7 @@ fn alter_column(table: &str, before: &ColumnDef, after: &ColumnDef, changes: &mu
         });
     }
     if before.primary_key != after.primary_key {
-        changes.push(Change::manual(format!(
+        changes.push(Change::Manual(format!(
             "the primary key of {table} changed on {}. Write the constraint change by hand.",
             after.name
         )));
@@ -197,7 +209,7 @@ fn alter_column(table: &str, before: &ColumnDef, after: &ColumnDef, changes: &mu
                 format!("`{constraints}`")
             }
         };
-        changes.push(Change::manual(format!(
+        changes.push(Change::Manual(format!(
             "the constraints of {place} changed from {} to {}. Write the statements by hand.",
             show(&before.constraints),
             show(&after.constraints)
@@ -205,105 +217,100 @@ fn alter_column(table: &str, before: &ColumnDef, after: &ColumnDef, changes: &mu
     }
 }
 
-/// Old and new names of what was renamed.
-type Renames<'a> = Vec<(&'a str, &'a str)>;
-
-fn renamed<'a>(renames: &Renames<'a>, name: &'a str) -> &'a str {
-    renames
-        .iter()
-        .find(|(old, _)| *old == name)
-        .map_or(name, |(_, new)| new)
+/// The changes of one table, grouped by the place they take in the migration.
+#[derive(Default)]
+struct TableChanges {
+    renames: Vec<Change>,
+    additions: Vec<Change>,
+    alterations: Vec<Change>,
+    dropped_constraints: Vec<Change>,
+    dropped_columns: Vec<Change>,
+    created_indexes: Vec<Change>,
+    /// Foreign keys wait until every table of the migration exists.
+    added_foreign_keys: Vec<Change>,
 }
 
-/// The statements that take a table from `before` to the model, under its
-/// current name. The foreign keys to add go to `added_foreign_keys`: they wait
-/// until every table exists.
-fn alter_table<'a>(
-    before: &'a TableSnapshot,
-    model: &'a Model,
-    table_renames: &Renames<'a>,
-    changes: &mut Vec<Change>,
-    added_foreign_keys: &mut Vec<Change>,
-) {
+/// Compares the columns. Returns the old and new names of those renamed.
+fn diff_columns<'a>(before: &'a Model, model: &'a Model, changes: &mut TableChanges) -> Renames<'a> {
     let table = quote(&model.table);
-    let mut renames = Vec::new();
-    let mut additions = Vec::new();
-    let mut alterations = Vec::new();
     let mut kept: Vec<&str> = Vec::new();
-    let mut column_renames: Renames = Vec::new();
+    let mut renames: Renames = Vec::new();
 
     for column in model.columns() {
-        let same_name = before.columns.iter().find(|existing| existing.name == column.name);
-        let previous = same_name.or_else(|| {
-            // A rename, unless the previous name is still a column of the model.
-            let previous = column.renamed_from.as_deref()?;
-            let still_used = model.columns().iter().any(|other| other.name == previous);
-            before
-                .columns
-                .iter()
-                .find(|existing| existing.name == previous && !still_used)
-        });
-        match previous {
-            Some(previous) => {
-                kept.push(&previous.name);
-                if previous.name != column.name {
-                    column_renames.push((&previous.name, &column.name));
-                    renames.push(Change::new(format!(
-                        "ALTER TABLE {table} RENAME COLUMN {} TO {};",
-                        quote(&previous.name),
-                        quote(&column.name)
-                    )));
-                }
-                alter_column(&model.table, previous, column, &mut alterations);
-            }
-            None => {
-                let sql = format!("ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {};", column.sql());
-                additions.push(if !column.nullable && column.default.is_none() {
-                    Change::risky(
-                        sql,
-                        format!(
-                            "fails if {} already has rows: {} is NOT NULL without a default. Give it a default, or add it as nullable and backfill it first.",
-                            model.table, column.name
-                        ),
-                    )
-                } else {
-                    Change::new(sql)
-                });
-            }
+        let previous = continued(
+            before.columns(),
+            |column| &column.name,
+            &column.name,
+            column.renamed_from.as_deref(),
+            |name| model.columns().iter().any(|other| other.name == name),
+        );
+        let Some(previous) = previous else {
+            let sql = column.add_sql(&model.table);
+            changes.additions.push(if !column.nullable && column.default.is_none() {
+                Change::risky(
+                    sql,
+                    format!(
+                        "fails if {} already has rows: {} is NOT NULL without a default. Give it a default, or add it as nullable and backfill it first.",
+                        model.table, column.name
+                    ),
+                )
+            } else {
+                Change::new(sql)
+            });
+            continue;
+        };
+        kept.push(&previous.name);
+        if previous.name != column.name {
+            renames.push((&previous.name, &column.name));
+            changes.renames.push(Change::new(format!(
+                "ALTER TABLE {table} RENAME COLUMN {} TO {};",
+                quote(&previous.name),
+                quote(&column.name)
+            )));
         }
+        alter_column(&model.table, previous, column, &mut changes.alterations);
     }
 
-    let removed_columns = before
-        .columns
-        .iter()
-        .filter(|column| !kept.contains(&column.name.as_str()))
-        .map(|column| {
-            Change::risky(
+    for column in before.columns() {
+        if !kept.contains(&column.name.as_str()) {
+            changes.dropped_columns.push(Change::risky(
                 format!("ALTER TABLE {table} DROP COLUMN IF EXISTS {};", quote(&column.name)),
                 format!("drops {}.{} and its data.", model.table, column.name),
-            )
-        });
+            ));
+        }
+    }
+    renames
+}
 
-    // A foreign key is the same link when its column and its target are, renames followed.
+/// Compares the foreign keys. A foreign key is the same link when its column
+/// and its target are, renames followed.
+fn diff_foreign_keys(
+    before: &Model,
+    model: &Model,
+    column_renames: &Renames,
+    table_renames: &Renames,
+    changes: &mut TableChanges,
+) {
+    let table = quote(&model.table);
     let same_link = |previous: &ForeignKeyDef, current: &ForeignKeyDef| {
-        renamed(&column_renames, &previous.column) == current.column
+        renamed(column_renames, &previous.column) == current.column
             && renamed(table_renames, &previous.table) == current.table
             && previous.references == current.references
     };
-    let mut kept_foreign_keys: Vec<&ForeignKeyDef> = Vec::new();
-    let mut dropped_foreign_keys = Vec::new();
+
+    let mut kept: Vec<&ForeignKeyDef> = Vec::new();
     for foreign_key in model.foreign_keys() {
         let link = before
-            .foreign_keys
+            .foreign_keys()
             .iter()
             .find(|previous| same_link(previous, foreign_key));
         match link {
             Some(previous) if previous.on_delete == foreign_key.on_delete => {
-                kept_foreign_keys.push(previous);
+                kept.push(previous);
                 // The constraint kept the name it was created with.
-                let (old, new) = (previous.name(&before.name), foreign_key.name(&model.table));
+                let (old, new) = (previous.name(&before.table), foreign_key.name(&model.table));
                 if old != new {
-                    renames.push(Change::new(format!(
+                    changes.renames.push(Change::new(format!(
                         "ALTER TABLE {table} RENAME CONSTRAINT {} TO {};",
                         quote(&old),
                         quote(&new)
@@ -311,8 +318,10 @@ fn alter_table<'a>(
                 }
             }
             // The same link with another action: the rows already satisfy it.
-            Some(_) => added_foreign_keys.push(Change::new(foreign_key.add_sql(&model.table))),
-            None => added_foreign_keys.push(Change::risky(
+            Some(_) => changes
+                .added_foreign_keys
+                .push(Change::new(foreign_key.add_sql(&model.table))),
+            None => changes.added_foreign_keys.push(Change::risky(
                 foreign_key.add_sql(&model.table),
                 format!(
                     "fails if a row of {} has a {} that is not the {} of a row of {}.",
@@ -321,66 +330,41 @@ fn alter_table<'a>(
             )),
         }
     }
-    for previous in &before.foreign_keys {
-        if !kept_foreign_keys.iter().any(|kept| std::ptr::eq(*kept, previous)) {
-            dropped_foreign_keys.push(Change::new(format!(
+    for previous in before.foreign_keys() {
+        if !kept.iter().any(|kept| std::ptr::eq(*kept, previous)) {
+            changes.dropped_constraints.push(Change::new(format!(
                 "ALTER TABLE {table} DROP CONSTRAINT IF EXISTS {};",
-                quote(&previous.name(&before.name))
+                quote(&previous.name(&before.table))
             )));
         }
     }
-
-    let mut dropped_indexes = Vec::new();
-    let mut created_indexes = Vec::new();
-    for index in model.indexes() {
-        match before.indexes.iter().find(|existing| existing.name == index.name) {
-            Some(existing) if existing == index => {}
-            existing => {
-                if existing.is_some() {
-                    dropped_indexes.push(Change::new(format!("DROP INDEX IF EXISTS {};", quote(&index.name))));
-                }
-                let sql = index.create_sql(&model.table);
-                created_indexes.push(if index.unique {
-                    Change::risky(
-                        sql,
-                        format!(
-                            "fails if two rows of {} have the same ({}).",
-                            model.table,
-                            index.columns.join(", ")
-                        ),
-                    )
-                } else {
-                    Change::new(sql)
-                });
-            }
-        }
-    }
-    for index in &before.indexes {
-        if !model.indexes().iter().any(|kept| kept.name == index.name) {
-            dropped_indexes.push(Change::new(format!("DROP INDEX IF EXISTS {};", quote(&index.name))));
-        }
-    }
-
-    changes.extend(renames);
-    changes.extend(additions);
-    changes.extend(alterations);
-    changes.extend(dropped_foreign_keys);
-    changes.extend(dropped_indexes);
-    changes.extend(removed_columns);
-    changes.extend(created_indexes);
 }
 
-/// The table a model continues: the one of the same name, or the one it was renamed from.
-fn table_before<'a>(previous: &'a SchemaSnapshot, models: &[Model], model: &Model) -> Option<&'a TableSnapshot> {
-    let same_name = previous.tables.iter().find(|table| table.name == model.table);
-    same_name.or_else(|| {
-        let renamed_from = model.previous_name()?;
-        let still_used = models.iter().any(|other| other.table == renamed_from);
-        previous
-            .tables
-            .iter()
-            .find(|table| table.name == renamed_from && !still_used)
-    })
+/// Compares the indexes: one that changed is dropped and created again.
+fn diff_indexes(before: &Model, model: &Model, changes: &mut TableChanges) {
+    for index in before.indexes() {
+        if !model.indexes().contains(index) {
+            changes.dropped_constraints.push(Change::new(index.drop_sql()));
+        }
+    }
+    for index in model.indexes() {
+        if before.indexes().contains(index) {
+            continue;
+        }
+        let sql = index.create_sql(&model.table);
+        changes.created_indexes.push(if index.unique {
+            Change::risky(
+                sql,
+                format!(
+                    "fails if two rows of {} have the same ({}).",
+                    model.table,
+                    index.columns.join(", ")
+                ),
+            )
+        } else {
+            Change::new(sql)
+        });
+    }
 }
 
 /// The statements that take a database matching `previous` to `models`.
@@ -390,46 +374,63 @@ fn table_before<'a>(previous: &'a SchemaSnapshot, models: &[Model], model: &Mode
 /// keys are added after every table exists, and tables are dropped starting
 /// with those that reference others.
 pub fn diff(previous: &SchemaSnapshot, models: &[Model]) -> Vec<Change> {
-    let matched: Vec<(&Model, Option<&TableSnapshot>)> = models
+    let matched: Vec<(&Model, Option<&Model>)> = models
         .iter()
-        .map(|model| (model, table_before(previous, models, model)))
+        .map(|model| {
+            let before = continued(
+                &previous.tables,
+                |table| &table.table,
+                &model.table,
+                model.previous_name(),
+                |name| models.iter().any(|other| other.table == name),
+            );
+            (model, before)
+        })
         .collect();
     let table_renames: Renames = matched
         .iter()
-        .filter_map(|(model, before)| Some((before.as_ref()?.name.as_str(), model.table.as_str())))
+        .filter_map(|(model, before)| Some((before.as_ref()?.table.as_str(), model.table.as_str())))
         .filter(|(old, new)| old != new)
         .collect();
 
     let mut changes = Vec::new();
     let mut added_foreign_keys = Vec::new();
     for (model, before) in &matched {
-        match before {
-            Some(before) => {
-                if before.name != model.table {
-                    changes.push(Change::new(format!(
-                        "ALTER TABLE {} RENAME TO {};",
-                        quote(&before.name),
-                        quote(&model.table)
-                    )));
-                }
-                alter_table(before, model, &table_renames, &mut changes, &mut added_foreign_keys);
-            }
-            None => {
-                changes.push(Change::new(model.create_sql()));
-                // A new table has no row that could break its foreign keys.
-                added_foreign_keys.extend(
-                    model
-                        .foreign_keys()
-                        .iter()
-                        .map(|foreign_key| Change::new(foreign_key.add_sql(&model.table))),
-                );
-            }
+        let Some(before) = before else {
+            changes.push(Change::new(model.create_sql()));
+            // A new table has no row that could break its foreign keys.
+            added_foreign_keys.extend(
+                model
+                    .foreign_keys()
+                    .iter()
+                    .map(|foreign_key| Change::new(foreign_key.add_sql(&model.table))),
+            );
+            continue;
+        };
+        if before.table != model.table {
+            changes.push(Change::new(format!(
+                "ALTER TABLE {} RENAME TO {};",
+                quote(&before.table),
+                quote(&model.table)
+            )));
         }
+        let mut table = TableChanges::default();
+        let column_renames = diff_columns(before, model, &mut table);
+        diff_foreign_keys(before, model, &column_renames, &table_renames, &mut table);
+        diff_indexes(before, model, &mut table);
+
+        changes.extend(table.renames);
+        changes.extend(table.additions);
+        changes.extend(table.alterations);
+        changes.extend(table.dropped_constraints);
+        changes.extend(table.dropped_columns);
+        changes.extend(table.created_indexes);
+        added_foreign_keys.extend(table.added_foreign_keys);
     }
     changes.extend(added_foreign_keys);
 
     // A table is dropped once no other table to drop references it.
-    let mut dropped: Vec<&TableSnapshot> = previous
+    let mut dropped: Vec<&Model> = previous
         .tables
         .iter()
         .filter(|table| {
@@ -443,34 +444,19 @@ pub fn diff(previous: &SchemaSnapshot, models: &[Model]) -> Vec<Change> {
             !dropped.iter().any(|other| {
                 !std::ptr::eq(*other, *table)
                     && other
-                        .foreign_keys
+                        .foreign_keys()
                         .iter()
-                        .any(|foreign_key| foreign_key.table == table.name)
+                        .any(|foreign_key| foreign_key.table == table.table)
             })
         });
         // Tables that reference each other are dropped in the order of the snapshot.
         let table = dropped.remove(free.unwrap_or(0));
         changes.push(Change::risky(
-            format!("DROP TABLE IF EXISTS {};", quote(&table.name)),
-            format!("drops the table {} and its data.", table.name),
+            format!("DROP TABLE IF EXISTS {};", quote(&table.table)),
+            format!("drops the table {} and its data.", table.table),
         ));
     }
     changes
-}
-
-/// A short description of each change, for messages.
-pub fn summarize(changes: &[Change]) -> Vec<String> {
-    changes
-        .iter()
-        .map(|change| {
-            let first_line = change.sql.lines().next().unwrap_or_default();
-            first_line
-                .trim_start_matches("-- TODO: ")
-                .trim_end_matches([';', '('])
-                .trim()
-                .to_string()
-        })
-        .collect()
 }
 
 #[cfg(test)]
@@ -492,7 +478,6 @@ mod tests {
     #[test]
     fn identical_models_need_no_statement() {
         assert!(diff(&SchemaSnapshot::of(&[reviews()]), &[reviews()]).is_empty());
-        assert!(SchemaSnapshot::of(&[reviews()]).matches(&[reviews()]));
         // A definition written as a string compares on what it means.
         let written = define_model("reviews")
             .column("product_id", "TEXT not null")

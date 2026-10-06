@@ -8,11 +8,13 @@ use syn::{
     Type, Visibility,
 };
 
+use crate::util::{constant_ident, plain_name, set, set_value};
+
 /// `api_url` → `apiUrl`: the key a field has in the saved configuration.
 fn camel_case(name: &str) -> String {
     let mut camel = String::new();
     let mut capitalize = false;
-    for character in name.trim_start_matches("r#").chars() {
+    for character in name.chars() {
         if character == '_' {
             capitalize = !camel.is_empty();
         } else if capitalize {
@@ -36,14 +38,6 @@ struct FieldOptions {
     /// Label and value of each choice.
     select: Option<Vec<(LitStr, LitStr)>>,
     validate: Option<Expr>,
-}
-
-fn set(slot: &mut Option<LitStr>, meta: &syn::meta::ParseNestedMeta) -> syn::Result<()> {
-    if slot.is_some() {
-        return Err(meta.error("given twice"));
-    }
-    *slot = Some(meta.value()?.parse()?);
-    Ok(())
 }
 
 /// `select("Europe" = "eu", "United States" = "us")`.
@@ -79,26 +73,18 @@ fn field_options(field: &syn::Field) -> syn::Result<FieldOptions> {
     {
         attribute.parse_nested_meta(|meta| {
             if meta.path.is_ident("label") {
-                set(&mut options.label, &meta)
+                set_value(&mut options.label, &meta)
             } else if meta.path.is_ident("name") {
-                set(&mut options.name, &meta)
+                set_value(&mut options.name, &meta)
             } else if meta.path.is_ident("placeholder") {
-                set(&mut options.placeholder, &meta)
+                set_value(&mut options.placeholder, &meta)
             } else if meta.path.is_ident("password") {
                 options.password = true;
                 Ok(())
             } else if meta.path.is_ident("select") {
-                if options.select.is_some() {
-                    return Err(meta.error("given twice"));
-                }
-                options.select = Some(parse_choices(&meta)?);
-                Ok(())
+                set(&mut options.select, &meta, parse_choices)
             } else if meta.path.is_ident("validate") {
-                if options.validate.is_some() {
-                    return Err(meta.error("given twice"));
-                }
-                options.validate = Some(meta.value()?.parse()?);
-                Ok(())
+                set_value(&mut options.validate, &meta)
             } else {
                 Err(meta.error(
                     "unknown field option; expected `label`, `name`, `placeholder`, `password`, `select(…)` or `validate`",
@@ -149,7 +135,7 @@ pub fn derive_config(input: DeriveInput) -> syn::Result<TokenStream> {
         }
         let key = match &options.name {
             Some(key) => key.value(),
-            None => camel_case(&ident.to_string()),
+            None => camel_case(&plain_name(ident)),
         };
         if keys.contains(&key) {
             return Err(syn::Error::new(
@@ -372,8 +358,8 @@ pub fn provider(name: LitStr, mut item: ItemImpl) -> syn::Result<TokenStream> {
     for method in &methods {
         let function = method.function;
         let ident = &function.sig.ident;
-        let method_name = ident.to_string().trim_start_matches("r#").to_string();
-        let constant = Ident::new(&method_name.to_uppercase(), ident.span());
+        let method_name = plain_name(ident);
+        let constant = constant_ident(ident);
         let visibility = &function.vis;
         let docs = docs(function);
         let output = method.output;
@@ -417,7 +403,7 @@ pub fn provider(name: LitStr, mut item: ItemImpl) -> syn::Result<TokenStream> {
                 &self,
                 #(#names: impl ::core::borrow::Borrow<#types>),*
             ) -> #krate::Result<#ok> {
-                self.connectors.invoke_by_name(#name, #method_name, #sent).await
+                self.connectors.call_as(#name, #method_name, #sent).await
             }
         });
     }
@@ -484,7 +470,6 @@ mod tests {
             ("api_url", "apiUrl"),
             ("key", "key"),
             ("batch_size_max", "batchSizeMax"),
-            ("r#type", "type"),
             ("_private", "private"),
         ] {
             assert_eq!(camel_case(field), key);
@@ -614,8 +599,8 @@ mod tests {
             "pub fn on (connectors : & :: openshop :: Connectors) -> WarehouseConnector < '_ >",
             "pub struct WarehouseConnector < 'a >",
             "# [doc = r\" Sends orders.\"] pub async fn push (& self , orders : impl :: core :: borrow :: Borrow < Vec < Order > >)",
-            "invoke_by_name (\"warehouse\" , \"move_stock\" , (< _ as :: core :: borrow :: Borrow < String >> :: borrow (& sku) , < _ as :: core :: borrow :: Borrow < i64 >> :: borrow (& quantity) ,))",
-            "invoke_by_name (\"warehouse\" , \"ping\" , ())",
+            "call_as (\"warehouse\" , \"move_stock\" , (< _ as :: core :: borrow :: Borrow < String >> :: borrow (& sku) , < _ as :: core :: borrow :: Borrow < i64 >> :: borrow (& quantity) ,))",
+            "call_as (\"warehouse\" , \"ping\" , ())",
         ] {
             assert!(generated.contains(expected), "missing `{expected}` in:\n{generated}");
         }

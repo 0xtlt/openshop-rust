@@ -3,11 +3,10 @@
 
 mod common;
 
-use common::noop_flow;
+use common::{noop_flow, shop_connectors as connectors};
 use openshop::testing::TestContext;
 use openshop::{
-    Connectors, FieldDef, Flow, OpenShopBuilder, OpenShopConfig, Provider, ProviderCall, RunFlowResult, Value, json,
-    validators,
+    FieldDef, Flow, OpenShopBuilder, OpenShopConfig, Provider, ProviderCall, RunFlowResult, Value, json, validators,
 };
 use serde::{Deserialize, Serialize};
 
@@ -84,17 +83,7 @@ async fn context() -> TestContext {
 }
 
 async fn save_config(ctx: &TestContext, config: Value) {
-    let response = ctx
-        .put("/api/providers/warehouse")
-        .json(&json!({ "config": config }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(response.status(), 200);
-}
-
-async fn connectors(ctx: &TestContext) -> Connectors {
-    ctx.app.connectors(&ctx.shop, "default").await.unwrap()
+    common::save_provider_config(ctx, "warehouse", config).await;
 }
 
 #[tokio::test]
@@ -220,14 +209,7 @@ async fn invoking_a_call_that_is_not_registered_fails_by_name() {
 async fn the_typed_checker_receives_the_stored_configuration() {
     let ctx = context().await;
 
-    let unconfigured: Value = ctx
-        .post("/api/providers/warehouse/check")
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
+    let unconfigured: Value = common::check_provider(&ctx, "warehouse").await;
     assert_eq!(
         unconfigured,
         json!({
@@ -238,14 +220,7 @@ async fn the_typed_checker_receives_the_stored_configuration() {
 
     for (api_key, expected) in [("secret-1", true), ("wrong", false)] {
         save_config(&ctx, json!({ "apiUrl": "https://warehouse.test", "apiKey": api_key })).await;
-        let checked: Value = ctx
-            .post("/api/providers/warehouse/check")
-            .send()
-            .await
-            .unwrap()
-            .json()
-            .await
-            .unwrap();
+        let checked: Value = common::check_provider(&ctx, "warehouse").await;
         assert_eq!(checked, json!({ "ok": expected }), "{api_key}");
     }
     ctx.shutdown().await.unwrap();

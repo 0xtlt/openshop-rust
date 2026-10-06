@@ -5,11 +5,11 @@ mod common;
 
 use std::path::{Path, PathBuf};
 
-use common::{TEST_SHOP, create_config, noop_flow, test_env};
+use common::{TEST_SHOP, TempProject, create_config, empty_database, noop_flow, test_env};
 use openshop::db::define_model;
 use openshop::db::migrate::{
-    FRAMEWORK_MIGRATIONS, MIGRATIONS_DIR, MigrationStatus, check_client_migrations, generate_client_migrations,
-    get_client_migration_status, migrate_schema, push_schema,
+    FRAMEWORK_MIGRATIONS, MigrationStatus, check_migrations, generate_migrations, get_client_migration_status,
+    migrate_schema, push_schema,
 };
 use openshop::testing::{MockTransport, TestDb};
 use openshop::{DispatchFlowParams, OpenShop, PgPool};
@@ -27,62 +27,13 @@ ALTER TABLE openshop_project_migration_test ADD COLUMN name text;
 ";
 
 /// A project directory that is removed when the test ends.
-struct Project {
-    dir: PathBuf,
-}
-
-impl Project {
-    fn empty() -> Self {
-        let dir = std::env::temp_dir().join(format!("openshop-migrations-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
-        Self { dir }
-    }
-
-    /// A project with two migrations, the second depending on the first.
-    fn with_migrations() -> Self {
-        let project = Self::empty();
-        // Written out of order: only the file names decide the order.
-        project.write(NEXT, NEXT_SQL);
-        project.write(INIT, INIT_SQL);
-        project
-    }
-
-    fn path(&self) -> &Path {
-        &self.dir
-    }
-
-    fn folder(&self) -> PathBuf {
-        self.dir.join(MIGRATIONS_DIR)
-    }
-
-    fn write(&self, tag: &str, sql: &str) {
-        self.write_file(&format!("{tag}.sql"), sql);
-    }
-
-    fn write_file(&self, name: &str, content: &str) {
-        let path = self.folder().join(name);
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(path, content).unwrap();
-    }
-}
-
-impl Drop for Project {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.dir);
-    }
-}
-
-/// A database without any table, as before the first deployment.
-async fn empty_database() -> TestDb {
-    let db = TestDb::create().await.unwrap();
-    sqlx::raw_sql(&format!(
-        "DROP SCHEMA \"{0}\" CASCADE; CREATE SCHEMA \"{0}\"",
-        db.schema
-    ))
-    .execute(&db.pool)
-    .await
-    .unwrap();
-    db
+/// A project with two migrations, the second depending on the first.
+fn project_with_migrations() -> TempProject {
+    let project = TempProject::new();
+    // Written out of order: only the file names decide the order.
+    project.write(NEXT, NEXT_SQL);
+    project.write(INIT, INIT_SQL);
+    project
 }
 
 async fn tables(pool: &PgPool) -> Vec<String> {
@@ -106,18 +57,23 @@ async fn columns(pool: &PgPool, table: &str) -> Vec<String> {
     .unwrap()
 }
 
+/// Generates for an application without models and returns the files.
+fn generate(cwd: &Path, args: &[String], production: bool) -> openshop::Result<Vec<PathBuf>> {
+    Ok(generate_migrations(cwd, args, production, &[])?.files)
+}
+
 fn tags(tags: &[&str]) -> Vec<String> {
     tags.iter().map(|tag| tag.to_string()).collect()
 }
 
-async fn status(db: &TestDb, project: &Project) -> MigrationStatus {
+async fn status(db: &TestDb, project: &TempProject) -> MigrationStatus {
     get_client_migration_status(&db.pool, project.path()).await.unwrap()
 }
 
 #[tokio::test]
 async fn migrate_fails_when_client_migrations_are_missing() {
     let db = TestDb::create().await.unwrap();
-    let project = Project::empty();
+    let project = TempProject::new();
     let expected = "[openshop] No client migrations found in ./migrations. Run `openshop migrate generate`, \
                     review the generated SQL, then run `openshop migrate`.";
 
@@ -136,7 +92,7 @@ async fn migrate_fails_when_client_migrations_are_missing() {
 #[tokio::test]
 async fn status_reports_pending_client_migrations_before_migrate() {
     let db = TestDb::create().await.unwrap();
-    let project = Project::with_migrations();
+    let project = project_with_migrations();
 
     assert_eq!(
         status(&db, &project).await,
@@ -153,7 +109,7 @@ async fn status_reports_pending_client_migrations_before_migrate() {
 #[tokio::test]
 async fn migrate_applies_client_migrations_in_file_name_order() {
     let db = TestDb::create().await.unwrap();
-    let project = Project::with_migrations();
+    let project = project_with_migrations();
     project.write(
         "0010_project_index",
         "CREATE INDEX project_name_idx ON openshop_project_migration_test (name);",
@@ -198,7 +154,7 @@ async fn migrate_applies_client_migrations_in_file_name_order() {
 #[tokio::test]
 async fn migrate_only_applies_what_is_pending() {
     let db = TestDb::create().await.unwrap();
-    let project = Project::with_migrations();
+    let project = project_with_migrations();
 
     assert_eq!(
         migrate_schema(&db.pool, project.path()).await.unwrap(),
@@ -233,7 +189,7 @@ async fn migrate_only_applies_what_is_pending() {
 #[tokio::test]
 async fn migrate_only_reads_sql_files_of_the_migrations_folder() {
     let db = TestDb::create().await.unwrap();
-    let project = Project::with_migrations();
+    let project = project_with_migrations();
     project.write_file("README.md", "not SQL");
     project.write_file("0002_draft.sql.bak", "SELECT * FROM table_that_does_not_exist;");
     project.write_file(".0003_hidden.sql", "SELECT * FROM table_that_does_not_exist;");
@@ -257,7 +213,7 @@ async fn migrate_only_reads_sql_files_of_the_migrations_folder() {
 #[tokio::test]
 async fn migration_can_contain_several_statements_and_dollar_quoted_bodies() {
     let db = TestDb::create().await.unwrap();
-    let project = Project::with_migrations();
+    let project = project_with_migrations();
     project.write(
         "0002_project_trigger",
         "
@@ -289,7 +245,7 @@ INSERT INTO openshop_project_migration_test (id) VALUES (1), (2);
 #[tokio::test]
 async fn migrate_rejects_a_migration_modified_after_it_was_applied() {
     let db = TestDb::create().await.unwrap();
-    let project = Project::with_migrations();
+    let project = project_with_migrations();
     migrate_schema(&db.pool, project.path()).await.unwrap();
 
     project.write(INIT, &INIT_SQL.replace("integer", "bigint"));
@@ -321,7 +277,7 @@ async fn migrate_rejects_a_migration_modified_after_it_was_applied() {
 #[tokio::test]
 async fn migrate_fails_on_real_migration_errors() {
     let db = TestDb::create().await.unwrap();
-    let project = Project::with_migrations();
+    let project = project_with_migrations();
     project.write(INIT, "SELECT * FROM table_that_does_not_exist;");
 
     let error = migrate_schema(&db.pool, project.path()).await.unwrap_err();
@@ -337,7 +293,7 @@ async fn migrate_fails_on_real_migration_errors() {
 #[tokio::test]
 async fn failing_migration_is_rolled_back_and_reported_by_its_tag() {
     let db = TestDb::create().await.unwrap();
-    let project = Project::with_migrations();
+    let project = project_with_migrations();
     project.write(
         "0002_broken",
         "
@@ -384,7 +340,7 @@ INSERT INTO table_that_does_not_exist VALUES (1);
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_migrators_apply_each_migration_once() {
     let db = TestDb::create().await.unwrap();
-    let project = Project::with_migrations();
+    let project = project_with_migrations();
     project.write(
         "0002_project_seed",
         "INSERT INTO openshop_project_migration_test (id, name) VALUES (1, 'seed');",
@@ -416,14 +372,14 @@ async fn concurrent_migrators_apply_each_migration_once() {
 async fn generate_then_migrate_creates_the_framework_tables() {
     let db = empty_database().await;
     assert!(tables(&db.pool).await.is_empty());
-    let project = Project::empty();
-    let error = check_client_migrations(project.path()).unwrap_err();
+    let project = TempProject::new();
+    let error = check_migrations(project.path(), &[]).unwrap_err();
     assert!(error.to_string().contains("is not covered by ./migrations"), "{error}");
 
-    let created = generate_client_migrations(project.path(), &[], false).unwrap();
+    let created = generate(project.path(), &[], false).unwrap();
     assert_eq!(created.len(), FRAMEWORK_MIGRATIONS.len());
     assert!(created.iter().all(|path| path.starts_with(project.folder())));
-    check_client_migrations(project.path()).unwrap();
+    check_migrations(project.path(), &[]).unwrap();
     let generated: Vec<String> = created
         .iter()
         .map(|path| path.file_stem().unwrap().to_string_lossy().into_owned())
@@ -460,11 +416,7 @@ async fn generate_then_migrate_creates_the_framework_tables() {
         .unwrap();
 
     // Nothing is left to generate or to apply.
-    assert!(
-        generate_client_migrations(project.path(), &[], false)
-            .unwrap()
-            .is_empty()
-    );
+    assert!(generate(project.path(), &[], false).unwrap().is_empty());
     assert!(migrate_schema(&db.pool, project.path()).await.unwrap().is_empty());
     let status = status(&db, &project).await;
     assert_eq!(status.applied, generated);
@@ -475,9 +427,9 @@ async fn generate_then_migrate_creates_the_framework_tables() {
 #[tokio::test]
 async fn generated_and_hand_written_migrations_apply_together() {
     let db = empty_database().await;
-    let project = Project::empty();
+    let project = TempProject::new();
 
-    let created = generate_client_migrations(project.path(), &["--name=Add Reviews".to_string()], false).unwrap();
+    let created = generate(project.path(), &["--name=Add Reviews".to_string()], false).unwrap();
     assert_eq!(created.len(), FRAMEWORK_MIGRATIONS.len() + 1);
     let custom = created.last().unwrap();
     assert!(custom.to_string_lossy().ends_with("_add_reviews.sql"));
@@ -498,9 +450,9 @@ async fn generated_and_hand_written_migrations_apply_together() {
 #[tokio::test]
 async fn generated_placeholder_migration_can_be_applied_before_it_is_filled_in() {
     let db = empty_database().await;
-    let project = Project::empty();
+    let project = TempProject::new();
 
-    let created = generate_client_migrations(project.path(), &["--name=later".to_string()], false).unwrap();
+    let created = generate(project.path(), &["--name=later".to_string()], false).unwrap();
     let placeholder = std::fs::read_to_string(created.last().unwrap()).unwrap();
     assert!(placeholder.lines().all(|line| line.starts_with("--")), "{placeholder}");
 
@@ -512,9 +464,9 @@ async fn generated_placeholder_migration_can_be_applied_before_it_is_filled_in()
 
 #[tokio::test]
 async fn generate_refuses_to_run_in_production() {
-    let project = Project::empty();
+    let project = TempProject::new();
 
-    let error = generate_client_migrations(project.path(), &[], true).unwrap_err();
+    let error = generate(project.path(), &[], true).unwrap_err();
     assert!(
         error
             .to_string()
@@ -525,9 +477,7 @@ async fn generate_refuses_to_run_in_production() {
 
     let allowed = ["--allow-generate-in-production".to_string()];
     assert_eq!(
-        generate_client_migrations(project.path(), &allowed, true)
-            .unwrap()
-            .len(),
+        generate(project.path(), &allowed, true).unwrap().len(),
         FRAMEWORK_MIGRATIONS.len()
     );
 }

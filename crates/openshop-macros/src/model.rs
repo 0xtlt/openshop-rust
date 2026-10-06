@@ -3,7 +3,9 @@
 use proc_macro2::{Span, TokenStream};
 use quote::{format_ident, quote};
 use syn::spanned::Spanned;
-use syn::{Data, DeriveInput, Fields, Ident, LitStr, Type, Visibility};
+use syn::{Data, DataStruct, DeriveInput, Fields, Ident, LitStr, Type, Visibility};
+
+use crate::util::{constant_ident, plain_name, set, set_value};
 
 /// Identifiers PostgreSQL would truncate are refused: two long names could collide.
 const MAX_IDENTIFIER: usize = 63;
@@ -68,12 +70,9 @@ impl ModelField {
     }
 }
 
-fn set(slot: &mut Option<LitStr>, meta: &syn::meta::ParseNestedMeta) -> syn::Result<()> {
-    if slot.is_some() {
-        return Err(meta.error("given twice"));
-    }
-    *slot = Some(meta.value()?.parse()?);
-    Ok(())
+/// `"name"`, as `openshop::db` quotes identifiers.
+fn quote_identifier(name: &str) -> String {
+    format!("\"{}\"", name.replace('"', "\"\""))
 }
 
 fn parse_index(meta: &syn::meta::ParseNestedMeta, unique: bool) -> syn::Result<IndexSpec> {
@@ -85,7 +84,7 @@ fn parse_index(meta: &syn::meta::ParseNestedMeta, unique: bool) -> syn::Result<I
     };
     meta.parse_nested_meta(|inner| {
         if inner.path.is_ident("name") {
-            return set(&mut spec.name, &inner);
+            return set_value(&mut spec.name, &inner);
         }
         match inner.path.get_ident() {
             Some(field) => {
@@ -140,9 +139,9 @@ fn struct_options(input: &DeriveInput) -> syn::Result<StructOptions> {
     {
         attribute.parse_nested_meta(|meta| {
             if meta.path.is_ident("table") {
-                set(&mut options.table, &meta)
+                set_value(&mut options.table, &meta)
             } else if meta.path.is_ident("renamed_from") {
-                set(&mut options.renamed_from, &meta)
+                set_value(&mut options.renamed_from, &meta)
             } else if meta.path.is_ident("index") {
                 options.indexes.push(parse_index(&meta, false)?);
                 Ok(())
@@ -166,21 +165,17 @@ fn field_options(field: &syn::Field) -> syn::Result<FieldOptions> {
     {
         attribute.parse_nested_meta(|meta| {
             if meta.path.is_ident("column") {
-                set(&mut options.column, &meta)
+                set_value(&mut options.column, &meta)
             } else if meta.path.is_ident("default") {
-                set(&mut options.default, &meta)
+                set_value(&mut options.default, &meta)
             } else if meta.path.is_ident("sql_type") {
-                set(&mut options.sql_type, &meta)
+                set_value(&mut options.sql_type, &meta)
             } else if meta.path.is_ident("renamed_from") {
-                set(&mut options.renamed_from, &meta)
+                set_value(&mut options.renamed_from, &meta)
             } else if meta.path.is_ident("references") {
-                if options.references.is_some() {
-                    return Err(meta.error("given twice"));
-                }
-                options.references = Some(parse_reference(&meta)?);
-                Ok(())
+                set(&mut options.references, &meta, parse_reference)
             } else if meta.path.is_ident("on_delete") {
-                set(&mut options.on_delete, &meta)
+                set_value(&mut options.on_delete, &meta)
             } else if meta.path.is_ident("index") {
                 options.index = true;
                 Ok(())
@@ -245,13 +240,11 @@ pub fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
     let name = &input.ident;
     let visibility = &input.vis;
 
-    let Data::Struct(data) = &input.data else {
-        return Err(syn::Error::new(
-            name.span(),
-            "`Model` is derived on a struct with named fields",
-        ));
-    };
-    let Fields::Named(named) = &data.fields else {
+    let Data::Struct(DataStruct {
+        fields: Fields::Named(named),
+        ..
+    }) = &input.data
+    else {
         return Err(syn::Error::new(
             name.span(),
             "`Model` is derived on a struct with named fields",
@@ -276,7 +269,7 @@ pub fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
         let options = field_options(field)?;
         let column = match &options.column {
             Some(column) => column.value(),
-            None => ident.to_string().trim_start_matches("r#").to_string(),
+            None => plain_name(&ident),
         };
         fields.push(ModelField {
             ident,
@@ -310,12 +303,13 @@ pub fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
             }
         }
     }
-    if !fields.iter().any(|field| field.column == "id") {
+    let Some(id_field) = fields.iter().find(|field| field.column == "id") else {
         return Err(syn::Error::new(
             name.span(),
             "a model needs its primary key: add `pub id: Uuid`",
         ));
-    }
+    };
+    let id_field = &id_field.ident;
     let has_shop = fields.iter().any(|field| field.column == "shop");
     let has_updated_at = fields.iter().any(|field| field.column == "updated_at");
 
@@ -325,10 +319,11 @@ pub fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
         let column = &field.column;
         let ty = &field.ty;
         match column.as_str() {
-            "id" => quote!(#krate::db::ColumnDef::id()),
-            "shop" => quote!(#krate::db::ColumnDef::shop()),
-            "created_at" => quote!(#krate::db::ColumnDef::created_at()),
-            "updated_at" => quote!(#krate::db::ColumnDef::updated_at()),
+            // `ColumnDef` has a constructor named after each conventional column.
+            conventional if field.is_conventional() => {
+                let constructor = format_ident!("{}", conventional);
+                quote!(#krate::db::ColumnDef::#constructor())
+            }
             _ => {
                 let sql_type = match &field.options.sql_type {
                     Some(sql_type) => quote!(#sql_type),
@@ -366,12 +361,7 @@ pub fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
         indexes.push((index, columns, spec.unique));
     }
     for field in &fields {
-        for unique in [false, true] {
-            let wanted = if unique {
-                field.options.unique
-            } else {
-                field.options.index
-            };
+        for (wanted, unique) in [(field.options.index, false), (field.options.unique, true)] {
             if wanted {
                 let columns = vec![field.column.clone()];
                 let index = index_name(&table_name, &columns, None, unique, field.ident.span())?;
@@ -418,10 +408,7 @@ pub fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
 
     // ── Typed columns ───────────────────────────────────────────────
     let constants = fields.iter().map(|field| {
-        let constant = Ident::new(
-            &field.ident.to_string().trim_start_matches("r#").to_uppercase(),
-            field.ident.span(),
-        );
+        let constant = constant_ident(&field.ident);
         let column = &field.column;
         let ty = &field.ty;
         let field_visibility = &field.visibility;
@@ -452,13 +439,9 @@ pub fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
     });
     let mut insert_columns: Vec<String> = Vec::new();
     if has_shop {
-        insert_columns.push("\"shop\"".to_string());
+        insert_columns.push(quote_identifier("shop"));
     }
-    insert_columns.extend(
-        inserted
-            .iter()
-            .map(|field| format!("\"{}\"", field.column.replace('"', "\"\""))),
-    );
+    insert_columns.extend(inserted.iter().map(|field| quote_identifier(&field.column)));
     let push_insert = if insert_columns.is_empty() {
         quote! {
             let _ = (new, shop);
@@ -502,7 +485,7 @@ pub fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
         .iter()
         .map(|field| {
             let ident = &field.ident;
-            let assignment = format!("\"{}\" = ", field.column.replace('"', "\"\""));
+            let assignment = format!("{} = ", quote_identifier(&field.column));
             quote! {
                 assignments.push(#assignment);
                 assignments.push_bind_unseparated(::core::clone::Clone::clone(&self.#ident));
@@ -541,11 +524,6 @@ pub fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
         }
     };
 
-    let id_field = &fields
-        .iter()
-        .find(|field| field.column == "id")
-        .expect("checked above")
-        .ident;
     let new_doc =
         format!(" What inserting a [`{name}`] takes: its fields, without those the database fills and without `shop`.");
 

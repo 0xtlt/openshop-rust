@@ -3,6 +3,7 @@
 
 mod model;
 mod provider;
+mod util;
 
 use std::collections::HashMap;
 use std::ffi::OsStr;
@@ -11,7 +12,7 @@ use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
 use openshop_graphql::codegen::{DATA_TYPE, VARIABLES_TYPE, data_types, variable_type, variables_types};
-use openshop_graphql::{Operation, PROJECT_SCHEMA_PATH, SCHEMA_ENV, Schema, analyze};
+use openshop_graphql::{Operation, PROJECT_SCHEMA_PATH, SCHEMA_ENV, Schema, Variable, analyze};
 use proc_macro2::{Span, TokenStream};
 use quote::{format_ident, quote, quote_spanned};
 use syn::parse::{Parse, ParseStream};
@@ -88,23 +89,69 @@ impl Parse for Input {
 /// Parsed schema files by path, with the modification time they were read at.
 type SchemaCache = HashMap<PathBuf, (Option<SystemTime>, Arc<Schema>)>;
 
-/// A schema, and the file it was read from when it is not the bundled one.
-struct LoadedSchema {
-    schema: SchemaSource,
-    file: Option<PathBuf>,
-}
-
-enum SchemaSource {
+/// The schema operations are checked against.
+enum LoadedSchema {
+    /// The one shipped with the framework.
     Bundled,
-    File(Arc<Schema>),
+    /// The one of the crate being compiled.
+    File { path: PathBuf, schema: Arc<Schema> },
 }
 
 impl LoadedSchema {
+    /// The schema of the crate being compiled, else the bundled one.
+    fn load() -> Result<Self, String> {
+        let manifest_dir = std::env::var_os("CARGO_MANIFEST_DIR").map(PathBuf::from);
+        let named = std::env::var_os(SCHEMA_ENV);
+        Ok(match schema_file(manifest_dir.as_deref(), named.as_deref())? {
+            Some(path) => Self::File {
+                schema: read_schema(&path)?,
+                path,
+            },
+            None => Self::Bundled,
+        })
+    }
+
     fn schema(&self) -> &Schema {
-        match &self.schema {
-            SchemaSource::Bundled => Schema::bundled(),
-            SchemaSource::File(schema) => schema,
+        match self {
+            Self::Bundled => Schema::bundled(),
+            Self::File { schema, .. } => schema,
         }
+    }
+
+    /// Makes the compiler rebuild the crate when what the expansion depends on changes.
+    fn tracking(&self) -> TokenStream {
+        // One operation of the crate is enough to track the file, which is large.
+        static TRACKED: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+        let file = match self {
+            Self::File { path, .. } => {
+                let mut tracked = TRACKED.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                (!tracked.contains(path)).then(|| {
+                    tracked.push(path.clone());
+                    let path = path.to_string_lossy().to_string();
+                    quote!(
+                        const _: &[u8] = ::core::include_bytes!(#path);
+                    )
+                })
+            }
+            Self::Bundled => None,
+        };
+        quote! {
+            const _: ::core::option::Option<&str> = ::core::option_env!(#SCHEMA_ENV);
+            #file
+        }
+    }
+
+    /// Checks an operation, pointing a refusal at its text.
+    fn check(&self, query: &LitStr) -> syn::Result<Operation> {
+        analyze(self.schema(), &query.value()).map_err(|error| {
+            syn::Error::new(
+                query.span(),
+                format!(
+                    "{error}\n(checked against the Shopify Admin API {})",
+                    self.schema().api_version
+                ),
+            )
+        })
     }
 }
 
@@ -152,168 +199,137 @@ fn read_schema(file: &Path) -> Result<Arc<Schema>, String> {
     Ok(schema)
 }
 
-/// The schema operations are checked against: the one of the crate being
-/// compiled, else the bundled one.
-fn load_schema() -> Result<LoadedSchema, String> {
-    let manifest_dir = std::env::var_os("CARGO_MANIFEST_DIR").map(PathBuf::from);
-    let named = std::env::var_os(SCHEMA_ENV);
-    Ok(match schema_file(manifest_dir.as_deref(), named.as_deref())? {
-        Some(file) => LoadedSchema {
-            schema: SchemaSource::File(read_schema(&file)?),
-            file: Some(file),
-        },
-        None => LoadedSchema {
-            schema: SchemaSource::Bundled,
-            file: None,
-        },
-    })
-}
+/// `graphql!("…", name = value)`: the operation as a value.
+fn expand_expression(schema: &LoadedSchema, query: &LitStr, variables: &[(Ident, Expr)]) -> syn::Result<TokenStream> {
+    let krate = quote!(::openshop);
+    let operation = schema.check(query)?;
 
-/// Makes the compiler rebuild the crate when what the expansion depends on changes.
-fn tracking(schema: &LoadedSchema) -> TokenStream {
-    let file = schema.file.as_ref().map(|file| {
-        let path = file.to_string_lossy().to_string();
-        quote!(
-            const _: &[u8] = ::core::include_bytes!(#path);
-        )
-    });
-    quote! {
-        const _: ::core::option::Option<&str> = ::core::option_env!(#SCHEMA_ENV);
-        #file
+    // Each value with the variable it is for.
+    let mut given: Vec<(&Variable, &Expr)> = Vec::new();
+    for (name, value) in variables {
+        let Some(declared) = operation.variables.iter().find(|variable| name == &variable.name) else {
+            let declared: Vec<String> = operation
+                .variables
+                .iter()
+                .map(|variable| format!("${}", variable.name))
+                .collect();
+            let known = if declared.is_empty() {
+                "it declares no variables".to_string()
+            } else {
+                format!("it declares {}", declared.join(", "))
+            };
+            return Err(syn::Error::new(
+                name.span(),
+                format!("The operation has no variable `${name}`: {known}"),
+            ));
+        };
+        if given.iter().any(|(earlier, _)| earlier.name == declared.name) {
+            return Err(syn::Error::new(
+                name.span(),
+                format!("Variable `${name}` is given twice"),
+            ));
+        }
+        given.push((declared, value));
     }
-}
-
-fn check(schema: &LoadedSchema, query: &LitStr) -> syn::Result<Operation> {
-    analyze(schema.schema(), &query.value()).map_err(|error| {
-        syn::Error::new(
+    if let Some(missing) = operation
+        .variables
+        .iter()
+        .find(|variable| variable.is_required() && !given.iter().any(|(declared, _)| declared.name == variable.name))
+    {
+        return Err(syn::Error::new(
             query.span(),
             format!(
-                "{error}\n(checked against the Shopify Admin API {})",
-                schema.schema().api_version
+                "Variable `${}: {}` needs a value: add `{} = …` after the operation",
+                missing.name, missing.ty, missing.name
             ),
-        )
+        ));
+    }
+
+    // Evaluated before the generated types are in scope, so that the
+    // values cannot name them by accident.
+    let locals: Vec<Ident> = (0..given.len())
+        .map(|index| Ident::new(&format!("__openshop_variable_{index}"), Span::mixed_site()))
+        .collect();
+    let values = given.iter().map(|(_, value)| value);
+    let setters = given.iter().zip(&locals).map(|((declared, value), local)| {
+        let key = &declared.name;
+        match variable_type(declared, &krate) {
+            Some(ty) => quote_spanned!(value.span()=> .variable::<#ty, _>(#key, #local)),
+            None => quote_spanned!(value.span()=> .json_variable(#key, #local)),
+        }
+    });
+
+    let tracking = schema.tracking();
+    let types = data_types(&operation, &krate);
+    let data = format_ident!("{}", DATA_TYPE);
+    Ok(quote! {{
+        #(let #locals = #values;)*
+        {
+            #tracking
+            #types
+            #krate::shopify::GraphqlOperation::<#data>::new(#query)
+                #(#setters)*
+        }
+    }})
+}
+
+/// `graphql! { mod name = "…"; }`: the operation as a module that names its types.
+fn expand_module(
+    schema: &LoadedSchema,
+    attributes: &[Attribute],
+    visibility: &Visibility,
+    name: &Ident,
+    query: &LitStr,
+) -> syn::Result<TokenStream> {
+    let krate = quote!(::openshop);
+    let operation = schema.check(query)?;
+    let data = format_ident!("{}", DATA_TYPE);
+    let (variables, function) = if operation.variables.is_empty() {
+        let function = quote! {
+            /// The operation, for `ShopifyClient::execute`.
+            pub fn operation() -> #krate::shopify::GraphqlOperation<#data> {
+                #krate::shopify::GraphqlOperation::new(QUERY)
+            }
+        };
+        (TokenStream::new(), function)
+    } else {
+        let variables = format_ident!("{}", VARIABLES_TYPE);
+        let function = quote! {
+            /// The operation with its variables, for `ShopifyClient::execute`.
+            pub fn operation(variables: #variables) -> #krate::shopify::GraphqlOperation<#data> {
+                #krate::shopify::GraphqlOperation::new(QUERY).variables(variables)
+            }
+        };
+        (variables_types(schema.schema(), &operation, &krate), function)
+    };
+
+    let tracking = schema.tracking();
+    let types = data_types(&operation, &krate);
+    Ok(quote! {
+        #(#attributes)*
+        #visibility mod #name {
+            #tracking
+
+            /// The text of the operation.
+            pub const QUERY: &str = #query;
+
+            #types
+            #variables
+            #function
+        }
     })
 }
 
 fn expand(input: Input) -> syn::Result<TokenStream> {
-    let schema = load_schema().map_err(|message| syn::Error::new(Span::call_site(), message))?;
-    let krate = quote!(::openshop);
-    let tracking = tracking(&schema);
-    let data = format_ident!("{}", DATA_TYPE);
-
+    let schema = LoadedSchema::load().map_err(|message| syn::Error::new(Span::call_site(), message))?;
     match input {
-        Input::Expression { query, variables } => {
-            let operation = check(&schema, &query)?;
-            let types = data_types(&operation, &krate);
-
-            for (index, (name, _)) in variables.iter().enumerate() {
-                if !operation.variables.iter().any(|variable| name == &variable.name) {
-                    let declared: Vec<String> = operation
-                        .variables
-                        .iter()
-                        .map(|variable| format!("${}", variable.name))
-                        .collect();
-                    let known = if declared.is_empty() {
-                        "it declares no variables".to_string()
-                    } else {
-                        format!("it declares {}", declared.join(", "))
-                    };
-                    return Err(syn::Error::new(
-                        name.span(),
-                        format!("The operation has no variable `${name}`: {known}"),
-                    ));
-                }
-                if variables[..index].iter().any(|(earlier, _)| earlier == name) {
-                    return Err(syn::Error::new(
-                        name.span(),
-                        format!("Variable `${name}` is given twice"),
-                    ));
-                }
-            }
-            if let Some(missing) = operation
-                .variables
-                .iter()
-                .find(|variable| variable.is_required() && !variables.iter().any(|(name, _)| name == &variable.name))
-            {
-                return Err(syn::Error::new(
-                    query.span(),
-                    format!(
-                        "Variable `${}: {}` needs a value: add `{} = …` after the operation",
-                        missing.name, missing.ty, missing.name
-                    ),
-                ));
-            }
-
-            // Evaluated before the generated types are in scope, so that the
-            // values cannot name them by accident.
-            let locals: Vec<Ident> = (0..variables.len())
-                .map(|index| Ident::new(&format!("__openshop_variable_{index}"), Span::mixed_site()))
-                .collect();
-            let values = variables.iter().map(|(_, value)| value);
-            let setters = variables.iter().zip(&locals).map(|((name, value), local)| {
-                let declared = operation
-                    .variables
-                    .iter()
-                    .find(|variable| name == &variable.name)
-                    .expect("checked above");
-                let key = &declared.name;
-                match variable_type(declared, &krate) {
-                    Some(ty) => quote_spanned!(value.span()=> .variable::<#ty, _>(#key, #local)),
-                    None => quote_spanned!(value.span()=> .json_variable(#key, #local)),
-                }
-            });
-
-            Ok(quote! {{
-                #(let #locals = #values;)*
-                {
-                    #tracking
-                    #types
-                    #krate::shopify::GraphqlOperation::<#data>::new(#query)
-                        #(#setters)*
-                }
-            }})
-        }
+        Input::Expression { query, variables } => expand_expression(&schema, &query, &variables),
         Input::Module {
             attributes,
             visibility,
             name,
             query,
-        } => {
-            let operation = check(&schema, &query)?;
-            let types = data_types(&operation, &krate);
-            let (variables, function) = if operation.variables.is_empty() {
-                let function = quote! {
-                    /// The operation, for `ShopifyClient::execute`.
-                    pub fn operation() -> #krate::shopify::GraphqlOperation<#data> {
-                        #krate::shopify::GraphqlOperation::new(QUERY)
-                    }
-                };
-                (TokenStream::new(), function)
-            } else {
-                let variables = format_ident!("{}", VARIABLES_TYPE);
-                let function = quote! {
-                    /// The operation with its variables, for `ShopifyClient::execute`.
-                    pub fn operation(variables: #variables) -> #krate::shopify::GraphqlOperation<#data> {
-                        #krate::shopify::GraphqlOperation::new(QUERY).variables(variables)
-                    }
-                };
-                (variables_types(schema.schema(), &operation, &krate), function)
-            };
-
-            Ok(quote! {
-                #(#attributes)*
-                #visibility mod #name {
-                    #tracking
-
-                    /// The text of the operation.
-                    pub const QUERY: &str = #query;
-
-                    #types
-                    #variables
-                    #function
-                }
-            })
-        }
+        } => expand_module(&schema, &attributes, &visibility, &name, &query),
     }
 }
 

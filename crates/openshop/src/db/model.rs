@@ -91,21 +91,6 @@ impl ColumnDef {
         self
     }
 
-    /// Reads a definition such as `text NOT NULL DEFAULT ''`.
-    fn written(name: String, definition: String) -> Self {
-        let parsed = parse_definition(&definition);
-        Self {
-            name,
-            sql_type: parsed.sql_type,
-            nullable: parsed.nullable,
-            default: parsed.default,
-            primary_key: parsed.primary_key,
-            constraints: parsed.constraints,
-            renamed_from: None,
-            written: Some(definition),
-        }
-    }
-
     /// The definition that follows the column name in `CREATE TABLE`.
     pub fn definition_sql(&self) -> String {
         if let Some(written) = &self.written {
@@ -131,6 +116,16 @@ impl ColumnDef {
     pub fn sql(&self) -> String {
         format!("{} {}", quote(&self.name), self.definition_sql())
     }
+
+    /// `ADD COLUMN IF NOT EXISTS "name" definition`, an action of `ALTER TABLE`.
+    pub fn add_clause(&self) -> String {
+        format!("ADD COLUMN IF NOT EXISTS {}", self.sql())
+    }
+
+    /// `ALTER TABLE … ADD COLUMN IF NOT EXISTS …;`
+    pub fn add_sql(&self, table: &str) -> String {
+        format!("ALTER TABLE {} {};", quote(table), self.add_clause())
+    }
 }
 
 /// An index of an application table.
@@ -153,6 +148,11 @@ impl IndexDef {
             quote(table),
             columns.join(", ")
         )
+    }
+
+    /// `DROP INDEX IF EXISTS …;`
+    pub fn drop_sql(&self) -> String {
+        format!("DROP INDEX IF EXISTS {};", quote(&self.name))
     }
 }
 
@@ -190,14 +190,7 @@ impl ForeignKeyDef {
 
     /// Sets the action taken when the referenced row is deleted.
     pub fn on_delete(mut self, action: impl Into<String>) -> Self {
-        self.on_delete = Some(
-            action
-                .into()
-                .split_whitespace()
-                .collect::<Vec<_>>()
-                .join(" ")
-                .to_uppercase(),
-        );
+        self.on_delete = Some(collapse_spaces(&action.into()).to_uppercase());
         self
     }
 
@@ -254,12 +247,18 @@ impl ForeignKeyDef {
 /// Every model gets `id` (uuid primary key) and, unless disabled, `shop`,
 /// `created_at` and `updated_at`. Application code is responsible for filtering
 /// its own queries by shop; the typed rows of a `#[derive(Model)]` struct do it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// The serialized form is what the schema snapshot records for the table.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Model {
+    #[serde(rename = "name")]
     pub table: String,
     columns: Vec<ColumnDef>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     indexes: Vec<IndexDef>,
+    #[serde(rename = "foreignKeys", default, skip_serializing_if = "Vec::is_empty")]
     foreign_keys: Vec<ForeignKeyDef>,
+    #[serde(skip)]
     renamed_from: Option<String>,
 }
 
@@ -318,7 +317,7 @@ impl Model {
 
     /// Adds a column, e.g. `.column("product_id", "text NOT NULL")`.
     pub fn column(mut self, name: impl Into<String>, definition: impl Into<String>) -> Self {
-        self.columns.push(ColumnDef::written(name.into(), definition.into()));
+        self.columns.push(parse_definition(name.into(), definition.into()));
         self
     }
 
@@ -345,22 +344,21 @@ impl Model {
         self.without("updated_at")
     }
 
-    pub fn index(mut self, name: impl Into<String>, columns: &[&str]) -> Self {
+    fn with_index(mut self, name: String, columns: &[&str], unique: bool) -> Self {
         self.indexes.push(IndexDef {
-            name: name.into(),
+            name,
             columns: columns.iter().map(|column| column.to_string()).collect(),
-            unique: false,
+            unique,
         });
         self
     }
 
-    pub fn unique_index(mut self, name: impl Into<String>, columns: &[&str]) -> Self {
-        self.indexes.push(IndexDef {
-            name: name.into(),
-            columns: columns.iter().map(|column| column.to_string()).collect(),
-            unique: true,
-        });
-        self
+    pub fn index(self, name: impl Into<String>, columns: &[&str]) -> Self {
+        self.with_index(name.into(), columns, false)
+    }
+
+    pub fn unique_index(self, name: impl Into<String>, columns: &[&str]) -> Self {
+        self.with_index(name.into(), columns, true)
     }
 
     /// Makes a column reference a row of another table.
@@ -407,7 +405,7 @@ impl Model {
 /// Lowercases a SQL type, collapses its spaces and resolves the usual aliases,
 /// so that `TIMESTAMPTZ` and `timestamp with time zone` compare equal.
 pub(crate) fn normalize_type(sql_type: &str) -> String {
-    let collapsed = sql_type.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase();
+    let collapsed = collapse_spaces(sql_type).to_lowercase();
     let (base, suffix) = match collapsed.find(['(', '[']) {
         Some(index) => collapsed.split_at(index),
         None => (collapsed.as_str(), ""),
@@ -426,12 +424,8 @@ pub(crate) fn normalize_type(sql_type: &str) -> String {
     format!("{base}{suffix}")
 }
 
-struct ParsedDefinition {
-    sql_type: String,
-    nullable: bool,
-    default: Option<String>,
-    primary_key: bool,
-    constraints: String,
+fn collapse_spaces(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// Splits on spaces that are outside parentheses and quotes.
@@ -491,20 +485,24 @@ fn is_constraint_keyword(token: &str) -> bool {
     )
 }
 
-/// Reads the type, nullability and default of a column definition. What it
-/// does not recognize is kept as `constraints`.
-fn parse_definition(definition: &str) -> ParsedDefinition {
-    let tokens = definition_tokens(definition);
+/// Reads a column definition such as `text NOT NULL DEFAULT ''`: its type,
+/// nullability and default. What is not recognized is kept as `constraints`,
+/// and the definition itself is kept to be rendered as written.
+fn parse_definition(name: String, definition: String) -> ColumnDef {
+    let tokens = definition_tokens(&definition);
     let type_end = tokens
         .iter()
         .position(|token| is_constraint_keyword(token))
         .unwrap_or(tokens.len());
-    let mut parsed = ParsedDefinition {
+    let mut parsed = ColumnDef {
+        name,
         sql_type: normalize_type(&tokens[..type_end].join(" ")),
         nullable: true,
         default: None,
         primary_key: false,
         constraints: String::new(),
+        renamed_from: None,
+        written: None,
     };
 
     let mut constraints: Vec<&str> = Vec::new();
@@ -548,6 +546,7 @@ fn parse_definition(definition: &str) -> ParsedDefinition {
         }
     }
     parsed.constraints = constraints.join(" ");
+    parsed.written = Some(definition);
     parsed
 }
 
@@ -610,7 +609,7 @@ mod tests {
     }
 
     fn written(definition: &str) -> ColumnDef {
-        ColumnDef::written("c".to_string(), definition.to_string())
+        parse_definition("c".to_string(), definition.to_string())
     }
 
     #[test]
