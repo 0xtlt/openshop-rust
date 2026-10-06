@@ -1,6 +1,7 @@
 //! An isolated database per test.
 
 use std::str::FromStr;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
@@ -14,10 +15,14 @@ use crate::runtime::env::DEFAULT_DATABASE_URL;
 ///
 /// Uses `TEST_DATABASE_URL`, then `DATABASE_URL`, then the local development
 /// database. Tests can run in parallel: each one only sees its own schema.
+///
+/// [`TestDb::cleanup`] drops the schema. A test that panics before reaching it
+/// still gets a best-effort drop when the value goes out of scope.
 pub struct TestDb {
     pub pool: PgPool,
     pub schema: String,
     options: PgConnectOptions,
+    dropped: bool,
 }
 
 impl TestDb {
@@ -46,17 +51,49 @@ impl TestDb {
             .await?;
         push_schema(&pool, models, false).await?;
 
-        Ok(Self { pool, schema, options })
+        Ok(Self {
+            pool,
+            schema,
+            options,
+            dropped: false,
+        })
     }
 
     /// Drops the schema and everything in it.
-    pub async fn cleanup(self) -> Result<()> {
+    pub async fn cleanup(mut self) -> Result<()> {
         self.pool.close().await;
-        let mut connection = PgConnection::connect_with(&self.options).await?;
-        sqlx::raw_sql(&format!("DROP SCHEMA IF EXISTS \"{}\" CASCADE", self.schema))
-            .execute(&mut connection)
-            .await?;
-        connection.close().await?;
+        drop_schema(&self.options, &self.schema).await?;
+        self.dropped = true;
         Ok(())
+    }
+}
+
+async fn drop_schema(options: &PgConnectOptions, schema: &str) -> Result<()> {
+    let mut connection = PgConnection::connect_with(options).await?;
+    sqlx::raw_sql(&format!("DROP SCHEMA IF EXISTS \"{schema}\" CASCADE"))
+        .execute(&mut connection)
+        .await?;
+    connection.close().await?;
+    Ok(())
+}
+
+impl Drop for TestDb {
+    fn drop(&mut self) {
+        if self.dropped {
+            return;
+        }
+        // Reached when a test fails before `cleanup`. The pool may still hold
+        // locks, so the drop runs on its own thread, bounded in time.
+        let options = self.options.clone().options([("lock_timeout", "2s")]);
+        let schema = std::mem::take(&mut self.schema);
+        let cleanup = std::thread::spawn(move || {
+            let Ok(runtime) = tokio::runtime::Builder::new_current_thread().enable_all().build() else {
+                return;
+            };
+            runtime.block_on(async {
+                let _ = tokio::time::timeout(Duration::from_secs(5), drop_schema(&options, &schema)).await;
+            });
+        });
+        let _ = cleanup.join();
     }
 }

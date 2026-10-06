@@ -118,7 +118,8 @@ run that writes to another system.
 
 - A cancel request marks an active run `canceled` and interrupts the step being
   executed. A worker in another process notices at its next heartbeat, within
-  about 15 seconds.
+  about 15 seconds, or half the lease when `lease_duration_ms` is below 30
+  seconds.
 - Work that a step moved off its own future, such as a `tokio::spawn` task or
   `spawn_blocking` code, keeps running unless it watches `ctx.signal`.
 - Resume retry keeps completed steps; reset retry discards all step results.

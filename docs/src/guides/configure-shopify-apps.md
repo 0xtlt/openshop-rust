@@ -67,21 +67,18 @@ fn config() -> Result<OpenShopConfig> {
 }
 ```
 
-Provide each secret through the process environment. The configuration is built
-before `dev` loads `.env`, so a secret read with `std::env::var` in `config()`
-must be exported in the shell that starts the app; a value that only exists in
-`.env` is not seen. To keep such secrets in `.env` during development, load the
-file yourself before building the configuration, with
-`openshop::cli::env::load_env_file(&std::env::current_dir()?)` at the top of
-`main`. That call applies to every command of the binary, so do not ship a
-`.env` file with a production build.
+Provide each secret through the process environment. During development they
+can live in `.env`: the generated `main` passes the `config` function itself to
+`openshop::cli::run(config)`, and `dev` loads `.env` before calling it. With
+`openshop::cli::run(config()?)` the configuration is built first and does not
+see values that only exist in `.env`. The other commands never load `.env`:
+export the secrets in the environment of `start`, `worker`, and `migrate`.
 
 Keep API keys unique and use each app's own secret. Include the TOML files in
 the deployed project and run the binary from the directory that contains them;
 OpenShop reads their client IDs and URLs at startup, and a missing file or
-`client_id` stops the process. The generated `.gitignore` excludes
-`shopify.app.*.toml`: adjust it if your deployment is built from the repository.
-Each `application_url` should point to the public OpenShop origin.
+`client_id` stops the process. Each `application_url` should point to the
+public OpenShop origin.
 
 If your platform manages the client IDs directly, replace a `Toml` entry with
 `Keys`:

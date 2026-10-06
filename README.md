@@ -142,8 +142,8 @@ robust; they are listed in [Differences](docs/src/reference/differences.md).
 | `crates/openshop` | The framework: engine, server, MCP, testing harness, embedded UI assets |
 | `crates/openshop-shared` | Types and rules shared by the server and the WebAssembly UI |
 | `crates/openshop-ui` | The admin UI (Leptos, built with trunk into `crates/openshop/ui-dist`) |
-| `crates/openshop-cli` | The `openshop` command: `init` and `dev` |
-| `apps/demo` | A demo app exercising every building block |
+| `crates/openshop-cli` | The `openshop` command: `init`, `init-ui` and `dev` |
+| `apps/demo` | A demo app exercising every building block; `apps/demo/ui` is its admin UI bundle with a custom page |
 | `docs` | Documentation (mdBook) |
 
 ## Contribute

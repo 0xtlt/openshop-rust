@@ -48,6 +48,9 @@ Consequences:
   at most). The TypeScript engine always waited 15 seconds, so a lease shorter
   than that let another worker take over a run that was still executing.
 - A worker only marks a run as failed while it still owns it.
+- The `worker` command uses `worker.concurrency` from the configuration when
+  `--concurrency` is absent; the original always fell back to 5. A value that
+  is not a positive integer is an error.
 - A step whose future is dropped before it finishes (flow timeout, panic) is
   recorded as `failed` with the error `Step was interrupted` instead of staying
   `running`.
@@ -117,9 +120,13 @@ Consequences:
 
 - Migrations are SQL files in `./migrations`, applied in file-name order and
   recorded in the `__openshop_migrations` table. There is no Drizzle journal.
-- `migrate generate` writes the framework schema your project does not cover
-  yet; `migrate generate --name=<name>` adds an empty migration for your own
-  tables. `migrate check` fails when the framework schema is not covered.
+- `migrate generate` writes what your project does not cover yet: the framework
+  schema, and a `CREATE TABLE` statement for each `define_model` table that no
+  migration creates. It does not diff columns: write `ALTER TABLE` migrations
+  yourself, starting from `migrate generate --name=<name>`, which adds an empty
+  file when nothing is missing.
+- `migrate check` fails when the framework schema or a registered model is not
+  covered.
 - A migration that was modified after being applied is rejected.
 - `dev` and the test harness create missing tables and indexes directly. They do
   not alter existing columns.

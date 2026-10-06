@@ -43,7 +43,7 @@ pub const USAGE: &str = "
     cargo run --release -- start
 ";
 
-/// Logs to stderr. `RUST_LOG` overrides the default filter (`info`, with SQL
+/// Logs to stdout. `RUST_LOG` overrides the default filter (`info`, with SQL
 /// statement and notice logging limited to warnings).
 pub fn init_logging() {
     use tracing_subscriber::EnvFilter;
@@ -114,6 +114,18 @@ impl<F: FnOnce() -> Result<OpenShopConfig>> ConfigSource for F {
     }
 }
 
+/// `--concurrency=N` of the `worker` command. Absent, `worker.concurrency`
+/// from the configuration applies.
+fn parse_concurrency(args: &[String]) -> Result<Option<usize>> {
+    let Some(value) = args.iter().find_map(|arg| arg.strip_prefix("--concurrency=")) else {
+        return Ok(None);
+    };
+    match value.parse::<usize>() {
+        Ok(concurrency) if concurrency > 0 => Ok(Some(concurrency)),
+        _ => anyhow::bail!("[openshop] --concurrency must be a positive integer, got \"{value}\""),
+    }
+}
+
 /// Runs the command given on the command line.
 pub async fn run(config: impl ConfigSource) -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -121,26 +133,49 @@ pub async fn run(config: impl ConfigSource) -> Result<()> {
 }
 
 pub async fn run_with_args(config: impl ConfigSource, args: &[String]) -> Result<()> {
+    let command = args.first().map(String::as_str);
+    if command == Some("dev") {
+        // Before logging and the configuration, so that both can read `.env` values.
+        env::load_env_file(&std::env::current_dir()?);
+    }
     init_logging();
 
-    match args.first().map(String::as_str) {
-        Some("dev") => {
-            // Before the configuration is built, so that it can read `.env` values.
-            env::load_env_file(&std::env::current_dir()?);
-            dev::start_dev(config.load()?).await
-        }
+    match command {
+        Some("dev") => dev::start_dev(config.load()?).await,
         Some("start") => start::start_prod(config.load()?).await,
         Some("worker") => {
-            let concurrency = args
-                .iter()
-                .find_map(|arg| arg.strip_prefix("--concurrency="))
-                .and_then(|value| value.parse().ok());
+            let concurrency = parse_concurrency(args)?;
             worker::start_worker(config.load()?, concurrency).await
         }
         Some("migrate") => migrate::run_migrate(&config.load()?, &args[1..]).await,
         _ => {
             println!("{USAGE}");
             Ok(())
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(args: &[&str]) -> Vec<String> {
+        args.iter().map(|arg| arg.to_string()).collect()
+    }
+
+    #[test]
+    fn worker_concurrency_is_optional_and_positive() {
+        assert_eq!(parse_concurrency(&args(&["worker"])).unwrap(), None);
+        assert_eq!(
+            parse_concurrency(&args(&["worker", "--concurrency=10"])).unwrap(),
+            Some(10)
+        );
+        for invalid in ["0", "-1", "ten", ""] {
+            let error = parse_concurrency(&args(&["worker", &format!("--concurrency={invalid}")])).unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                format!("[openshop] --concurrency must be a positive integer, got \"{invalid}\"")
+            );
         }
     }
 }

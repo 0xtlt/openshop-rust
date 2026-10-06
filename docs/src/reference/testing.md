@@ -56,7 +56,9 @@ against one database.
 
 `shutdown()` destroys factory-created resources, closes the server, and drops
 the schema. A context that is dropped without `shutdown()`, for example because
-an assertion panicked first, leaves its schema behind.
+an assertion panicked first, still drops its schema on a best-effort basis: the
+attempt is limited to a few seconds and gives up when the schema is locked.
+Factory-created resources are only destroyed by `shutdown()` or `cleanup()`.
 
 The example imports the configuration from the app's library target. In a
 binary-only project, write the tests in a `#[cfg(test)]` module next to
@@ -94,12 +96,12 @@ syntax.
 | `transport` | The `MockTransport` behind every Shopify HTTP call. |
 | `http` | A `reqwest::Client` that does not follow redirects, for unauthenticated requests. |
 | `run_flow(flow, input)` / `run_flow_for(flow, input, shop)` | Executes a flow immediately with the fakes. |
-| `dispatch_flow(flow, input)` | Queues a run for the default shop and returns its `Uuid`. |
+| `dispatch_flow(flow, input)` / `dispatch_flow_for(flow, input, shop)` | Queues a run and returns its `Uuid`. |
 | `proxy()` / `proxy_for(shop, secret)` | App proxy client that signs requests. |
 | `get`, `post`, `put`, `patch`, `delete`, `request(method, path)` | Request builders authenticated with a session token for the default shop. |
 | `request_as(method, path, shop, sub)` | Request authenticated as staff user `sub` of `shop`. |
 | `session_token()` / `session_token_for(shop, sub)` | A signed session token, valid for one minute. |
-| `authorization_header()` | `Bearer <session token>` for the default shop. |
+| `authorization_header()` / `authorization_header_for(shop, sub)` | `Bearer <session token>`. |
 | `create(&factory, overrides)`, `cleanup()` | Factory resources; see below. |
 | `reset_fakes()` | Resets every provider fake. |
 | `shutdown()` | Cleans up and drops the schema. |

@@ -40,46 +40,23 @@ context also carries `ctx.db`, `ctx.shopify`, and `ctx.connectors`.
 
 ## 2. Create the page
 
-Create a second crate in a `ui/` directory of the project. It depends on
-`openshop-ui`, which contains the built-in screens. `ui/Cargo.toml`:
+Scaffold the UI crate from the project root:
 
-```toml
-[package]
-name = "my-app-ui"
-version = "0.1.0"
-edition = "2024"
-publish = false
-
-# Built with trunk for wasm32; kept out of the server crate.
-[workspace]
-
-[dependencies]
-openshop-ui = { git = "https://github.com/0xtlt/openshop-rust", tag = "<tag>" }
-leptos = "0.8"
-serde = { version = "1", features = ["derive"] }
+```bash
+openshop init-ui
 ```
 
-Replace `<tag>` with the tag of the `openshop` dependency in the project's own
-`Cargo.toml`, so that both halves come from the same release.
-
-Copy `index.html` and `Trunk.toml` from `crates/openshop-ui` in the OpenShop
-repository into `ui/`, and set the output directory in `ui/Trunk.toml`:
-
-```toml
-[build]
-target = "index.html"
-dist = "dist"
-public_url = "/"
-# The server rewrites head tags of index.html at serve time: keep them byte-for-byte.
-minify = "never"
-no_sri = true
-```
+This writes a `ui/` directory: a `Cargo.toml` that depends on `openshop-ui`
+(the crate containing the built-in screens, pinned to the same release as the
+CLI), `Trunk.toml`, `index.html`, and `src/main.rs` with an example page. The
+crate is its own cargo workspace, because it is compiled for
+`wasm32-unknown-unknown` and not with the server.
 
 Do not edit the `shopify-api-key` meta tag or the App Bridge script tag of
-`index.html`: the server injects the Shopify API key into them when it serves
-the page.
+`ui/index.html`: the server injects the Shopify API key into them when it
+serves the page.
 
-Create `ui/src/main.rs`:
+Replace `ui/src/main.rs` with the **Store** page:
 
 ```rust,ignore
 use leptos::prelude::*;
@@ -119,16 +96,14 @@ fn main() {
 is identified by its name, so `"storeSummary"` must match the server side. The
 browser calls the loader with a fresh Shopify session token.
 
-Build the bundle:
+`openshop dev` builds the bundle for you: when the project has a
+`ui/Trunk.toml`, it runs `trunk watch` in `ui/` and serves `ui/dist`. To build
+it yourself, for example before a deployment:
 
 ```bash
 cd ui
 trunk build --release
 ```
-
-This writes `ui/dist/`. Rebuild it after every change to the page:
-`openshop dev` rebuilds and restarts the server when `src/` changes, but it does
-not build the UI crate.
 
 ## 3. Enable navigation
 
@@ -156,10 +131,14 @@ fn config() -> Result<OpenShopConfig> {
 resolved from the working directory of the process. The `OPENSHOP_UI_DIR`
 environment variable overrides it.
 
-Start development again if it is not running. Open the app from Shopify admin
-and select **Store**. You should see the current shop domain. A
-**Page unavailable** message means the server knows the page but the bundle
-being served does not contain it: rebuild the bundle and check the directory.
+Restart `openshop dev` so that it picks up the new `ui/` directory. Open the
+app from Shopify admin and select **Store**. You should see the current shop
+domain. A **Page unavailable** message means the server knows the page but the
+bundle being served does not contain it: check the `trunk` output in the
+terminal and the directory being served.
+
+`cargo run -- dev` does not run `trunk`. Without the `openshop` CLI, run
+`trunk watch` in `ui/` in a second terminal.
 
 Run `cargo check` in the project root and `trunk build --release` in `ui/`
 before deployment.

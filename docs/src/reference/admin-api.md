@@ -47,6 +47,7 @@ still answers `401` without a valid token.
   `404 Not Found`.
 - A request body larger than the
   [request body limit](configuration.md#builder-methods) answers `413`.
+- Responses are compressed with gzip or Brotli when the client accepts it.
 
 ## Admin pages
 

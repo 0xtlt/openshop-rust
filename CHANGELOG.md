@@ -15,5 +15,5 @@ Initial Rust implementation, at feature parity with OpenShop (TypeScript)
 - Admin UI compiled to WebAssembly and embedded in the binary.
 - SQL migrations owned by the application, with the framework schema generated
   into `./migrations`.
-- `openshop` CLI (`init`, `dev`) and a testing harness with isolated databases,
-  fake providers and signed requests.
+- `openshop` CLI (`init`, `init-ui`, `dev`) and a testing harness with isolated
+  databases, fake providers and signed requests.

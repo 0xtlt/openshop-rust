@@ -317,9 +317,14 @@ impl TestContext {
 
     /// Dispatch a flow to the queue
     pub async fn dispatch_flow(&self, flow_name: &str, input: Value) -> Result<Uuid> {
+        let shop = self.shop.clone();
+        self.dispatch_flow_for(flow_name, input, &shop).await
+    }
+
+    pub async fn dispatch_flow_for(&self, flow_name: &str, input: Value, shop: &str) -> Result<Uuid> {
         let result = self
             .app
-            .dispatch_flow(DispatchFlowParams::new(flow_name, self.shop.clone()).input(input))
+            .dispatch_flow(DispatchFlowParams::new(flow_name, shop).input(input))
             .await?;
         Ok(result.run_id)
     }
@@ -346,6 +351,10 @@ impl TestContext {
     /// Authorization header value for authenticated API requests.
     pub fn authorization_header(&self) -> String {
         format!("Bearer {}", self.session_token())
+    }
+
+    pub fn authorization_header_for(&self, shop: &str, sub: &str) -> String {
+        format!("Bearer {}", self.session_token_for(shop, sub))
     }
 
     /// The absolute URL of a path of the application.

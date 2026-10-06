@@ -40,9 +40,14 @@ jobs:
 
   ui:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # The framework's admin UI, and the demo's bundle built on top of it.
+        workspace: [crates/openshop-ui, apps/demo/ui]
     defaults:
       run:
-        working-directory: crates/openshop-ui
+        working-directory: ${{ matrix.workspace }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -51,7 +56,7 @@ jobs:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: crates/openshop-ui
+          workspaces: ${{ matrix.workspace }}
       - run: cargo fmt --check
       - run: cargo clippy --target wasm32-unknown-unknown -- -D warnings
       - run: cargo test

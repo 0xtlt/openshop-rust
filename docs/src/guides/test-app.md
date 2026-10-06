@@ -126,7 +126,8 @@ Every context owns its schema, so tests do not see each other's rows and can run
 in parallel. Each context also opens its own connection pool; pass
 `--test-threads=4` after `--` if PostgreSQL runs out of connections. End every
 test with `ctx.shutdown().await`: it stops the HTTP server and drops the schema.
-A test that panics before that line leaves its `test_…` schema behind.
+When a test panics before that line, the schema is still dropped on a
+best-effort basis as the context goes out of scope.
 
 Provider methods are faked only inside `run_flow()`. A provider reached through
 the HTTP API, such as the provider check endpoint or a server route that calls a

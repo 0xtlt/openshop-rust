@@ -38,6 +38,9 @@ trunk build --release      # writes crates/openshop/ui-dist
 framework get the admin UI without installing trunk. Rebuild and commit it when
 you change `crates/openshop-ui`.
 
+`apps/demo/ui` is a third workspace: the demo's own bundle, with a custom admin
+page. It is checked the same way; its `dist/` is not committed.
+
 ## Running the demo
 
 ```bash
@@ -49,6 +52,20 @@ The admin UI is an embedded Shopify app: it only starts inside the Shopify
 admin iframe. To exercise the backend without a store, call the API with an
 HS256 session token signed with `SHOPIFY_API_SECRET` (`aud` = `SHOPIFY_API_KEY`,
 `iss` / `dest` = `https://<shop>.myshopify.com`), as the test harness does.
+
+To look at the admin UI without a store, run the preview. It serves the UI on
+`http://127.0.0.1:3999` with a stub in place of Shopify App Bridge and a
+session for a fixed test shop, in a throwaway schema of the database above. It
+only accepts loopback connections:
+
+```bash
+cargo run -p openshop-demo --example preview
+```
+
+Set `PREVIEW_UI_DIR=apps/demo/ui/dist` to preview the demo's own bundle after
+building it with `trunk build --release` in `apps/demo/ui`. The stub does not
+reproduce what Shopify admin renders itself (navigation menu, title bar,
+modals), so check those in a development store.
 
 ## Conventions
 

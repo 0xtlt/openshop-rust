@@ -42,9 +42,9 @@ openshop init my-app
 embedded minimal template, derives the Cargo package name from the directory
 name, pins the `openshop` dependency to the Git tag of the CLI's own version
 (`tag = "v<version>"`), and generates the initial migration in `migrations/`.
-It does not update an existing app. See the [first-app tutorial](../tutorials/first-app.md) for the
-full setup and [Project structure](project-structure.md) for the generated
-files.
+It does not update an existing app. See the
+[first-app tutorial](../tutorials/first-app.md) for the full setup and
+[Project structure](project-structure.md) for the generated files.
 
 | Argument | Behavior |
 | --- | --- |
@@ -101,9 +101,11 @@ Details:
 - Every command builds the configuration before it runs, including `migrate`.
   Variables the configuration requires must be set for all of them.
 - `dev` and `start` listen on `0.0.0.0` at `PORT` (default `3000`).
-- `--concurrency=N` must be written with `=`. When the flag is absent or not a
-  number, the worker uses `worker.concurrency` from the configuration, then the
-  default of `5`. See [Worker defaults](configuration.md#worker-defaults).
+- `--concurrency=N` must be written with `=`. When the flag is absent, the
+  worker uses `worker.concurrency` from the configuration, then the default of
+  `5`. A value that is not a positive integer stops the command with
+  `[openshop] --concurrency must be a positive integer, got "<value>"`. See
+  [Worker defaults](configuration.md#worker-defaults).
 - `--name=<name>` is lowercased and every character that is not an ASCII letter
   or digit becomes `_`. Generated files are named
   `<YYYYMMDDHHMMSS>_<name>.sql` using the current UTC time. Without `--name`,
@@ -148,9 +150,8 @@ not start a second `dev` process alongside it.
 
 Only `dev` loads the project-root `.env` file, before it builds the
 configuration. Set variables explicitly for build, migration, test, and
-production commands. Existing process variables
-take precedence over `.env` in development. See
-[Environment variables](environment-variables.md).
+production commands. Existing process variables take precedence over `.env`
+in development. See [Environment variables](environment-variables.md).
 
 ## Tests
 

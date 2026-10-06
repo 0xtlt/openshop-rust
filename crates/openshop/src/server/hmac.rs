@@ -63,7 +63,7 @@ pub fn verify_proxy_signature(query: &IndexMap<String, String>, secret: &str) ->
     let Some(signature) = query.get("signature").filter(|signature| !signature.is_empty()) else {
         return false;
     };
-    if secret.is_empty() {
+    if secret.trim().is_empty() {
         return false;
     }
     let Ok(provided) = hex::decode(signature) else {

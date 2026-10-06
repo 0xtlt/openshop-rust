@@ -40,8 +40,8 @@ Notes:
   and `migrate status`, when the variable is unset or empty.
   `OpenShop::connect` and `openshop::db::connect` have no fallback and fail
   with `[openshop] DATABASE_URL not set`.
-- `RUST_LOG` is read when the command starts, before `.env` is loaded. Set it
-  in the process environment, not in `.env`. See [Logging](logging.md).
+- `RUST_LOG` is read when the command starts. `dev` loads `.env` first, so the
+  variable can be set there for development. See [Logging](logging.md).
 
 ## Minimal single-app `.env`
 

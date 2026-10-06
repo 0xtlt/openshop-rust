@@ -87,6 +87,7 @@ Anything that implements `IntoResponse` can be returned after calling
 OpenShop reads the whole request body before calling your code, does not parse
 it, and does not add CORS headers for public routes. A body larger than the
 [request body limit](configuration.md#builder-methods) is answered with `413`.
+Responses are compressed with gzip or Brotli when the client accepts it.
 
 ## Authentication
 
