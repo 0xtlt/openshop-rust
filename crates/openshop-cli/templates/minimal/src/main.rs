@@ -1,7 +1,7 @@
 mod flows;
 mod providers;
 
-use openshop::{CronEntry, OpenShopConfig, Result, json};
+use openshop::{AdminPageId, AdminPageMode, CronEntry, McpConfig, OpenShopConfig, Result, json};
 
 fn config() -> Result<OpenShopConfig> {
     // Single-app projects can keep Shopify credentials in env/TOML.
@@ -14,6 +14,10 @@ fn config() -> Result<OpenShopConfig> {
                 .name("Quick sync")
                 .input(json!({ "limit": 10 })),
         )
+        // MCP is off: `POST /mcp` is refused and the admin has no token page.
+        // Remove both lines to turn it on.
+        .mcp(McpConfig::new().enabled(false))
+        .page(AdminPageId::Mcp, AdminPageMode::Disabled)
         .on_error(|error, context| async move {
             eprintln!(
                 "[openshop:error] Flow \"{}\" failed: {error}",

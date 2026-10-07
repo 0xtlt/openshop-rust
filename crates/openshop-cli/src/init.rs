@@ -313,6 +313,9 @@ mod tests {
         assert!(read(".gitignore").contains("target/"));
         assert!(read(".env.example").contains("DATABASE_URL="));
         assert!(read("src/flows/sync_orders.rs").contains("syncOrders"));
+        let main = read("src/main.rs");
+        assert!(main.contains(".mcp(McpConfig::new().enabled(false))"));
+        assert!(main.contains(".page(AdminPageId::Mcp, AdminPageMode::Disabled)"));
 
         for path in TEMPLATE.iter().map(|(path, _)| path) {
             assert!(!read(path).contains("__"), "{path} still has a placeholder");

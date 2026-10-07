@@ -84,6 +84,8 @@ fn config() -> Result<OpenShopConfig> {
         .provider(providers::warehouse::warehouse())
         .flow(flows::sync_orders::sync_orders())
         .flow(flows::prepare_report::prepare_report())
+        .mcp(McpConfig::new().enabled(false))
+        .page(AdminPageId::Mcp, AdminPageMode::Disabled)
         .on_error(|error, context| async move {
             eprintln!(
                 "[openshop:error] Flow \"{}\" failed: {error}",

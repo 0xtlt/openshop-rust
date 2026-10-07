@@ -45,7 +45,7 @@ Open these three files:
 | --- | --- |
 | `src/providers/warehouse.rs` | The `warehouse` provider: two configuration fields, a connection check, and a `push` method |
 | `src/flows/sync_orders.rs` | The sample flow with `fetch-orders` and `send-to-warehouse` steps |
-| `src/main.rs` | The configuration that registers the provider and the flow, a sample cron schedule, and an error hook |
+| `src/main.rs` | The configuration that registers the provider and the flow, a sample cron schedule, and an error hook, with MCP turned off |
 
 There is also a `migrations/` directory containing the initial database migration.
 The [project structure reference](../reference/project-structure.md) describes the
@@ -116,12 +116,14 @@ The generated configuration schedules `syncOrders` every five minutes. In
 mod flows;
 mod providers;
 
-use openshop::{OpenShopConfig, Result};
+use openshop::{AdminPageId, AdminPageMode, McpConfig, OpenShopConfig, Result};
 
 fn config() -> Result<OpenShopConfig> {
     OpenShopConfig::builder()
         .provider(providers::warehouse::warehouse())
         .flow(flows::sync_orders::sync_orders())
+        .mcp(McpConfig::new().enabled(false))
+        .page(AdminPageId::Mcp, AdminPageMode::Disabled)
         .on_error(|error, context| async move {
             eprintln!(
                 "[openshop:error] Flow \"{}\" failed: {error}",
@@ -133,7 +135,8 @@ fn config() -> Result<OpenShopConfig> {
 ```
 
 We will run the flow from the admin UI after saving its provider credentials.
-This removes the generated schedule for now and keeps the error hook. The
+This removes the generated schedule for now and keeps the error hook and the
+two lines that turn MCP off. The
 [flow guide](../guides/define-flow.md#3-schedule-the-flow-for-installed-shops) adds a
 schedule that explicitly targets installed shops.
 

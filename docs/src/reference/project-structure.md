@@ -76,6 +76,10 @@ build, a "Quick sync" cron that runs the flow every five minutes, and an
 `on_error` hook that prints failed flows, and `main` passes `config` to
 `openshop::cli::run`. The file also contains the generated tests.
 
+MCP is off in the generated file: `.mcp(McpConfig::new().enabled(false))`
+refuses `POST /mcp`, and `.page(AdminPageId::Mcp, AdminPageMode::Disabled)`
+removes the token page from the admin. Remove both lines to use [MCP](mcp.md).
+
 ## `src/providers/`
 
 Contains provider definitions. Providers define admin config fields and methods

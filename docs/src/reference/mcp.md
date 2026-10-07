@@ -43,6 +43,9 @@ and `/api/mcp/*`. Give `McpConfig::new().enabled(false)` to the `mcp` setting
 of `app!` to disable the JSON-RPC endpoint. Set both to disable MCP completely. See
 [Admin pages](configuration.md#admin-pages).
 
+A project created by `openshop init` sets both: MCP is off until the two lines
+are removed from `src/main.rs`.
+
 `Hidden` is navigation-only: the direct page URL and admin API remain available.
 It must not be used as an access-control boundary.
 

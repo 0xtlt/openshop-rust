@@ -60,6 +60,9 @@
   proxy path. Each method of a route keeps its own authentication.
 - `.mcp(…)` adds to the MCP permissions, tools and resources already
   registered instead of replacing them.
+- A project created by `openshop init` starts with MCP off: `POST /mcp` is
+  refused and the admin has no token page, until the two lines are removed
+  from `src/main.rs`. Existing projects are not changed.
 - `OpenShopBuilder::crons`, `mcp_tool` and `mcp_resource`, and
   `CustomAdminNavigationItem::new(label, path)`.
 - Responses under 1 KB are no longer compressed: on small JSON responses the
