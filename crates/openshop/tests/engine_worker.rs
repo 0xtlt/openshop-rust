@@ -91,6 +91,13 @@ async fn wait_until(what: &str, condition: impl Fn() -> bool) {
     }
 }
 
+/// Lets `duration` pass for the timers of this runtime, without waiting for it.
+async fn skip(duration: Duration) {
+    tokio::time::pause();
+    tokio::time::advance(duration).await;
+    tokio::time::resume();
+}
+
 /// A flow that reports when it starts, then blocks until `release` is cancelled.
 fn gated_flow(name: &str, started: Arc<Notify>, release: CancellationToken) -> Flow {
     Flow::new(name, move |_ctx: FlowContext| {
@@ -847,39 +854,69 @@ async fn takes_over_a_run_whose_lease_expired() {
     test.cleanup().await;
 }
 
-// Opening a connection keeps a thread busy for longer than the margin of this
-// lease: the heartbeat needs a second one.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+// A lease is counted in wall-clock time, a heartbeat in the time of the runtime.
+// A flow that really outlasts a short lease leaves each heartbeat half a lease
+// to arrive, which a busy machine does not always grant. Skipping runtime time
+// makes the heartbeats due at once instead, under a lease long enough to wait.
+#[tokio::test]
 async fn a_live_worker_keeps_a_lease_shorter_than_its_flow() {
-    let executions = Arc::new(AtomicUsize::new(0));
-    let flow = Flow::new("slow-flow", {
-        let executions = executions.clone();
-        move |_ctx: FlowContext| {
-            let executions = executions.clone();
-            async move {
-                executions.fetch_add(1, Ordering::SeqCst);
-                tokio::time::sleep(Duration::from_millis(900)).await;
-                Ok(())
-            }
-        }
-    });
-    let test = TestApp::new(create_config([flow])).await;
-    let run_id = dispatch(&test, "slow-flow").await;
-    let short_lease = || PartialWorkerConfig::new().concurrency(1).lease_duration_ms(200);
+    const LEASE: Duration = Duration::from_secs(14);
+    // Past half a lease: a heartbeat is due. One sent on the default interval
+    // would be 7 seconds away, one sent once per lease 6 seconds away.
+    const SKIPPED: Duration = Duration::from_secs(8);
+    // Time left to the heartbeat that is due, shorter than both.
+    const AT_ONCE: Duration = Duration::from_secs(5);
 
-    // Heartbeats follow the lease duration, so a second worker never sees the run as abandoned.
+    let started = Arc::new(Notify::new());
+    let release = CancellationToken::new();
+    let test = TestApp::new(create_config([gated_flow(
+        "slow-flow",
+        started.clone(),
+        release.clone(),
+    )]))
+    .await;
+    let run_id = dispatch(&test, "slow-flow").await;
+    let short_lease = || {
+        PartialWorkerConfig::new()
+            .concurrency(1)
+            .lease_duration_ms(LEASE.as_millis() as u64)
+    };
+
     let first = worker_with(&test.app, short_lease());
     let second = worker_with(&test.app, short_lease());
     first.start().await;
-    wait_until("the flow to start", || executions.load(Ordering::SeqCst) == 1).await;
+    tokio::time::timeout(TIMEOUT, started.notified())
+        .await
+        .expect("run claimed");
     second.start().await;
 
+    // Heartbeats follow the lease duration: every half lease extends it, and
+    // the second worker never sees the run as abandoned.
+    for _ in 0..2 {
+        let leased_until = find_run(&test, run_id).await.available_at.expect("lease");
+        skip(SKIPPED).await;
+        let deadline = Instant::now() + AT_ONCE;
+        loop {
+            let run = find_run(&test, run_id).await;
+            if run.available_at.is_some_and(|available_at| available_at > leased_until) {
+                assert_eq!(run.status, "running");
+                assert_eq!(run.worker_id.as_deref(), Some(first.worker_id()));
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "no heartbeat extended the lease after half of its duration"
+            );
+            tokio::time::sleep(POLL).await;
+        }
+    }
+
+    release.cancel();
     let completed = wait_for_status(&test, run_id, "completed").await;
     first.stop().await;
     second.stop().await;
 
     assert_eq!(completed.attempts, 1);
-    assert_eq!(executions.load(Ordering::SeqCst), 1);
     test.cleanup().await;
 }
 
@@ -1005,9 +1042,7 @@ async fn survives_a_panic_outside_of_the_flow_body() {
 
 /// Lets 16 seconds pass for the timers of this runtime, enough for one heartbeat.
 async fn skip_to_next_heartbeat() {
-    tokio::time::pause();
-    tokio::time::advance(Duration::from_secs(16)).await;
-    tokio::time::resume();
+    skip(Duration::from_secs(16)).await;
 }
 
 #[tokio::test]
