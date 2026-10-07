@@ -153,6 +153,12 @@ larger configurations easier to split:
 - A migration that was modified after being applied is rejected.
 - `dev` and the test harness create missing tables directly and add missing
   columns and indexes. They do not rename, retype or drop anything.
+- The pool learns that PostgreSQL closed an idle connection when it uses it
+  again, where `pg.Pool` drops the client as soon as its socket closes. A
+  connection that waited more than a second is pinged first, and replaced when
+  the ping fails; one reused sooner is not checked, and fails the statement it
+  is given if it was closed. See
+  [Idle connection check](database.md#idle-connection-check).
 
 ## Environment
 

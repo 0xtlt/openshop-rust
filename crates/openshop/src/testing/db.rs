@@ -7,8 +7,8 @@ use anyhow::{Context, Result};
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use sqlx::{Connection, PgConnection, PgPool};
 
-use crate::db::Model;
 use crate::db::migrate::push_schema;
+use crate::db::{Model, ping_after_idle};
 use crate::runtime::env::DEFAULT_DATABASE_URL;
 
 /// A PostgreSQL schema created for one test, with the framework tables pushed.
@@ -45,8 +45,7 @@ impl TestDb {
             .await?;
         connection.close().await?;
 
-        let pool = PgPoolOptions::new()
-            .max_connections(8)
+        let pool = ping_after_idle(PgPoolOptions::new().max_connections(8))
             .connect_with(options.clone().options([("search_path", schema.as_str())]))
             .await?;
         push_schema(&pool, models, false).await?;
