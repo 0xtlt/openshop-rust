@@ -15,7 +15,8 @@ my-app/
 │       ├── mod.rs
 │       └── warehouse.rs
 ├── migrations/
-│   └── <timestamp>_openshop_init.sql
+│   ├── <timestamp>_openshop_init.sql
+│   └── <timestamp>_openshop_queue_indexes.sql
 ├── Cargo.toml
 ├── shopify.app.toml
 ├── shopify.web.toml
@@ -102,8 +103,9 @@ Rust components compiled into a separate WebAssembly UI bundle. See
 ## `migrations/`
 
 Contains committed SQL migrations owned by the app. The first file holds the
-framework tables; later files hold framework schema updates and your own
-tables. See [Database and migrations](database.md).
+framework tables and the second the indexes of the run queue; later files hold
+framework schema updates and your own tables. See
+[Database and migrations](database.md).
 
 ## Shopify files
 

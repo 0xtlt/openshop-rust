@@ -323,7 +323,7 @@ defaults:
 | Field | Type | Default | Purpose |
 | --- | --- | --- | --- |
 | `concurrency` | `usize`, positive | `5` | Maximum active runs in one worker process. |
-| `poll_interval_ms` | `u64`, positive | `1000` | Initial queue polling interval and delay while all slots are occupied. |
+| `poll_interval_ms` | `u64`, positive | `1000` | Initial polling interval of an empty queue, and interval between two sweeps of the runs past their deadline. |
 | `poll_max_interval_ms` | `u64`, positive | `5000` | Maximum empty-queue backoff. |
 | `poll_backoff_coefficient` | `f64`, positive | `1.5` | Multiplier applied after consecutive empty polls. |
 | `lease_duration_ms` | `u64`, positive | `30000` | Claim lease and graceful-stop deadline. Active runs refresh their lease every 15 seconds, or twice per lease period when that is shorter. |
@@ -331,8 +331,13 @@ defaults:
 Each field has a builder method of the same name on `PartialWorkerConfig`.
 The `worker` command overrides `concurrency` only when `--concurrency=N` is
 given; other worker settings come from the configuration. `dev` uses the
-configuration as is. Run multiple worker processes to scale horizontally;
-PostgreSQL claims work with `FOR UPDATE SKIP LOCKED`.
+configuration as is.
+
+A worker only polls while the queue is empty. With runs waiting, it claims as
+many as it has free slots in one statement, and claims again as soon as a run
+finishes: the poll interval does not limit throughput. Run multiple worker
+processes to scale horizontally; PostgreSQL claims work with
+`FOR UPDATE SKIP LOCKED`.
 
 ## Retry defaults
 

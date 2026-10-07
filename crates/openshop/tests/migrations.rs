@@ -57,6 +57,19 @@ async fn columns(pool: &PgPool, table: &str) -> Vec<String> {
     .unwrap()
 }
 
+async fn indexes(pool: &PgPool, table: &str) -> Vec<String> {
+    sqlx::query_scalar(
+        "SELECT indexname::text FROM pg_indexes \
+         WHERE schemaname = current_schema() AND tablename = $1 ORDER BY indexname",
+    )
+    .bind(table)
+    .fetch_all(pool)
+    .await
+    .unwrap()
+}
+
+const QUEUE_INDEXES: [&str; 2] = ["flow_runs_claimable_idx", "flow_runs_deadline_idx"];
+
 /// Generates for an application without models and returns the files.
 fn generate(cwd: &Path, args: &[String], production: bool) -> openshop::Result<Vec<PathBuf>> {
     Ok(generate_migrations(cwd, args, production, &[])?.files)
@@ -425,6 +438,45 @@ async fn generate_then_migrate_creates_the_framework_tables() {
 }
 
 #[tokio::test]
+async fn generate_then_migrate_upgrades_a_deployed_framework_schema() {
+    // A project created when the framework schema was one migration, deployed and in use.
+    let db = empty_database().await;
+    let project = TempProject::new();
+    let init = &FRAMEWORK_MIGRATIONS[0];
+    project.write(
+        "20260101000000_openshop_init",
+        &format!("-- openshop:framework {}\n\n{}", init.id, init.sql),
+    );
+    migrate_schema(&db.pool, project.path()).await.unwrap();
+    sqlx::query(
+        "INSERT INTO flow_runs (shop, flow_name, available_at, deadline_at) VALUES ($1, 'test-flow', now(), now())",
+    )
+    .bind(TEST_SHOP)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    let before = indexes(&db.pool, "flow_runs").await;
+    assert!(QUEUE_INDEXES.iter().all(|index| !before.contains(&index.to_string())));
+    assert!(check_migrations(project.path(), &[]).is_err());
+
+    // Only what the project lacks is generated, and it applies to a table that has rows.
+    let created = generate(project.path(), &[], false).unwrap();
+    assert_eq!(created.len(), FRAMEWORK_MIGRATIONS.len() - 1);
+    check_migrations(project.path(), &[]).unwrap();
+    assert_eq!(
+        migrate_schema(&db.pool, project.path()).await.unwrap().len(),
+        created.len()
+    );
+    let after = indexes(&db.pool, "flow_runs").await;
+    assert!(
+        QUEUE_INDEXES.iter().all(|index| after.contains(&index.to_string())),
+        "{after:?}"
+    );
+    assert!(before.iter().all(|index| after.contains(index)));
+    db.cleanup().await.unwrap();
+}
+
+#[tokio::test]
 async fn generated_and_hand_written_migrations_apply_together() {
     let db = empty_database().await;
     let project = TempProject::new();
@@ -508,6 +560,11 @@ async fn push_schema_creates_framework_and_model_tables() {
     assert!(existing.contains(&"flow_runs".to_string()));
     assert!(existing.contains(&"reviews".to_string()));
     assert!(!existing.contains(&"__openshop_migrations".to_string()));
+    let queue = indexes(&db.pool, "flow_runs").await;
+    assert!(
+        QUEUE_INDEXES.iter().all(|index| queue.contains(&index.to_string())),
+        "{queue:?}"
+    );
     assert_eq!(
         columns(&db.pool, "reviews").await,
         ["created_at", "id", "rating", "shop", "updated_at"]

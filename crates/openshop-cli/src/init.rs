@@ -247,7 +247,7 @@ pub fn run_init(cwd: &Path, args: &[String]) -> Result<InitResult> {
         std::fs::write(&file, content)?;
     }
 
-    // The framework schema becomes the project's first, client-owned migration.
+    // The framework schema becomes the project's first, client-owned migrations.
     generate_migrations(&target_dir, &[], false, &[])?;
 
     println!("[openshop] Created {app_name} in {}", target_dir.display());
@@ -318,12 +318,14 @@ mod tests {
             assert!(!read(path).contains("__"), "{path} still has a placeholder");
         }
 
-        let migrations: Vec<_> = std::fs::read_dir(result.target_dir.join("migrations"))
+        let mut migrations: Vec<_> = std::fs::read_dir(result.target_dir.join("migrations"))
             .unwrap()
             .flatten()
+            .map(|entry| entry.path())
             .collect();
-        assert_eq!(migrations.len(), 1);
-        let migration = std::fs::read_to_string(migrations[0].path()).unwrap();
+        migrations.sort();
+        assert_eq!(migrations.len(), openshop::db::migrate::FRAMEWORK_MIGRATIONS.len());
+        let migration = std::fs::read_to_string(&migrations[0]).unwrap();
         assert!(migration.contains("CREATE TABLE IF NOT EXISTS installations"));
         std::fs::remove_dir_all(cwd).ok();
     }

@@ -36,11 +36,18 @@ pub struct FrameworkMigration {
     pub sql: &'static str,
 }
 
-pub const FRAMEWORK_MIGRATIONS: &[FrameworkMigration] = &[FrameworkMigration {
-    id: "0001_openshop_init",
-    name: "openshop_init",
-    sql: include_str!("../../migrations/0001_openshop_init.sql"),
-}];
+pub const FRAMEWORK_MIGRATIONS: &[FrameworkMigration] = &[
+    FrameworkMigration {
+        id: "0001_openshop_init",
+        name: "openshop_init",
+        sql: include_str!("../../migrations/0001_openshop_init.sql"),
+    },
+    FrameworkMigration {
+        id: "0002_openshop_queue_indexes",
+        name: "openshop_queue_indexes",
+        sql: include_str!("../../migrations/0002_openshop_queue_indexes.sql"),
+    },
+];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MigrationFile {
@@ -543,19 +550,43 @@ mod tests {
     }
 
     #[test]
+    fn generates_the_framework_migrations_a_project_lacks() {
+        // As `openshop init` wrote it when the first migration was the only one.
+        let dir = temp_dir("upgrade");
+        let folder = dir.join(MIGRATIONS_DIR);
+        std::fs::create_dir_all(&folder).unwrap();
+        let init = &FRAMEWORK_MIGRATIONS[0];
+        std::fs::write(
+            folder.join("20260101000000_openshop_init.sql"),
+            format!("{FRAMEWORK_MARKER}{}\n\n{}", init.id, init.sql),
+        )
+        .unwrap();
+        assert!(check_migrations(&dir, &[]).is_err());
+
+        let created = generate_framework(&dir, &[], false).unwrap();
+        assert_eq!(created.len(), FRAMEWORK_MIGRATIONS.len() - 1);
+        assert!(file_name(&created[0]).ends_with("_openshop_queue_indexes.sql"));
+        let content = std::fs::read_to_string(&created[0]).unwrap();
+        assert!(content.starts_with("-- openshop:framework 0002_openshop_queue_indexes\n"));
+        assert!(content.contains("CREATE INDEX IF NOT EXISTS flow_runs_claimable_idx"));
+        assert!(!content.contains("CREATE TABLE"));
+
+        check_migrations(&dir, &[]).unwrap();
+        assert!(generate_framework(&dir, &[], false).unwrap().is_empty());
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
     fn generates_named_empty_migrations_in_order() {
         let dir = temp_dir("named");
         let created = generate_framework(&dir, &["--name=Add Reviews!".to_string()], false).unwrap();
-        assert_eq!(created.len(), 2);
-        let names: Vec<String> = created
-            .iter()
-            .map(|path| path.file_name().unwrap().to_string_lossy().into_owned())
-            .collect();
-        assert!(names[1].ends_with("_add_reviews.sql"));
-        assert!(names[0] < names[1]);
+        assert_eq!(created.len(), FRAMEWORK_MIGRATIONS.len() + 1);
+        let names: Vec<String> = created.iter().map(|path| file_name(path)).collect();
+        assert!(names.last().unwrap().ends_with("_add_reviews.sql"));
+        assert!(names.is_sorted());
 
         let files = read_migration_files(&dir.join(MIGRATIONS_DIR)).unwrap();
-        assert_eq!(files.len(), 2);
+        assert_eq!(files.len(), created.len());
         assert_eq!(files[0].tag, names[0].trim_end_matches(".sql"));
         std::fs::remove_dir_all(dir).ok();
     }
@@ -622,8 +653,8 @@ mod tests {
 
         // The first generation creates the table and records the models.
         let first = generate(&dir, std::slice::from_ref(&reviews));
-        assert_eq!(first.files.len(), 2);
-        assert!(file_name(&first.files[1]).ends_with("_models.sql"));
+        assert_eq!(first.files.len(), FRAMEWORK_MIGRATIONS.len() + 1);
+        assert!(file_name(first.files.last().unwrap()).ends_with("_models.sql"));
         assert_eq!(first.snapshot, Some(folder.join(SNAPSHOT_FILE)));
         assert!(first.warnings.is_empty());
         let snapshot = SchemaSnapshot::read(&folder).unwrap().unwrap();

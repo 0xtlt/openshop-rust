@@ -5,7 +5,7 @@ mod common;
 
 use chrono::{DateTime, Utc};
 use common::{TempProject, empty_database};
-use openshop::db::migrate::{check_migrations, generate_migrations, migrate_schema};
+use openshop::db::migrate::{FRAMEWORK_MIGRATIONS, check_migrations, generate_migrations, migrate_schema};
 use openshop::testing::TestDb;
 use openshop::{Model, OpenShopConfig, PgPool, Record, Value, json};
 use uuid::Uuid;
@@ -428,7 +428,7 @@ async fn generated_migrations_follow_the_models_from_one_release_to_the_next() {
 
     // First release: the framework schema and the table of the model.
     let first = generate_migrations(project.path(), &[], false, &[Review::model()]).unwrap();
-    assert_eq!(first.files.len(), 2);
+    assert_eq!(first.files.len(), FRAMEWORK_MIGRATIONS.len() + 1);
     assert!(first.warnings.is_empty());
     migrate_schema(&db.pool, project.path()).await.unwrap();
     check_migrations(project.path(), &[Review::model()]).unwrap();
@@ -692,7 +692,7 @@ async fn generated_migrations_carry_the_references() {
 
     let first = generate_migrations(project.path(), &[], false, &[ReviewVote::model(), Review::model()]).unwrap();
     assert!(first.warnings.is_empty());
-    let sql = std::fs::read_to_string(&first.files[1]).unwrap();
+    let sql = std::fs::read_to_string(first.files.last().unwrap()).unwrap();
     let position = |needle: &str| sql.find(needle).unwrap_or_else(|| panic!("{needle} in:\n{sql}"));
     let constraint = "ALTER TABLE \"review_votes\" ADD CONSTRAINT \"review_votes_review_id_fkey\"";
     assert!(position("CREATE TABLE IF NOT EXISTS \"reviews\"") < position(constraint));
