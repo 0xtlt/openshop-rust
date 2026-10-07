@@ -56,7 +56,9 @@ larger configurations easier to split:
   page loader, action or access rule, a provider checker, or the error hook is
   caught and treated as a failure of that unit of work.
 - Log lines are written in emission order with their emission time, and are
-  fully persisted when a run finishes.
+  fully persisted when a run finishes. Lines logged within 50 ms of each other
+  share one statement, and the lines a flow logged are stored before the
+  outcome of its run.
 - A worker keeps polling when claiming a run fails, for example during a
   database outage.
 - A worker with every slot taken claims again as soon as a run finishes, and

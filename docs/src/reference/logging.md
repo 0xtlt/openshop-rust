@@ -31,8 +31,10 @@ pub fn sync_orders() -> Flow {
 JSON payload (`serde_json::Value`) and a message. Each line is sent to the
 runtime logger as `[LEVEL] message` and stored in the `logs` table with the
 time it was emitted. Lines are written in emission order by a background task:
-logging never blocks or fails a flow, and every line is persisted by the time
-the run finishes. `flush().await` waits for the lines logged so far.
+logging never blocks or fails a flow. A line waits up to 50 ms for the next
+ones, which are written with it in one statement, and the lines a flow logged
+are stored before the outcome of its run is. `flush().await` writes the lines
+logged so far without waiting.
 
 Logs are associated with the current run and appear in the embedded admin. The
 Admin API supports level/text filters, context expansion, and JSON or CSV

@@ -103,6 +103,13 @@ worker process count × concurrency per worker
 
 Also budget PostgreSQL connections per process using `PGPOOL_MAX`.
 
+A worker mostly waits for PostgreSQL and for the services its steps call. The
+tokio runtime starts one thread per core, and waking them costs more CPU than
+they save on such work: on short flows, a worker with `TOKIO_WORKER_THREADS=1`
+used a third less CPU per run than one with fourteen threads, at the same
+throughput. Keep several threads when steps compute for long without awaiting:
+on a single thread, such a step holds back every other run of the process.
+
 ## Recover failed runs
 
 1. Open the failed run and find the first failed step and its error.

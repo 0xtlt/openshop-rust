@@ -302,7 +302,11 @@ pub async fn run_flow(app: &OpenShop, opts: RunFlowOptions) -> Result<RunFlowRes
         outcome.unwrap_or_else(|panic| Err(anyhow!("Flow panicked: {}", panic_message(panic))))
     };
 
-    let result = match execution.await {
+    let outcome = execution.await;
+    // What the flow logged is stored before its outcome is.
+    logger.flush().await;
+
+    let result = match outcome {
         Ok(()) => {
             if finish_run(db, run_id, worker_id, RunUpdate::status("completed").completed()).await? {
                 logger.info(

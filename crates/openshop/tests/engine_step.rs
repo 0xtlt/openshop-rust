@@ -3,7 +3,7 @@ mod common;
 use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use chrono::Utc;
 use common::{TEST_SHOP, TestApp, create_config, noop_flow};
@@ -549,5 +549,72 @@ async fn logs_the_lifecycle_of_each_step() {
     assert_eq!(failure["step"], "save");
     assert_eq!(failure["error"], "disk full");
     assert!(failure["durationMs"].is_number());
+    test.cleanup().await;
+}
+
+/// The lines of a run with the transaction that wrote each of them: rows
+/// inserted by one statement share it.
+async fn find_log_writes(test: &TestApp, run_id: Uuid) -> Vec<(String, String, String)> {
+    sqlx::query_as("SELECT level, message, xmin::text FROM logs WHERE flow_run_id = $1 ORDER BY created_at, ctid")
+        .bind(run_id.to_string())
+        .fetch_all(&test.db)
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn writes_the_lines_logged_together_in_one_statement() {
+    let test = new_test().await;
+    let run_id = create_run(&test).await;
+    let logger = FlowLogger::new(test.db.clone(), run_id.to_string());
+
+    logger.info(json!({ "position": 1 }), "first");
+    logger.warn(json!({ "position": 2 }), "second");
+    logger.error(json!({ "position": 3 }), "third");
+    logger.flush().await;
+
+    let writes = find_log_writes(&test, run_id).await;
+    let lines: Vec<(&str, &str)> = writes
+        .iter()
+        .map(|(level, message, _)| (level.as_str(), message.as_str()))
+        .collect();
+    assert_eq!(lines, [("info", "first"), ("warn", "second"), ("error", "third")]);
+    assert!(
+        writes.iter().all(|(_, _, statement)| *statement == writes[0].2),
+        "{writes:?}"
+    );
+
+    let payloads: Vec<(openshop::Value,)> =
+        sqlx::query_as("SELECT payload FROM logs WHERE flow_run_id = $1 ORDER BY created_at, ctid")
+            .bind(run_id.to_string())
+            .fetch_all(&test.db)
+            .await
+            .unwrap();
+    let positions: Vec<&openshop::Value> = payloads.iter().map(|(payload,)| &payload["position"]).collect();
+    assert_eq!(positions, [&json!(1), &json!(2), &json!(3)]);
+    test.cleanup().await;
+}
+
+#[tokio::test]
+async fn writes_a_line_without_waiting_for_the_end_of_the_run() {
+    let test = new_test().await;
+    let run_id = create_run(&test).await;
+    let logger = FlowLogger::new(test.db.clone(), run_id.to_string());
+
+    // Nothing flushes: the line is written on its own, after a short delay.
+    logger.info(json!({}), "still running");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while find_log_writes(&test, run_id).await.is_empty() {
+        assert!(Instant::now() < deadline, "the line was not written");
+        tokio::time::sleep(Duration::from_millis(15)).await;
+    }
+
+    logger.info(json!({}), "done");
+    logger.flush().await;
+
+    let writes = find_log_writes(&test, run_id).await;
+    let messages: Vec<&str> = writes.iter().map(|(_, message, _)| message.as_str()).collect();
+    assert_eq!(messages, ["still running", "done"]);
+    assert_ne!(writes[0].2, writes[1].2, "the second line has its own statement");
     test.cleanup().await;
 }

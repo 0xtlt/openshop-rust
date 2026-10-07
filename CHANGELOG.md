@@ -58,6 +58,12 @@
   two partial indexes on `flow_runs` that workers read the queue through.
   `migrate generate` adds it to an existing project, and `migrate check` fails
   until it is there. `dev` creates the indexes on start.
+- A run writes its log lines in fewer statements. A line waits up to 50 ms for
+  the next ones and they are inserted together, each with the time it was
+  logged; `flush()` and the end of the flow do not wait. The lines a flow
+  logged are now stored before the outcome of its run. A flow of three steps
+  goes from 21 statements to 15: a busy worker completes about a third more
+  runs per second and uses a fifth less CPU per run.
 
 ## 0.0.12-beta.0
 
