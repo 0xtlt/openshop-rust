@@ -59,6 +59,15 @@ larger configurations easier to split:
   fully persisted when a run finishes.
 - A worker keeps polling when claiming a run fails, for example during a
   database outage.
+- A worker with every slot taken claims again as soon as a run finishes, and
+  claims as many runs as it has free slots in one statement. The TypeScript
+  engine waits a poll interval when its slots are full and claims one run per
+  statement, which caps a worker at `concurrency` runs per poll interval.
+- Claiming reads the queue through a partial index, so its cost does not grow
+  with the number of runs waiting.
+- Runs past their deadline are failed once per poll interval, including while
+  every slot is taken, instead of before each claim. A claim skips them, so
+  none starts late.
 - A worker extends its lease at least twice per lease period (every 15 seconds
   at most). The TypeScript engine always waited 15 seconds, so a lease shorter
   than that let another worker take over a run that was still executing.

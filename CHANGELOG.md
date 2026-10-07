@@ -45,6 +45,19 @@
   timeout, and `PGPOOL_MAX=0` is the default size. Before, the first closed
   every connection as soon as it was released, the second kept the pool from
   connecting, and the third stopped the process with a panic.
+- A worker with runs waiting is no longer held back by its poll interval or by
+  the length of the queue. A run that finishes wakes the worker, which used to
+  wait a full `poll_interval_ms` while its slots were taken: 5 runs per second
+  with the default settings, whatever the flow did. It claims as many runs as
+  it has free slots in one statement, through a partial index, so a claim
+  costs the same with a few runs waiting or with 80,000.
+- Runs past their deadline are failed once per `poll_interval_ms`, also while
+  every slot of the worker is taken, instead of before each claim. A claim
+  skips them, so none starts late.
+- The framework schema has a second migration, `openshop_queue_indexes`: the
+  two partial indexes on `flow_runs` that workers read the queue through.
+  `migrate generate` adds it to an existing project, and `migrate check` fails
+  until it is there. `dev` creates the indexes on start.
 
 ## 0.0.12-beta.0
 

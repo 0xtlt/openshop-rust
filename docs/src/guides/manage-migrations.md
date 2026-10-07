@@ -7,14 +7,15 @@ configured `DATABASE_URL` for each environment.
 ## 1. Include the schema
 
 Migrations are SQL files owned by your project. `openshop init` writes the
-framework schema as the first one:
+framework schema as the first files:
 
 ```txt
 migrations/
   20261006143115_openshop_init.sql
+  20261006143116_openshop_queue_indexes.sql
 ```
 
-The file starts with a marker line:
+Each file starts with a marker line:
 
 ```sql
 -- openshop:framework 0001_openshop_init

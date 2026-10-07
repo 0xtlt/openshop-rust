@@ -10,7 +10,7 @@ use chrono::{DateTime, Utc};
 use futures::FutureExt;
 use rand::Rng;
 use serde_json::Value;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Notify};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
@@ -48,6 +48,46 @@ fn merge(mut config: WorkerConfig, partial: &PartialWorkerConfig) -> WorkerConfi
     config
 }
 
+/// Fails the unfinished runs that outlived their deadline. The `WHERE` clause
+/// repeats the predicate of `flow_runs_deadline_idx`.
+const EXPIRE_SQL: &str = "\
+    UPDATE flow_runs SET \
+      status = 'failed', \
+      error = 'Flow timed out — exceeded maximum allowed duration', \
+      worker_id = NULL, available_at = NULL, completed_at = $1 \
+    WHERE status IN ('pending', 'sleeping', 'running') \
+      AND deadline_at IS NOT NULL AND deadline_at <= $1";
+
+/// Leases up to `$4` runs in one statement and returns them oldest first.
+///
+/// `FOR UPDATE SKIP LOCKED` lets several workers claim at the same time. A
+/// `running` row past its `available_at` is an expired lease and can be taken
+/// over. A run past its deadline is left to [`EXPIRE_SQL`].
+///
+/// The candidates repeat the predicate of `flow_runs_claimable_idx`, which
+/// yields them already ordered, and the update finds them by primary key:
+/// the cost of a claim follows its size, not the length of the queue.
+const CLAIM_SQL: &str = "\
+    WITH candidate AS ( \
+      SELECT id, available_at, created_at FROM flow_runs \
+      WHERE status IN ('pending', 'sleeping', 'running') AND available_at <= $1 \
+        AND (deadline_at IS NULL OR deadline_at > $1) \
+      ORDER BY available_at ASC, created_at ASC \
+      LIMIT $4 \
+      FOR UPDATE SKIP LOCKED \
+    ), claimed AS ( \
+      UPDATE flow_runs SET \
+        status = 'running', \
+        attempts = attempts + 1, \
+        worker_id = $2, \
+        available_at = $3, \
+        started_at = COALESCE(started_at, $1) \
+      WHERE id = ANY(ARRAY(SELECT id FROM candidate)) \
+      RETURNING id, flow_name, app_handle, shop, input, attempts \
+    ) \
+    SELECT claimed.* FROM claimed JOIN candidate USING (id) \
+    ORDER BY candidate.available_at, candidate.created_at";
+
 #[derive(Debug, Clone, sqlx::FromRow)]
 struct ClaimedRun {
     id: Uuid,
@@ -64,6 +104,8 @@ struct Inner {
     worker_id: String,
     running: AtomicBool,
     active: AtomicUsize,
+    /// Signalled when a run finishes, for a loop that waits for a free slot.
+    slot_freed: Notify,
     wake: Mutex<CancellationToken>,
     loop_handle: Mutex<Option<JoinHandle<()>>>,
 }
@@ -85,6 +127,7 @@ impl Worker {
                 worker_id: Uuid::new_v4().to_string(),
                 running: AtomicBool::new(false),
                 active: AtomicUsize::new(0),
+                slot_freed: Notify::new(),
                 wake: Mutex::new(CancellationToken::new()),
                 loop_handle: Mutex::new(None),
             }),
@@ -117,7 +160,7 @@ impl Worker {
         *self.inner.wake.lock().await = stop.clone();
         let inner = self.inner.clone();
         *self.inner.loop_handle.lock().await = Some(tokio::spawn(async move {
-            inner.run_loop(stop).await;
+            tokio::join!(inner.claim_loop(&stop), inner.expire_loop(&stop));
         }));
     }
 
@@ -139,77 +182,67 @@ impl Worker {
 }
 
 impl Inner {
-    async fn run_loop(self: Arc<Self>, stop: CancellationToken) {
+    /// Fills the free slots from the queue until the worker stops.
+    async fn claim_loop(self: &Arc<Self>, stop: &CancellationToken) {
         let mut consecutive_empty: u32 = 0;
 
         while self.running.load(Ordering::SeqCst) {
-            if self.active.load(Ordering::SeqCst) >= self.config.concurrency {
-                self.sleep(self.config.poll_interval_ms, &stop).await;
+            let free = self
+                .config
+                .concurrency
+                .saturating_sub(self.active.load(Ordering::SeqCst));
+            if free == 0 {
+                // Every slot is taken: the next run to finish wakes the loop.
+                tokio::select! {
+                    _ = self.slot_freed.notified() => {}
+                    _ = stop.cancelled() => {}
+                }
                 continue;
             }
 
-            match self.claim_one().await {
-                Ok(Some(claimed)) => {
-                    consecutive_empty = 0;
-                    self.clone().process_run(claimed);
-                }
-                Ok(None) => {
+            match self.claim(free).await {
+                Ok(claimed) if claimed.is_empty() => {
                     consecutive_empty += 1;
-                    self.sleep(self.backoff_delay(consecutive_empty), &stop).await;
+                    self.sleep(self.backoff_delay(consecutive_empty), stop).await;
+                }
+                Ok(claimed) => {
+                    consecutive_empty = 0;
+                    for run in claimed {
+                        self.clone().process_run(run);
+                    }
                 }
                 Err(error) => {
                     // Keep polling through database outages.
                     consecutive_empty += 1;
-                    logger::warn(format!("[openshop] Worker failed to claim a run: {error:#}"));
-                    self.sleep(self.backoff_delay(consecutive_empty), &stop).await;
+                    logger::warn(format!("[openshop] Worker failed to claim runs: {error:#}"));
+                    self.sleep(self.backoff_delay(consecutive_empty), stop).await;
                 }
             }
         }
     }
 
-    async fn claim_one(&self) -> Result<Option<ClaimedRun>> {
-        let db = self.app.db();
-        let now = Utc::now();
-        let lease_until = self.lease_until();
+    /// Expires the runs past their deadline once per poll interval, whether or
+    /// not the worker has a free slot. Claiming skips them in the meantime.
+    async fn expire_loop(&self, stop: &CancellationToken) {
+        while self.running.load(Ordering::SeqCst) {
+            let expired = sqlx::query(EXPIRE_SQL).bind(Utc::now()).execute(self.app.db()).await;
+            if let Err(error) = expired {
+                logger::warn(format!(
+                    "[openshop] Worker failed to expire runs past their deadline: {error:#}"
+                ));
+            }
+            self.sleep(self.config.poll_interval_ms, stop).await;
+        }
+    }
 
-        // Expire deadline-exceeded runs
-        sqlx::query(
-            "UPDATE flow_runs SET \
-               status = 'failed', \
-               error = 'Flow timed out — exceeded maximum allowed duration', \
-               worker_id = NULL, available_at = NULL, completed_at = $1 \
-             WHERE status IN ('pending', 'running', 'sleeping') \
-               AND deadline_at IS NOT NULL AND deadline_at <= $1",
-        )
-        .bind(now)
-        .execute(db)
-        .await?;
-
-        // Atomic claim using FOR UPDATE SKIP LOCKED. A `running` row past its
-        // `available_at` is an expired lease and can be taken over.
-        let claimed = sqlx::query_as::<_, ClaimedRun>(
-            "WITH candidate AS ( \
-               SELECT id FROM flow_runs \
-               WHERE status IN ('pending', 'sleeping', 'running') AND available_at <= $1 \
-               ORDER BY available_at ASC, created_at ASC \
-               LIMIT 1 \
-               FOR UPDATE SKIP LOCKED \
-             ) \
-             UPDATE flow_runs SET \
-               status = 'running', \
-               attempts = attempts + 1, \
-               worker_id = $2, \
-               available_at = $3, \
-               started_at = COALESCE(started_at, $1) \
-             WHERE id = (SELECT id FROM candidate) \
-             RETURNING id, flow_name, app_handle, shop, input, attempts",
-        )
-        .bind(now)
-        .bind(&self.worker_id)
-        .bind(lease_until)
-        .fetch_optional(db)
-        .await?;
-
+    async fn claim(&self, limit: usize) -> Result<Vec<ClaimedRun>> {
+        let claimed = sqlx::query_as::<_, ClaimedRun>(CLAIM_SQL)
+            .bind(Utc::now())
+            .bind(&self.worker_id)
+            .bind(self.lease_until())
+            .bind(limit as i64)
+            .fetch_all(self.app.db())
+            .await?;
         Ok(claimed)
     }
 
@@ -222,6 +255,7 @@ impl Inner {
         tokio::spawn(async move {
             self.execute(claimed).await;
             self.active.fetch_sub(1, Ordering::SeqCst);
+            self.slot_freed.notify_one();
         });
     }
 
@@ -306,5 +340,45 @@ impl Inner {
             _ = tokio::time::sleep(Duration::from_millis(ms)) => {}
             _ = stop.cancelled() => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testing::TestDb;
+
+    /// The plan PostgreSQL chooses for a statement of the worker, as JSON text.
+    async fn plan(db: &TestDb, statement: &str, limit: Option<i64>) -> String {
+        let explain = format!("EXPLAIN (FORMAT JSON) {statement}");
+        let mut query = sqlx::query_as(&explain).bind(Utc::now());
+        if let Some(limit) = limit {
+            query = query.bind("worker").bind(Utc::now()).bind(limit);
+        }
+        let (plan,): (Value,) = query.fetch_one(&db.pool).await.unwrap();
+        plan.to_string()
+    }
+
+    #[tokio::test]
+    async fn reads_the_queue_through_its_indexes() {
+        let db = TestDb::create().await.unwrap();
+        // Enough runs for a scan of the table to cost more than an index.
+        sqlx::raw_sql(
+            "INSERT INTO flow_runs (shop, flow_name, available_at, deadline_at) \
+             SELECT 'shop.myshopify.com', 'flow', now(), now() + interval '1 hour' FROM generate_series(1, 5000); \
+             ANALYZE flow_runs",
+        )
+        .execute(&db.pool)
+        .await
+        .unwrap();
+
+        // An index whose predicate the statement does not repeat would be ignored.
+        let claim = plan(&db, CLAIM_SQL, Some(5)).await;
+        assert!(claim.contains("flow_runs_claimable_idx"), "{claim}");
+        assert!(!claim.contains("Seq Scan"), "{claim}");
+        let expire = plan(&db, EXPIRE_SQL, None).await;
+        assert!(expire.contains("flow_runs_deadline_idx"), "{expire}");
+        assert!(!expire.contains("Seq Scan"), "{expire}");
+        db.cleanup().await.unwrap();
     }
 }

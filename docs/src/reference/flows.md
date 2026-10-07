@@ -227,9 +227,10 @@ blocking call, or a task started with `tokio::spawn`. For such work, pass
 `signal.is_cancelled()` returns `true`.
 
 A flow with a `timeout` also gets a deadline at dispatch: the dispatch time
-plus the timeout. Workers mark any `pending`, `running`, or `sleeping` run past
-its deadline as `failed` with
-`Flow timed out — exceeded maximum allowed duration`.
+plus the timeout. Workers never start a run past its deadline, and mark any
+`pending`, `running`, or `sleeping` run past it as `failed` with
+`Flow timed out — exceeded maximum allowed duration`. Each worker looks for
+such runs once per `poll_interval_ms`, one second by default.
 
 A panic inside the flow function is caught and handled like a returned error.
 The run fails with `Flow panicked: <message>` and is retried according to its

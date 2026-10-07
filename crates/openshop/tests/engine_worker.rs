@@ -25,6 +25,16 @@ fn worker(app: &OpenShop, concurrency: usize) -> Worker {
     worker_with(app, PartialWorkerConfig::new().concurrency(concurrency))
 }
 
+/// A worker whose poll interval outlasts the test: after its first poll and
+/// its first deadline sweep, only a run that finishes makes it claim again.
+fn worker_without_polling(app: &OpenShop, concurrency: usize) -> Worker {
+    let config = PartialWorkerConfig::new()
+        .concurrency(concurrency)
+        .poll_interval_ms(60_000)
+        .poll_max_interval_ms(60_000);
+    Worker::new(app.clone(), config)
+}
+
 async fn dispatch(test: &TestApp, flow: &str) -> Uuid {
     dispatch_with(test, DispatchFlowParams::new(flow, TEST_SHOP)).await
 }
@@ -177,8 +187,7 @@ async fn never_runs_more_than_its_concurrency_limit() {
         }
     })
     .concurrency(Concurrency::Allow);
-    // The limit comes from the application; the slow polling it also asks for is
-    // overridden by the worker's own settings, or four runs would not fit in the timeout.
+    // The limit comes from the application, the polling from the worker's own settings.
     let config = OpenShopConfig::builder()
         .flow(flow)
         .worker(PartialWorkerConfig::new().concurrency(1).poll_interval_ms(30_000))
@@ -198,6 +207,73 @@ async fn never_runs_more_than_its_concurrency_limit() {
     worker.stop().await;
 
     assert_eq!(peak.load(Ordering::SeqCst), 1);
+    test.cleanup().await;
+}
+
+#[tokio::test]
+async fn starts_the_next_run_as_soon_as_a_slot_is_free() {
+    let test = TestApp::new(create_config([noop_flow("quick-flow").concurrency(Concurrency::Allow)])).await;
+    let mut runs = Vec::new();
+    for _ in 0..4 {
+        runs.push(dispatch(&test, "quick-flow").await);
+    }
+
+    // The single slot is taken by the first run: the others start because a
+    // run finished, not because the worker polled again.
+    let worker = worker_without_polling(&test.app, 1);
+    worker.start().await;
+    for run_id in runs {
+        wait_for_status(&test, run_id, "completed").await;
+    }
+    worker.stop().await;
+    test.cleanup().await;
+}
+
+#[tokio::test]
+async fn fills_its_free_slots_with_one_claim() {
+    let started = Arc::new(AtomicUsize::new(0));
+    let release = CancellationToken::new();
+    let flow = Flow::new("slow-flow", {
+        let (started, release) = (started.clone(), release.clone());
+        move |_ctx: FlowContext| {
+            let (started, release) = (started.clone(), release.clone());
+            async move {
+                started.fetch_add(1, Ordering::SeqCst);
+                release.cancelled().await;
+                Ok(())
+            }
+        }
+    })
+    .concurrency(Concurrency::Allow);
+    let test = TestApp::new(create_config([flow])).await;
+    let mut runs = Vec::new();
+    for _ in 0..5 {
+        runs.push(dispatch(&test, "slow-flow").await);
+    }
+
+    let worker = worker(&test.app, 3);
+    worker.start().await;
+    wait_until("three runs to start", || started.load(Ordering::SeqCst) == 3).await;
+    assert_eq!(worker.active_count(), 3);
+
+    // The three oldest runs were claimed, by a single statement: they share its timestamp.
+    let mut started_at = Vec::new();
+    for run_id in &runs[..3] {
+        let run = find_run(&test, *run_id).await;
+        assert_eq!((run.status.as_str(), run.attempts), ("running", 1));
+        started_at.push(run.started_at.expect("started"));
+    }
+    assert!(started_at.iter().all(|at| *at == started_at[0]), "{started_at:?}");
+    for run_id in &runs[3..] {
+        let run = find_run(&test, *run_id).await;
+        assert_eq!((run.status.as_str(), run.attempts), ("pending", 0));
+    }
+
+    release.cancel();
+    for run_id in runs {
+        wait_for_status(&test, run_id, "completed").await;
+    }
+    worker.stop().await;
     test.cleanup().await;
 }
 
@@ -592,10 +668,7 @@ async fn expires_runs_past_their_deadline() {
     for run_id in expired {
         let run = find_run(&test, run_id).await;
         assert_eq!(run.status, "failed");
-        assert_eq!(
-            run.error.as_deref(),
-            Some("Flow timed out — exceeded maximum allowed duration")
-        );
+        assert_eq!(run.error.as_deref(), Some(TIMED_OUT));
         assert_eq!(run.available_at, None);
         assert_eq!(run.worker_id, None);
         assert!(run.completed_at.is_some());
@@ -605,6 +678,124 @@ async fn expires_runs_past_their_deadline() {
         1,
         "expired runs must not be executed"
     );
+    test.cleanup().await;
+}
+
+const TIMED_OUT: &str = "Flow timed out — exceeded maximum allowed duration";
+
+#[tokio::test]
+async fn does_not_start_a_run_whose_deadline_passed_since_the_last_sweep() {
+    let executions = Arc::new(AtomicUsize::new(0));
+    let guarded = Flow::new("guarded-flow", {
+        let executions = executions.clone();
+        move |_ctx: FlowContext| {
+            executions.fetch_add(1, Ordering::SeqCst);
+            async { Ok(()) }
+        }
+    })
+    .timeout(Duration::from_secs(60))
+    .concurrency(Concurrency::Allow);
+    let started = Arc::new(Notify::new());
+    let release = CancellationToken::new();
+    let test = TestApp::new(create_config([
+        guarded,
+        gated_flow("gate-flow", started.clone(), release.clone()),
+        noop_flow("control-flow"),
+    ]))
+    .await;
+
+    // The worker sweeps on start, then not again before the test ends.
+    let swept = dispatch(&test, "guarded-flow").await;
+    sqlx::query("UPDATE flow_runs SET deadline_at = now() - interval '1 hour' WHERE id = $1")
+        .bind(swept)
+        .execute(&test.db)
+        .await
+        .unwrap();
+    let gate = dispatch(&test, "gate-flow").await;
+    let worker = worker_without_polling(&test.app, 1);
+    worker.start().await;
+    tokio::time::timeout(TIMEOUT, started.notified())
+        .await
+        .expect("run claimed");
+    wait_for_status(&test, swept, "failed").await;
+
+    // A run becomes claimable with its deadline already behind it, ahead of another one in the queue.
+    let overdue = dispatch_with(
+        &test,
+        DispatchFlowParams::new("guarded-flow", TEST_SHOP).options(DispatchOptions {
+            delay_ms: Some(60_000),
+            ..Default::default()
+        }),
+    )
+    .await;
+    sqlx::query(
+        "UPDATE flow_runs SET available_at = now() - interval '1 minute', deadline_at = now() - interval '1 second' \
+         WHERE id = $1",
+    )
+    .bind(overdue)
+    .execute(&test.db)
+    .await
+    .unwrap();
+    let control = dispatch(&test, "control-flow").await;
+
+    release.cancel();
+    wait_for_status(&test, gate, "completed").await;
+    wait_for_status(&test, control, "completed").await;
+    worker.stop().await;
+
+    // The claims skipped it, and no sweep has failed it yet.
+    let run = find_run(&test, overdue).await;
+    assert_eq!((run.status.as_str(), run.attempts), ("pending", 0));
+    assert_eq!(
+        executions.load(Ordering::SeqCst),
+        0,
+        "expired runs must not be executed"
+    );
+
+    // The next sweep does.
+    worker.start().await;
+    let run = wait_for_status(&test, overdue, "failed").await;
+    worker.stop().await;
+    assert_eq!(run.error.as_deref(), Some(TIMED_OUT));
+    assert_eq!(executions.load(Ordering::SeqCst), 0);
+    test.cleanup().await;
+}
+
+#[tokio::test]
+async fn expires_runs_past_their_deadline_while_every_slot_is_busy() {
+    let started = Arc::new(Notify::new());
+    let release = CancellationToken::new();
+    let guarded = noop_flow("guarded-flow").timeout(Duration::from_secs(60));
+    let test = TestApp::new(create_config([
+        guarded,
+        gated_flow("gate-flow", started.clone(), release.clone()),
+    ]))
+    .await;
+    let gate = dispatch(&test, "gate-flow").await;
+
+    let worker = worker(&test.app, 1);
+    worker.start().await;
+    tokio::time::timeout(TIMEOUT, started.notified())
+        .await
+        .expect("run claimed");
+
+    let overdue = dispatch(&test, "guarded-flow").await;
+    sqlx::query("UPDATE flow_runs SET deadline_at = now() - interval '1 second' WHERE id = $1")
+        .bind(overdue)
+        .execute(&test.db)
+        .await
+        .unwrap();
+
+    // The worker has no slot to claim with, and still fails the run.
+    let run = wait_for_status(&test, overdue, "failed").await;
+    assert_eq!(worker.active_count(), 1);
+    assert_eq!(run.error.as_deref(), Some(TIMED_OUT));
+    assert_eq!((run.attempts, run.available_at, run.worker_id), (0, None, None));
+    assert!(run.completed_at.is_some());
+
+    release.cancel();
+    wait_for_status(&test, gate, "completed").await;
+    worker.stop().await;
     test.cleanup().await;
 }
 
@@ -656,7 +847,9 @@ async fn takes_over_a_run_whose_lease_expired() {
     test.cleanup().await;
 }
 
-#[tokio::test]
+// Opening a connection keeps a thread busy for longer than the margin of this
+// lease: the heartbeat needs a second one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_live_worker_keeps_a_lease_shorter_than_its_flow() {
     let executions = Arc::new(AtomicUsize::new(0));
     let flow = Flow::new("slow-flow", {
