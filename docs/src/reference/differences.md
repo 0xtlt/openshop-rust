@@ -162,6 +162,18 @@ larger configurations easier to split:
 - A migration that was modified after being applied is rejected.
 - `dev` and the test harness create missing tables directly and add missing
   columns and indexes. They do not rename, retype or drop anything.
+- The pool learns that PostgreSQL closed an idle connection when it uses it
+  again, where `pg.Pool` drops the client as soon as its socket closes. A
+  connection that waited more than a second is pinged first, and replaced when
+  the ping fails; one reused sooner is not checked, and fails the statement it
+  is given if it was closed. See
+  [Idle connection check](database.md#idle-connection-check).
+- A `PGPOOL_*` value that is not a non-negative integer falls back to its
+  default instead of going through `Number()`. `0` keeps the meaning it has
+  for `pg.Pool`: no timeout, and the default size for `PGPOOL_MAX`.
+- While PostgreSQL refuses connections, a statement waits and the pool retries
+  until `PGPOOL_CONNECTION_TIMEOUT_MS`, where `pg.Pool` fails at once. With
+  the timeout disabled, it waits until PostgreSQL is back.
 
 ## Environment
 

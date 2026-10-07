@@ -34,6 +34,17 @@
 - Responses under 1 KB are no longer compressed: on small JSON responses the
   compression took more CPU than the rest of the request and did not make them
   smaller.
+- The pool no longer pings a connection before every statement, which cost
+  each one a second round trip to PostgreSQL. Only a connection that waited
+  more than a second in the pool is pinged, and replaced when the ping fails.
+  If PostgreSQL closes a connection used less than a second ago, the next
+  statement on it fails once and the pool drops the connection. The test
+  harness uses the same check.
+- `0` in a `PGPOOL_*` variable means what it means to node-postgres:
+  `PGPOOL_IDLE_TIMEOUT_MS=0` and `PGPOOL_CONNECTION_TIMEOUT_MS=0` disable the
+  timeout, and `PGPOOL_MAX=0` is the default size. Before, the first closed
+  every connection as soon as it was released, the second kept the pool from
+  connecting, and the third stopped the process with a panic.
 - A worker with runs waiting is no longer held back by its poll interval or by
   the length of the queue. A run that finishes wakes the worker, which used to
   wait a full `poll_interval_ms` while its slots were taken: 5 runs per second
