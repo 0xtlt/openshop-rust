@@ -34,6 +34,12 @@
 - Responses under 1 KB are no longer compressed: on small JSON responses the
   compression took more CPU than the rest of the request and did not make them
   smaller.
+- The pool no longer pings a connection before every statement, which cost
+  each one a second round trip to PostgreSQL. Only a connection that waited
+  more than a second in the pool is pinged, and replaced when the ping fails.
+  If PostgreSQL closes a connection used less than a second ago, the next
+  statement on it fails once and the pool drops the connection. The test
+  harness uses the same check.
 
 ## 0.0.12-beta.0
 

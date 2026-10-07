@@ -170,6 +170,9 @@ Choose `PGPOOL_MAX` from the database connection limit divided by the maximum nu
 of simultaneously running web and worker processes, leaving capacity for migrations
 and administration.
 
+How the pool checks a connection that PostgreSQL may have closed has no setting:
+see [Idle connection check](database.md#idle-connection-check).
+
 ## Production rules
 
 - Set `OPENSHOP_ENV=production` in production.

@@ -24,7 +24,31 @@ process creates one pool and shares it through the `OpenShop` handle.
 | --- | --- |
 | `openshop::db::connect()` | Pool for `DATABASE_URL`. |
 | `openshop::db::connect_to(url)` | Pool for an explicit URL. |
-| `openshop::db::pool_options()` | `PgPoolOptions` with the `PGPOOL_*` settings applied. |
+| `openshop::db::pool_options()` | `PgPoolOptions` with the `PGPOOL_*` settings and the [idle connection check](#idle-connection-check) applied. |
+
+### Idle connection check
+
+PostgreSQL can close a connection while it waits in the pool: a restart, a
+failover, the idle timeout of a proxy. The pool finds out when it uses the
+connection again.
+
+- A connection that waited **more than one second** is pinged first, and
+  replaced when the ping fails. The statement runs on another connection and
+  no error reaches the application.
+- A connection reused **within the second** is handed out as is. If the server
+  closed it in the meantime, the statement run on it fails, and the pool drops
+  the connection when it comes back: one failed statement per closed
+  connection, `PGPOOL_MAX` at most per process.
+
+`sqlx` pings every connection it hands out by default, a second network round
+trip for each statement run on the pool. OpenShop replaces that with the check
+above, which costs nothing while connections are busy; the delay is not
+configurable. A pool built from `pool_options()` can set its own check with
+`test_before_acquire` or `before_acquire`.
+
+A connection that stays unused is closed after `PGPOOL_IDLE_TIMEOUT_MS`. The
+pool looks for such connections once per timeout, so one can wait up to twice
+that long.
 
 ## App models
 
