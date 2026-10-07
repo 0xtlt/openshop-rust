@@ -31,6 +31,9 @@
   generated migrations add, drop and rename the constraints.
 - `dev` adds the columns, indexes and foreign keys a model gained to an
   existing table.
+- Responses under 1 KB are no longer compressed: on small JSON responses the
+  compression took more CPU than the rest of the request and did not make them
+  smaller.
 
 ## 0.0.12-beta.0
 

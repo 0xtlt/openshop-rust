@@ -113,6 +113,17 @@ async fn responses_are_compressed_when_the_client_accepts_it() {
     let plain = ctx.get("/api/flows").send().await.unwrap();
     assert!(plain.headers().get("content-encoding").is_none());
     assert_eq!(plain.json::<Vec<Value>>().await.unwrap().len(), 40);
+
+    // A body that fits in one packet is sent as it is.
+    let small = ctx
+        .http
+        .get(ctx.url_for("/health"))
+        .header("accept-encoding", "gzip, br")
+        .send()
+        .await
+        .unwrap();
+    assert!(small.headers().get("content-encoding").is_none());
+    assert_eq!(small.json::<Value>().await.unwrap()["status"], "ok");
     ctx.shutdown().await.unwrap();
 }
 

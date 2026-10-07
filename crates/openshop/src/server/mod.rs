@@ -4,6 +4,7 @@
 pub mod admin_pages;
 pub mod api;
 pub mod auth;
+mod compression;
 pub mod connectors;
 pub mod crypto;
 pub mod file_routes;
@@ -30,15 +31,16 @@ use std::sync::LazyLock;
 use anyhow::{Context, Result};
 use axum::Router;
 use axum::extract::{DefaultBodyLimit, Request, State};
-use axum::http::{HeaderValue, Method, StatusCode};
+use axum::http::{HeaderName, HeaderValue, Method, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::Response;
 use axum::routing::{get, post};
 use regex::Regex;
 use serde_json::json;
 use tokio::net::TcpListener;
-use tower_http::compression::CompressionLayer;
+use tower::layer::layer_fn;
 use tower_http::cors::{AllowHeaders, AllowOrigin, CorsLayer};
+use tower_http::set_header::SetResponseHeaderLayer;
 
 use self::http::{json_error, json_response, not_found};
 use self::proxy::{EXTENSION_AUTH_MODES, PROXY_AUTH_MODES};
@@ -140,14 +142,6 @@ fn with_cors(router: Router<OpenShop>, cors: &CorsLayer) -> Router<OpenShop> {
     router.layer(cors.clone()).layer(middleware::from_fn(preflight_status))
 }
 
-async fn robots_header(request: Request, next: Next) -> Response {
-    let mut response = next.run(request).await;
-    response
-        .headers_mut()
-        .insert("x-robots-tag", HeaderValue::from_static(ROBOTS_HEADER));
-    response
-}
-
 /// Blocks the Admin API of built-in pages that are disabled.
 async fn page_gate(State(app): State<OpenShop>, request: Request, next: Next) -> Response {
     let config = app.config();
@@ -244,10 +238,17 @@ pub(crate) fn create_router(app: &OpenShop, options: ServerOptions, log: bool) -
         .config()
         .max_request_body_bytes
         .unwrap_or(DEFAULT_MAX_REQUEST_BODY_BYTES);
+    // One stack, outermost first: each `Router::layer` call would box every
+    // route once more, and a request clones every box it goes through.
     Ok(router
-        .layer(DefaultBodyLimit::max(body_limit))
-        .layer(CompressionLayer::new())
-        .layer(middleware::from_fn(robots_header))
+        .layer((
+            SetResponseHeaderLayer::overriding(
+                HeaderName::from_static("x-robots-tag"),
+                HeaderValue::from_static(ROBOTS_HEADER),
+            ),
+            layer_fn(compression::CompressLarge),
+            DefaultBodyLimit::max(body_limit),
+        ))
         .with_state(app.clone()))
 }
 
