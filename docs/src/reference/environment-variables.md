@@ -36,7 +36,8 @@ Notes:
   `HOST`, `SHOPIFY_APP_URL`, `ENCRYPTION_KEY`, and `OPENSHOP_UI_DIR`.
 - A `PORT` that is not a number between 1 and 65535 falls back to `3000`.
 - A `PGPOOL_*` value that is not a non-negative integer falls back to its
-  default.
+  default. `0` disables a timeout and is the default size for `PGPOOL_MAX`:
+  see [Connection](database.md#connection).
 - The `DATABASE_URL` fallback applies to `dev`, `start`, `worker`, `migrate`,
   and `migrate status`, when the variable is unset or empty.
   `OpenShop::connect` and `openshop::db::connect` have no fallback and fail

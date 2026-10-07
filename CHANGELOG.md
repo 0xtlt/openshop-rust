@@ -40,6 +40,11 @@
   If PostgreSQL closes a connection used less than a second ago, the next
   statement on it fails once and the pool drops the connection. The test
   harness uses the same check.
+- `0` in a `PGPOOL_*` variable means what it means to node-postgres:
+  `PGPOOL_IDLE_TIMEOUT_MS=0` and `PGPOOL_CONNECTION_TIMEOUT_MS=0` disable the
+  timeout, and `PGPOOL_MAX=0` is the default size. Before, the first closed
+  every connection as soon as it was released, the second kept the pool from
+  connecting, and the third stopped the process with a panic.
 
 ## 0.0.12-beta.0
 
