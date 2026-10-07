@@ -1,6 +1,10 @@
 //! Procedural macros of the OpenShop framework. Use them through the
 //! `openshop` crate, which re-exports them and documents them.
 
+mod admin;
+mod app;
+mod block;
+mod function;
 mod model;
 mod provider;
 mod util;
@@ -376,6 +380,82 @@ pub fn provider(arguments: proc_macro::TokenStream, item: proc_macro::TokenStrea
     provider::provider(name, item)
         .unwrap_or_else(syn::Error::into_compile_error)
         .into()
+}
+
+/// See `openshop::FunctionConfig`.
+#[proc_macro_derive(FunctionConfig, attributes(function, field))]
+pub fn derive_function_config(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
+    let input = syn::parse_macro_input!(input as syn::DeriveInput);
+    function::derive(input)
+        .unwrap_or_else(syn::Error::into_compile_error)
+        .into()
+}
+
+/// An attribute on a function that declares it as a building block.
+macro_rules! block_attribute {
+    ($(#[$doc:meta])* $name:ident) => {
+        $(#[$doc])*
+        #[proc_macro_attribute]
+        pub fn $name(arguments: proc_macro::TokenStream, item: proc_macro::TokenStream) -> proc_macro::TokenStream {
+            let arguments = syn::parse_macro_input!(arguments as util::Arguments);
+            let item = syn::parse_macro_input!(item as syn::ItemFn);
+            block::$name(arguments, item)
+                .unwrap_or_else(syn::Error::into_compile_error)
+                .into()
+        }
+    };
+}
+
+block_attribute!(
+    /// See `openshop::flow`.
+    flow
+);
+block_attribute!(
+    /// See `openshop::webhook`.
+    webhook
+);
+block_attribute!(
+    /// See `openshop::proxy`.
+    proxy
+);
+block_attribute!(
+    /// See `openshop::route`.
+    route
+);
+block_attribute!(
+    /// See `openshop::mcp_tool`.
+    mcp_tool
+);
+block_attribute!(
+    /// See `openshop::mcp_resource`.
+    mcp_resource
+);
+
+/// See `openshop::admin_page`.
+#[proc_macro_attribute]
+pub fn admin_page(arguments: proc_macro::TokenStream, item: proc_macro::TokenStream) -> proc_macro::TokenStream {
+    let path = match syn::parse::<LitStr>(arguments) {
+        Ok(path) => path,
+        Err(error) => {
+            return syn::Error::new(
+                error.span(),
+                "expected the path of the page: `#[admin_page(\"/reviews\")]`",
+            )
+            .into_compile_error()
+            .into();
+        }
+    };
+    let item = syn::parse_macro_input!(item as syn::ItemImpl);
+    admin::admin_page(path, item)
+        .unwrap_or_else(syn::Error::into_compile_error)
+        .into()
+}
+
+/// See `openshop::app!`.
+#[proc_macro]
+pub fn app(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
+    let declaration = syn::parse_macro_input!(input as app::Declaration);
+    app::expand(declaration).into()
 }
 
 #[cfg(test)]

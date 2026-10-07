@@ -26,51 +26,68 @@ cargo add subtle
 Create `src/routes/status.rs`:
 
 ```rust,ignore
-use openshop::{RouteAuthOutcome, ServerRoute, json, response};
+use openshop::response::{self, Response};
+use openshop::{Result, RouteAuthOutcome, ServerRouteContext, ServerRouteRequestContext, json, route};
 use subtle::ConstantTimeEq;
 
-pub fn status() -> ServerRoute {
-    ServerRoute::authenticated(|ctx| async move {
-        let Some(token) = std::env::var("INBOUND_API_TOKEN").ok().filter(|token| !token.is_empty()) else {
-            return Ok(RouteAuthOutcome::Unauthorized);
-        };
-        let expected = format!("Bearer {token}");
-        let supplied = ctx.request.header("authorization").unwrap_or_default();
+async fn service_token(ctx: ServerRouteRequestContext) -> Result<RouteAuthOutcome> {
+    let Some(token) = std::env::var("INBOUND_API_TOKEN").ok().filter(|token| !token.is_empty()) else {
+        return Ok(RouteAuthOutcome::Unauthorized);
+    };
+    let expected = format!("Bearer {token}");
+    let supplied = ctx.request.header("authorization").unwrap_or_default();
 
-        Ok(if bool::from(supplied.as_bytes().ct_eq(expected.as_bytes())) {
-            RouteAuthOutcome::Authenticated(json!({ "service": "warehouse" }))
-        } else {
-            RouteAuthOutcome::Unauthorized
-        })
+    Ok(if bool::from(supplied.as_bytes().ct_eq(expected.as_bytes())) {
+        RouteAuthOutcome::Authenticated(json!({ "service": "warehouse" }))
+    } else {
+        RouteAuthOutcome::Unauthorized
     })
-    .get(|ctx| async move { Ok(response::json(json!({ "ok": true, "service": ctx.auth["service"] }))) })
+}
+
+#[route(GET, "/status", auth = service_token)]
+pub async fn status(ctx: ServerRouteContext) -> Result<Response> {
+    Ok(response::json(json!({ "ok": true, "service": ctx.auth["service"] })))
 }
 ```
 
-Declare it in a new `src/routes/mod.rs` (`pub mod status;`), add `mod routes;`
-next to the other `mod` lines of `src/main.rs`, and register the route on the
-builder, keeping your other settings:
+`#[route]` declares the function as the handler of one method of a path, and
+`auth = service_token` names the function that authenticates its requests.
+Without `auth`, a route is public.
+
+Declare the module in a new `src/routes/mod.rs` (`pub mod status;`), add
+`mod routes;` next to the other `mod` lines, and list the function in the
+`routes` of `app!`, keeping your other entries:
 
 ```rust,ignore
-fn config() -> Result<OpenShopConfig> {
-    OpenShopConfig::builder()
-        // ... providers, flows and other settings ...
-        .route("/status", routes::status::status())
-        .build()
-}
+use routes::status::status;
+
+pub static APP: App = app! {
+    // ... providers, flows and other entries ...
+    routes: [status],
+};
 ```
+
+The attribute adds a type named `status` next to the function, which is what
+`routes` lists. Import the function where the application is declared, as
+above: re-exporting it from `src/routes/mod.rs` (`pub use status::status;`)
+does not compile, because the module has the same name.
 
 The route is served at `GET /routes/status`. Returning
 `RouteAuthOutcome::Unauthorized` from the authentication function rejects the
 request with 401; the value inside `RouteAuthOutcome::Authenticated` becomes
-`ctx.auth` in the handler. The handler returns an HTTP response: use the helpers
-in `openshop::response` (`json`, `json_with_status`, `text`, `status`) or build
-any response with the custom status and headers you need.
+`ctx.auth` in the route function. The route function returns anything that is
+an HTTP response: use the helpers in `openshop::response` (`json`,
+`json_with_status`, `text`, `status`) or build any response with the custom
+status and headers you need.
 
 Both functions read the request through `ctx.request`: `header(name)`,
 `query()`, `json()`, `text()`, and the raw `body`. A body larger than 2 MB is
-refused with HTTP 413 before your code runs; change the limit with
-`.max_request_body_bytes(..)` on the builder.
+refused with HTTP 413 before your code runs; change the limit with the
+`max_request_body_bytes` setting of `app!`.
+
+To answer another method on the same path, declare another function, such as
+`#[route(POST, "/status", auth = service_token)]`, and list it too. Each
+route function names its own authentication.
 
 ## 3. Check both authentication paths
 

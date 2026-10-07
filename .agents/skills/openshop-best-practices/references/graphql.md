@@ -206,7 +206,7 @@ async fn reads_a_product() {
 - The response body must have the Shopify envelope: `{ "data": … }` or `{ "errors": [{ "message": … }] }`.
 - A transport without a responder answers `404 not mocked`. `respond_json(body)` answers every request with the same body.
 - `ctx.transport.requests()` and `last_request()` return the recorded requests; `clear()` forgets them.
-- For a flow, script the transport and call `ctx.run_flow("name", json!({ … }))`. The flow's `ctx.shopify` uses the same transport. See `apps/demo/tests/common/mod.rs` for fixtures selected by operation name.
+- For a flow, script the transport and call `ctx.run_flow(sync_orders::NAME, json!({ … }))`. The flow's `ctx.shopify` uses the same transport. See `apps/demo/tests/common/mod.rs` for fixtures selected by operation name.
 - Write fixtures with the same field casing and nullability Shopify returns, including a `null` case for nullable fields.
 
 ## Framework Code

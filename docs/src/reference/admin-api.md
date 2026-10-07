@@ -46,7 +46,7 @@ still answers `401` without a valid token.
 - An unknown path, or an unsupported method on a known path, answers a plain
   `404 Not Found`.
 - A request body larger than the
-  [request body limit](configuration.md#builder-methods) answers `413`.
+  [request body limit](configuration.md#settings) answers `413`.
 - Responses of 1 KB or more are compressed with gzip or Brotli when the client
   accepts it.
 

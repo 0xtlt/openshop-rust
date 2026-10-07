@@ -31,6 +31,37 @@
   generated migrations add, drop and rename the constraints.
 - `dev` adds the columns, indexes and foreign keys a model gained to an
   existing table.
+- Blocks declared with attributes: a block is the function or the struct
+  itself, and no function builds it. `#[flow]`, `#[webhook]`, `#[proxy]`,
+  `#[route]`, `#[mcp_tool]` and `#[mcp_resource]` go on `async` functions,
+  which stay ordinary functions; the input of a flow, the payload of a webhook
+  and the arguments of an MCP tool are an optional, typed second argument.
+  `#[admin_page("/path")]` goes on an `impl` block whose functions are marked
+  `#[access]`, `#[loader]` or `#[action]`. `#[derive(FunctionConfig)]` with
+  `#[function(…)]` makes a struct the configuration form of a Shopify
+  Function. Each block carries its constants: `sync_orders::NAME`,
+  `orders_create::TOPICS`, `reviews::PATH`, `ReviewsPage::PATH`,
+  `VolumeDiscount::KEY`.
+- `app!` declares an application as a value, an `App`: it lists the blocks by
+  name (`flows: [sync_orders]`, `models: [Review]`…) and takes the settings of
+  the builder (`crons: […]`, `on_error: report`…), which can fail with `?`
+  (`shopify: shopify_apps()?`). `APP.run()` runs the command given on the
+  command line, `APP.config()` returns the validated configuration and
+  `APP.builder()` the builder to add to.
+- `OpenShopBuilder::add::<Block>()` adds a declared block of any kind.
+  `model_of` is removed: use `.add::<Review>()`, or `models: [Review]` in
+  `app!`.
+- `build()` refuses a key registered twice, with
+  `[openshop] Invalid config: flows.syncOrders is registered twice`: providers,
+  flows, functions, webhooks, models, and MCP tools, resources and permissions.
+- The methods of a proxy or route path can be registered separately:
+  `.proxy(path, …)` and `.route(path, …)` called again for a path add methods
+  to it. A method registered twice is refused, as are two response types on a
+  proxy path. Each method of a route keeps its own authentication.
+- `.mcp(…)` adds to the MCP permissions, tools and resources already
+  registered instead of replacing them.
+- `OpenShopBuilder::crons`, `mcp_tool` and `mcp_resource`, and
+  `CustomAdminNavigationItem::new(label, path)`.
 - Responses under 1 KB are no longer compressed: on small JSON responses the
   compression took more CPU than the rest of the request and did not make them
   smaller.

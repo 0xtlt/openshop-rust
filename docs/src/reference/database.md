@@ -84,7 +84,7 @@ pub struct Review {
 }
 ```
 
-Register it with `.model_of::<Review>()` on the configuration builder.
+List it in the `models` of `app!`: `models: [Review]`.
 
 Four fields are conventional. They are recognized by name and their
 definition is fixed:
@@ -235,12 +235,12 @@ applies `on_delete` to the votes of a review that is deleted.
 
 | Option | |
 | --- | --- |
-| `references(Review)` | The `id` of another model, or of the model itself. Register that model too. |
+| `references(Review)` | The `id` of another model, or of the model itself. List that model too. |
 | `references(Review, column = "code")` | Another column of that model. It must be unique. |
 | `references("legacy_orders")` | A table by its name, when no struct describes it. |
 | `on_delete = "…"` | `cascade`, `restrict`, `set null`, `set default` or `no action`, which is what PostgreSQL does when the option is absent. `set null` needs an `Option` field. |
 
-The constraint is named `<table>_<column>_fkey`. Models can be registered in
+The constraint is named `<table>_<column>_fkey`. Models can be listed in
 any order: `dev` and the generated migrations create every table first, then
 the constraints.
 
@@ -279,7 +279,9 @@ It adds the conventional columns; `.without_shop()`, `.without_created_at()`
 and `.without_updated_at()` omit them. `.column(name, definition)` takes the
 SQL definition of the column, and `.create_sql()` returns the idempotent
 `CREATE TABLE IF NOT EXISTS` and index statements. Register it with
-`.model(…)`. Migrations are generated for it like for a struct: the type,
+`.model(…)` on the builder, for example `APP.builder()?.model(reviews())`; a
+table registered twice is refused when the configuration is built.
+Migrations are generated for it like for a struct: the type,
 nullability and default of each definition are read; a change to another
 constraint written in a definition, such as `CHECK`, is left for you to
 write. Declare a foreign key with

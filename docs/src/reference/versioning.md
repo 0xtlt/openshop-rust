@@ -36,7 +36,7 @@ app-owned after creation. Updating the dependency does not rewrite its
 | --- | --- |
 | Rust API | Run `cargo check` and the application tests. |
 | Generated template | Compare `Cargo.toml`, `src/main.rs`, Shopify TOML, Docker, and `Procfile` files with a freshly generated project. |
-| Configuration | Build the configuration, for example in a test, so validation checks registered names, paths, schedules, and positive numeric options. |
+| Configuration | Build the configuration, for example with `APP.config()` in a test, so validation checks registered names, paths, schedules, and positive numeric options. |
 | Database | Run `migrate generate`, review the SQL, and run `migrate check`; test forward migration and application rollback compatibility. |
 | Custom admin UI | Rebuild the bundle against the matching `openshop-ui` version. |
 | Web and worker | Deploy the exact same binary and configuration. |

@@ -64,8 +64,8 @@ See [Custom admin pages](custom-admin-pages.md#authorization-and-errors).
 
 ## Configuration errors
 
-`OpenShopConfig::builder().build()` and `OpenShop::new` return an error whose
-message starts with `[openshop]`, such as
+`APP.config()`, which `APP.run()` calls, and `OpenShop::new` return an error
+whose message starts with `[openshop]`, such as
 `[openshop] Invalid config: flows.syncOrders.timeout must be a positive number`.
 With the standard `main`, the process prints the error and exits with a
 non-zero status before serving anything. See
@@ -92,29 +92,35 @@ as a stable machine-readable code unless the endpoint documents one.
 
 ## Application error hook
 
-Configure `.on_error(…)` for centralized reporting:
+Set the `on_error` setting of `app!` for centralized reporting:
 
 ```rust,ignore
-use openshop::{OpenShopConfig, Result};
+use std::sync::Arc;
 
-fn config() -> Result<OpenShopConfig> {
-    OpenShopConfig::builder()
-        .flow(flows::sync_orders::sync_orders())
-        .on_error(|error, context| async move {
-            // Forward to your error reporter here.
-            eprintln!(
-                "flow {:?} step {:?} failed: {error:#}",
-                context.flow, context.step
-            );
-        })
-        .build()
+use openshop::{App, ErrorContext, app};
+
+use flows::sync_orders::sync_orders;
+
+async fn report_failure(error: Arc<openshop::Error>, context: ErrorContext) {
+    // Forward to your error reporter here.
+    eprintln!(
+        "flow {:?} step {:?} failed: {error:#}",
+        context.flow, context.step
+    );
 }
+
+pub static APP: App = app! {
+    flows: [sync_orders],
+    on_error: report_failure,
+};
 ```
 
-The hook receives the error as an `Arc<anyhow::Error>` and an `ErrorContext`
-whose `flow` is the flow key. `step` is currently always `None`. It runs after
-every failed attempt of a flow run, whether or not the run will be retried, and
-not for cancellations. A panic inside the hook is caught and ignored.
+The hook is an async function. It receives the error as an
+`Arc<anyhow::Error>` (`openshop::Error` is `anyhow::Error`) and an
+`ErrorContext` whose `flow` is the flow key. `step` is currently always
+`None`. It runs after every failed attempt of a flow run, whether or not the
+run will be retried, and not for cancellations. A panic inside the hook is
+caught and ignored.
 
 The hook supplements stored logs. It does not replace returning errors from
 failed provider or Shopify operations.

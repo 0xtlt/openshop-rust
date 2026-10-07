@@ -63,7 +63,7 @@ pub fn graphql_fixture(query: &str) -> Value {
 
 pub async fn context() -> TestContext {
     let ctx = TestContext::with_options(
-        openshop_demo::config().expect("valid demo config"),
+        openshop_demo::APP.config().expect("valid demo config"),
         TestOptions {
             access_token: Some("test-access-token".to_string()),
             ..Default::default()

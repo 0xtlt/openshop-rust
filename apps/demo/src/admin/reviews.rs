@@ -1,6 +1,6 @@
 //! Server side of the custom `/reviews` admin page.
 
-use openshop::{AdminPage, define_admin_page_access, define_typed_admin_action, json};
+use openshop::{AdminServerContext, Result, Value, admin_page, json};
 use schemars::JsonSchema;
 use serde::Deserialize;
 
@@ -10,21 +10,24 @@ pub struct SaveReviewInput {
     pub title: String,
 }
 
-pub fn page() -> AdminPage {
-    let page_access = define_admin_page_access(|ctx| async move { Ok(!ctx.actor.id.is_empty()) });
+pub struct ReviewsPage;
 
-    AdminPage::new("/reviews")
-        .access(page_access.clone())
-        .loader("listReviews", |ctx, _input| async move {
-            Ok(json!({
-                "reviews": [{ "id": "example", "title": "Example review", "shop": ctx.shop }],
-            }))
-        })
-        .function(
-            "saveReview",
-            define_typed_admin_action(|ctx, input: SaveReviewInput| async move {
-                Ok(json!({ "ok": true, "title": input.title, "savedBy": ctx.actor.id }))
-            })
-            .authorize(page_access),
-        )
+#[admin_page("/reviews")]
+impl ReviewsPage {
+    #[access]
+    async fn signed_in(ctx: AdminServerContext) -> Result<bool> {
+        Ok(!ctx.actor.id.is_empty())
+    }
+
+    #[loader]
+    async fn list_reviews(ctx: AdminServerContext) -> Result<Value> {
+        Ok(json!({
+            "reviews": [{ "id": "example", "title": "Example review", "shop": ctx.shop }],
+        }))
+    }
+
+    #[action(authorize = Self::signed_in)]
+    async fn save_review(ctx: AdminServerContext, input: SaveReviewInput) -> Result<Value> {
+        Ok(json!({ "ok": true, "title": input.title, "savedBy": ctx.actor.id }))
+    }
 }

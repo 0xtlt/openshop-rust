@@ -75,7 +75,7 @@ fn preview_ui_dir() -> Result<PathBuf> {
 async fn main() -> Result<()> {
     openshop::cli::init_logging();
 
-    let mut config = openshop_demo::config()?;
+    let mut config = openshop_demo::APP.config()?;
     config.routes.insert(
         "/preview-token".to_string(),
         ServerRoute::public().get(|_ctx| async move {

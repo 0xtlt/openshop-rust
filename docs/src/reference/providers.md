@@ -47,8 +47,9 @@ async fn push(ctx: &FlowContext, orders: &Vec<Order>) -> Result<usize> {
 }
 ```
 
-Register it with `.provider(Warehouse::provider())` on the configuration
-builder, under the name given to `#[provider]`.
+List it in the `providers` of [`app!`](configuration.md):
+`providers: [Warehouse]`. It is registered under the name given to
+`#[provider]`.
 
 ## Provider structs
 
@@ -98,7 +99,7 @@ the code directly, which is how a unit test exercises it. The macro adds:
 
 | Added | |
 | --- | --- |
-| `Warehouse::provider()` | The [`Provider`](#providers-without-a-struct) to register. It can still be extended, for example with `.transformer(…)`. |
+| `Warehouse::provider()` | The [`Provider`](#providers-without-a-struct) the struct describes. The struct itself is what `providers` lists; take the `Provider` to extend it, for example with `.transformer(…)`, and register the result with `.provider(…)` on the [builder](configuration.md#builder-methods) instead. |
 | `Warehouse::on(&connectors)` | The same public methods, run with the configuration the shop saved: `Warehouse::on(&ctx.connectors).push(&orders)`. An argument is passed by value or by reference. |
 | `Warehouse::PUSH`, one constant per method | A [`ProviderCall`](#typed-calls), for `connectors.invoke(…)` and for the [fake](testing.md#configure-provider-fakes) of a test: `ctx.fakes.for_call(Warehouse::PUSH)`. |
 
@@ -111,7 +112,8 @@ What is checked when:
 
 - The compiler checks the arguments and the result of
   `Warehouse::on(..).push(..)`, and that the method exists.
-- `build()` checks that the provider is registered under its own name: with
+- A provider listed in `app!` is registered under its own name. On the
+  builder, `build()` checks it: with
   `.provider_as("main", Warehouse::provider())` it fails, as described under
   [Typed calls](#typed-calls).
 - Whether the shop saved its configuration is only known when the call
@@ -141,9 +143,10 @@ pub fn warehouse() -> Provider {
 }
 ```
 
-Register it with `.provider(warehouse())`. It is stored under `provider.name`;
-`.provider_as(key, provider)` uses another key. The sections below describe
-this form: [field definitions](#field-definitions),
+Register it on the [builder](configuration.md#builder-methods), for example
+with `APP.builder()?.provider(warehouse())`. It is stored under
+`provider.name`; `.provider_as(key, provider)` uses another key. The sections
+below describe this form: [field definitions](#field-definitions),
 [methods](#methods-and-connectors) and [typed calls](#typed-calls).
 
 ## Field definitions

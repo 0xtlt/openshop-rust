@@ -122,7 +122,7 @@ fn the_struct_describes_the_table() {
     );
 
     // A registered model is what the configuration pushes and migrates.
-    let config = OpenShopConfig::builder().model_of::<Review>().build().unwrap();
+    let config = OpenShopConfig::builder().add::<Review>().build().unwrap();
     assert_eq!(config.models, [Review::model()]);
 }
 

@@ -8,24 +8,7 @@ use syn::{
     Type, Visibility,
 };
 
-use crate::util::{constant_ident, plain_name, set, set_value};
-
-/// `api_url` → `apiUrl`: the key a field has in the saved configuration.
-fn camel_case(name: &str) -> String {
-    let mut camel = String::new();
-    let mut capitalize = false;
-    for character in name.chars() {
-        if character == '_' {
-            capitalize = !camel.is_empty();
-        } else if capitalize {
-            camel.extend(character.to_uppercase());
-            capitalize = false;
-        } else {
-            camel.push(character);
-        }
-    }
-    camel
-}
+use crate::util::{camel_case, constant_ident, plain_name, set, set_value};
 
 // ─── #[derive(ProviderConfig)] ───────────────────────────────────────
 
@@ -95,16 +78,26 @@ fn field_options(field: &syn::Field) -> syn::Result<FieldOptions> {
     Ok(options)
 }
 
-pub fn derive_config(input: DeriveInput) -> syn::Result<TokenStream> {
+/// The form a struct describes: one field of the form per field of the struct.
+pub struct Form {
+    /// Statements adding each field to `fields`, a `FieldDefinitions`.
+    pub definitions: Vec<TokenStream>,
+    /// The struct, read from `config`, a mutable `JsonMap`.
+    pub construct: TokenStream,
+}
+
+/// Reads the form of a struct. `derive` and `what` name the derive and what
+/// the struct is, for the refusals.
+pub fn form(input: &DeriveInput, derive: &str, what: &str) -> syn::Result<Form> {
     let krate = quote!(::openshop);
     let name = &input.ident;
     if !input.generics.params.is_empty() {
         return Err(syn::Error::new(
             input.generics.span(),
-            "a provider configuration cannot be generic",
+            format!("a {what} cannot be generic"),
         ));
     }
-    let not_a_struct = "`ProviderConfig` is derived on a struct with named fields, or without fields";
+    let not_a_struct = format!("`{derive}` is derived on a struct with named fields, or without fields");
     let Data::Struct(data) = &input.data else {
         return Err(syn::Error::new(name.span(), not_a_struct));
     };
@@ -172,10 +165,19 @@ pub fn derive_config(input: DeriveInput) -> syn::Result<TokenStream> {
     }
 
     let construct = match &data.fields {
-        Fields::Unit => quote!(Self),
+        Fields::Unit => quote!({
+            let _ = &mut config;
+            Self
+        }),
         _ => quote!(Self { #(#readers,)* }),
     };
-    let ignore_config = readers.is_empty().then(|| quote!(let _ = &mut config;));
+    Ok(Form { definitions, construct })
+}
+
+pub fn derive_config(input: DeriveInput) -> syn::Result<TokenStream> {
+    let krate = quote!(::openshop);
+    let name = &input.ident;
+    let Form { definitions, construct } = form(&input, "ProviderConfig", "provider configuration")?;
 
     Ok(quote! {
         impl #krate::ProviderConfig for #name {
@@ -186,7 +188,6 @@ pub fn derive_config(input: DeriveInput) -> syn::Result<TokenStream> {
             }
 
             fn from_config(mut config: #krate::JsonMap) -> ::core::result::Result<Self, ::std::string::String> {
-                #ignore_config
                 ::core::result::Result::Ok(#construct)
             }
         }
@@ -446,6 +447,14 @@ pub fn provider(name: LitStr, mut item: ItemImpl) -> syn::Result<TokenStream> {
             }
         }
 
+        impl #krate::Declared for #self_type {
+            type Kind = #krate::declare::kind::Provider;
+
+            fn register(app: #krate::OpenShopBuilder) -> #krate::OpenShopBuilder {
+                app.provider(Self::provider())
+            }
+        }
+
         #[doc = #connector_doc]
         #[allow(private_interfaces)]
         pub struct #connector<'a> {
@@ -514,7 +523,10 @@ mod tests {
 
         // A provider without configuration.
         let empty = derive_config(parse_quote! { struct Clock; }).unwrap().to_string();
-        assert!(empty.contains(":: core :: result :: Result :: Ok (Self)"), "{empty}");
+        assert!(
+            empty.contains("Result :: Ok ({ let _ = & mut config ; Self })"),
+            "{empty}"
+        );
     }
 
     #[test]

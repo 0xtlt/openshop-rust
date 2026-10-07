@@ -30,19 +30,19 @@ my-app/
 ```
 
 OpenShop does not discover anything from the file system at runtime. The
-module layout is a convention; a definition takes effect when it is registered
-on `OpenShopConfig::builder()`.
+module layout is a convention; a block takes effect when the application
+lists it, in [`app!`](configuration.md).
 
-| Optional module | Add it when you need | Register with |
+| Optional module | Add it when you need | In `app!` |
 | --- | --- | --- |
-| `src/proxy/` | Storefront or Customer Account endpoints | `.proxy(path, …)` |
-| `src/routes/` | HTTP endpoints with explicit authentication | `.route(path, …)` |
-| `src/webhooks/` | Shopify event handlers | `.webhook(topic, …)` |
-| `src/functions/` | Shopify Function definitions | `.function(key, …)` |
-| `src/models/` | Application-owned database tables | `.model(…)` |
-| `src/admin/` | Server side of experimental custom admin screens | `.admin_page(…)` and `.custom_pages(…)` |
+| `src/proxy/` | Storefront or Customer Account endpoints | `proxies` |
+| `src/routes/` | HTTP endpoints with explicit authentication | `routes` |
+| `src/webhooks/` | Shopify event handlers | `webhooks` |
+| `src/functions/` | Shopify Function definitions | `functions` |
+| `src/models/` | Application-owned database tables | `models` |
+| `src/admin/` | Server side of experimental custom admin screens | `admin_pages` and `custom_pages` |
 | `tests/` | Integration tests using `openshop::testing` | — |
-| `ui/` | WebAssembly admin UI bundle with the views of custom admin screens, created by `openshop init-ui` | `.admin_ui(…)` or `OPENSHOP_UI_DIR` |
+| `ui/` | WebAssembly admin UI bundle with the views of custom admin screens, created by `openshop init-ui` | `admin_ui`, or `OPENSHOP_UI_DIR` |
 
 ## `Cargo.toml`
 
@@ -61,14 +61,20 @@ too, because MCP token hashing is very slow without optimizations.
 
 ## `src/main.rs`
 
-Defines `config()`, which builds the configuration with
-`OpenShopConfig::builder()`, and passes that function to `openshop::cli::run`,
-which implements the `dev`, `start`, `worker`, and `migrate` commands. The generated file registers the sample provider and flow,
-a "Quick sync" cron that runs the flow every five minutes, and an `on_error`
-hook that prints failed flows. Register further providers, flows, crons,
-webhooks, routes, Shopify Function definitions, worker settings, retry policy,
-MCP configuration, and admin page visibility here. The file also contains the
-generated tests. See [Configuration](configuration.md).
+Holds the application and the entry point of the `dev`, `start`, `worker`, and
+`migrate` commands. An application is declared with `app!`, which lists its
+providers, flows, webhooks, routes, Shopify Functions, and MCP capabilities,
+and sets its crons, worker settings, retry policy, and admin page visibility;
+`main` runs it, as shown under [Modules](#modules). See
+[Configuration](configuration.md).
+
+The generated file is written with the
+[builder](configuration.md#builder-methods), the lower level of `app!`:
+`config()` registers the sample provider and flow, which the functions
+`providers::warehouse::warehouse()` and `flows::sync_orders::sync_orders()`
+build, a "Quick sync" cron that runs the flow every five minutes, and an
+`on_error` hook that prints failed flows, and `main` passes `config` to
+`openshop::cli::run`. The file also contains the generated tests.
 
 ## `src/providers/`
 
@@ -83,20 +89,21 @@ database. See [Flows](flows.md).
 
 ## `src/proxy/`
 
-Contains app proxy and Customer Account extension handlers. Each function
-returns a `ProxyDefinition` that `main.rs` registers under a path. See
+Contains app proxy and Customer Account extension handlers. Each handler is a
+function marked `#[proxy(GET, "/path")]`, one per method of a path. See
 [Proxy routes](proxy-routes.md).
 
 ## `src/routes/`
 
 Contains optional public server routes mounted under `/routes/*`. Every route
-is created with `ServerRoute::public()` or `ServerRoute::authenticated(…)`. See
+is a function marked `#[route(GET, "/path")]`, public unless it names an
+authentication function with `auth = …`. See
 [Public server routes](server-routes.md).
 
 ## `src/admin/`
 
-Contains the server side of experimental custom admin pages: `AdminPage`
-definitions with their loaders, actions, and access rules. The page views are
+Contains the server side of experimental custom admin pages: `#[admin_page]`
+blocks with their loaders, actions, and access rules. The page views are
 Rust components compiled into a separate WebAssembly UI bundle. See
 [Custom admin pages](custom-admin-pages.md).
 
@@ -140,23 +147,36 @@ schema of [another API version](graphql.md#schema-and-api-version).
 
 ## Modules
 
-`main.rs` declares the app's modules, and definitions are referenced by path:
+`main.rs` declares the app's modules, and the application lists the blocks
+they declare:
 
 ```rust,ignore
 mod flows;
 mod providers;
 
-use openshop::{OpenShopConfig, Result};
+use openshop::{App, Result, app};
 
-fn config() -> Result<OpenShopConfig> {
-    OpenShopConfig::builder()
-        .provider(providers::warehouse::warehouse())
-        .flow(flows::sync_orders::sync_orders())
-        .build()
+use flows::sync_orders::sync_orders;
+use providers::warehouse::Warehouse;
+
+static APP: App = app! {
+    providers: [Warehouse],
+    flows: [sync_orders],
+};
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    APP.run().await
 }
 ```
 
 Each directory has a `mod.rs` that declares its files (`pub mod sync_orders;`).
-When you also need a library target, for example to share the configuration
-with integration tests in `tests/`, move the modules and `config()` to
-`src/lib.rs` and keep `main.rs` as a thin entry point.
+An attribute on a function, such as `#[flow]`, adds a type of the same name as
+the function, so do not re-export a declared function next to its module:
+`pub use sync_orders::sync_orders;` beside `pub mod sync_orders;` does not
+compile. Import the function where the application is declared, as above.
+
+When you also need a library target, for example to share the application
+with integration tests in `tests/`, move the modules and `APP` to `src/lib.rs`
+(`pub static APP`) and keep `main.rs` as a thin entry point that runs
+`my_app::APP.run().await`. A test reads the configuration with `APP.config()`.

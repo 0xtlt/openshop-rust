@@ -25,8 +25,8 @@ Keep that line. `migrate generate` and `migrate check` read it to know which
 parts of the framework schema your project already covers. Files are applied in
 file-name order and recorded in the `__openshop_migrations` table.
 
-Your own tables are described by structs with `#[derive(Model)]`, registered
-with `.model_of::<..>()`. `dev` and the test harness create them directly, and
+Your own tables are described by structs with `#[derive(Model)]`, listed in
+the `models` of `app!`. `dev` and the test harness create them directly, and
 `migrate generate` writes the migrations that create and change them
 elsewhere. See the [model reference](../reference/database.md#app-models).
 

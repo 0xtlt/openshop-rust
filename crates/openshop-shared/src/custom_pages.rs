@@ -24,6 +24,15 @@ pub struct CustomAdminNavigationItem {
     pub path: String,
 }
 
+impl CustomAdminNavigationItem {
+    pub fn new(label: impl Into<String>, path: impl Into<String>) -> Self {
+        Self {
+            label: label.into(),
+            path: path.into(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CustomAdminPageAccess {
     pub id: String,

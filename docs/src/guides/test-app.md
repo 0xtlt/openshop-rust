@@ -63,7 +63,7 @@ mod tests {
     #[ignore = "requires PostgreSQL"]
     async fn syncs_an_order_with_fake_external_services() {
         let ctx = TestContext::with_options(
-            config().unwrap(),
+            APP.config().unwrap(),
             TestOptions {
                 shop: "docs-test.myshopify.com".to_string(),
                 access_token: Some("test-access-token".to_string()),
@@ -83,7 +83,7 @@ mod tests {
         let push = ctx.fakes.method("warehouse", "push");
         push.returns(true);
 
-        let result = ctx.run_flow("syncOrders", json!({ "limit": 10 })).await.unwrap();
+        let result = ctx.run_flow(sync_orders::NAME, json!({ "limit": 10 })).await.unwrap();
 
         assert_eq!(result, RunFlowResult::Completed);
         assert_eq!(push.call_count(), 1);
@@ -99,6 +99,16 @@ mod tests {
     }
 }
 ```
+
+`APP.config()` is the validated configuration of the application declared with
+`app!` in `src/main.rs`, and `sync_orders::NAME` is the name of the flow
+declared by `#[flow]` on `sync_orders`, `"syncOrders"`. Both come with
+`use super::*`: `src/main.rs` imports the flow to list it in `app!`.
+
+The generated `src/main.rs` builds its configuration with
+`OpenShopConfig::builder()`, the lower level of `app!`, in a `config()`
+function. To keep it as it is, pass `config().unwrap()` to the context and
+name the flow by its string, `"syncOrders"`.
 
 The fixture supports both the template's `edges` query and the flow guide's
 `nodes` query. Update it when your flow requests different fields.

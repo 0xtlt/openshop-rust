@@ -25,7 +25,7 @@ use openshop::testing::{TestContext, TestOptions};
 #[tokio::test]
 async fn serves_health() {
     let ctx = TestContext::with_options(
-        my_app::config().expect("valid config"),
+        my_app::APP.config().expect("valid config"),
         TestOptions {
             access_token: Some("test-access-token".to_string()),
             ..Default::default()
@@ -41,7 +41,9 @@ async fn serves_health() {
 }
 ```
 
-`TestContext::new(config)` uses the default options. Creating a context:
+`APP.config()` is the validated configuration of the application declared with
+`app!`; each call builds a new one. `TestContext::new(config)` uses the default
+options. Creating a context:
 
 1. creates a schema named `test_<uuid>` in the test database and pushes the
    framework tables and the configuration's models into it;
@@ -60,9 +62,38 @@ an assertion panicked first, still drops its schema on a best-effort basis: the
 attempt is limited to a few seconds and gives up when the schema is locked.
 Factory-created resources are only destroyed by `shutdown()` or `cleanup()`.
 
-The example imports the configuration from the app's library target. In a
-binary-only project, write the tests in a `#[cfg(test)]` module next to
-`config()`, as the generated `src/main.rs` does.
+The example imports the application from the app's library target. In a
+binary-only project, write the tests in a `#[cfg(test)]` module of
+`src/main.rs`, next to the declaration of `APP`.
+
+### Test-only configurations
+
+A test that needs only some blocks, or blocks of its own, builds its
+configuration with `OpenShopConfig::builder()`. `.add::<Block>()` adds a
+declared block of any kind, by its name; the builder types, such as
+`Flow::new(…)`, make up a block in the test. `APP.builder()?` is the builder
+of the declaration, to add to the whole application.
+
+```rust,ignore
+use my_app::flows::sync_orders::sync_orders;
+use my_app::providers::warehouse::Warehouse;
+use openshop::testing::TestContext;
+use openshop::{Flow, OpenShopConfig};
+
+async fn context() -> TestContext {
+    let config = OpenShopConfig::builder()
+        .add::<Warehouse>()
+        .add::<sync_orders>()
+        .flow(Flow::new("noop", |_ctx| async { Ok(()) }))
+        .build()
+        .expect("valid config");
+
+    TestContext::new(config).await.expect("test context")
+}
+```
+
+`build()` refuses a key registered twice, for example with
+`[openshop] Invalid config: flows.syncOrders is registered twice`.
 
 ## `TestOptions`
 
@@ -109,6 +140,7 @@ syntax.
 ## Test a flow
 
 ```rust,ignore
+use my_app::flows::sync_orders::sync_orders;
 use openshop::engine::RunFlowResult;
 use openshop::json;
 use openshop::testing::{MockTransport, TestContext};
@@ -126,7 +158,7 @@ async fn syncs_orders(ctx: &TestContext) {
     });
     ctx.fakes.method("warehouse", "push").returns(true);
 
-    let result = ctx.run_flow("syncOrders", json!({ "limit": 10 })).await.unwrap();
+    let result = ctx.run_flow(sync_orders::NAME, json!({ "limit": 10 })).await.unwrap();
 
     assert_eq!(result, RunFlowResult::Completed);
     let push = ctx.fakes.method("warehouse", "push");
@@ -136,6 +168,8 @@ async fn syncs_orders(ctx: &TestContext) {
 }
 ```
 
+`sync_orders::NAME` is the name of the flow declared by `#[flow]` on
+`sync_orders`, here `"syncOrders"`; the string works as well.
 `run_flow(flow, input)` inserts a running row and executes the flow
 immediately with fake provider connectors. It does not require a worker, and
 the run is not retried: a failing flow returns
@@ -166,11 +200,12 @@ server.
 Use `dispatch_flow(flow, input)` to test queueing:
 
 ```rust,ignore
+use my_app::flows::sync_orders::sync_orders;
 use openshop::testing::TestContext;
 use openshop::{json, sqlx};
 
 async fn queues_a_run(ctx: &TestContext) {
-    let run_id = ctx.dispatch_flow("syncOrders", json!({ "limit": 10 })).await.unwrap();
+    let run_id = ctx.dispatch_flow(sync_orders::NAME, json!({ "limit": 10 })).await.unwrap();
 
     let (status,): (String,) = sqlx::query_as("SELECT status FROM flow_runs WHERE id = $1")
         .bind(run_id)
@@ -461,13 +496,19 @@ server.
 Call a custom admin page loader or action without HTTP:
 
 ```rust,ignore
+use my_app::admin::reviews::ReviewsPage;
 use openshop::testing::{
     AdminFunctionTestOptions, TestContext, create_admin_function_test_context, invoke_admin_function,
 };
 use openshop::{Value, json};
 
 async fn saves_a_review(ctx: &TestContext) {
-    let page = my_app::admin::reviews::list_page();
+    let config = ctx.app.config();
+    let page = config
+        .admin_pages
+        .iter()
+        .find(|page| page.path == ReviewsPage::PATH)
+        .expect("the reviews page");
     let context = create_admin_function_test_context(&ctx.app, AdminFunctionTestOptions::default())
         .await
         .unwrap();
@@ -480,12 +521,17 @@ async fn saves_a_review(ctx: &TestContext) {
 }
 ```
 
+`config.admin_pages` holds the pages of the application, in the order of the
+`admin_pages` list of `app!`. The `functions` of a page are its loaders and
+actions, by the name the page view calls them with: `saveReview` for a function
+`save_review` marked `#[action]`.
+
 `AdminFunctionTestOptions` has the fields `shop` (`test.myshopify.com`),
 `shopify_app` (`default`), `actor_id` (`test-actor`), `params` (empty), and
 `request_id` (`test-request`). `invoke_admin_function` applies the function's
 own `authorize` rule and input schema, then deserializes the output. It does
-not evaluate page access rules; cover those with HTTP tests through
-`ctx.post("/api/pages/custom/…")`.
+not evaluate page access rules (`#[access]`); cover those with HTTP tests
+through `ctx.post("/api/pages/custom/…")`.
 
 ## Test runner integration
 

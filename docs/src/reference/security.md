@@ -53,9 +53,10 @@ display fingerprint. See [MCP](mcp.md#tokens).
 - `/webhooks` verifies the raw body with a matching Shopify app secret.
 - `/proxy/*` accepts App Proxy HMAC or a Customer Account JWT.
 - `/ext/*` accepts only a Customer Account JWT.
-- `/routes/*` uses the authentication contract declared by each route. A route
-  is built with `ServerRoute::public()` or `ServerRoute::authenticated(…)`;
-  there is no implicit default.
+- `/routes/*` uses the authentication declared by each route function.
+  `#[route(…, auth = <function>)]` runs the function before the handler; a
+  route function declared without `auth` is public. Each method of a path
+  declares its own.
 - `/mcp` accepts only OpenShop-issued MCP tokens and applies explicit grants.
 
 Signatures and token hashes are compared in constant time. An app proxy
@@ -88,8 +89,8 @@ and duration; they do not replace external security monitoring.
 - Do not return secrets or raw upstream error bodies to clients.
 
 Request bodies are limited to 2 MB by default (`413` above that); change the
-limit with `.max_request_body_bytes(…)`. The MCP endpoint has its own limit of
-1,000,000 bytes.
+limit with the `max_request_body_bytes` setting of `app!`. The MCP endpoint
+has its own limit of 1,000,000 bytes.
 
 ## Embedded admin exposure
 

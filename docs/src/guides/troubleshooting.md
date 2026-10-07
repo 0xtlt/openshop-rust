@@ -20,8 +20,8 @@ The configuration is validated when it is built and again when the process
 starts, so a mistake stops the process with a message instead of failing later
 requests:
 
-- `[openshop] Invalid config: …` names the builder entry to fix, such as a cron
-  that references an unknown flow or an invalid schedule.
+- `[openshop] Invalid config: …` names the entry of the application to fix,
+  such as a cron that references an unknown flow or an invalid schedule.
 - `… have the same route shape` means two proxy routes, server routes, or custom
   admin pages can match the same URL.
 - `[openshop] Shopify app "<handle>" TOML not found` or
@@ -120,9 +120,9 @@ accepted. Verify the token audience matches the selected Shopify app.
 ## A request is refused with 413
 
 Request bodies are limited to 2 MB by default. This applies to webhooks, proxy
-routes, server routes, and the Admin API. Raise the limit with
-`.max_request_body_bytes(..)` on the builder if a caller legitimately sends
-more. The MCP endpoint keeps its own 1 MB limit.
+routes, server routes, and the Admin API. Raise the limit with the
+`max_request_body_bytes` setting of `app!` if a caller legitimately sends more.
+The MCP endpoint keeps its own 1 MB limit.
 
 ## Provider secrets cannot be read back
 

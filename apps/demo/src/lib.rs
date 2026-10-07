@@ -5,93 +5,69 @@
 pub mod admin;
 pub mod flows;
 pub mod functions;
+pub mod mcp;
 pub mod models;
 pub mod providers;
 pub mod proxy;
 pub mod routes;
 pub mod webhooks;
 
+use std::sync::Arc;
+
 use openshop::{
-    CronEntry, CustomAdminNavigationItem, McpConfig, McpPermissionDefinition, McpResourceContent,
-    McpResourceDefinition, McpRiskLevel, McpToolDefinition, OpenShopConfig, Result, json,
+    App, CronEntry, CustomAdminNavigationItem, ErrorContext, McpConfig, McpPermissionDefinition, McpRiskLevel, app,
+    json,
 };
 
-fn mcp() -> McpConfig {
-    McpConfig::new()
-        .permission(
-            "demo:read_status",
-            McpPermissionDefinition::new("Read demo status")
-                .description("Allows MCP tokens to read a small demo status payload.")
-                .group("Demo")
-                .risk_level(McpRiskLevel::Low),
-        )
-        .tool(
-            "demo.status",
-            McpToolDefinition::new("Read a small OpenShop demo status payload.", |ctx, _input| async move {
-                Ok(json!({
-                    "content": [{
-                        "type": "text",
-                        "text": format!("Demo app is reachable for {} ({}).", ctx.shop, ctx.app_handle),
-                    }],
-                    "structuredContent": { "ok": true, "shop": ctx.shop, "appHandle": ctx.app_handle },
-                }))
-            })
-            .required_permissions(["demo:read_status"])
-            .risk_level(McpRiskLevel::Low)
-            .input_schema(json!({ "type": "object", "additionalProperties": false, "properties": {} })),
-        )
-        .resource(
-            "openshop://demo/mcp",
-            McpResourceDefinition::new("Demo MCP guide", |_ctx| async move {
-                Ok(McpResourceContent::from(
-                    [
-                        "# Demo MCP",
-                        "",
-                        "Create an MCP token from the OpenShop admin, grant `demo:read_status`, then call `demo.status`.",
-                        "Core tools such as `openshop.logs.search` are available through OpenShop itself.",
-                    ]
-                    .join("\n"),
-                ))
-            })
-            .description("Example resource exposed by the demo app.")
-            .mime_type("text/markdown"),
-        )
+use admin::reviews::ReviewsPage;
+use flows::count_variants::count_variants;
+use flows::sync_orders::sync_orders;
+use functions::volume_discount::VolumeDiscount;
+use mcp::{guide, status};
+use models::review::Review;
+use providers::warehouse::Warehouse;
+use proxy::api_reviews::{list_reviews, submit_review};
+use proxy::reviews::reviews;
+use routes::ping::ping;
+use webhooks::app_uninstalled::app_uninstalled;
+use webhooks::orders_create::orders_create;
+
+/// Called when a flow run fails.
+async fn report_failure(error: Arc<openshop::Error>, context: ErrorContext) {
+    eprintln!(
+        "[openshop:error] Flow \"{}\" failed: {error}",
+        context.flow.unwrap_or_default()
+    );
 }
 
-pub fn config() -> Result<OpenShopConfig> {
-    OpenShopConfig::builder()
-        .provider(providers::warehouse::Warehouse::provider())
-        .flow(flows::sync_orders::sync_orders())
-        .flow(flows::count_variants::count_variants())
-        .function("volumeDiscount", functions::volume_discount::volume_discount())
-        .model_of::<models::review::Review>()
-        .custom_pages([CustomAdminNavigationItem {
-            label: "Reviews".to_string(),
-            path: "/reviews".to_string(),
-        }])
-        .admin_page(admin::reviews::page())
-        .mcp(mcp())
-        .webhook("orders/create", webhooks::orders_create::orders_create())
-        .webhook("app/uninstalled", webhooks::app_uninstalled::app_uninstalled())
-        .proxy("/reviews", proxy::reviews::reviews())
-        .proxy("/api/reviews", proxy::api_reviews::api_reviews())
-        .route("/ping", routes::ping::ping())
-        .cron(
-            CronEntry::new("*/5 * * * *", "syncOrders")
-                .name("Quick sync")
-                .input(json!({ "limit": 10 })),
-        )
-        .cron(
-            CronEntry::new("0 2 * * *", "syncOrders")
-                .name("Nightly full sync")
-                .input(json!({ "limit": 1000 }))
-                .shops("all"),
-        )
-        .on_error(|error, context| async move {
-            eprintln!(
-                "[openshop:error] Flow \"{}\" failed: {error}",
-                context.flow.unwrap_or_default()
-            );
-        })
-        .build()
-}
+/// The application: what it is made of, and how it is set up.
+pub static APP: App = app! {
+    providers: [Warehouse],
+    flows: [sync_orders, count_variants],
+    functions: [VolumeDiscount],
+    models: [Review],
+    admin_pages: [ReviewsPage],
+    custom_pages: [CustomAdminNavigationItem::new("Reviews", ReviewsPage::PATH)],
+    webhooks: [orders_create, app_uninstalled],
+    proxies: [reviews, list_reviews, submit_review],
+    routes: [ping],
+    mcp_tools: [status],
+    mcp_resources: [guide],
+    mcp: McpConfig::new().permission(
+        mcp::READ_STATUS,
+        McpPermissionDefinition::new("Read demo status")
+            .description("Allows MCP tokens to read a small demo status payload.")
+            .group("Demo")
+            .risk_level(McpRiskLevel::Low),
+    ),
+    crons: [
+        CronEntry::new("*/5 * * * *", sync_orders::NAME)
+            .name("Quick sync")
+            .input(json!({ "limit": 10 })),
+        CronEntry::new("0 2 * * *", sync_orders::NAME)
+            .name("Nightly full sync")
+            .input(json!({ "limit": 1000 }))
+            .shops("all"),
+    ],
+    on_error: report_failure,
+};

@@ -8,8 +8,9 @@ This page lists every place where it intentionally differs.
 
 | TypeScript | Rust |
 | --- | --- |
-| `openshop.config.ts` loaded by the `openshop` CLI | Your binary builds an `OpenShopConfig` and calls `openshop::cli::run` |
-| `proxy/`, `routes/` and `admin/pages/` discovered from files | `.proxy(path, …)`, `.route(path, …)` and `.admin_page(…)` on the builder |
+| `openshop.config.ts` loaded by the `openshop` CLI | Your binary declares an `App` with `app!` and runs it with `APP.run()` |
+| `defineFlow({ … })` and `defineProvider({ … })` returning a definition | An attribute on the function or the struct itself (`#[flow]`, `#[provider]`), which `app!` lists by name |
+| `proxy/`, `routes/` and `admin/pages/` discovered from files | `#[proxy(GET, "/path")]`, `#[route(GET, "/path")]` and `#[admin_page("/path")]` on the code, listed in `app!` |
 | Hot reload of the config module in `dev` | `openshop dev` rebuilds and restarts the process |
 | `process.env` read on each request | Environment captured once in `RuntimeEnv` at startup |
 | `getDb()` and other process globals | An `OpenShop` handle (`ctx.app`, `ctx.db`) passed to every handler |
@@ -21,7 +22,8 @@ Consequences:
   missing `client_id` stops the process instead of failing each request.
 - Invalid definitions are rejected when the configuration is built: ambiguous
   proxy, route or admin page paths, a route without handlers, navigation that
-  points to an unknown page, an invalid cron expression.
+  points to an unknown page, an invalid cron expression, a block registered
+  twice under the same key.
 - `GET /api/flows` and the MCP tool `openshop.flows.list` return `inputSchema`
   as JSON Schema (or `null`) rather than arktype's JSON format. Validation
   messages differ accordingly; they still start with
@@ -41,7 +43,10 @@ larger configurations easier to split:
 - Underneath, `ProviderCall<A, R>` constants with `Provider::handle`,
   `Provider::typed_checker` and `Connectors::invoke`, for a provider built
   without a struct. See [Typed calls](providers.md#typed-calls).
-- `.providers([…])`, `.flows([…])` and `.with(register)` on the builder.
+- Blocks are declared in the module that writes them and `app!` lists them by
+  name, so a large application has no registration code to split. On the
+  builder underneath, `.providers([…])`, `.flows([…])` and `.with(register)`
+  register several definitions at once.
 
 ## Engine
 
@@ -100,8 +105,8 @@ larger configurations easier to split:
 - Run details list steps in creation order.
 - Unknown paths under `/api` return `404` after authentication.
 - Request bodies are limited to 2 MB (`413` above that). Set
-  `max_request_body_bytes` on the configuration builder to change the limit.
-  The MCP endpoint keeps its own 1 MB limit.
+  `max_request_body_bytes` in `app!` to change the limit. The MCP endpoint
+  keeps its own 1 MB limit.
 - Responses of 1 KB or more are compressed (gzip or Brotli) when the client
   accepts it.
 - With custom admin pages, a static page takes precedence over a dynamic
@@ -132,8 +137,8 @@ larger configurations easier to split:
 
 - The UI is written in Rust with Leptos and compiled to WebAssembly. It is
   embedded in the framework crate. An application with custom admin pages
-  serves its own bundle with `.admin_ui(UiSource::Dir(…))`,
-  `.admin_ui(UiSource::assets(…))` for a bundle compiled into the binary, or
+  serves its own bundle with the setting `admin_ui: UiSource::Dir(…)`,
+  `admin_ui: UiSource::assets(…)` for a bundle compiled into the binary, or
   the `OPENSHOP_UI_DIR` environment variable.
 - Assets whose file name carries a content hash are served with
   `Cache-Control: public, max-age=31536000, immutable`; other files with

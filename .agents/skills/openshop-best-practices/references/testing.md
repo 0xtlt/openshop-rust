@@ -42,6 +42,7 @@ Use targeted tests when the change is narrow:
 
 - Engine behavior: `crates/openshop/tests/engine_*.rs` (dispatch, runner, step, worker, scheduler) and the unit tests in `crates/openshop/src/engine`.
 - Server, Admin API, auth, security, proxy, routes, and webhooks: `api.rs`, `auth.rs`, `security.rs`, `proxy_routes.rs`, `server_routes.rs`, `server_limits.rs`, `webhooks.rs`, `pages.rs`, `static_ui.rs`, `functions.rs`, `mcp.rs`, and `custom_admin_pages.rs` in `crates/openshop/tests`.
+- Declared blocks (`#[flow]`, `#[webhook]`, `#[proxy]`, `#[route]`, `#[admin_page]`, `#[mcp_tool]`, `#[mcp_resource]`, `#[derive(FunctionConfig)]`), `app!` and what the builder refuses: `crates/openshop/tests/declared.rs`, and the unit tests of the macros in `crates/openshop-macros/src`.
 - Migrations: `crates/openshop/tests/migrations.rs` and the unit tests in `crates/openshop/src/db/migrate.rs`.
 - CLI behavior (`init`, `dev` watcher, restarts): unit tests in `crates/openshop-cli/src`.
 - Shared rules: unit tests in `crates/openshop-shared/src`.
@@ -71,5 +72,9 @@ For changes affecting app usage, flows, providers, app proxy, or demo convention
 - Add regression tests for bugs in retries, step persistence, scheduling, auth, signatures, migrations, or generated templates.
 - Keep integration tests for behavior that depends on DB state, HTTP requests, Shopify signatures/JWTs, worker execution, or generated app structure.
 - Use the harness in `openshop::testing` (feature `testing`): `TestContext` starts the app on a random port against an isolated schema, `ctx.fakes` replaces provider methods with recording fakes, `ctx.transport` (`MockTransport`) scripts Shopify HTTP responses, `ctx.proxy()` signs app proxy requests, and `ctx.get(..)` / `ctx.post(..)` send requests with a session token.
+- Test an application through its declaration: `TestContext::new(my_app::APP.config()?)` boots what `app!` lists. `APP.config()` builds a new configuration at each call.
+- Build a small test-only configuration with `OpenShopConfig::builder()`: `.add::<Block>()` for a declared block (`.add::<Warehouse>().add::<sync_orders>()`), the builder types (`Flow::new(..)`, `Provider::new(..)`, `ServerRoute::public()`…) for blocks made up in the test, and `APP.builder()?` to add to the whole application. `build()` refuses a key registered twice.
+- Name a block by its constant: `ctx.run_flow(sync_orders::NAME, json!({ … }))`, `ctx.fakes.for_call(Warehouse::PUSH)`, `ReviewsPage::PATH`.
+- Test admin loaders and actions with `create_admin_function_test_context` and `invoke_admin_function` on `config.admin_pages[..].functions["listReviews"]`; a function is keyed by its name in camel case, or by the name given to `#[loader]` or `#[action]`.
 - End each test with `ctx.shutdown().await` so the test schema is dropped.
 - Assert on `RunFlowResult` returned by `ctx.run_flow(..)` instead of reading run rows when the outcome is enough.

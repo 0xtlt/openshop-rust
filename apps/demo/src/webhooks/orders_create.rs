@@ -1,14 +1,20 @@
-use openshop::{Value, Webhook};
+use openshop::{Result, WebhookContext, webhook};
+use serde::Deserialize;
 
-pub fn orders_create() -> Webhook {
-    Webhook::new(|ctx| async move {
-        let field = |name: &str| ctx.payload.get(name).and_then(Value::as_str).unwrap_or_default();
-        println!(
-            "[webhook] New order on {}: {} — {}",
-            ctx.shop,
-            field("name"),
-            field("total_price")
-        );
-        Ok(())
-    })
+/// What the handler reads from the order Shopify sends.
+#[derive(Debug, Deserialize)]
+pub struct CreatedOrder {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub total_price: String,
+}
+
+#[webhook("orders/create")]
+pub async fn orders_create(ctx: WebhookContext, order: CreatedOrder) -> Result<()> {
+    println!(
+        "[webhook] New order on {}: {} — {}",
+        ctx.shop, order.name, order.total_price
+    );
+    Ok(())
 }

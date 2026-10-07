@@ -10,6 +10,7 @@ use sqlx::PgPool;
 use crate::admin::{AdminPage, CustomAdminPage};
 use crate::config::validate::validate_openshop_config;
 use crate::db::Model;
+use crate::declare::Declared;
 use crate::engine::dispatch::{DispatchFlowParams, DispatchFlowResult, dispatch_flow};
 use crate::runtime::{HttpTransport, ReqwestTransport, RuntimeEnv};
 use crate::server::connectors::{Connectors, build_connectors};
@@ -21,8 +22,8 @@ use crate::server::static_ui::UiSource;
 use crate::shopify::client::{ShopifyClient, create_shopify_client};
 use crate::types::{
     AdminPageId, AdminPageMode, AdminPagesConfig, CronEntry, CustomAdminNavigationItem, CustomPagesConfig,
-    ErrorContext, ExperimentalConfig, Flow, FunctionDefinition, McpConfig, OnErrorFn, PartialRetryPolicy,
-    PartialWorkerConfig, Provider, ProxyDefinition, ServerRoute, ShopifyConfig, Webhook,
+    ErrorContext, ExperimentalConfig, Flow, FunctionDefinition, McpConfig, McpResourceDefinition, McpToolDefinition,
+    OnErrorFn, PartialRetryPolicy, PartialWorkerConfig, Provider, ProxyDefinition, ServerRoute, ShopifyConfig, Webhook,
 };
 
 /// The validated definition of an OpenShop application.
@@ -85,9 +86,32 @@ impl OpenShopConfig {
 #[derive(Clone, Default)]
 pub struct OpenShopBuilder {
     config: OpenShopConfig,
+    /// What cannot be registered, reported by [`OpenShopBuilder::build`].
+    problems: Vec<String>,
+}
+
+/// Registers `value` under `key`, once: a second registration is a problem.
+fn insert_once<V>(map: &mut IndexMap<String, V>, problems: &mut Vec<String>, section: &str, key: String, value: V) {
+    if map.contains_key(&key) {
+        problems.push(format!("{section}.{key} is registered twice"));
+    } else {
+        map.insert(key, value);
+    }
 }
 
 impl OpenShopBuilder {
+    /// Adds a building block declared with an attribute: a `#[provider]`, a
+    /// `#[flow]`, a `#[derive(Model)]` struct…
+    pub fn add<T: Declared>(self) -> Self {
+        T::register(self)
+    }
+
+    /// [`OpenShopBuilder::add`] for a block of a given kind: what a list of `app!` expands to.
+    #[doc(hidden)]
+    pub fn add_as<K, T: Declared<Kind = K>>(self) -> Self {
+        T::register(self)
+    }
+
     pub fn shopify(mut self, shopify: ShopifyConfig) -> Self {
         self.config.shopify = Some(shopify);
         self
@@ -100,7 +124,13 @@ impl OpenShopBuilder {
     }
 
     pub fn provider_as(mut self, key: impl Into<String>, provider: Provider) -> Self {
-        self.config.providers.insert(key.into(), provider);
+        insert_once(
+            &mut self.config.providers,
+            &mut self.problems,
+            "providers",
+            key.into(),
+            provider,
+        );
         self
     }
 
@@ -116,7 +146,7 @@ impl OpenShopBuilder {
     }
 
     pub fn flow_as(mut self, key: impl Into<String>, flow: Flow) -> Self {
-        self.config.flows.insert(key.into(), flow);
+        insert_once(&mut self.config.flows, &mut self.problems, "flows", key.into(), flow);
         self
     }
 
@@ -133,22 +163,73 @@ impl OpenShopBuilder {
     }
 
     pub fn function(mut self, key: impl Into<String>, function: FunctionDefinition) -> Self {
-        self.config.functions.insert(key.into(), function);
+        insert_once(
+            &mut self.config.functions,
+            &mut self.problems,
+            "functions",
+            key.into(),
+            function,
+        );
         self
     }
 
+    /// Adds MCP permissions, tools and resources to the ones already registered.
     pub fn mcp(mut self, mcp: McpConfig) -> Self {
-        self.config.mcp = Some(mcp);
+        let McpConfig {
+            enabled,
+            custom_permissions,
+            tools,
+            resources,
+        } = mcp;
+        let problems = &mut self.problems;
+        let registered = self.config.mcp.get_or_insert_default();
+        if enabled.is_some() {
+            registered.enabled = enabled;
+        }
+        for (key, permission) in custom_permissions {
+            insert_once(
+                &mut registered.custom_permissions,
+                problems,
+                "mcp.permissions",
+                key,
+                permission,
+            );
+        }
+        for (name, tool) in tools {
+            insert_once(&mut registered.tools, problems, "mcp.tools", name, tool);
+        }
+        for (uri, resource) in resources {
+            insert_once(&mut registered.resources, problems, "mcp.resources", uri, resource);
+        }
         self
+    }
+
+    pub fn mcp_tool(self, name: impl Into<String>, tool: McpToolDefinition) -> Self {
+        self.mcp(McpConfig::new().tool(name, tool))
+    }
+
+    pub fn mcp_resource(self, uri: impl Into<String>, resource: McpResourceDefinition) -> Self {
+        self.mcp(McpConfig::new().resource(uri, resource))
     }
 
     pub fn webhook(mut self, topic: impl Into<String>, webhook: Webhook) -> Self {
-        self.config.webhooks.insert(topic.into(), webhook);
+        insert_once(
+            &mut self.config.webhooks,
+            &mut self.problems,
+            "webhooks",
+            topic.into(),
+            webhook,
+        );
         self
     }
 
     pub fn cron(mut self, cron: CronEntry) -> Self {
         self.config.crons.push(cron);
+        self
+    }
+
+    pub fn crons(mut self, crons: impl IntoIterator<Item = CronEntry>) -> Self {
+        self.config.crons.extend(crons);
         self
     }
 
@@ -198,15 +279,38 @@ impl OpenShopBuilder {
         self
     }
 
-    /// Registers an app proxy path such as `/reviews` or `/api/reviews/:id`.
+    /// Registers handlers of an app proxy path such as `/reviews` or
+    /// `/api/reviews/:id`. The methods of a path can be registered separately.
     pub fn proxy(mut self, path: impl Into<String>, proxy: ProxyDefinition) -> Self {
-        self.config.proxies.insert(path.into(), proxy);
+        let path = path.into();
+        match self.config.proxies.get_mut(&path) {
+            Some(registered) => {
+                if let Err(problem) = registered.merge(proxy) {
+                    self.problems.push(format!("proxies.{path} {problem}"));
+                }
+            }
+            None => {
+                self.config.proxies.insert(path, proxy);
+            }
+        }
         self
     }
 
-    /// Registers a public server route such as `/ping` or `/orders/:id`.
+    /// Registers handlers of a public server route such as `/ping` or
+    /// `/orders/:id`. The methods of a path can be registered separately, each
+    /// with its own authentication.
     pub fn route(mut self, path: impl Into<String>, route: ServerRoute) -> Self {
-        self.config.routes.insert(path.into(), route);
+        let path = path.into();
+        match self.config.routes.get_mut(&path) {
+            Some(registered) => {
+                if let Err(problem) = registered.merge(route) {
+                    self.problems.push(format!("routes.{path} {problem}"));
+                }
+            }
+            None => {
+                self.config.routes.insert(path, route);
+            }
+        }
         self
     }
 
@@ -215,13 +319,13 @@ impl OpenShopBuilder {
         self
     }
 
-    /// Registers the table of a `#[derive(Model)]` struct.
-    pub fn model_of<M: crate::db::Record>(self) -> Self {
-        self.model(M::model())
-    }
-
     pub fn model(mut self, model: Model) -> Self {
-        self.config.models.push(model);
+        if self.config.models.iter().any(|known| known.table == model.table) {
+            self.problems
+                .push(format!("models.{} is registered twice", model.table));
+        } else {
+            self.config.models.push(model);
+        }
         self
     }
 
@@ -237,6 +341,9 @@ impl OpenShopBuilder {
     }
 
     pub fn build(self) -> Result<OpenShopConfig> {
+        if let Some(problem) = self.problems.first() {
+            anyhow::bail!("[openshop] Invalid config: {problem}");
+        }
         validate_openshop_config(&self.config)?;
         Ok(self.config)
     }

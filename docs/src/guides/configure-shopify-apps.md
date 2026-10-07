@@ -27,11 +27,11 @@ credentials and tunnel URL when you run `shopify app dev`.
 ### Several Shopify apps
 
 Link a TOML file for each Shopify app with Shopify CLI, then register the files
-under stable handles in `src/main.rs`. Add the `use` line and the `shopify`
-function, and call `.shopify(..)` on the existing builder:
+under stable handles where the application is declared. Add the `use` line and
+the `shopify` function, and set the `shopify` setting of `app!`:
 
 ```rust,ignore
-use openshop::{Context, IndexMap, ShopifyAppConfig, ShopifyConfig};
+use openshop::{Context, IndexMap, Result, ShopifyAppConfig, ShopifyConfig};
 
 fn shopify() -> Result<ShopifyConfig> {
     let secret = |name: &str| std::env::var(name).with_context(|| format!("{name} is not set"));
@@ -59,20 +59,20 @@ fn shopify() -> Result<ShopifyConfig> {
     })
 }
 
-fn config() -> Result<OpenShopConfig> {
-    OpenShopConfig::builder()
-        .shopify(shopify()?)
-        // ... providers, flows and other settings ...
-        .build()
-}
+pub static APP: App = app! {
+    shopify: shopify()?,
+    // ... providers, flows and other entries ...
+};
 ```
 
-Provide each secret through the process environment. During development they
-can live in `.env`: the generated `main` passes the `config` function itself to
-`openshop::cli::run(config)`, and `dev` loads `.env` before calling it. With
-`openshop::cli::run(config()?)` the configuration is built first and does not
-see values that only exist in `.env`. The other commands never load `.env`:
-export the secrets in the environment of `start`, `worker`, and `migrate`.
+Provide each secret through the process environment. A setting of `app!` can
+fail with `?`: when a secret is missing, the command stops at startup with
+`SHOPIFY_RETAIL_API_SECRET is not set`.
+
+During development the secrets can live in `.env`: the settings of `app!` are
+evaluated when `APP.run()` builds the configuration, and `dev` loads `.env`
+before that. The other commands never load `.env`: export the secrets in the
+environment of `start`, `worker`, and `migrate`.
 
 Keep API keys unique and use each app's own secret. Include the TOML files in
 the deployed project and run the binary from the directory that contains them;

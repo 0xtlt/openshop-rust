@@ -4,8 +4,8 @@ Import the supported application API from the root of the `openshop` crate:
 
 ```rust,ignore
 use openshop::{
-    CronEntry, FieldDef, Flow, OpenShop, OpenShopConfig, Provider, Result, define_model,
-    get_runtime_logger, json, set_runtime_logger, validators,
+    App, CronEntry, FlowContext, Model, OpenShop, ProviderConfig, Result, app, flow,
+    get_runtime_logger, json, provider, set_runtime_logger, validators,
 };
 ```
 
@@ -17,7 +17,7 @@ framework and its tests and can change without notice.
 
 | Path | Purpose | Detailed contract |
 | --- | --- | --- |
-| `openshop` | App definitions, the configuration builder, the `OpenShop` handle, dispatch, the Shopify client, and runtime logging | This page |
+| `openshop` | `app!` and the attributes that declare building blocks, the configuration builder, the `OpenShop` handle, dispatch, the Shopify client, and runtime logging | This page |
 | `openshop::cli` | `run`, `run_with_args`, `init_logging`, and `env::load_env_file` | [CLI commands](cli.md) |
 | `openshop::db` | `connect`, `connect_to`, `pool_options`, models, and the `migrate` functions | [Database](database.md) |
 | `openshop::engine` | `Worker`, `Scheduler`, `run_flow`, `RunFlowResult`, default policies, and typed errors | [Flows](flows.md), [Errors](errors.md) |
@@ -36,7 +36,7 @@ The client side of custom admin pages lives in a separate crate,
 | Feature | Default | Effect |
 | --- | --- | --- |
 | `embedded-ui` | Yes | Embeds the prebuilt admin UI bundle in the binary. Without it, `UiSource::Embedded` serves nothing. |
-| `schema` | Yes | Enables `Flow::input::<T>()`, `InputSchema::of::<T>()`, and the typed admin function helpers, which derive validation from `schemars`. |
+| `schema` | Yes | Enables typed inputs, which derive validation from `schemars`: the input argument of a `#[flow]`, of an `#[mcp_tool]`, and of the loaders and actions of an `#[admin_page]`; underneath, `Flow::input::<T>()`, `InputSchema::of::<T>()`, and the typed admin function helpers. |
 | `testing` | No | Compiles `openshop::testing`. Enable it under `[dev-dependencies]`. |
 
 ## Re-exports
@@ -60,41 +60,71 @@ start with `serde` and `schemars`, so an app that derives typed flow inputs
 declares both crates in its own `Cargo.toml`. The same applies to `tokio` for
 `#[tokio::main]`.
 
-## `OpenShopConfig::builder()`
+## `app!` and `App`
 
-Collects the definitions of an app and validates them as a whole.
+`app!` declares an application: it lists the building blocks, each declared
+where it is written, and sets the rest. The `App` it declares is a value that
+the binary runs and the tests read.
 
 ```rust,ignore
-use openshop::{OpenShopConfig, PartialRetryPolicy, PartialWorkerConfig, Result};
+use std::sync::Arc;
 
-fn config() -> Result<OpenShopConfig> {
-    OpenShopConfig::builder()
-        .provider(providers::warehouse::warehouse())
-        .flow(flows::sync_orders::sync_orders())
-        .worker(PartialWorkerConfig::new().concurrency(5))
-        .retry_policy(PartialRetryPolicy::new().max_attempts(3))
-        .on_error(|error, context| async move {
-            eprintln!("{context:?}: {error:#}");
-        })
-        .build()
+use openshop::{App, ErrorContext, PartialRetryPolicy, PartialWorkerConfig, Result, app};
+
+use flows::sync_orders::sync_orders;
+use providers::warehouse::Warehouse;
+
+async fn report_failure(error: Arc<openshop::Error>, context: ErrorContext) {
+    eprintln!("{context:?}: {error:#}");
+}
+
+pub static APP: App = app! {
+    providers: [Warehouse],
+    flows: [sync_orders],
+    worker: PartialWorkerConfig::new().concurrency(5),
+    retry_policy: PartialRetryPolicy::new().max_attempts(3),
+    on_error: report_failure,
+};
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    APP.run().await
 }
 ```
 
-[Configuration](configuration.md) lists every builder method. The definitions
-it accepts are created with:
+`APP.run()` runs the command given on the command line, `APP.config()` returns
+the validated `OpenShopConfig`, and `APP.builder()` returns the
+`OpenShopBuilder` of the declaration, to add to it. Each returns a `Result`: a
+setting of the declaration can fail. [Configuration](configuration.md)
+describes every list and setting. The blocks are declared with:
 
-- `Flow::new(name, run)` — see [Flows](flows.md);
-- `Provider::new(name)` — see [Providers](providers.md);
-- `FunctionDefinition::new(function_type, handle)` — see [Shopify Functions](shopify-functions.md);
-- `ProxyDefinition::json()`, `::liquid()`, `::html()` — see [Proxy routes](proxy-routes.md);
-- `ServerRoute::public()`, `ServerRoute::authenticated(auth)` — see [Public server routes](server-routes.md);
-- `Webhook::new(run)` — see [Webhooks](webhooks.md);
-- `CronEntry::new(schedule, flow)` — see [Crons](configuration.md#crons);
-- `McpConfig::new()` — see [MCP](mcp.md);
-- `AdminPage::new(path)` — see [Custom admin pages](custom-admin-pages.md);
-- `#[derive(Model)]` and `define_model(table)` — see [Database](database.md#app-models).
+- `#[flow]` on a function — see [Flows](flows.md);
+- `#[derive(ProviderConfig)]` on a struct and `#[provider]` on its `impl` block — see [Providers](providers.md);
+- `#[derive(FunctionConfig)]` on a struct — see [Shopify Functions](shopify-functions.md);
+- `#[proxy]` on a function — see [Proxy routes](proxy-routes.md);
+- `#[route]` on a function — see [Public server routes](server-routes.md);
+- `#[webhook]` on a function — see [Webhooks](webhooks.md);
+- `#[mcp_tool]` and `#[mcp_resource]` on a function, with `McpConfig::new()` for custom permissions — see [MCP](mcp.md);
+- `#[admin_page]` on an `impl` block — see [Custom admin pages](custom-admin-pages.md);
+- `#[derive(Model)]` on a struct — see [Database](database.md#app-models).
 
-## `Provider::new(name)`
+Crons are data: `CronEntry::new(schedule, flow)` — see
+[Crons](configuration.md#crons).
+
+### `OpenShopConfig::builder()`
+
+The attributes are built on definitions that can be created by hand:
+`Flow::new(name, run)`, `Provider::new(name)`,
+`FunctionDefinition::new(function_type, handle)`, `ProxyDefinition::json()`,
+`::liquid()` and `::html()`, `ServerRoute::public()` and
+`ServerRoute::authenticated(auth)`, `Webhook::new(run)`,
+`McpToolDefinition::new(description, run)`,
+`McpResourceDefinition::new(name, read)`, `AdminPage::new(path)`, and
+`define_model(table)`. `OpenShopConfig::builder()` collects them, along with
+declared blocks, and `build()` validates the whole. Use it for tests and for
+blocks built at run time. See [Builder methods](configuration.md#builder-methods).
+
+## `#[provider]` and `Provider::new(name)`
 
 A provider is a struct: `#[derive(ProviderConfig)]` makes its fields the
 configuration form, and `#[provider("name")]` makes the public `async` methods
@@ -127,8 +157,8 @@ impl Warehouse {
 }
 ```
 
-Register `Warehouse::provider()`. In a method, `self` is the configuration
-the shop saved; flows call it with
+List `Warehouse` in the `providers` of `app!`. In a method, `self` is the
+configuration the shop saved; flows call it with
 `Warehouse::on(&ctx.connectors).push("gid://shopify/Order/1".to_string()).await?`.
 `Provider::new(name)` builds a provider without a struct, with `.field(…)`,
 `.method(…)` and `.checker(…)`; `ProviderCall<A, R>` is the typed reference to
@@ -144,14 +174,17 @@ a six-field expression with seconds, or a nickname. The expression is validated
 when the configuration is built.
 
 ```rust,ignore
-use openshop::{CronEntry, json};
+use openshop::{App, CronEntry, app, json};
 
-fn crons() -> Vec<CronEntry> {
-    vec![
-        CronEntry::new("0 3 * * *", "syncOrders").name("Nightly sync").shops("all"),
-        CronEntry::new("@hourly", "syncOrders").input(json!({ "limit": 10 })),
-    ]
-}
+use flows::sync_orders::sync_orders;
+
+pub static APP: App = app! {
+    flows: [sync_orders],
+    crons: [
+        CronEntry::new("0 3 * * *", sync_orders::NAME).name("Nightly sync").shops("all"),
+        CronEntry::new("@hourly", sync_orders::NAME).input(json!({ "limit": 10 })),
+    ],
+};
 ```
 
 Supported nicknames are `@yearly`, `@annually`, `@monthly`, `@weekly`, `@daily`,
@@ -170,7 +203,7 @@ carries one as `ctx.app`.
 | `OpenShop::with_transport(config, db, env, transport)` | Same, with a custom `HttpTransport` for Shopify HTTP calls. |
 
 All three validate the configuration and resolve the Shopify apps, and fail
-when either is invalid. `openshop::cli::run` creates the handle for you.
+when either is invalid. `APP.run()` creates the handle for you.
 
 | Method | Returns |
 | --- | --- |
@@ -208,7 +241,7 @@ async fn queue_sync(app: &OpenShop) -> Result<()> {
 
 | Field | Set with | Type | Notes |
 | --- | --- | --- | --- |
-| `flow_name` | `DispatchFlowParams::new` | `String` | Registered flow key. |
+| `flow_name` | `DispatchFlowParams::new` | `String` | Registered flow key, such as `sync_orders::NAME`. |
 | `shop` | `DispatchFlowParams::new` | `String` | Target `*.myshopify.com` domain, or the cron global sentinel when used internally. |
 | `input` | `.input(…)` | `serde_json::Value` | Defaults to `{}`. Validated by the worker, not at dispatch. |
 | `shopify_app` | `.shopify_app(…)` | `String` | Defaults to the `default` app handle. |
@@ -348,10 +381,10 @@ pub struct Review {
 }
 ```
 
-Register it with `.model_of::<Review>()`, then read and write through
+List it in the `models` of `app!`, then read and write through
 `Review::for_shop(&ctx.db, &ctx.shop)`. `define_model(table)` describes a table
 without a struct, with its columns as SQL definitions, and is registered with
-`.model(…)`. See [App models](database.md#app-models).
+`.model(…)` on the builder. See [App models](database.md#app-models).
 
 ## Runtime logging
 
@@ -394,8 +427,9 @@ use `ctx.logger`, which persists records in the run log. See
 
 ## Server, worker, and scheduler
 
-`openshop::cli::run` covers the standard processes. To embed OpenShop in a
-process you manage yourself, the same pieces are exported:
+`APP.run()` covers the standard processes. To embed OpenShop in a process you
+manage yourself, the same pieces are exported, and `APP.config()?` gives them
+the configuration:
 
 ```rust,ignore
 use std::future::Future;

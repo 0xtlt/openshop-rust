@@ -12,7 +12,7 @@ forward one surface's credential to another.
 | `/webhooks` | `X-Shopify-Hmac-Sha256` | HMAC over the raw request body | shop and app selected by the matching secret |
 | `/proxy/*` | Shopify App Proxy query signature, or Customer Account JWT | Query HMAC or JWT | shop, app, optional customer |
 | `/ext/*` | Customer Account session JWT | JWT signature and audience | shop, app, customer |
-| `/routes/*` | Route-defined | Explicit authentication function, or intentionally public with `ServerRoute::public()` | Route-defined; optional `for_shop()` context |
+| `/routes/*` | Route-defined | Authentication function named by `auth = …` in `#[route]`, or intentionally public without it | Route-defined; optional `for_shop()` context |
 | `/mcp` | OpenShop token in `Authorization: Bearer …` | Stored token hash, status, expiry, shop, and permissions | token, shop, app, grants |
 
 `/health` and `/robots.txt` are public.

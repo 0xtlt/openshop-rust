@@ -2,35 +2,45 @@
 
 To add an endpoint, see [Add a server route](../guides/add-server-route.md).
 
-Server routes are registered with `.route(path, …)` on the configuration
-builder and mounted under `/routes/*`. Handlers receive the raw request and
-return an HTTP response. They do not require Shopify authentication.
+A server route is an async function declared with `#[route(METHOD, "/path")]`,
+listed in the `routes` of `app!` and mounted under `/routes/*`. Route functions
+receive the raw request and return an HTTP response. They do not require
+Shopify authentication.
 
 ```rust,ignore
 // src/routes/ping.rs
-use openshop::{ServerRoute, json, response};
+use openshop::response::{self, Response};
+use openshop::{Result, ServerRouteContext, json, route};
 
-pub fn ping() -> ServerRoute {
-    ServerRoute::public().get(|_ctx| async move { Ok(response::json(json!({ "ok": true }))) })
+#[route(GET, "/ping")]
+pub async fn ping(_ctx: ServerRouteContext) -> Result<Response> {
+    Ok(response::json(json!({ "ok": true })))
 }
 ```
 
 ```rust,ignore
-use openshop::{OpenShopConfig, Result};
+use openshop::{App, app};
 
-fn config() -> Result<OpenShopConfig> {
-    OpenShopConfig::builder()
-        .route("/ping", routes::ping::ping())
-        .build()
-}
+use routes::ping::ping;
+
+pub static APP: App = app! {
+    routes: [ping],
+};
 ```
 
-The endpoint is available at `GET /routes/ping`. Use `ServerRoute::public()`
-only when the endpoint is intentionally unauthenticated.
+The endpoint is available at `GET /routes/ping`. A route declared without
+`auth` is public: leave `auth` out only when the endpoint is intentionally
+unauthenticated.
+
+The attribute leaves the function an ordinary function and adds a type of the
+same name, which is what `routes` lists, with the constants `ping::METHOD` and
+`ping::PATH`. Because of that type, do not re-export the function next to a
+module of the same name (`pub use ping::ping;` beside `pub mod ping;` does not
+compile): import it where the application is declared.
 
 ## Routing
 
-| Registered path | Endpoint |
+| Declared path | Endpoint |
 | --- | --- |
 | `/` | `/routes` |
 | `/callback` | `/routes/callback` |
@@ -41,20 +51,22 @@ Static segments take precedence over dynamic ones. Two paths with the same
 shape, such as `/orders/:id` and `/orders/:slug`, are rejected when the
 configuration is built.
 
-`ServerRoute` has one builder method per supported HTTP method: `.get(…)`,
-`.head(…)`, `.post(…)`, `.put(…)`, `.patch(…)`, `.delete(…)`, and
-`.options(…)`. A route without any handler is rejected when the configuration
-is built
-(`[openshop] Invalid server route <path>: define at least one HTTP method`).
-A request using a method without a handler receives `405` with an `Allow`
-header and the body `{ "error": "Method not allowed" }`.
+The method is `GET`, `HEAD`, `POST`, `PUT`, `PATCH`, `DELETE`, or `OPTIONS`. A
+path can have several methods, each declared by its own function:
+`#[route(GET, "/status")]` on one, `#[route(POST, "/status")]` on another, both
+listed in `routes`. Two functions that declare the same method of a path are
+rejected when the configuration is built
+(`[openshop] Invalid config: routes./status handles GET twice`).
+A request using a method that no function declares receives `405` with an
+`Allow` header and the body `{ "error": "Method not allowed" }`.
 
 `/routes` is only mounted when at least one server route is registered.
 
 ## Request and response
 
-Handlers receive a `ServerRouteContext` and return
-`Result<openshop::response::Response>`.
+A route function takes a `ServerRouteContext` and returns `Result<T>`, where
+`T` is anything that is a response (`openshop::response::IntoResponse`):
+`openshop::response::Response`, `(StatusCode, String)`, and so on.
 
 | Field | Type | Contract |
 | --- | --- | --- |
@@ -80,23 +92,29 @@ Handlers receive a `ServerRouteContext` and return
 | `response::text(body)` | `200` with a `text/plain; charset=utf-8` body. |
 | `response::status(status)` | An empty response with the given status. |
 
-Anything that implements `IntoResponse` can be returned after calling
-`.into_response()`, for example
+A function can return any type that implements `IntoResponse` as it is, for
+example `Result<(StatusCode, String)>`. When its branches build different
+types, it returns `Result<Response>` and calls `.into_response()` on each
+value, for example
 `(StatusCode::CREATED, [("x-request-id", "1")], response::json(body)).into_response()`.
 
 OpenShop reads the whole request body before calling your code, does not parse
 it, and does not add CORS headers for public routes. A body larger than the
-[request body limit](configuration.md#builder-methods) is answered with `413`.
+[request body limit](configuration.md#settings) is answered with `413`.
 Responses of 1 KB or more are compressed with gzip or Brotli when the client
 accepts it.
 
 ## Authentication
 
-Every route is created with either `ServerRoute::public()` or
-`ServerRoute::authenticated(auth)`; a route cannot be built without choosing.
-The authentication function receives a `ServerRouteRequestContext` with the
-same `request`, `params`, and `app` as the handler, so both may read the body.
-It returns a `RouteAuthOutcome`:
+A route function is public unless its attribute names an authentication
+function: `#[route(POST, "/orders/:id", auth = partner)]`. Each route function
+has its own authentication, so the methods of one path can differ, for example
+a public `GET` next to an authenticated `POST`.
+
+The authentication function is an
+`async fn(ServerRouteRequestContext) -> Result<RouteAuthOutcome>`. It runs
+before the route function and receives the same `request`, `params`, and
+`app`, so both may read the body. It returns a `RouteAuthOutcome`:
 
 | Outcome | Effect |
 | --- | --- |
@@ -134,41 +152,73 @@ the shop identity:
 
 ```rust,ignore
 // src/routes/warehouse.rs
-use openshop::response::{self, StatusCode};
-use openshop::{DispatchFlowParams, RouteAuthOutcome, ServerRoute, json};
+use openshop::response::{self, Response, StatusCode};
+use openshop::{
+    DispatchFlowParams, Result, RouteAuthOutcome, ServerRouteContext, ServerRouteRequestContext, json, route,
+};
 
 use crate::integrations::warehouse::authenticate_warehouse;
 
-pub fn warehouse() -> ServerRoute {
-    ServerRoute::authenticated(|ctx| async move {
-        // Your own verification. It returns the `RouteShopInput` of the shop
-        // the verified caller acts for, or `None`.
-        let Some(identity) = authenticate_warehouse(&ctx.request).await? else {
-            return Ok(RouteAuthOutcome::Unauthorized);
-        };
-        let tenant = ctx.for_shop(identity).await?;
-        Ok(RouteAuthOutcome::Authenticated(json!({
-            "shop": tenant.shop,
-            "shopifyApp": tenant.shopify_app,
-        })))
-    })
-    .post(|ctx| async move {
-        let shop = ctx.auth["shop"].as_str().unwrap_or_default();
-        let shopify_app = ctx.auth["shopifyApp"].as_str().unwrap_or_default();
+async fn caller(ctx: ServerRouteRequestContext) -> Result<RouteAuthOutcome> {
+    // Your own verification. It returns the `RouteShopInput` of the shop
+    // the verified caller acts for, or `None`.
+    let Some(identity) = authenticate_warehouse(&ctx.request).await? else {
+        return Ok(RouteAuthOutcome::Unauthorized);
+    };
+    let tenant = ctx.for_shop(identity).await?;
+    Ok(RouteAuthOutcome::Authenticated(json!({
+        "shop": tenant.shop,
+        "shopifyApp": tenant.shopify_app,
+    })))
+}
 
-        let queued = ctx
-            .app
-            .dispatch_flow(
-                DispatchFlowParams::new("syncOrders", shop)
-                    .shopify_app(shopify_app)
-                    .input(json!({ "limit": 50 })),
-            )
-            .await?;
+#[route(POST, "/warehouse", auth = caller)]
+pub async fn warehouse(ctx: ServerRouteContext) -> Result<Response> {
+    let shop = ctx.auth["shop"].as_str().unwrap_or_default();
+    let shopify_app = ctx.auth["shopifyApp"].as_str().unwrap_or_default();
 
-        Ok(response::json_with_status(StatusCode::ACCEPTED, queued))
-    })
+    let queued = ctx
+        .app
+        .dispatch_flow(
+            DispatchFlowParams::new("syncOrders", shop)
+                .shopify_app(shopify_app)
+                .input(json!({ "limit": 50 })),
+        )
+        .await?;
+
+    Ok(response::json_with_status(StatusCode::ACCEPTED, queued))
 }
 ```
 
 The flow name must be a registered flow key. The input is validated by the
 worker when the run starts, not at dispatch; see [Input](flows.md#input).
+
+## Without the attribute
+
+`#[route]` is built on `ServerRoute`, which can be used directly for a route
+that is only known at run time, or in a test:
+
+```rust,ignore
+use openshop::{ServerRoute, json, response};
+
+pub fn ping() -> ServerRoute {
+    ServerRoute::public().get(|_ctx| async move { Ok(response::json(json!({ "ok": true }))) })
+}
+```
+
+Register it with `.route("/ping", ping())` on `OpenShopConfig::builder()`, or
+on `APP.builder()?` to add it to a declared application.
+
+`ServerRoute::public()` and `ServerRoute::authenticated(auth)` start a
+definition. It has one method per supported HTTP method: `.get(…)`,
+`.head(…)`, `.post(…)`, `.put(…)`, `.patch(…)`, `.delete(…)`, and
+`.options(…)`. Each takes a handler that returns
+`Result<openshop::response::Response>` and keeps the authentication of the
+definition it is added to: `ServerRoute::handlers` maps a method to its
+`ServerRouteMethod`, the handler with its authentication.
+
+Calling `.route(path, …)` again for a path adds methods to it, each with the
+authentication of its own definition; a method registered twice is rejected as
+for route functions. A definition without any handler is rejected when the
+configuration is built
+(`[openshop] Invalid server route <path>: define at least one HTTP method`).

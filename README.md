@@ -31,7 +31,7 @@ sources change. Run it through `shopify app dev` to open the app in a store.
 ## What an application looks like
 
 ```rust
-use openshop::{Flow, OpenShopConfig, ProviderConfig, Result, graphql, provider, validators};
+use openshop::{App, FlowContext, ProviderConfig, Result, app, flow, graphql, provider, validators};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -65,48 +65,44 @@ impl Warehouse {
     }
 }
 
-fn sync_orders() -> Flow {
-    Flow::new("syncOrders", |ctx| async move {
-        let input: SyncInput = ctx.input()?;
+/// A flow is an `async` function; its second argument is the validated input of a run.
+#[flow("syncOrders")]
+async fn sync_orders(ctx: FlowContext, input: SyncInput) -> Result<()> {
+    // Each step is checkpointed: a retried run reuses its stored output.
+    let orders: Vec<Order> = ctx
+        .step
+        .run("fetch-orders", || async {
+            // Checked against Shopify's schema when the crate compiles; `data` is typed.
+            let data = ctx
+                .shopify
+                .execute(graphql!(
+                    "query($first: Int!) { orders(first: $first) { nodes { id name } } }",
+                    first = input.limit
+                ))
+                .await?;
+            let orders = data.orders.nodes.into_iter();
+            Ok(orders.map(|order| Order { id: order.id, name: order.name }).collect())
+        })
+        .await?;
 
-        // Each step is checkpointed: a retried run reuses its stored output.
-        let orders: Vec<Order> = ctx
-            .step
-            .run("fetch-orders", || async {
-                // Checked against Shopify's schema when the crate compiles; `data` is typed.
-                let data = ctx
-                    .shopify
-                    .execute(graphql!(
-                        "query($first: Int!) { orders(first: $first) { nodes { id name } } }",
-                        first = input.limit
-                    ))
-                    .await?;
-                let orders = data.orders.nodes.into_iter();
-                Ok(orders.map(|order| Order { id: order.id, name: order.name }).collect())
-            })
-            .await?;
-
-        ctx.step
-            .run("send-to-warehouse", || async {
-                // Checked by the compiler: a `Vec<Order>` in, a `usize` out.
-                Warehouse::on(&ctx.connectors).push(&orders).await?;
-                Ok(())
-            })
-            .await
-    })
-    .input::<SyncInput>()
+    ctx.step
+        .run("send-to-warehouse", || async {
+            // Checked by the compiler: a `Vec<Order>` in, a `usize` out.
+            Warehouse::on(&ctx.connectors).push(&orders).await?;
+            Ok(())
+        })
+        .await
 }
 
-fn config() -> Result<OpenShopConfig> {
-    OpenShopConfig::builder()
-        .provider(Warehouse::provider())
-        .flow(sync_orders())
-        .build()
-}
+/// The application is a value that lists its building blocks.
+static APP: App = app! {
+    providers: [Warehouse],
+    flows: [sync_orders],
+};
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    openshop::cli::run(config).await
+    APP.run().await
 }
 ```
 
@@ -119,9 +115,10 @@ The binary understands `dev`, `start`, `worker [--concurrency=N]` and
   a configuration form for each shop and supplies configured connectors at runtime.
 - **Flows** define background work in named steps. OpenShop queues runs, stores
   checkpoints, applies retry policies, and exposes execution logs.
-- **App configuration** registers flows, providers, schedules, webhooks, app
-  proxies, public routes, Shopify Functions and MCP capabilities. Shopify OAuth
-  and the embedded admin are handled by the framework.
+- **App configuration** lists the flows, providers, webhooks, app proxies,
+  public routes, Shopify Functions and MCP capabilities of the application,
+  each declared where it is written, and sets its schedules. Shopify OAuth and
+  the embedded admin are handled by the framework.
 
 In production, a web process (`start`) accepts requests and queues work; separate
 workers (`worker`) execute it. PostgreSQL stores installations, credentials, runs,
@@ -135,14 +132,14 @@ Rust conventions.
 
 | TypeScript | Rust |
 | --- | --- |
-| `defineOpenShop({ providers }).defineConfig({ … })` | `OpenShopConfig::builder()…build()` |
-| `defineFlow({ name, input: type({…}), run })` | `Flow::new(name, run).input::<T>()` with `serde` + `schemars` |
+| `defineOpenShop({ providers }).defineConfig({ … })` | `app! { providers: […], flows: […], … }`, a value of type `App` |
+| `defineFlow({ name, input: type({…}), run })` | `#[flow("name")]` on an `async fn(ctx, input)`, the input being a `serde` + `schemars` type |
 | `await step('name', fn)` / `step.sleep` | `ctx.step.run("name", \|\| async { … }).await?` / `ctx.step.sleep` |
 | `defineProvider({ fields, methods })` | a struct with `#[derive(ProviderConfig)]` and `#[provider("name")]` on its `impl` block |
 | `connectors.warehouse.push(data)` | `Warehouse::on(&ctx.connectors).push(&data)`, or by name with `ctx.connectors.call("warehouse", "push", data)` |
-| `proxy/*.ts`, `routes/*.ts`, `admin/pages/**` discovered from files | `.proxy(path, …)`, `.route(path, …)`, `.admin_page(…)` on the builder |
-| `validate: type('string.url')` | `.validate(validators::url())` or any closure |
-| `openshop.config.ts` loaded by the `openshop` CLI | your own binary calling `openshop::cli::run(config)` |
+| `proxy/*.ts`, `routes/*.ts`, `admin/pages/**` discovered from files | `#[proxy(GET, "/path")]`, `#[route(GET, "/path")]` and `#[admin_page("/path")]` on the code, listed in `app!` |
+| `validate: type('string.url')` | `validate = validators::url()` on a field, or any closure |
+| `openshop.config.ts` loaded by the `openshop` CLI | your own binary running the application it declares: `APP.run()` |
 | `defineModel('reviews', { … })` and Drizzle queries | `#[derive(Model)]` on a struct, with typed rows: `Review::for_shop(&db, &shop).filter(Review::RATING.gte(4))` |
 | `drizzle-kit` migrations in `./drizzle` | SQL migrations in `./migrations`, generated from what changed in the models (`migrate generate` / `migrate`) |
 | Preact admin UI built with Vite | Leptos admin UI compiled to WebAssembly and embedded in the binary |
@@ -162,7 +159,7 @@ robust; they are listed in [Differences](docs/src/reference/differences.md).
 | `crates/openshop` | The framework: engine, server, MCP, testing harness, embedded UI assets |
 | `crates/openshop-shared` | Types and rules shared by the server and the WebAssembly UI |
 | `crates/openshop-graphql` | Shopify's Admin schema, and the checks and code generation behind `graphql!` |
-| `crates/openshop-macros` | The `graphql!` macro |
+| `crates/openshop-macros` | The macros: `app!`, the attributes and derives that declare building blocks, and `graphql!` |
 | `crates/openshop-ui` | The admin UI (Leptos, built with trunk into `crates/openshop/ui-dist`) |
 | `crates/openshop-cli` | The `openshop` command: `init`, `init-ui`, `dev` and `codegen` |
 | `apps/demo` | A demo app exercising every building block; `apps/demo/ui` is its admin UI bundle with a custom page |

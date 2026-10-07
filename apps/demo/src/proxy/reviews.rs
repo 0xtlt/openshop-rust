@@ -1,9 +1,9 @@
-use openshop::{ProxyDefinition, Value};
+use openshop::{ProxyContext, Result, proxy};
 
-pub fn reviews() -> ProxyDefinition {
-    ProxyDefinition::liquid().get(|ctx| async move {
-        Ok(Value::from(format!(
-            r#"
+#[proxy(GET, "/reviews", liquid)]
+pub async fn reviews(ctx: ProxyContext) -> Result<String> {
+    Ok(format!(
+        r#"
       <div class="openshop-reviews">
         <h2>Customer Reviews for {{{{ shop.name }}}}</h2>
         <p>Reviews loaded via OpenShop App Proxy from {}</p>
@@ -12,7 +12,6 @@ pub fn reviews() -> ProxyDefinition {
         {{% endif %}}
       </div>
     "#,
-            ctx.shop
-        )))
-    })
+        ctx.shop
+    ))
 }

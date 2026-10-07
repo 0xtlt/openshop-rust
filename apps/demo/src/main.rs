@@ -1,4 +1,4 @@
 #[tokio::main]
 async fn main() -> openshop::Result<()> {
-    openshop::cli::run(openshop_demo::config).await
+    openshop_demo::APP.run().await
 }

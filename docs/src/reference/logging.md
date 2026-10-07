@@ -8,22 +8,21 @@ OpenShop has two logging surfaces:
 ## Flow logger
 
 ```rust,ignore
-use openshop::{Flow, json};
+use openshop::{FlowContext, Result, flow, json};
 
-pub fn sync_orders() -> Flow {
-    Flow::new("syncOrders", |ctx| async move {
-        ctx.logger.info(json!({ "source": "shopify" }), "Starting order sync");
+#[flow("syncOrders")]
+pub async fn sync_orders(ctx: FlowContext) -> Result<()> {
+    ctx.logger.info(json!({ "source": "shopify" }), "Starting order sync");
 
-        ctx.step
-            .run("push", || async {
-                if let Err(error) = ctx.connectors.call("warehouse", "push", json!([])).await {
-                    ctx.logger.error(json!({ "error": format!("{error:#}") }), "Provider push failed");
-                    return Err(error);
-                }
-                Ok(())
-            })
-            .await
-    })
+    ctx.step
+        .run("push", || async {
+            if let Err(error) = ctx.connectors.call("warehouse", "push", json!([])).await {
+                ctx.logger.error(json!({ "error": format!("{error:#}") }), "Provider push failed");
+                return Err(error);
+            }
+            Ok(())
+        })
+        .await
 }
 ```
 
@@ -112,7 +111,7 @@ returns the active adapter.
 
 The default adapter forwards to the [`tracing`](https://docs.rs/tracing) crate
 at the matching level, with the context as a `context` field.
-`openshop::cli::run` calls `openshop::cli::init_logging()`, which installs a
+`APP.run()` calls `openshop::cli::init_logging()`, which installs a
 `tracing` formatter that writes to standard output unless the process already
 has a global subscriber. Its filter is the `RUST_LOG` environment variable,
 or `info,sqlx=warn` when the variable is unset: `info` and above, with `sqlx`
@@ -123,7 +122,7 @@ RUST_LOG=debug cargo run -- dev
 ```
 
 To send runtime logs elsewhere, either install your own `tracing` subscriber
-before calling `openshop::cli::run`, or replace the adapter with
+before calling `APP.run()`, or replace the adapter with
 `set_runtime_logger`. Startup banners of the CLI commands are printed directly
 to standard output.
 

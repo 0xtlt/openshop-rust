@@ -1,57 +1,149 @@
 # Configuration
 
-An OpenShop app describes itself once with `OpenShopConfig::builder()` and
-hands the function that builds the configuration to `openshop::cli::run`.
-Nothing is discovered from files: every flow, provider, route, and page is
-registered on the builder.
+An OpenShop app declares itself once with `app!`: the building blocks it is
+made of, each declared where it is written, and its settings. Nothing is
+discovered from files: a flow, a provider, a route, or a page takes effect
+when the application lists it.
 
 ```rust,ignore
-use openshop::{CronEntry, OpenShopConfig, PartialRetryPolicy, PartialWorkerConfig, Result, json};
+use std::sync::Arc;
 
-fn config() -> Result<OpenShopConfig> {
-    OpenShopConfig::builder()
-        .provider(providers::warehouse::warehouse())
-        .flow(flows::sync_orders::sync_orders())
-        .cron(
-            CronEntry::new("*/5 * * * *", "syncOrders")
-                .name("Quick sync")
-                .input(json!({ "limit": 10 }))
-                .shops("all"),
-        )
-        .worker(PartialWorkerConfig::new().concurrency(5))
-        .retry_policy(
-            PartialRetryPolicy::new()
-                .max_attempts(3)
-                .initial_interval_ms(1_000)
-                .backoff_coefficient(2.0)
-                .max_interval_ms(30_000),
-        )
-        .on_error(|error, context| async move {
-            eprintln!("[openshop:error] {context:?}: {error:#}");
-        })
-        .build()
+use openshop::{App, CronEntry, ErrorContext, PartialRetryPolicy, PartialWorkerConfig, Result, app, json};
+
+use flows::sync_orders::sync_orders;
+use providers::warehouse::Warehouse;
+
+async fn report_failure(error: Arc<openshop::Error>, context: ErrorContext) {
+    eprintln!("[openshop:error] {context:?}: {error:#}");
 }
+
+pub static APP: App = app! {
+    providers: [Warehouse],
+    flows: [sync_orders],
+    crons: [
+        CronEntry::new("*/5 * * * *", sync_orders::NAME)
+            .name("Quick sync")
+            .input(json!({ "limit": 10 }))
+            .shops("all"),
+    ],
+    worker: PartialWorkerConfig::new().concurrency(5),
+    retry_policy: PartialRetryPolicy::new()
+        .max_attempts(3)
+        .initial_interval_ms(1_000)
+        .backoff_coefficient(2.0)
+        .max_interval_ms(30_000),
+    on_error: report_failure,
+};
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    openshop::cli::run(config).await
+    APP.run().await
 }
 ```
 
-`openshop::cli::run` accepts either a function returning
-`Result<OpenShopConfig>` or an already built `OpenShopConfig`. Prefer the
-function: `dev` then loads `.env` before the configuration is built, so the
-configuration can read variables defined there.
+`app!` is an expression of type `App`, usually kept in a `static`. An `App` is
+a value: the binary runs it, a test reads its configuration.
+
+| Method | Returns |
+| --- | --- |
+| `APP.run().await` | `Result<()>`. Runs the command given on the command line: `dev`, `start`, `worker`, or `migrate`. See [CLI commands](cli.md#command-behavior). |
+| `APP.config()` | `Result<OpenShopConfig>`: the configuration, after [validation](#runtime-validation). |
+| `APP.builder()` | `Result<OpenShopBuilder>`: the builder holding the blocks and settings of the declaration, to add to them. It fails when a setting does. See [Builder methods](#builder-methods). |
+
+Nothing is evaluated before one of these is called, and each call starts over.
+`APP.run()` reads the declaration after `dev` loaded `.env`, so a setting can
+read variables defined there.
 
 At runtime the configuration lives inside an `OpenShop` handle. Every handler
 context carries one as `ctx.app`: use `ctx.app.dispatch_flow(…)` to enqueue
 durable work from a webhook, a proxy, a server route, or an admin function. See
 [`OpenShop`](sdk.md#openshop).
 
+## Lists
+
+Each list takes the blocks of one kind, by name.
+
+| List | Takes | Declared with |
+| --- | --- | --- |
+| `providers` | Provider structs | `#[derive(ProviderConfig)]` on the struct and `#[provider("name")]` on its `impl` block. See [Providers](providers.md). |
+| `flows` | Flow functions | `#[flow]`. See [Flows](flows.md). |
+| `functions` | Shopify Function configuration structs | `#[derive(FunctionConfig)]`. See [Shopify Functions](shopify-functions.md). |
+| `models` | Model structs | `#[derive(Model)]`. See [App models](database.md#app-models). |
+| `admin_pages` | Custom admin page types | `#[admin_page("/path")]` on the `impl` block. See [Custom admin pages](custom-admin-pages.md). |
+| `webhooks` | Webhook functions | `#[webhook("topic")]`. See [Webhooks](webhooks.md). |
+| `proxies` | App proxy functions | `#[proxy(GET, "/path")]`. See [Proxy routes](proxy-routes.md). |
+| `routes` | Server route functions | `#[route(GET, "/path")]`. See [Public server routes](server-routes.md). |
+| `mcp_tools` | MCP tool functions | `#[mcp_tool("name")]`. See [MCP](mcp.md). |
+| `mcp_resources` | MCP resource functions | `#[mcp_resource("uri", name = "…")]`. See [MCP](mcp.md). |
+
+A block is named as it is in scope: imported (`flows: [sync_orders]`) or by
+path (`flows: [flows::sync_orders::sync_orders]`). Listing a block under
+another kind, or a function without its attribute, does not compile. Each key
+of the declaration, list or setting, is written once.
+
+An attribute on a function leaves it an ordinary function and adds a type of
+the same name, with the constants of the block (`sync_orders::NAME`,
+`orders_create::TOPICS`, `ping::PATH`). That type is what a list takes. Because
+of it, do not re-export a declared function next to a module of the same name:
+`pub use sync_orders::sync_orders;` beside `mod sync_orders;` does not compile.
+Import the function where the application is declared.
+
+## Settings
+
+Every other entry is a setting, written `name: value`. The value is an
+expression, passed to the [builder method](#builder-methods) of that name when
+the configuration is built. It can fail with `?`, such as a value read from
+the environment (`shopify: shopify_apps()?`): the error is the one
+`APP.config()` and `APP.run()` return.
+
+| Setting | Value | Default when absent |
+| --- | --- | --- |
+| `crons` | [`CronEntry`](#crons) values, as an array or any other iterator | No crons |
+| `on_error` | `async fn(Arc<openshop::Error>, ErrorContext)`, called after each failed attempt of a flow run | No hook |
+| `mcp` | `McpConfig`: the custom permissions, `enabled`, and tools or resources built without an attribute | Core MCP capabilities enabled; no custom permissions |
+| `custom_pages` | Sidebar entries (`CustomAdminNavigationItem`), as an array or any other iterator | Custom pages disabled; see [Custom admin pages](custom-admin-pages.md) |
+| `experimental` | `ExperimentalConfig` | Same as above; replaces `custom_pages` |
+| `shopify` | [`ShopifyConfig`](#shopify) | Single app resolved from env and Shopify TOML |
+| `worker` | `PartialWorkerConfig` | See [Worker defaults](#worker-defaults) |
+| `retry_policy` | `PartialRetryPolicy` | See [Retry defaults](#retry-defaults) |
+| `pages` | [`AdminPagesConfig`](#admin-pages) | Every admin page `visible` |
+| `admin_ui` | `UiSource` | The admin UI bundle built into the framework; see [Custom admin pages](custom-admin-pages.md#serve-the-bundle) |
+| `max_request_body_bytes` | `usize` | `2 * 1024 * 1024` (2 MB); larger request bodies are answered with `413` |
+
 ## Builder methods
+
+`app!` expands to calls on an `OpenShopBuilder`: a list adds each of its
+blocks, a setting calls the method of its name. The builder is the lower
+level. Use it in a test that adds to the application, and for a block built at
+run time.
+
+```rust,ignore
+use openshop::{Flow, OpenShopConfig, Result};
+
+// The declaration, with one more flow.
+fn extended() -> Result<OpenShopConfig> {
+    APP.builder()?
+        .flow(Flow::new("extra", |_ctx| async { Ok(()) }))
+        .build()
+}
+
+// From an empty builder: a declared block is added by its name, whatever its kind.
+fn minimal() -> Result<OpenShopConfig> {
+    OpenShopConfig::builder()
+        .add::<Warehouse>()
+        .add::<sync_orders>()
+        .build()
+}
+```
+
+A binary runs such a configuration with `openshop::cli::run(extended)`, which
+accepts either a function returning `Result<OpenShopConfig>` or an already
+built `OpenShopConfig`. Prefer the function: `dev` then loads `.env` before the
+configuration is built.
 
 | Method | Argument | Default when not called |
 | --- | --- | --- |
+| `.add::<Block>()` | A declared block, as a type: `.add::<Warehouse>()`, `.add::<sync_orders>()` | — |
 | `.provider(provider)` | `Provider`, registered under `provider.name` | No providers |
 | `.provider_as(key, provider)` | Key and `Provider` | — |
 | `.providers(providers)` | Iterator of `Provider`, each registered under its own name | — |
@@ -62,8 +154,11 @@ durable work from a webhook, a proxy, a server route, or an admin function. See
 | `.shopify(config)` | `ShopifyConfig` | Single app resolved from env and Shopify TOML |
 | `.function(key, definition)` | Key and `FunctionDefinition` | No functions |
 | `.mcp(config)` | `McpConfig` | Core MCP capabilities enabled; no custom capabilities |
+| `.mcp_tool(name, definition)` | Tool name and `McpToolDefinition` | No custom tools |
+| `.mcp_resource(uri, definition)` | Resource URI and `McpResourceDefinition` | No custom resources |
 | `.webhook(topic, webhook)` | Topic and `Webhook` | No handlers |
 | `.cron(entry)` | `CronEntry` | No crons |
+| `.crons(entries)` | Iterator of `CronEntry` | — |
 | `.proxy(path, definition)` | Route path and `ProxyDefinition` | No proxy routes; `/proxy` and `/ext` are not mounted |
 | `.route(path, route)` | Route path and `ServerRoute` | No server routes; `/routes` is not mounted |
 | `.admin_page(page)` | `AdminPage` | No custom admin pages |
@@ -79,8 +174,28 @@ durable work from a webhook, a proxy, a server route, or an admin function. See
 | `.on_error(hook)` | `Fn(Arc<anyhow::Error>, ErrorContext) -> impl Future<Output = ()>` | No hook |
 | `.build()` | — | Returns `Result<OpenShopConfig>` after [validation](#runtime-validation) |
 
-Registering a second definition under an existing key replaces the first one.
-`.pages(…)` and `.page(…)` merge with earlier calls; later values win.
+A key is registered once. `build()` refuses a second provider, flow, function,
+webhook topic, model table, MCP tool, MCP resource, or MCP permission under a
+key that is taken, for example with
+`[openshop] Invalid config: flows.syncOrders is registered twice`. This holds
+for a declared block added or listed twice as well as for the methods above.
+
+Calling the other methods again:
+
+- `.proxy(path, …)` and `.route(path, …)` add methods to a path that is
+  already registered. A method registered twice is refused
+  (`proxies./widgets handles GET twice`, `routes./status handles GET twice`).
+  The methods of a proxy path share one response type
+  (`proxies./banner answers with both liquid and json; a path has one response type`);
+  each method of a route keeps its own authentication.
+- `.mcp(config)` adds its permissions, tools, and resources to the ones
+  registered instead of replacing them. Its `enabled`, when set, replaces the
+  earlier value.
+- `.cron(…)`, `.crons(…)`, and `.admin_page(…)` append.
+- `.pages(…)` and `.page(…)` merge with earlier calls; later values win.
+- The remaining settings (`.shopify(…)`, `.worker(…)`, `.retry_policy(…)`,
+  `.on_error(…)`, `.custom_pages(…)`, `.experimental(…)`, `.admin_ui(…)`,
+  `.max_request_body_bytes(…)`) replace the earlier value.
 
 The fields of `OpenShopConfig` are public. `OpenShop::new` validates the
 configuration again, so a configuration modified after `build()` is still
@@ -101,13 +216,13 @@ The app handle is `default` in single-app mode.
 For multiple apps, define one entry per stable app handle:
 
 ```rust,ignore
-use openshop::{Context, IndexMap, OpenShopConfig, Result, ShopifyAppConfig, ShopifyConfig};
+use openshop::{App, Context, IndexMap, Result, ShopifyAppConfig, ShopifyConfig, app};
 
 fn env(name: &str) -> Result<String> {
     std::env::var(name).with_context(|| format!("{name} is not set"))
 }
 
-fn config() -> Result<OpenShopConfig> {
+fn shopify_apps() -> Result<ShopifyConfig> {
     let mut apps = IndexMap::new();
     apps.insert(
         "retail".to_string(),
@@ -126,14 +241,20 @@ fn config() -> Result<OpenShopConfig> {
         },
     );
 
-    OpenShopConfig::builder()
-        .shopify(ShopifyConfig {
-            scopes: Some("read_products,read_orders".to_string()),
-            apps: Some(apps),
-        })
-        .build()
+    Ok(ShopifyConfig {
+        scopes: Some("read_products,read_orders".to_string()),
+        apps: Some(apps),
+    })
 }
+
+pub static APP: App = app! {
+    shopify: shopify_apps()?,
+};
 ```
+
+`shopify_apps()?` makes the declaration fail when a variable is not set:
+`APP.config()` and every command of `APP.run()` return the error, here
+`SHOPIFY_RETAIL_API_SECRET is not set`.
 
 | Field | Type | Behavior |
 | --- | --- | --- |
@@ -157,9 +278,12 @@ for how variables you read yourself interact with `.env`.
 
 ## Split the registration
 
-`.providers([…])` and `.flows([…])` register several definitions at once, each
-under its own name. `.with(register)` hands the builder to a function, so that
-a module registers everything it defines and `config()` stays short:
+A declaration has nothing to split: each block is declared in the module that
+writes it, and `app!` names it, imported or by path.
+
+On the builder, `.providers([…])` and `.flows([…])` register several
+definitions at once, each under its own name, and `.with(register)` hands the
+builder to a function, so that a module adds everything it holds:
 
 ```rust,ignore
 use openshop::{OpenShopBuilder, OpenShopConfig, Result};
@@ -167,34 +291,33 @@ use openshop::{OpenShopBuilder, OpenShopConfig, Result};
 // src/reviews/mod.rs
 pub fn register(builder: OpenShopBuilder) -> OpenShopBuilder {
     builder
-        .flow(moderate_reviews())
-        .proxy("/reviews", list_reviews())
-        .admin_page(reviews_page())
+        .add::<moderate_reviews>()
+        .add::<list_reviews>()
+        .add::<ReviewsPage>()
 }
 
-// src/main.rs
+// Where the configuration is built
 fn config() -> Result<OpenShopConfig> {
-    OpenShopConfig::builder()
-        .providers([warehouse(), erp()])
-        .flows([sync_orders(), sync_products()])
-        .with(reviews::register)
-        .build()
+    APP.builder()?.with(reviews::register).build()
 }
 ```
 
-Registration order is kept, and a later registration under the same key
-replaces the earlier one, as with the singular methods.
+Registration order is kept, and a key registered twice is refused, as with the
+singular methods.
 
 ## Flows
 
-Register flow definitions under stable keys. The key is the name used by
-dispatch, crons, runs, and logs. `.flow(flow)` uses the flow's own `name` as the
+A flow listed in `flows` is registered under its name: the one given to
+`#[flow]`, or the name of the function in camel case, also available as the
+constant `sync_orders::NAME`. That key is the name used by dispatch, crons,
+runs, and logs. On the builder, `.flow(flow)` uses the flow's own `name` as the
 key; `.flow_as(key, flow)` registers it under another one. The
 [flow reference](flows.md) owns the definition options, context, checkpoint
 contract, and timeout behavior.
 
 ## Crons
 
+The `crons` setting takes the entries of the application.
 `CronEntry::new(schedule, flow)` creates an entry; the other fields are set
 with builder methods.
 
@@ -202,7 +325,7 @@ with builder methods.
 | --- | --- | --- | --- |
 | `name` | `.name(…)` | `String` | Omitted; display logs fall back to the flow name |
 | `schedule` | `CronEntry::new` | cron expression string | Required |
-| `flow` | `CronEntry::new` | registered flow key | Required |
+| `flow` | `CronEntry::new` | registered flow key, such as `sync_orders::NAME` | Required |
 | `input` | `.input(…)` | JSON object (`serde_json::Value`) | `{}` |
 | `shops` | `.shops(…)` | `CronShops`, or anything that converts into it | `CronShops::Global` |
 
@@ -228,15 +351,16 @@ Runtime behavior is unchanged: crons still fire, webhooks still run, Shopify
 Functions still execute, and `POST /mcp` still follows `McpConfig::enabled`.
 
 ```rust,ignore
-use openshop::{AdminPageId, AdminPageMode, OpenShopConfig, Result};
+use openshop::{AdminPageMode, AdminPagesConfig, App, app};
 
-fn config() -> Result<OpenShopConfig> {
-    OpenShopConfig::builder()
-        .flow(flows::sync_orders::sync_orders())
-        .page(AdminPageId::Functions, AdminPageMode::Hidden)
-        .page(AdminPageId::Mcp, AdminPageMode::Disabled)
-        .build()
-}
+pub static APP: App = app! {
+    flows: [flows::sync_orders::sync_orders],
+    pages: AdminPagesConfig {
+        functions: Some(AdminPageMode::Hidden),
+        mcp: Some(AdminPageMode::Disabled),
+        ..Default::default()
+    },
+};
 ```
 
 | Mode | Sidebar | Direct URL | Admin API `/api/*` |
@@ -245,10 +369,11 @@ fn config() -> Result<OpenShopConfig> {
 | `AdminPageMode::Hidden` | Hidden | Works | 200 |
 | `AdminPageMode::Disabled` | Hidden | Shows “This page is disabled” | 404 |
 
-`AdminPageId` has the variants `Flows`, `Providers`, `Crons`, `Functions`, and
-`Mcp`. `.pages(AdminPagesConfig { … })` sets several pages at once; its fields
-are `flows`, `providers`, `crons`, `functions`, and `mcp`, each an
-`Option<AdminPageMode>`.
+The fields of `AdminPagesConfig` are `flows`, `providers`, `crons`,
+`functions`, and `mcp`, each an `Option<AdminPageMode>`. On the builder,
+`.pages(AdminPagesConfig { … })` sets several pages at once and
+`.page(id, mode)` sets one, named by an `AdminPageId`: `Flows`, `Providers`,
+`Crons`, `Functions`, or `Mcp`.
 
 `Hidden` is navigation-only and must not be used as an access-control boundary.
 Use `Disabled` when shop staff must not be able to open a page or call its
@@ -257,15 +382,18 @@ admin API.
 The MCP dashboard and protocol are independent:
 
 ```rust,ignore
-use openshop::{AdminPageId, AdminPageMode, McpConfig, OpenShopConfig, Result};
+use openshop::{AdminPageMode, AdminPagesConfig, App, McpConfig, app};
 
-fn config() -> Result<OpenShopConfig> {
-    OpenShopConfig::builder()
-        .flow(flows::sync_orders::sync_orders())
-        .page(AdminPageId::Mcp, AdminPageMode::Disabled) // Block the dashboard and /api/mcp/*.
-        .mcp(McpConfig::new().enabled(false)) // Block POST /mcp.
-        .build()
-}
+pub static APP: App = app! {
+    flows: [flows::sync_orders::sync_orders],
+    // Block the dashboard and /api/mcp/*.
+    pages: AdminPagesConfig {
+        mcp: Some(AdminPageMode::Disabled),
+        ..Default::default()
+    },
+    // Block POST /mcp.
+    mcp: McpConfig::new().enabled(false),
+};
 ```
 
 - Set only the page mode to `Disabled` to block MCP administration while
@@ -276,12 +404,15 @@ fn config() -> Result<OpenShopConfig> {
 
 ## Runtime validation
 
-`.build()` returns an error instead of a configuration when a definition is
-invalid. Messages have the form `[openshop] Invalid config: <path> <problem>`,
-for example
+`APP.config()` returns an error instead of a configuration when a definition
+is invalid, and so does every command of `APP.run()`; on the builder, that is
+`.build()`. Messages have the form
+`[openshop] Invalid config: <path> <problem>`, for example
 `[openshop] Invalid config: crons[0].flow references unknown flow "syncOrder"`.
 The checks are:
 
+- a key must be registered once, and a method once for a proxy or server route
+  path, as described under [Builder methods](#builder-methods);
 - cron entries must reference registered flows and carry a valid schedule;
 - provider and flow names must be non-empty;
 - provider and function fields must have a non-empty label, and `select`
@@ -317,8 +448,8 @@ shop through the admin UI or MCP is skipped for that shop.
 
 ## Worker defaults
 
-`.worker(…)` accepts a `PartialWorkerConfig`. Missing fields use these runtime
-defaults:
+The `worker` setting takes a `PartialWorkerConfig`. Missing fields use these
+runtime defaults:
 
 | Field | Type | Default | Purpose |
 | --- | --- | --- | --- |
@@ -341,8 +472,8 @@ processes to scale horizontally; PostgreSQL claims work with
 
 ## Retry defaults
 
-The app-level `.retry_policy(…)` supplies defaults for registered flows. Flow
-and dispatch settings override it field by field. See the
+The app-level `retry_policy` setting supplies defaults for the flows of the
+application. Flow and dispatch settings override it field by field. See the
 [retry defaults and precedence](flows.md#retry-precedence-and-defaults)
 for the authoritative option table and deadline behavior.
 

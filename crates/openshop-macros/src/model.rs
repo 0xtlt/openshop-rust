@@ -534,6 +534,14 @@ pub fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
             #(#new_fields)*
         }
 
+        impl #krate::Declared for #name {
+            type Kind = #krate::declare::kind::Model;
+
+            fn register(app: #krate::OpenShopBuilder) -> #krate::OpenShopBuilder {
+                app.model(<Self as #krate::db::Record>::model())
+            }
+        }
+
         impl #krate::db::Record for #name {
             type New = #new_name;
 

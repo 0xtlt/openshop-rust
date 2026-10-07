@@ -24,8 +24,8 @@ Before editing:
 ## Core Rules
 
 - Use `cargo` for workspace commands. `crates/openshop-ui` is a separate workspace built with `trunk`.
-- Follow the existing builder style at public boundaries: `OpenShopConfig::builder()`, `Flow::new(..).input::<T>()`, provider structs with `#[derive(ProviderConfig)]` and `#[provider(..)]`, models with `#[derive(Model)]`.
-- Treat hand-indexed `serde_json::Value` as a last resort where a shape is known; prefer `graphql!` for Shopify operations, serde types, `graphql_as::<T>()`, `call_as::<T>()`, and `ctx.input::<T>()`.
+- Declare building blocks where they are written, with an attribute on the function or the struct itself, and list them in the `app!` declaration of the application: `#[flow]`, `#[webhook]`, `#[proxy]`, `#[route]`, `#[mcp_tool]` and `#[mcp_resource]` on `async` functions, `#[admin_page(..)]` on an `impl` block, `#[derive(ProviderConfig)]` with `#[provider(..)]`, `#[derive(FunctionConfig)]` with `#[function(..)]`, and `#[derive(Model)]` on structs. Do not write functions that build a block or the configuration. Keep the builder (`OpenShopConfig::builder()`, `.add::<Block>()`, `Flow::new(..)`, `AdminPage::new(..)`…) for tests and for blocks only known at run time. See `references/architecture.md`.
+- Treat hand-indexed `serde_json::Value` as a last resort where a shape is known; prefer `graphql!` for Shopify operations, serde types, `graphql_as::<T>()`, `call_as::<T>()`, and a typed second argument for the input of a flow, of an admin loader or action and of an MCP tool, and for the payload of a webhook.
 - Return errors with `?` and `openshop::Result`; do not `unwrap()` or `expect()` values that come from Shopify, providers, requests, or the database. Engine errors are typed and recovered with `downcast_ref`.
 - Do not add `unsafe`: the framework crate denies `unsafe_code` and the CLI forbids it.
 - The TypeScript implementation is the reference for behavior. When the Rust version deliberately differs, document it in `docs/src/reference/differences.md`.

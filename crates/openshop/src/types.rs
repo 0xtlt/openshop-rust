@@ -1009,6 +1009,19 @@ impl FunctionDefinition {
     }
 }
 
+/// A struct that is the configuration of a Shopify Function: its fields are
+/// the form of an instance. Implemented by `#[derive(FunctionConfig)]`.
+pub trait FunctionConfig: Sized {
+    /// The key the function is registered under.
+    const KEY: &'static str;
+
+    /// The function, with the fields of the struct as its form.
+    fn definition() -> FunctionDefinition;
+
+    /// Reads the configuration of an instance.
+    fn from_config(config: JsonMap) -> Result<Self, String>;
+}
+
 // ─── App Proxy ──────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -1125,6 +1138,38 @@ impl ProxyDefinition {
             ("PATCH", self.patch.as_ref()),
         ]
     }
+
+    /// Adds the handlers of another definition of the same path. Fails when
+    /// both handle a method, or answer with different response types.
+    pub(crate) fn merge(&mut self, other: Self) -> Result<(), String> {
+        let (ours, theirs) = (
+            self.response_type.unwrap_or_default(),
+            other.response_type.unwrap_or_default(),
+        );
+        if ours != theirs {
+            return Err(format!(
+                "answers with both {} and {}; a path has one response type",
+                ours.as_str(),
+                theirs.as_str()
+            ));
+        }
+        for (method, slot, handler) in [
+            ("GET", &mut self.get, other.get),
+            ("POST", &mut self.post, other.post),
+            ("PUT", &mut self.put, other.put),
+            ("DELETE", &mut self.delete, other.delete),
+            ("PATCH", &mut self.patch, other.patch),
+        ] {
+            if handler.is_none() {
+                continue;
+            }
+            if slot.is_some() {
+                return Err(format!("handles {method} twice"));
+            }
+            *slot = handler;
+        }
+        Ok(())
+    }
 }
 
 // ─── Public server routes ──────────────────────────────────────────
@@ -1238,11 +1283,19 @@ pub enum ServerRouteAuth {
 
 pub const SERVER_ROUTE_METHODS: [&str; 7] = ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"];
 
+/// The handler of one HTTP method, with the authentication it was declared under.
+#[derive(Clone)]
+pub struct ServerRouteMethod {
+    pub auth: ServerRouteAuth,
+    pub handler: ServerRouteHandler,
+}
+
 /// A public HTTP route mounted under `/routes` with an explicit authentication contract.
 #[derive(Clone)]
 pub struct ServerRoute {
+    /// Authentication of the handlers added to this definition.
     pub auth: ServerRouteAuth,
-    pub handlers: IndexMap<&'static str, ServerRouteHandler>,
+    pub handlers: IndexMap<&'static str, ServerRouteMethod>,
 }
 
 macro_rules! route_methods {
@@ -1284,9 +1337,26 @@ impl ServerRoute {
         F: Fn(ServerRouteContext) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Result<axum::response::Response>> + Send + 'static,
     {
-        self.handlers
-            .insert(method, Arc::new(move |ctx| Box::pin(handler(ctx))));
+        self.handlers.insert(
+            method,
+            ServerRouteMethod {
+                auth: self.auth.clone(),
+                handler: Arc::new(move |ctx| Box::pin(handler(ctx))),
+            },
+        );
         self
+    }
+
+    /// Adds the handlers of another definition of the same path, each keeping
+    /// its own authentication. Fails when both handle a method.
+    pub(crate) fn merge(&mut self, other: Self) -> Result<(), String> {
+        for (method, handler) in other.handlers {
+            if self.handlers.contains_key(method) {
+                return Err(format!("handles {method} twice"));
+            }
+            self.handlers.insert(method, handler);
+        }
+        Ok(())
     }
 
     route_methods!(get => "GET", head => "HEAD", post => "POST", put => "PUT", patch => "PATCH", delete => "DELETE", options => "OPTIONS");

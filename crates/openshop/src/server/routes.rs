@@ -20,7 +20,8 @@ use crate::app::OpenShop;
 use crate::engine::step::error_message;
 use crate::runtime::logger;
 use crate::types::{
-    RouteAuthOutcome, RouteRequest, ServerRoute, ServerRouteAuth, ServerRouteContext, ServerRouteRequestContext,
+    RouteAuthOutcome, RouteRequest, ServerRoute, ServerRouteAuth, ServerRouteContext, ServerRouteMethod,
+    ServerRouteRequestContext,
 };
 
 pub use super::connectors::resolve_shop_context;
@@ -48,7 +49,11 @@ async fn handle(
         definition: route,
     } = &*registered;
     let method_name = method.as_str().to_uppercase();
-    let Some(handler) = route.handlers.get(method_name.as_str()).cloned() else {
+    let Some(ServerRouteMethod {
+        auth: authentication,
+        handler,
+    }) = route.handlers.get(method_name.as_str()).cloned()
+    else {
         return (
             StatusCode::METHOD_NOT_ALLOWED,
             [(ALLOW, route.allowed_methods().join(", "))],
@@ -69,7 +74,7 @@ async fn handle(
     };
 
     let mut auth = Value::Null;
-    if let ServerRouteAuth::Custom(authenticate) = &route.auth {
+    if let ServerRouteAuth::Custom(authenticate) = &authentication {
         let context = ServerRouteRequestContext {
             request: request.clone(),
             params: params.clone(),

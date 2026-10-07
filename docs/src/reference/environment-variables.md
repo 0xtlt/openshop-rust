@@ -22,7 +22,7 @@ afterwards has no effect on a running process.
 | `OPENSHOP_ENV` | Production | Development mode | `production` enables production safety checks and encryption enforcement |
 | `NODE_ENV` | No | — | `production` is honored like `OPENSHOP_ENV=production` |
 | `PORT` | No | `3000` | HTTP port of `dev` and `start` |
-| `OPENSHOP_UI_DIR` | No | The bundle set with `.admin_ui(…)`, then the embedded admin UI | Directory of a custom admin UI bundle served by `dev` and `start` |
+| `OPENSHOP_UI_DIR` | No | The bundle set with the `admin_ui` setting of `app!`, then the embedded admin UI | Directory of a custom admin UI bundle served by `dev` and `start` |
 | `PGPOOL_MAX` | No | `10` | Maximum PostgreSQL pool connections per process |
 | `PGPOOL_IDLE_TIMEOUT_MS` | No | `30000` | Idle PostgreSQL connection timeout |
 | `PGPOOL_CONNECTION_TIMEOUT_MS` | No | `5000` | PostgreSQL connection acquisition timeout |
@@ -71,17 +71,17 @@ value are not stripped.
 
 ## Multi-app configuration
 
-In multi-app mode, API keys and secrets come from the configuration your binary
-builds, usually with secrets read from your own environment variable names:
+In multi-app mode, API keys and secrets come from the `shopify` setting of
+`app!`, usually with secrets read from your own environment variable names:
 
 ```rust,ignore
-use openshop::{Context, IndexMap, OpenShopConfig, Result, ShopifyAppConfig, ShopifyConfig};
+use openshop::{App, Context, IndexMap, Result, ShopifyAppConfig, ShopifyConfig, app};
 
 fn env(name: &str) -> Result<String> {
     std::env::var(name).with_context(|| format!("{name} is not set"))
 }
 
-fn config() -> Result<OpenShopConfig> {
+fn shopify() -> Result<ShopifyConfig> {
     let mut apps = IndexMap::new();
     apps.insert(
         "retail".to_string(),
@@ -100,32 +100,35 @@ fn config() -> Result<OpenShopConfig> {
         },
     );
 
-    OpenShopConfig::builder()
-        .shopify(ShopifyConfig {
-            scopes: Some("read_orders,write_products".to_string()),
-            apps: Some(apps),
-        })
-        .build()
+    Ok(ShopifyConfig {
+        scopes: Some("read_orders,write_products".to_string()),
+        apps: Some(apps),
+    })
 }
+
+pub static APP: App = app! {
+    shopify: shopify()?,
+};
 ```
 
 OpenShop does not assign special meaning to `RETAIL_SHOPIFY_API_SECRET`,
 `WHOLESALE_SHOPIFY_API_KEY`, or `WHOLESALE_APP_URL`; they are application-defined
-variables read by this example.
+variables read by this example. A setting of `app!` can fail with `?`: when a
+variable is not set, the command stops at startup with the error of the
+setting, here `RETAIL_SHOPIFY_API_SECRET is not set`.
 
-These variables are read while the configuration is built. Pass the `config`
-function itself to `openshop::cli::run`, as the generated `main` does, so that
-`dev` loads `.env` first:
+These variables are read while the configuration is built. `APP.run()` builds
+it when the command starts, after `dev` loaded `.env`:
 
 ```rust,ignore
 #[tokio::main]
 async fn main() -> openshop::Result<()> {
-    openshop::cli::run(config).await
+    APP.run().await
 }
 ```
 
-With `openshop::cli::run(config()?)`, the configuration is built before the
-command starts and does not see values that only exist in `.env`.
+A variable read before `APP.run()` is called, for example at the top of
+`main`, does not see values that only exist in `.env`.
 
 ## Resolution priority
 

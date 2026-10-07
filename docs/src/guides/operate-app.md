@@ -72,24 +72,21 @@ Start additional identical worker processes against the same database. Workers u
 PostgreSQL row locking with `SKIP LOCKED`, so separate processes can safely claim
 different runs.
 
-Configure defaults on the builder in `src/main.rs`, keeping your other settings:
+Configure defaults with the `worker` setting of `app!`, keeping your other
+entries:
 
 ```rust,ignore
 use openshop::PartialWorkerConfig;
 
-fn config() -> Result<OpenShopConfig> {
-    OpenShopConfig::builder()
-        // ... providers, flows and other settings ...
-        .worker(
-            PartialWorkerConfig::new()
-                .concurrency(5)
-                .poll_interval_ms(1_000)
-                .poll_max_interval_ms(5_000)
-                .poll_backoff_coefficient(1.5)
-                .lease_duration_ms(30_000),
-        )
-        .build()
-}
+pub static APP: App = app! {
+    // ... providers, flows and other entries ...
+    worker: PartialWorkerConfig::new()
+        .concurrency(5)
+        .poll_interval_ms(1_000)
+        .poll_max_interval_ms(5_000)
+        .poll_backoff_coefficient(1.5)
+        .lease_duration_ms(30_000),
+};
 ```
 
 A CLI `--concurrency` override wins for that worker process. The complete
@@ -136,32 +133,31 @@ run that writes to another system.
 Pass the cancellation token to work the engine cannot interrupt:
 
 ```rust,ignore
-use openshop::Flow;
+use openshop::{FlowContext, Result, flow};
 
-pub fn refresh_catalog() -> Flow {
-    Flow::new("refreshCatalog", |ctx| async move {
-        let total: u64 = ctx
-            .step
-            .run("hash catalog", || async {
-                let signal = ctx.signal.clone();
-                let total = tokio::task::spawn_blocking(move || {
-                    let mut total = 0u64;
-                    for chunk in 0..1_000_000u64 {
-                        if signal.is_cancelled() {
-                            break;
-                        }
-                        total = total.wrapping_add(checksum(chunk));
+#[flow("refreshCatalog")]
+pub async fn refresh_catalog(ctx: FlowContext) -> Result<()> {
+    let total: u64 = ctx
+        .step
+        .run("hash catalog", || async {
+            let signal = ctx.signal.clone();
+            let total = tokio::task::spawn_blocking(move || {
+                let mut total = 0u64;
+                for chunk in 0..1_000_000u64 {
+                    if signal.is_cancelled() {
+                        break;
                     }
-                    total
-                })
-                .await?;
-                Ok(total)
+                    total = total.wrapping_add(checksum(chunk));
+                }
+                total
             })
             .await?;
+            Ok(total)
+        })
+        .await?;
 
-        ctx.logger.info(openshop::json!({ "total": total }), "Catalog hashed");
-        Ok(())
-    })
+    ctx.logger.info(openshop::json!({ "total": total }), "Catalog hashed");
+    Ok(())
 }
 
 fn checksum(chunk: u64) -> u64 {

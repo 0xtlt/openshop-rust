@@ -9,20 +9,19 @@ and the subscription in Shopify.
 Create `src/webhooks/orders_create.rs`:
 
 ```rust,ignore
-use openshop::Webhook;
+use openshop::{Result, WebhookContext, webhook};
 
-pub fn orders_create() -> Webhook {
-    Webhook::new(|ctx| async move {
-        println!(
-            "Received Shopify event: topic={} shop={} app={}",
-            ctx.topic, ctx.shop, ctx.shopify_app
-        );
-        Ok(())
-    })
+#[webhook("orders/create")]
+pub async fn orders_create(ctx: WebhookContext) -> Result<()> {
+    println!(
+        "Received Shopify event: topic={} shop={} app={}",
+        ctx.topic, ctx.shop, ctx.shopify_app
+    );
+    Ok(())
 }
 ```
 
-Declare it in a new `src/webhooks/mod.rs`:
+Declare the module in a new `src/webhooks/mod.rs`:
 
 ```rust,ignore
 pub mod orders_create;
@@ -31,19 +30,31 @@ pub mod orders_create;
 The example logs identity and topic without logging the order payload
 (`ctx.payload`). OpenShop verifies Shopify's signature before invoking it.
 
+`#[webhook]` names the topic the function handles, and accepts several:
+`#[webhook("orders/create", "orders/updated")]`. To read fields of the order,
+give the function a second argument whose type implements `Deserialize`, such
+as `order: CreatedOrder`; the [webhook reference](../reference/webhooks.md)
+shows it.
+
 ## 2. Register it in OpenShop
 
-Add `mod webhooks;` next to the other `mod` lines of `src/main.rs` and register
-the handler on the builder. Preserve your existing flows and other settings:
+Add `mod webhooks;` next to the other `mod` lines and list the function in the
+`webhooks` of `app!`. Preserve your existing flows and other entries:
 
 ```rust,ignore
-fn config() -> Result<OpenShopConfig> {
-    OpenShopConfig::builder()
-        // ... providers, flows and other settings ...
-        .webhook("orders/create", webhooks::orders_create::orders_create())
-        .build()
-}
+use webhooks::orders_create::orders_create;
+
+pub static APP: App = app! {
+    // ... providers, flows and other entries ...
+    webhooks: [orders_create],
+};
 ```
+
+The attribute adds a type named `orders_create` next to the function, which is
+what `webhooks` lists. Import the function where the application is declared,
+as above: re-exporting it from `src/webhooks/mod.rs`
+(`pub use orders_create::orders_create;`) does not compile, because the module
+has the same name.
 
 The topic can be written `orders/create` or `ORDERS_CREATE`.
 
@@ -87,7 +98,7 @@ Run `cargo check` to check the handler before shipping.
 
 Request bodies are limited to 2 MB by default, and a larger delivery is refused
 with HTTP 413. If you subscribe to a topic with larger payloads, raise the limit
-with `.max_request_body_bytes(..)` on the builder.
+with the `max_request_body_bytes` setting of `app!`.
 
 > **Caution: handler errors are acknowledged.**
 > OpenShop logs handler errors and panics and still returns HTTP 200. Shopify
@@ -98,19 +109,18 @@ with `.max_request_body_bytes(..)` on the builder.
 To enqueue a flow, dispatch it for the shop and app that received the event:
 
 ```rust,ignore
-use openshop::{DispatchFlowParams, Webhook, json};
+use openshop::{DispatchFlowParams, Result, WebhookContext, json, webhook};
 
-pub fn orders_create() -> Webhook {
-    Webhook::new(|ctx| async move {
-        ctx.app
-            .dispatch_flow(
-                DispatchFlowParams::new("syncOrders", ctx.shop.clone())
-                    .shopify_app(ctx.shopify_app.clone())
-                    .input(json!({ "limit": 10 })),
-            )
-            .await?;
-        Ok(())
-    })
+#[webhook("orders/create")]
+pub async fn orders_create(ctx: WebhookContext) -> Result<()> {
+    ctx.app
+        .dispatch_flow(
+            DispatchFlowParams::new("syncOrders", ctx.shop.clone())
+                .shopify_app(ctx.shopify_app.clone())
+                .input(json!({ "limit": 10 })),
+        )
+        .await?;
+    Ok(())
 }
 ```
 

@@ -4,7 +4,7 @@ Use this guide to add a **Store** page to an existing app. It displays the trust
 shop identity returned by a server loader. You need a running app installed on a
 development store.
 
-A custom page has two halves: a loader registered on the server, and a view
+A custom page has two halves: a loader declared on the server, and a view
 compiled into your own admin UI bundle. The bundle is a small WebAssembly crate
 built with [trunk](https://trunkrs.dev). Install the toolchain once:
 
@@ -14,7 +14,7 @@ cargo install trunk --locked
 ```
 
 > **Caution: experimental API.**
-> Custom admin pages are enabled with `.custom_pages(..)` on the builder. Check the
+> Custom admin pages are enabled with the `custom_pages` setting of `app!`. Check the
 > [custom admin page reference](../reference/custom-admin-pages.md) when upgrading.
 
 ## 1. Create the server loader
@@ -22,17 +22,25 @@ cargo install trunk --locked
 Create `src/admin/store.rs`:
 
 ```rust,ignore
-use openshop::{AdminPage, json};
+use openshop::{AdminServerContext, Result, Value, admin_page, json};
 
-pub fn page() -> AdminPage {
-    AdminPage::new("/store").loader("storeSummary", |ctx, _input| async move {
+pub struct StorePage;
+
+#[admin_page("/store")]
+impl StorePage {
+    #[loader]
+    async fn store_summary(ctx: AdminServerContext) -> Result<Value> {
         Ok(json!({ "shop": ctx.shop, "shopifyApp": ctx.shopify_app }))
-    })
+    }
 }
 ```
 
-Declare it in a new `src/admin/mod.rs` (`pub mod store;`) and add `mod admin;`
-next to the other `mod` lines of `src/main.rs`.
+Declare the module in a new `src/admin/mod.rs` (`pub mod store;`) and add
+`mod admin;` next to the other `mod` lines of `src/main.rs`.
+
+`#[admin_page("/store")]` makes the `impl` block of `StorePage` the server side
+of the page, and `#[loader]` makes `store_summary` a loader of that page, called
+`storeSummary`: the name of the function in camel case.
 
 The loader receives the identity verified by OpenShop. Keep database access,
 provider credentials, and other server-only work in loaders and actions: their
@@ -71,7 +79,7 @@ struct StoreSummary {
     shop: String,
 }
 
-// Kind, name, input and output of the loader registered on the server.
+// Kind, name, input and output of the loader declared on the server.
 const STORE_SUMMARY: AdminFunctionRef<(), StoreSummary> = AdminFunctionRef::loader("storeSummary");
 
 #[component]
@@ -107,29 +115,33 @@ trunk build --release
 
 ## 3. Enable navigation
 
-In `src/main.rs`, register the page, its sidebar entry, and the bundle to serve,
-keeping your flows and other settings:
+In `src/main.rs`, where the application is declared, list the page and add its
+sidebar entry and the bundle to serve, keeping your flows and other settings:
 
 ```rust,ignore
-use openshop::{CustomAdminNavigationItem, UiSource};
+use openshop::{App, CustomAdminNavigationItem, UiSource, app};
 
-fn config() -> Result<OpenShopConfig> {
-    OpenShopConfig::builder()
-        // ... providers, flows and other settings ...
-        .custom_pages([CustomAdminNavigationItem {
-            label: "Store".to_string(),
-            path: "/store".to_string(),
-        }])
-        .admin_page(admin::store::page())
-        .admin_ui(UiSource::Dir("ui/dist".into()))
-        .build()
-}
+use admin::store::StorePage;
+
+static APP: App = app! {
+    // ... providers, flows and other settings ...
+    admin_pages: [StorePage],
+    custom_pages: [CustomAdminNavigationItem::new("Store", StorePage::PATH)],
+    admin_ui: UiSource::Dir("ui/dist".into()),
+};
 ```
 
-`build()` fails when a navigation path does not match a registered page.
-`.admin_ui(..)` replaces the built-in bundle with yours; the directory is
-resolved from the working directory of the process. The `OPENSHOP_UI_DIR`
+`StorePage::PATH` is the path given to `#[admin_page]`. The configuration is
+refused, and the app does not start, when a navigation path does not match a
+listed page. `admin_ui` replaces the built-in bundle with yours; the directory
+is resolved from the working directory of the process. The `OPENSHOP_UI_DIR`
 environment variable overrides it.
+
+The generated `src/main.rs` builds its configuration with
+`OpenShopConfig::builder()`, the lower level of `app!`. To keep it as it is,
+add `.add::<admin::store::StorePage>()` to the builder, which adds a declared
+block, and give the two settings to the methods of their name:
+`.custom_pages([…])` and `.admin_ui(…)`.
 
 Restart `openshop dev` so that it picks up the new `ui/` directory. Open the
 app from Shopify admin and select **Store**. You should see the current shop
@@ -152,19 +164,17 @@ To keep a single binary, compile the bundle into it instead. Add the
 `rust-embed` crate (`cargo add rust-embed`) and serve the embedded files:
 
 ```rust,ignore
-use openshop::UiSource;
+use openshop::{App, UiSource, app};
 use rust_embed::RustEmbed;
 
 #[derive(RustEmbed)]
 #[folder = "ui/dist/"]
 struct AdminUi;
 
-fn config() -> Result<OpenShopConfig> {
-    OpenShopConfig::builder()
-        // ... providers, flows, pages and other settings ...
-        .admin_ui(UiSource::assets(|path| AdminUi::get(path).map(|file| file.data)))
-        .build()
-}
+static APP: App = app! {
+    // ... providers, flows, pages and other settings ...
+    admin_ui: UiSource::assets(|path| AdminUi::get(path).map(|file| file.data)),
+};
 ```
 
 `ui/dist` must then exist when the server crate is compiled, so build the
@@ -173,22 +183,27 @@ bundle first.
 ## Restrict access when adding business data
 
 This example is available to authenticated app users. For narrower access, add
-a page rule with `.access(..)` and per-function rules with `.authorize(..)`:
+a page rule with `#[access]` and per-function rules with `authorize = ..` on
+`#[loader]` and `#[action]`:
 
 ```rust,ignore
-use openshop::{AdminPage, define_admin_page_access, json};
+use openshop::{AdminServerContext, Result, Value, admin_page, json};
 
 const ALLOWED_STAFF: [&str; 1] = ["1234567890"];
 
-pub fn page() -> AdminPage {
-    let staff_only =
-        define_admin_page_access(|ctx| async move { Ok(ALLOWED_STAFF.contains(&ctx.actor.id.as_str())) });
+pub struct StorePage;
 
-    AdminPage::new("/store")
-        .access(staff_only)
-        .loader("storeSummary", |ctx, _input| async move {
-            Ok(json!({ "shop": ctx.shop, "shopifyApp": ctx.shopify_app }))
-        })
+#[admin_page("/store")]
+impl StorePage {
+    #[access]
+    async fn staff_only(ctx: AdminServerContext) -> Result<bool> {
+        Ok(ALLOWED_STAFF.contains(&ctx.actor.id.as_str()))
+    }
+
+    #[loader]
+    async fn store_summary(ctx: AdminServerContext) -> Result<Value> {
+        Ok(json!({ "shop": ctx.shop, "shopifyApp": ctx.shopify_app }))
+    }
 }
 ```
 

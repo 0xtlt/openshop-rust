@@ -82,20 +82,27 @@ the method runs for. For every option, see [Providers](../reference/providers.md
 
 ## 2. Register it
 
-In `src/main.rs`, register the provider on the builder, keeping the other
-calls of your configuration. The generated project registers
-`providers::warehouse::warehouse()`: replace that line.
+In `src/main.rs`, list the provider in the application, keeping its other
+entries:
 
 ```rust,ignore
-fn config() -> Result<OpenShopConfig> {
-    OpenShopConfig::builder()
-        .provider(providers::warehouse::Warehouse::provider())
-        // ... flows, crons and other settings ...
-        .build()
-}
+use openshop::{App, app};
+
+use providers::warehouse::Warehouse;
+
+static APP: App = app! {
+    providers: [Warehouse],
+    // ... flows, crons and other settings ...
+};
 ```
 
 The provider is registered under the name given to `#[provider]`, `warehouse`.
+
+The generated `src/main.rs` builds its configuration with
+`OpenShopConfig::builder()`, the lower level of `app!`, and registers
+`providers::warehouse::warehouse()`. To keep it as it is, replace that line by
+`.add::<providers::warehouse::Warehouse>()`, which adds a declared block to a
+builder.
 
 ## 3. Save and check credentials
 
@@ -130,8 +137,8 @@ only, and the compiler checks them: passing anything other than a
 Whether the shop saved its credentials is a run-time question: without them
 the call fails with
 `Invalid configuration for provider "warehouse": missing field `apiUrl``. If
-it fails with `Unknown provider "warehouse"`, check the registration on the
-builder.
+it fails with `Unknown provider "warehouse"`, check that the application lists
+the provider.
 
 The flow of the generated project calls
 `ctx.connectors.call("warehouse", "push", &orders)`, by name. That still
