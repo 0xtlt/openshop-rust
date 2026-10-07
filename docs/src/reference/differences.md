@@ -159,6 +159,12 @@ larger configurations easier to split:
   the ping fails; one reused sooner is not checked, and fails the statement it
   is given if it was closed. See
   [Idle connection check](database.md#idle-connection-check).
+- A `PGPOOL_*` value that is not a non-negative integer falls back to its
+  default instead of going through `Number()`. `0` keeps the meaning it has
+  for `pg.Pool`: no timeout, and the default size for `PGPOOL_MAX`.
+- While PostgreSQL refuses connections, a statement waits and the pool retries
+  until `PGPOOL_CONNECTION_TIMEOUT_MS`, where `pg.Pool` fails at once. With
+  the timeout disabled, it waits until PostgreSQL is back.
 
 ## Environment
 

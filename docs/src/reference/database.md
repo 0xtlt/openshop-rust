@@ -11,14 +11,22 @@ The CLI commands connect to `DATABASE_URL` and fall back to
 `OpenShop::connect` and `openshop::db::connect` require the variable and fail
 with `[openshop] DATABASE_URL not set` when it is absent.
 
-| Environment variable | Default |
-| --- | --- |
-| `PGPOOL_MAX` | `10` |
-| `PGPOOL_IDLE_TIMEOUT_MS` | `30000` |
-| `PGPOOL_CONNECTION_TIMEOUT_MS` | `5000` |
+| Environment variable | Default | `0` |
+| --- | --- | --- |
+| `PGPOOL_MAX` | `10` | The default size |
+| `PGPOOL_IDLE_TIMEOUT_MS` | `30000` | No idle timeout |
+| `PGPOOL_CONNECTION_TIMEOUT_MS` | `5000` | No connection timeout |
 
-Values that are not non-negative integers fall back to the default. Each
-process creates one pool and shares it through the `OpenShop` handle.
+Values that are not non-negative integers fall back to the default, and `0`
+means what it means to node-postgres. Each process creates one pool and shares
+it through the `OpenShop` handle.
+
+`PGPOOL_CONNECTION_TIMEOUT_MS` covers the wait for a free connection and the
+opening of a new one. While PostgreSQL refuses connections, the pool retries at
+growing intervals until the timeout, then fails with `pool timed out while
+waiting for an open connection`. Without a timeout it keeps retrying, at
+intervals that double each time: after an outage, a waiting statement can take
+as long as the outage lasted to notice that PostgreSQL is back.
 
 | Function | Purpose |
 | --- | --- |
@@ -46,9 +54,9 @@ above, which costs nothing while connections are busy; the delay is not
 configurable. A pool built from `pool_options()` can set its own check with
 `test_before_acquire` or `before_acquire`.
 
-A connection that stays unused is closed after `PGPOOL_IDLE_TIMEOUT_MS`. The
-pool looks for such connections once per timeout, so one can wait up to twice
-that long.
+A connection that stays unused is closed after `PGPOOL_IDLE_TIMEOUT_MS`, unless
+it is `0`. The pool looks for such connections once per timeout, so one can
+wait up to twice that long.
 
 ## App models
 
