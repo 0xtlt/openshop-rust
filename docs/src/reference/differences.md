@@ -91,7 +91,8 @@ larger configurations easier to split:
 - Request bodies are limited to 2 MB (`413` above that). Set
   `max_request_body_bytes` on the configuration builder to change the limit.
   The MCP endpoint keeps its own 1 MB limit.
-- Responses are compressed (gzip or Brotli) when the client accepts it.
+- Responses of 1 KB or more are compressed (gzip or Brotli) when the client
+  accepts it.
 - With custom admin pages, a static page takes precedence over a dynamic
   sibling: `/reviews/new` is handled by its own page rather than rejected as
   ambiguous with `/reviews/:id`.

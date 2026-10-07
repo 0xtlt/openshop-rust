@@ -1,6 +1,7 @@
 //! Public server routes under `/routes`, each with an explicit authentication contract.
 
 use std::panic::AssertUnwindSafe;
+use std::sync::Arc;
 
 use axum::Router;
 use axum::body::Bytes;
@@ -28,14 +29,13 @@ fn internal_error() -> Response {
     json_error(StatusCode::INTERNAL_SERVER_ERROR, "Internal server route error")
 }
 
-#[derive(Clone)]
 struct RegisteredRoute {
     path: String,
     definition: ServerRoute,
 }
 
 async fn handle(
-    registered: RegisteredRoute,
+    registered: Arc<RegisteredRoute>,
     app: OpenShop,
     method: Method,
     uri: Uri,
@@ -46,7 +46,7 @@ async fn handle(
     let RegisteredRoute {
         path: route_path,
         definition: route,
-    } = registered;
+    } = &*registered;
     let method_name = method.as_str().to_uppercase();
     let Some(handler) = route.handlers.get(method_name.as_str()).cloned() else {
         return (
@@ -133,10 +133,10 @@ pub fn create_server_routes(app: &OpenShop, log: bool) -> anyhow::Result<Router<
         assert_route_definition(&route, route_path)?;
         let allowed = route.allowed_methods().join(", ");
 
-        let registered = RegisteredRoute {
+        let registered = Arc::new(RegisteredRoute {
             path: route_path.clone(),
             definition: route,
-        };
+        });
         let handler = any(
             move |State(app): State<OpenShop>,
                   method: Method,
