@@ -64,6 +64,9 @@
   logged are now stored before the outcome of its run. A flow of three steps
   goes from 21 statements to 15: a busy worker completes about a third more
   runs per second and uses a fifth less CPU per run.
+- An open connection no longer holds its own copy of the route table, which
+  axum made for every connection it accepted. With the routes of the demo, a
+  connection goes from 62 KB to 19 KB: 43 MB less with 1,000 connections open.
 
 ## 0.0.12-beta.0
 

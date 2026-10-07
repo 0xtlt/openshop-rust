@@ -288,7 +288,9 @@ pub async fn serve(listener: TcpListener, router: Router) -> Result<ServerHandle
     let addr = listener.local_addr()?;
     let (shutdown, stopped) = tokio::sync::oneshot::channel::<()>();
     let task = tokio::spawn(async move {
-        axum::serve(listener, router)
+        // Served as is, a router copies its whole route table for each
+        // connection. The make-service hands every connection the same one.
+        axum::serve(listener, router.into_make_service())
             .with_graceful_shutdown(async move {
                 let _ = stopped.await;
             })
