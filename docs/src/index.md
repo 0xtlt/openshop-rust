@@ -4,9 +4,9 @@ OpenShop is a Rust framework for Shopify integrations. Write the code that
 moves data between Shopify and your services; OpenShop provides the embedded
 admin UI, saved provider credentials, background workers, schedules, and run logs.
 
-> **Beta.** APIs, generated files, and workflows may change before `1.0`. These
-> docs describe the current repository. Check [versioning](reference/versioning.md)
-> when working with an older version.
+> **v0, in development.** APIs, generated files, and workflows change without a
+> transition period before `1.0`. These docs describe the current repository.
+> Check [versioning](reference/versioning.md) when working with an older version.
 
 ## Find the help you need
 

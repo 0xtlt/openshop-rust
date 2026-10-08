@@ -35,5 +35,5 @@ contract. For a complete procedure, start with the [how-to guides](../guides/ind
 ## Security and compatibility
 
 - [Security](security.md) — secret handling and trust boundaries.
-- [Versioning](versioning.md) — beta compatibility and generated project updates.
+- [Versioning](versioning.md) — compatibility before `1.0` and generated project updates.
 - [Differences from the TypeScript version](differences.md) — where this implementation intentionally differs from OpenShop for TypeScript.

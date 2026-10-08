@@ -1,8 +1,8 @@
 # Versioning
 
-OpenShop is currently beta. Until `1.0`, minor or prerelease updates can change
-public Rust APIs, configuration, generated template files, database
-migrations, CLI behavior, and documented workflows.
+OpenShop is a v0 in development. Until `1.0`, any update can change public
+Rust APIs, configuration, generated template files, database migrations, CLI
+behavior, and documented workflows, without a transition period.
 
 The crates `openshop`, `openshop-shared`, `openshop-cli`, and `openshop-ui`
 share one version number and require Rust 1.88 or newer.

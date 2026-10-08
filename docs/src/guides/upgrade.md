@@ -1,6 +1,6 @@
 # Upgrade OpenShop
 
-OpenShop is beta software. Read the [repository changelog](https://github.com/0xtlt/openshop-rust/blob/main/CHANGELOG.md) and test an upgrade in
+OpenShop is a v0 in development. Read the [repository changelog](https://github.com/0xtlt/openshop-rust/blob/main/CHANGELOG.md) and test an upgrade in
 a non-production environment before changing production.
 
 ## Upgrade procedure

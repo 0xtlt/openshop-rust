@@ -8,7 +8,8 @@ It keeps the same model, HTTP API, database schema and admin screens as the
 TypeScript framework, compiled into a single binary: the server, the worker,
 the scheduler and the WebAssembly admin UI.
 
-OpenShop is in beta. APIs, generated files, and workflows may change before `1.0`.
+This implementation is a v0 in development and has no users yet. APIs,
+generated files, and workflows change without a transition period before `1.0`.
 
 ## Start here
 
