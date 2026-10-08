@@ -91,7 +91,8 @@ of the declaration, to add to the whole application.
 use my_app::flows::sync_orders::sync_orders;
 use my_app::providers::warehouse::Warehouse;
 use openshop::testing::{TestContext, TestOptions};
-use openshop::{Flow, OpenShopConfig};
+use openshop::builder::Flow;
+use openshop::OpenShopConfig;
 
 async fn context() -> TestContext {
     let config = OpenShopConfig::builder()

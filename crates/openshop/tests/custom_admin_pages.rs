@@ -3,14 +3,14 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use openshop::builder::{AdminFunction, AdminPage, Field, InputSchema, OpenShopBuilder, Provider};
 use openshop::testing::{
     AdminTestOptions, MockTransport, TestContext, TestOptions, admin_context, invoke_admin_function, session_token,
     sign_session_token,
 };
 use openshop::{
-    AdminActor, AdminContext, AdminFunction, AdminPage, AdminPublicError, CustomAdminNavigationItem, Field,
-    InputSchema, OpenShopBuilder, OpenShopConfig, Provider, Result, ShopifyAppConfig, ShopifyConfig, Value, anyhow,
-    json,
+    AdminActor, AdminContext, AdminPublicError, CustomAdminNavigationItem, OpenShopConfig, Result, ShopifyAppConfig,
+    ShopifyConfig, Value, anyhow, json,
 };
 use openshop_shared::build_admin_function_rpc_url;
 use reqwest::{Method, RequestBuilder, Response};

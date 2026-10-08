@@ -8,10 +8,10 @@ use std::time::{Duration, Instant};
 use chrono::Utc;
 use common::{TEST_SHOP, TestApp, create_config, noop_flow};
 use openshop::db::schema::StepResult;
+use openshop::engine::{SleepSignal, StepExecutor};
 use openshop::runtime::time::to_iso;
 use openshop::{
-    CancellationToken, Context, FlowCanceledError, FlowLogger, SleepSignal, StepExecutor, StepOptions,
-    StepTimeoutError, anyhow, bail, json,
+    CancellationToken, Context, FlowCanceledError, FlowLogger, StepOptions, StepTimeoutError, anyhow, bail, json,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;

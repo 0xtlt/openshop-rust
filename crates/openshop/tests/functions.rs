@@ -4,12 +4,12 @@
 use std::sync::{Arc, Mutex};
 
 use chrono::{DateTime, Utc};
+use openshop::builder::{
+    CombinesWith, DiscountMode, Field, FieldOption, Function, FunctionOwner, FunctionType, OpenShopBuilder,
+};
 use openshop::runtime::OutboundRequest;
 use openshop::testing::{MockTransport, TestContext, TestOptions, session_token};
-use openshop::{
-    CombinesWith, DiscountMode, Field, FieldOption, Function, FunctionOwner, FunctionType, IndexMap, OpenShopBuilder,
-    OpenShopConfig, ShopifyAppConfig, ShopifyConfig, Value, json, validators,
-};
+use openshop::{IndexMap, OpenShopConfig, ShopifyAppConfig, ShopifyConfig, Value, json, validators};
 use reqwest::{Method, RequestBuilder};
 
 const ACCESS_TOKEN: &str = "shpat_test";

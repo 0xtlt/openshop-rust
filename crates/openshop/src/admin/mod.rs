@@ -19,6 +19,8 @@ use crate::shopify::client::ShopifyClient;
 use crate::types::{CustomAdminNavigationItem, InputSchema, ShopScope};
 use openshop_shared::{custom_admin_route_shape_key, is_safe_custom_admin_path, match_custom_admin_path};
 
+pub use crate::types::{CustomAdminPageAccess, CustomAdminPagesResponse, ResolvedAdminPages};
+
 /// The Shopify staff member behind the session token.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]

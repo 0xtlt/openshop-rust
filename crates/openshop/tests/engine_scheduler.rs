@@ -4,9 +4,11 @@ use std::collections::BTreeSet;
 use std::time::{Duration, Instant};
 
 use common::{TestApp, noop_flow, test_env};
+use openshop::builder::Flow;
 use openshop::db::schema::FlowRun;
+use openshop::engine::Scheduler;
 use openshop::testing::{MockTransport, TestDb};
-use openshop::{Concurrency, Cron, Flow, IndexMap, OpenShop, OpenShopConfig, Scheduler, json};
+use openshop::{Concurrency, Cron, IndexMap, OpenShop, OpenShopConfig, json};
 
 const EVERY_SECOND: &str = "* * * * * *";
 /// Long enough for an every-second cron to fire at least once.

@@ -18,12 +18,13 @@ mod common;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use openshop::builder::Route;
+use openshop::engine::{Scheduler, Worker};
 use openshop::runtime::RuntimeEnv;
+use openshop::server::ServerOptions;
 use openshop::server::{router, serve};
 use openshop::testing::{MockTransport, TestDb, session_token};
-use openshop::{
-    DispatchOptions, OpenShop, Result, Route, Scheduler, ServerOptions, UiSource, Worker, WorkerConfig, json, response,
-};
+use openshop::{DispatchOptions, OpenShop, Result, UiSource, WorkerConfig, json, response};
 
 const SHOP: &str = "preview.myshopify.com";
 const API_KEY: &str = "preview-key";

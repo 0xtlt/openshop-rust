@@ -3,12 +3,10 @@
 mod common;
 
 use common::{create_config, noop_flow};
+use openshop::builder::{Field, Function, FunctionType, OpenShopBuilder, Provider};
 use openshop::server::mcp::tokens::create_mcp_token;
 use openshop::testing::TestContext;
-use openshop::{
-    AdminPageId, AdminPageMode, Cron, Field, Function, FunctionType, McpConfig, OpenShopBuilder, OpenShopConfig,
-    Provider, Value, json,
-};
+use openshop::{AdminPageId, AdminPageMode, Cron, McpConfig, OpenShopConfig, Value, json};
 use reqwest::{Method, RequestBuilder, StatusCode};
 
 const CRON_KEY: &str = "test-flow:*/5 * * * *";

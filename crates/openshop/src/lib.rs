@@ -28,9 +28,24 @@
 //!
 //! A web process (`start`) accepts requests and queues work; workers (`worker`)
 //! execute it. PostgreSQL stores installations, credentials, runs and checkpoints.
+//!
+//! The root of the crate holds what an application names: the attributes,
+//! [`app!`], the contexts of the handlers, the settings and the values they
+//! exchange. The rest is in its module:
+//!
+//! - [`builder`]: the builder of an application and the definitions it
+//!   takes, for a block made by hand;
+//! - [`engine`]: workers, the scheduler, running and canceling a flow;
+//! - [`server`]: the HTTP server and its parts;
+//! - [`db`]: the pool, models, tables and migrations;
+//! - [`admin`]: the server side of custom admin pages;
+//! - [`runtime`]: the environment, the loggers and the outbound transport;
+//! - [`shopify`]: the Admin API client and typed operations;
+//! - [`testing`] (feature `testing`): the test harness.
 
 pub mod admin;
 mod app;
+pub mod builder;
 pub mod cli;
 pub mod config;
 pub mod db;
@@ -43,9 +58,10 @@ pub mod shopify;
 mod template;
 #[cfg(feature = "testing")]
 pub mod testing;
-pub mod types;
+mod types;
 pub mod validators;
 
+// The crates whose types appear in the API of an application.
 pub use anyhow::{Context, Error, Result, anyhow, bail};
 pub use chrono;
 pub use indexmap::IndexMap;
@@ -57,22 +73,29 @@ pub use sqlx::{self, PgPool};
 pub use tokio_util::sync::CancellationToken;
 pub use uuid::Uuid;
 
-pub use admin::{AdminActor, AdminContext, AdminFunction, AdminPage, AdminPublicError};
-pub use app::{OpenShop, OpenShopBuilder, OpenShopConfig};
-pub use db::{Model, Table};
-pub use declare::{App, Declared, InvalidInput};
+// The application, and what its handlers receive and return. What the engine
+// and the server are made of stays in their modules, and the definitions a
+// block is built from by hand are in `builder`.
+pub use admin::{AdminActor, AdminContext, AdminPublicError};
+pub use app::{OpenShop, OpenShopConfig};
+pub use db::Model;
+pub use declare::{App, InvalidInput};
 pub use engine::{
-    DispatchOptions, FlowCanceledError, FlowConcurrencyError, FlowTimeoutError, QueuedRun, RunFlowOptions, RunOutcome,
-    Scheduler, SleepSignal, StepExecutor, StepTimeoutError, Worker, cancel_run, dispatch_flow, run_flow,
+    DispatchOptions, FlowCanceledError, FlowConcurrencyError, FlowTimeoutError, QueuedRun, RunOutcome, StepTimeoutError,
 };
 pub use runtime::logger::{logger, set_logger};
-pub use runtime::{FlowLogger, RuntimeEnv, RuntimeLogger};
-pub use server::connectors::{Connector, Connectors};
-pub use server::static_ui::UiAssets;
-pub use server::{ServerOptions, ShopSession, UiSource};
-pub use shopify::{GraphqlOperation, IntoVariable, ShopifyClient};
+pub use runtime::{FlowLogger, RuntimeLogger};
+pub use server::UiSource;
+pub use server::connectors::Connectors;
+pub use shopify::{GraphqlOperation, ShopifyClient};
 pub use template::Liquid;
-pub use types::*;
+pub use types::{
+    AdminPageId, AdminPageMode, AdminPagesConfig, Concurrency, Cron, CronShops, CustomAdminNavigationItem,
+    ErrorContext, FlowContext, FunctionConfig, JsonMap, McpConfig, McpContext, McpPermission, McpResourceContent,
+    McpRiskLevel, ProviderConfig, ProxyAuthKind, ProxyContext, RetryPolicy, RouteAuthContext, RouteAuthOutcome,
+    RouteContext, RouteRequest, RouteShopContext, RouteShopInput, ShopScope, ShopifyAppConfig, ShopifyConfig,
+    StepOptions, WebhookContext, WorkerConfig,
+};
 
 /// What the code of an application uses, in one import.
 ///
@@ -241,12 +264,12 @@ pub use openshop_macros::ProviderConfig;
 /// The block gains:
 ///
 /// - `Struct::NAME`, the name of the provider;
-/// - `Struct::provider()`, the [`Provider`] the struct describes; the struct
+/// - `Struct::provider()`, the [`Provider`](builder::Provider) the struct describes; the struct
 ///   itself is what the `providers` of [`app!`] list;
 /// - `Struct::on(&connectors)`, whose methods mirror the public ones and run
 ///   them with the configuration of the shop: `Warehouse::on(&ctx.connectors)
 ///   .push(&orders)`. An argument is taken by value or by reference;
-/// - one constant per method, `Warehouse::PUSH`, a [`ProviderCall`] that names
+/// - one constant per method, `Warehouse::PUSH`, a [`ProviderCall`](builder::ProviderCall) that names
 ///   the fake of the method in a test: `ctx.fakes.for_call(Warehouse::PUSH)`.
 ///
 /// See [`ProviderConfig`](macro@ProviderConfig) for an example.
@@ -276,7 +299,7 @@ pub use openshop_macros::provider;
 /// ```
 ///
 /// Variables follow the operation as `name = value`. A value is converted to
-/// the Rust type of the variable ([`IntoVariable`]); a variable holding an
+/// the Rust type of the variable ([`IntoVariable`](shopify::IntoVariable)); a variable holding an
 /// input object accepts any serializable value.
 ///
 /// To name the generated types, for an operation used in several places or
@@ -345,7 +368,7 @@ pub use openshop_macros::graphql;
 /// kind, or a function without its attribute, does not compile.
 ///
 /// Every other entry is a setting, written `name: value` and passed to the
-/// method of that name of [`OpenShopBuilder`]: `crons`, `on_error`, `mcp`,
+/// method of that name of [`OpenShopBuilder`](builder::OpenShopBuilder): `crons`, `on_error`, `mcp`,
 /// `shopify`, `worker`, `retry_policy`, `pages`, `custom_pages`, `admin_ui`,
 /// `max_request_body_bytes`… A value can fail with `?`, such as one read from
 /// the environment (`shopify: shopify_apps()?`): the error is the one

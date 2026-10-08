@@ -294,7 +294,7 @@ signature. Handler errors are logged without exposing their details.
 route that is only known at run time, or in a test:
 
 ```rust,ignore
-use openshop::Proxy;
+use openshop::builder::Proxy;
 use openshop::prelude::*;
 
 pub fn reviews() -> Proxy {

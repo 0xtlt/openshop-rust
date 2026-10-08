@@ -3,9 +3,10 @@
 
 use std::sync::Arc;
 
+use openshop::builder::Flow;
 use openshop::runtime::RuntimeEnv;
 use openshop::testing::{MockTransport, TestDb};
-use openshop::{Flow, FlowContext, OpenShop, OpenShopConfig, PgPool, Result};
+use openshop::{FlowContext, OpenShop, OpenShopConfig, PgPool, Result};
 
 pub const TEST_SHOP: &str = "test-integration.myshopify.com";
 pub const TEST_SECRET: &str = "test-secret";

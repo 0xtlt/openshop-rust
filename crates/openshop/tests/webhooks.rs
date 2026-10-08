@@ -5,12 +5,10 @@ mod common;
 use std::sync::{Arc, Mutex};
 
 use common::noop_flow;
+use openshop::builder::{OpenShopBuilder, Webhook};
 use openshop::db::schema::FlowRun;
 use openshop::testing::{TestContext, TestOptions, sign_webhook_body};
-use openshop::{
-    DispatchOptions, OpenShopBuilder, OpenShopConfig, ShopifyAppConfig, ShopifyConfig, Value, Webhook, WebhookContext,
-    bail, json,
-};
+use openshop::{DispatchOptions, OpenShopConfig, ShopifyAppConfig, ShopifyConfig, Value, WebhookContext, bail, json};
 use reqwest::Response;
 
 const SECRET: &str = "test-secret";

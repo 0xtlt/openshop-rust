@@ -34,7 +34,7 @@ fn modes(list: TokenStream) -> syn::Result<TokenStream> {
             _ => return Err(syn::Error::new(mode.span(), "expected `automatic` or `code`")),
         };
         let variant = Ident::new(variant, mode.span());
-        modes.push(quote!(::openshop::DiscountMode::#variant));
+        modes.push(quote!(::openshop::builder::DiscountMode::#variant));
     }
     Ok(quote!(.modes([#(#modes),*])))
 }
@@ -62,7 +62,7 @@ fn combines_with(list: TokenStream) -> syn::Result<TokenStream> {
         let value = value.unwrap_or_else(|| quote!(::core::option::Option::None));
         quote!(#field: #value)
     });
-    Ok(quote!(.combines_with(::openshop::CombinesWith { #(#fields),* })))
+    Ok(quote!(.combines_with(::openshop::builder::CombinesWith { #(#fields),* })))
 }
 
 pub fn derive(input: DeriveInput) -> syn::Result<TokenStream> {
@@ -125,9 +125,9 @@ pub fn derive(input: DeriveInput) -> syn::Result<TokenStream> {
         Some(Expr::Lit(syn::ExprLit {
             lit: syn::Lit::Str(title),
             ..
-        })) => Some(quote!(#krate::FunctionOwner::new(#title))),
+        })) => Some(quote!(#krate::builder::FunctionOwner::new(#title))),
         Some(title) => Some(quote! {
-            #krate::FunctionOwner::dynamic_title(|config: &#krate::JsonMap| {
+            #krate::builder::FunctionOwner::dynamic_title(|config: &#krate::JsonMap| {
                 match <Self as #krate::FunctionConfig>::from_config(::core::clone::Clone::clone(config)) {
                     ::core::result::Result::Ok(config) => (#title)(&config),
                     ::core::result::Result::Err(_) => ::std::string::String::from(#fallback),
@@ -152,10 +152,10 @@ pub fn derive(input: DeriveInput) -> syn::Result<TokenStream> {
         impl #krate::FunctionConfig for #name {
             const NAME: &'static str = #key;
 
-            fn definition() -> #krate::Function {
-                let mut fields = #krate::Fields::new();
+            fn definition() -> #krate::builder::Function {
+                let mut fields = #krate::builder::Fields::new();
                 #(#definitions)*
-                let mut function = #krate::Function::new(#krate::FunctionType::#function_type, #handle)
+                let mut function = #krate::builder::Function::new(#krate::builder::FunctionType::#function_type, #handle)
                     #label
                     #(#definition_options)*
                     #owner;
@@ -168,10 +168,10 @@ pub fn derive(input: DeriveInput) -> syn::Result<TokenStream> {
             }
         }
 
-        impl #krate::Declared for #name {
+        impl #krate::declare::Declared for #name {
             type Kind = #krate::declare::kind::Function;
 
-            fn register(app: #krate::OpenShopBuilder) -> #krate::OpenShopBuilder {
+            fn register(app: #krate::builder::OpenShopBuilder) -> #krate::builder::OpenShopBuilder {
                 app.function(
                     <Self as #krate::FunctionConfig>::NAME,
                     <Self as #krate::FunctionConfig>::definition(),
@@ -216,16 +216,16 @@ mod tests {
 
         for expected in [
             "impl :: openshop :: FunctionConfig for VolumeDiscount { const NAME : & 'static str = \"volumeDiscount\" ;",
-            "String :: from (\"minQuantity\") , < u32 as :: openshop :: ProviderField > :: field (\"Minimum quantity\")",
-            ":: openshop :: Function :: new (:: openshop :: FunctionType :: Discount , \"volume-discount\") . label (\"Volume discount\")",
-            ". modes ([:: openshop :: DiscountMode :: Automatic , :: openshop :: DiscountMode :: Code])",
-            ". owner (:: openshop :: FunctionOwner :: dynamic_title (",
+            "String :: from (\"minQuantity\") , < u32 as :: openshop :: builder :: ProviderField > :: field (\"Minimum quantity\")",
+            ":: openshop :: builder :: Function :: new (:: openshop :: builder :: FunctionType :: Discount , \"volume-discount\") . label (\"Volume discount\")",
+            ". modes ([:: openshop :: builder :: DiscountMode :: Automatic , :: openshop :: builder :: DiscountMode :: Code])",
+            ". owner (:: openshop :: builder :: FunctionOwner :: dynamic_title (",
             ":: core :: result :: Result :: Ok (config) => (Self :: title) (& config)",
             ":: core :: result :: Result :: Err (_) => :: std :: string :: String :: from (\"Volume discount\")",
             ". starts_at (true) . ends_at (false)",
-            ". combines_with (:: openshop :: CombinesWith { product_discounts : :: core :: option :: Option :: Some (true) , order_discounts : :: core :: option :: Option :: Some (false) , shipping_discounts : :: core :: option :: Option :: None })",
+            ". combines_with (:: openshop :: builder :: CombinesWith { product_discounts : :: core :: option :: Option :: Some (true) , order_discounts : :: core :: option :: Option :: Some (false) , shipping_discounts : :: core :: option :: Option :: None })",
             "function . config = fields ;",
-            "impl :: openshop :: Declared for VolumeDiscount { type Kind = :: openshop :: declare :: kind :: Function ;",
+            "impl :: openshop :: declare :: Declared for VolumeDiscount { type Kind = :: openshop :: declare :: kind :: Function ;",
         ] {
             assert!(generated.contains(expected), "missing `{expected}` in:\n{generated}");
         }

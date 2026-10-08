@@ -6,11 +6,10 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use common::{TestApp, create_config, noop_flow};
+use openshop::server::ServerOptions;
 use openshop::server::listen;
 use openshop::testing::{TestContext, TestOptions, sign_query, to_query_string};
-use openshop::{
-    IndexMap, OpenShopConfig, PgPool, ServerOptions, ShopifyAppConfig, ShopifyConfig, UiSource, Value, json,
-};
+use openshop::{IndexMap, OpenShopConfig, PgPool, ShopifyAppConfig, ShopifyConfig, UiSource, Value, json};
 use reqwest::header::{CACHE_CONTROL, CONTENT_SECURITY_POLICY, CONTENT_TYPE, HOST, HeaderMap, LOCATION, REFERER};
 use reqwest::{Method, RequestBuilder, StatusCode};
 use uuid::Uuid;

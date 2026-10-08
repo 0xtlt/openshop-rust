@@ -179,9 +179,7 @@ The derive is built on `Function`, which can be used directly when
 the fields of a function are only known at run time:
 
 ```rust,ignore
-use openshop::{
-    CombinesWith, DiscountMode, Field, Function, FunctionOwner, FunctionType,
-};
+use openshop::builder::{CombinesWith, DiscountMode, Field, Function, FunctionOwner, FunctionType};
 
 pub fn volume_discount() -> Function {
     Function::new(FunctionType::Discount, "volume-discount")

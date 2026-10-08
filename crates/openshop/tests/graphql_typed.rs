@@ -4,8 +4,9 @@
 mod common;
 
 use common::noop_flow;
+use openshop::builder::Flow;
 use openshop::testing::{TestContext, TestOptions};
-use openshop::{Flow, OpenShopConfig, RunOutcome, ShopifyClient, Value, graphql, json};
+use openshop::{OpenShopConfig, RunOutcome, ShopifyClient, Value, graphql, json};
 
 /// A context whose shop is installed, so that it has a Shopify client.
 async fn context_with(config: OpenShopConfig) -> TestContext {

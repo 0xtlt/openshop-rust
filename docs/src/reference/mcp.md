@@ -331,7 +331,8 @@ is only known at run time:
 
 ```rust,ignore
 use openshop::prelude::*;
-use openshop::{McpResource, McpResourceContent, McpTool};
+use openshop::builder::{McpResource, McpTool};
+use openshop::McpResourceContent;
 
 pub fn inventory_tool() -> McpTool {
     McpTool::new("List warehouse inventory.", |ctx, _input| async move {

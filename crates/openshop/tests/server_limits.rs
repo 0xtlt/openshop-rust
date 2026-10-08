@@ -3,8 +3,10 @@ mod common;
 use std::borrow::Cow;
 
 use common::noop_flow;
+use openshop::builder::Route;
+use openshop::server::ServerOptions;
 use openshop::testing::{TestContext, TestOptions, sign_query, to_query_string};
-use openshop::{OpenShopConfig, Route, ServerOptions, UiSource, Value, json, response};
+use openshop::{OpenShopConfig, UiSource, Value, json, response};
 use reqwest::Method;
 
 fn echo_size() -> Route {

@@ -24,10 +24,12 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
+use openshop::builder::Flow;
 use openshop::db::migrate::push_schema;
+use openshop::engine::Worker;
 use openshop::runtime::RuntimeEnv;
 use openshop::sqlx::postgres::PgConnectOptions;
-use openshop::{Concurrency, Flow, FlowContext, OpenShop, OpenShopConfig, Result, Worker, WorkerConfig};
+use openshop::{Concurrency, FlowContext, OpenShop, OpenShopConfig, Result, WorkerConfig};
 
 const FLOW: &str = "bench-flow";
 

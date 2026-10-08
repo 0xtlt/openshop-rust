@@ -4,11 +4,9 @@
 mod common;
 
 use common::shop_connectors as connectors;
+use openshop::builder::{Field, FieldOption, Flow, Provider};
 use openshop::testing::TestContext;
-use openshop::{
-    Field, FieldOption, Flow, OpenShopConfig, Provider, ProviderConfig, Result, RunOutcome, Value, json, provider,
-    validators,
-};
+use openshop::{OpenShopConfig, ProviderConfig, Result, RunOutcome, Value, json, provider, validators};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

@@ -213,7 +213,7 @@ pub type ProviderTransformer = Arc<dyn Fn(JsonMap) -> Value + Send + Sync>;
 /// the result of every call.
 ///
 /// ```
-/// use openshop::ProviderCall;
+/// use openshop::builder::ProviderCall;
 ///
 /// const PUSH: ProviderCall<Vec<String>, usize> = ProviderCall::new("warehouse", "push");
 /// assert_eq!(PUSH.provider(), "warehouse");

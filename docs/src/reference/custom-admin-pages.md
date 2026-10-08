@@ -413,7 +413,7 @@ does not state, such as an output validator:
 
 ```rust,ignore
 use openshop::prelude::*;
-use openshop::{AdminPage, InputSchema};
+use openshop::builder::{AdminPage, InputSchema};
 
 pub fn reviews_page() -> AdminPage {
     AdminPage::new("/reviews")

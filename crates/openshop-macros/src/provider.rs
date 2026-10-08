@@ -183,21 +183,21 @@ pub fn form(input: &DeriveInput, derive: &str, what: &str) -> syn::Result<Form> 
 
         // A password or a choice is a string in the form; the type says whether it can be left blank.
         let stated = if options.password {
-            Some(quote!(#krate::Field::password(#label)))
+            Some(quote!(#krate::builder::Field::password(#label)))
         } else {
             options.select.as_ref().map(|choices| {
                 let choices = choices
                     .iter()
-                    .map(|(label, value)| quote!(#krate::FieldOption::new(#label, #value)));
-                quote!(#krate::Field::select(#label, [#(#choices),*]))
+                    .map(|(label, value)| quote!(#krate::builder::FieldOption::new(#label, #value)));
+                quote!(#krate::builder::Field::select(#label, [#(#choices),*]))
             })
         };
         let base = match stated {
             Some(field) => quote! {{
                 let field = #field;
-                if <#ty as #krate::ProviderField>::OPTIONAL { field.optional() } else { field }
+                if <#ty as #krate::builder::ProviderField>::OPTIONAL { field.optional() } else { field }
             }},
-            None => quote!(<#ty as #krate::ProviderField>::field(#label)),
+            None => quote!(<#ty as #krate::builder::ProviderField>::field(#label)),
         };
         let placeholder = options.placeholder.as_ref().map(|text| quote!(.placeholder(#text)));
         // The named constraints first, in the order they are written.
@@ -209,7 +209,7 @@ pub fn form(input: &DeriveInput, derive: &str, what: &str) -> syn::Result<Form> 
         definitions.push(quote! {
             fields.insert(::std::string::String::from(#key), #base #placeholder #(#constraints)* #validate);
         });
-        readers.push(quote!(#ident: #krate::provider_field_value::<#ty>(&mut config, #key)?));
+        readers.push(quote!(#ident: #krate::builder::provider_field_value::<#ty>(&mut config, #key)?));
         keys.push(key);
     }
 
@@ -230,8 +230,8 @@ pub fn derive_config(input: DeriveInput) -> syn::Result<TokenStream> {
 
     Ok(quote! {
         impl #krate::ProviderConfig for #name {
-            fn fields() -> #krate::Fields {
-                let mut fields = #krate::Fields::new();
+            fn fields() -> #krate::builder::Fields {
+                let mut fields = #krate::builder::Fields::new();
                 #(#definitions)*
                 fields
             }
@@ -415,7 +415,7 @@ pub fn provider(name: Option<LitStr>, mut item: ItemImpl) -> syn::Result<TokenSt
         let visibility = &function.vis;
         let docs = docs(function);
         let output = method.output;
-        let ok = quote!(<#output as #krate::MethodResult>::Ok);
+        let ok = quote!(<#output as #krate::builder::MethodResult>::Ok);
         let names: Vec<&Ident> = method.arguments.iter().map(|(name, _)| name).collect();
         let types: Vec<&Type> = method.arguments.iter().map(|(_, ty)| *ty).collect();
 
@@ -441,12 +441,12 @@ pub fn provider(name: Option<LitStr>, mut item: ItemImpl) -> syn::Result<TokenSt
             format!(" The call of [`{struct_name}::{ident}`]: it names the fake of the method in a test.");
         constants.push(quote! {
             #[doc = #constant_doc]
-            #visibility const #constant: #krate::ProviderCall<#arguments_type, #ok> =
-                #krate::ProviderCall::new(#name, #method_name);
+            #visibility const #constant: #krate::builder::ProviderCall<#arguments_type, #ok> =
+                #krate::builder::ProviderCall::new(#name, #method_name);
         });
         handlers.push(quote! {
             .handle(Self::#constant, |config: Self, #pattern: #arguments_type| async move {
-                #krate::MethodResult::into_result(config.#ident(#(#names),*).await)
+                #krate::builder::MethodResult::into_result(config.#ident(#(#names),*).await)
             })
         });
         calls.push(quote! {
@@ -463,7 +463,7 @@ pub fn provider(name: Option<LitStr>, mut item: ItemImpl) -> syn::Result<TokenSt
     let checker = checker.map(|check| {
         quote! {
             .typed_checker(|config: Self| async move {
-                #krate::MethodResult::into_result(config.#check().await)
+                #krate::builder::MethodResult::into_result(config.#check().await)
             })
         }
     });
@@ -487,8 +487,8 @@ pub fn provider(name: Option<LitStr>, mut item: ItemImpl) -> syn::Result<TokenSt
             #(#constants)*
 
             #[doc = #provider_doc]
-            pub fn provider() -> #krate::Provider {
-                #krate::Provider::new(#name)
+            pub fn provider() -> #krate::builder::Provider {
+                #krate::builder::Provider::new(#name)
                     .fields(<Self as #krate::ProviderConfig>::fields())
                     #checker
                     #(#handlers)*
@@ -501,10 +501,10 @@ pub fn provider(name: Option<LitStr>, mut item: ItemImpl) -> syn::Result<TokenSt
             }
         }
 
-        impl #krate::Declared for #self_type {
+        impl #krate::declare::Declared for #self_type {
             type Kind = #krate::declare::kind::Provider;
 
-            fn register(app: #krate::OpenShopBuilder) -> #krate::OpenShopBuilder {
+            fn register(app: #krate::builder::OpenShopBuilder) -> #krate::builder::OpenShopBuilder {
                 app.provider(Self::provider())
             }
         }
@@ -565,11 +565,11 @@ mod tests {
 
         for expected in [
             "impl :: openshop :: ProviderConfig for Warehouse",
-            "String :: from (\"apiUrl\") , < String as :: openshop :: ProviderField > :: field (\"API URL\") . placeholder (\"https://…\") . validate (validators :: url ())",
-            "let field = :: openshop :: Field :: password (\"API key\") ; if < String as :: openshop :: ProviderField > :: OPTIONAL { field . optional () } else { field }",
-            ":: openshop :: Field :: select (\"Region\" , [:: openshop :: FieldOption :: new (\"Europe\" , \"eu\") , :: openshop :: FieldOption :: new (\"United States\" , \"us\")])",
-            "String :: from (\"batch\") , < u32 as :: openshop :: ProviderField > :: field (\"Batch size\")",
-            "batch_size : :: openshop :: provider_field_value :: < u32 > (& mut config , \"batch\") ?",
+            "String :: from (\"apiUrl\") , < String as :: openshop :: builder :: ProviderField > :: field (\"API URL\") . placeholder (\"https://…\") . validate (validators :: url ())",
+            "let field = :: openshop :: builder :: Field :: password (\"API key\") ; if < String as :: openshop :: builder :: ProviderField > :: OPTIONAL { field . optional () } else { field }",
+            ":: openshop :: builder :: Field :: select (\"Region\" , [:: openshop :: builder :: FieldOption :: new (\"Europe\" , \"eu\") , :: openshop :: builder :: FieldOption :: new (\"United States\" , \"us\")])",
+            "String :: from (\"batch\") , < u32 as :: openshop :: builder :: ProviderField > :: field (\"Batch size\")",
+            "batch_size : :: openshop :: builder :: provider_field_value :: < u32 > (& mut config , \"batch\") ?",
             "impl < 'de > :: openshop :: serde :: Deserialize < 'de > for Warehouse",
         ] {
             assert!(generated.contains(expected), "missing `{expected}` in:\n{generated}");
@@ -604,7 +604,7 @@ mod tests {
             // The named constraints run before the validator of the field.
             "field (\"Batch size\") . validate (:: openshop :: validators :: range (:: core :: option :: Option :: Some ((1) as _) , :: core :: option :: Option :: Some ((1000) as _))) . validate (even)",
             "field (\"Code\") . validate (:: openshop :: validators :: length (:: core :: option :: Option :: None , :: core :: option :: Option :: Some ((8) as _)))",
-            "< bool as :: openshop :: ProviderField > :: field (\"Plain\")",
+            "< bool as :: openshop :: builder :: ProviderField > :: field (\"Plain\")",
         ] {
             assert!(generated.contains(expected), "missing `{expected}` in:\n{generated}");
         }
@@ -686,12 +686,12 @@ mod tests {
         for expected in [
             // The block itself is kept, without the marker.
             "async fn check (& self) -> Result < bool >",
-            "pub const PUSH : :: openshop :: ProviderCall < Vec < Order > , < Result < usize > as :: openshop :: MethodResult > :: Ok > = :: openshop :: ProviderCall :: new (\"warehouse\" , \"push\")",
-            "pub const MOVE_STOCK : :: openshop :: ProviderCall < (String , i64 ,) ,",
-            "pub const PING : :: openshop :: ProviderCall < () ,",
-            ":: openshop :: Provider :: new (\"warehouse\") . fields (< Self as :: openshop :: ProviderConfig > :: fields ())",
-            ". typed_checker (| config : Self | async move { :: openshop :: MethodResult :: into_result (config . check () . await) })",
-            ". handle (Self :: PUSH , | config : Self , orders : Vec < Order > | async move { :: openshop :: MethodResult :: into_result (config . push (orders) . await) })",
+            "pub const PUSH : :: openshop :: builder :: ProviderCall < Vec < Order > , < Result < usize > as :: openshop :: builder :: MethodResult > :: Ok > = :: openshop :: builder :: ProviderCall :: new (\"warehouse\" , \"push\")",
+            "pub const MOVE_STOCK : :: openshop :: builder :: ProviderCall < (String , i64 ,) ,",
+            "pub const PING : :: openshop :: builder :: ProviderCall < () ,",
+            ":: openshop :: builder :: Provider :: new (\"warehouse\") . fields (< Self as :: openshop :: ProviderConfig > :: fields ())",
+            ". typed_checker (| config : Self | async move { :: openshop :: builder :: MethodResult :: into_result (config . check () . await) })",
+            ". handle (Self :: PUSH , | config : Self , orders : Vec < Order > | async move { :: openshop :: builder :: MethodResult :: into_result (config . push (orders) . await) })",
             ". handle (Self :: MOVE_STOCK , | config : Self , (sku , quantity ,) : (String , i64 ,) | async move",
             ". handle (Self :: PING , | config : Self , () : () | async move",
             "pub fn on (connectors : & :: openshop :: Connectors) -> WarehouseConnector < '_ >",

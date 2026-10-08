@@ -275,7 +275,7 @@ The name must be a registered flow key.
 that is only known at run time, or in a test:
 
 ```rust,ignore
-use openshop::Route;
+use openshop::builder::Route;
 use openshop::prelude::*;
 
 pub fn ping() -> Route {

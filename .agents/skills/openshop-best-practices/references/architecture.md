@@ -13,11 +13,12 @@ Use this reference before moving behavior across OpenShop boundaries.
 - `crates/openshop/src/runtime`: environment (`RuntimeEnv`), logging, and the outbound HTTP transport.
 - `crates/openshop/src/shopify`: Shopify Admin GraphQL client.
 - `crates/openshop/src/testing`: test harness, compiled with the `testing` feature.
-- `crates/openshop/src/types.rs`: the definitions an application registers (providers, flows, crons, webhooks, proxies, routes, functions, MCP), the contexts of their handlers, and `ShopScope`, the trait of the contexts that belong to a shop.
+- `crates/openshop/src/types.rs`: the definitions an application registers (providers, flows, crons, webhooks, proxies, routes, functions, MCP), the contexts of their handlers, and `ShopScope`, the trait of the contexts that belong to a shop. The module is private: each item is exported from the root or from `openshop::builder`.
 - `crates/openshop/src/declare.rs`: `App`, the value `app!` declares (`APP.main()`, `APP.config()`), `Declared`, the trait every attribute implements for its block, and what the generated code calls: the `dispatch` of a flow, the typed input of a proxy or a route.
 - `crates/openshop/src/template.rs`: `Liquid` and `liquid!`, the Liquid templates of app proxies.
 - `crates/openshop/src/app.rs`: `OpenShopConfig`, `OpenShopBuilder` (the lower level `app!` expands to), and the `OpenShop` handle.
-- `crates/openshop/src/lib.rs`: the public exports, the `prelude` module, and the documentation of every macro.
+- `crates/openshop/src/lib.rs`: the root of the crate, the `prelude` module, and the documentation of every macro. The root exports what an application names (attributes, `app!`, contexts, settings, the values handlers exchange), by an explicit list: add a name to it only when application code writes that name. Everything else is exported from its module (`openshop::engine`, `openshop::server`, `openshop::db`, `openshop::admin`, `openshop::runtime`, `openshop::shopify`).
+- `crates/openshop/src/builder.rs`: `openshop::builder`, the lower level in one place: `OpenShopBuilder` and the definitions a block is built from by hand (`Flow`, `Provider`, `Field`, `Proxy`, `Route`, `Webhook`, `Function`, `McpTool`, `McpResource`, `AdminPage`, `Table`, `InputSchema`). Generated code names them by this path.
 - `crates/openshop-macros`: `app!`, the attributes and derives of the building blocks (`#[flow]`, `#[webhook]`, `#[proxy]`, `#[route]`, `#[admin_page]`, `#[mcp_tool]`, `#[mcp_resource]`, `#[provider]`, `ProviderConfig`, `FunctionConfig`, `Model`), `#[input]`, `#[openshop::test]`, and `graphql!`. Their documentation is in `crates/openshop/src/lib.rs`.
 - `crates/openshop/migrations`: framework schema SQL, embedded in the crate.
 - `crates/openshop/ui-dist`: prebuilt admin UI bundle, committed and embedded in the crate.

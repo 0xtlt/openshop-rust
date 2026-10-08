@@ -128,7 +128,7 @@ work:
 
 Another type is a compile error on the value: `` `&str` is not a value for a
 GraphQL variable of Rust type `i64` ``. The conversions are the
-implementations of `openshop::IntoVariable`.
+implementations of `openshop::shopify::IntoVariable`.
 
 ## Named operations
 

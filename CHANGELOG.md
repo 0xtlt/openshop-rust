@@ -40,6 +40,15 @@
   and shut down when the function returns. `TestContext::for_app`, `APP.test()`
   and `TestOptions::installed()` do the same by hand.
 - `use openshop::prelude::*;` imports what the code of an application uses.
+- The root of the crate holds what an application names, about half of what
+  it exported: the attributes, `app!`, the contexts, the settings and the
+  values handlers exchange. The definitions a block is built from by hand
+  moved to `openshop::builder` with `OpenShopBuilder` (`Flow`, `Provider`,
+  `Field`, `Proxy`, `Route`, `Webhook`, `Function`, `McpTool`, `McpResource`,
+  `AdminPage`, `Table`, `InputSchema`…). `Worker`, `Scheduler`, `run_flow`,
+  `cancel_run`, `StepExecutor` and `SleepSignal` are in `openshop::engine`,
+  `ServerOptions` in `openshop::server`, `RuntimeEnv` in `openshop::runtime`,
+  `IntoVariable` in `openshop::shopify` and `Declared` in `openshop::declare`.
 - Durations are `Duration`s: `RetryPolicy::initial_interval` and
   `max_interval`, `WorkerConfig::poll_interval`, `poll_max_interval` and
   `lease_duration`, `DispatchOptions::delay`.

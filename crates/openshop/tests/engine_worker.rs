@@ -5,10 +5,12 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use common::{TEST_SHOP, TestApp, create_config, noop_flow};
+use openshop::builder::{Flow, InputSchema};
 use openshop::db::schema::{FlowRun, StepResult};
+use openshop::engine::{Worker, cancel_run};
 use openshop::{
-    CancellationToken, Concurrency, DispatchOptions, Flow, FlowContext, InputSchema, OpenShop, OpenShopConfig,
-    RetryPolicy, Worker, WorkerConfig, bail, cancel_run, json,
+    CancellationToken, Concurrency, DispatchOptions, FlowContext, OpenShop, OpenShopConfig, RetryPolicy, WorkerConfig,
+    bail, json,
 };
 use tokio::sync::{Barrier, Notify};
 use uuid::Uuid;

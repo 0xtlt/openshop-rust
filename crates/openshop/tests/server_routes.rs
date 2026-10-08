@@ -3,12 +3,13 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use openshop::builder::{Field, OpenShopBuilder, Provider, Route};
 use openshop::response::{self, IntoResponse, Response, StatusCode};
 use openshop::server::http::parse_query;
 use openshop::testing::{TestContext, TestOptions};
 use openshop::{
-    Field, IndexMap, OpenShopBuilder, OpenShopConfig, Provider, Result, Route, RouteAuthOutcome, RouteContext,
-    RouteShopInput, ShopifyAppConfig, ShopifyConfig, Value, anyhow, json,
+    IndexMap, OpenShopConfig, Result, RouteAuthOutcome, RouteContext, RouteShopInput, ShopifyAppConfig, ShopifyConfig,
+    Value, anyhow, json,
 };
 use reqwest::{Method, RequestBuilder};
 

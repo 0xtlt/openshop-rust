@@ -334,7 +334,7 @@ body of a flow is only known at run time, and in tests:
 use std::time::Duration;
 
 use openshop::prelude::*;
-use openshop::Flow;
+use openshop::builder::Flow;
 
 pub fn export(resource: &'static str) -> Flow {
     Flow::new(format!("export-{resource}"), move |ctx| async move {

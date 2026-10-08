@@ -55,10 +55,10 @@ fn declare(item: &ItemFn, kind: &str, doc: String, constants: TokenStream, regis
             #constants
         }
 
-        impl #krate::Declared for #name {
+        impl #krate::declare::Declared for #name {
             type Kind = #krate::declare::kind::#kind;
 
-            fn register(app: #krate::OpenShopBuilder) -> #krate::OpenShopBuilder {
+            fn register(app: #krate::builder::OpenShopBuilder) -> #krate::builder::OpenShopBuilder {
                 #register
             }
         }
@@ -118,14 +118,14 @@ pub fn flow(arguments: Arguments, item: ItemFn) -> syn::Result<TokenStream> {
 
     let flow = match extra.first() {
         Some(input) => quote! {
-            #krate::Flow::new(Self::NAME, |ctx: #krate::FlowContext| async move {
+            #krate::builder::Flow::new(Self::NAME, |ctx: #krate::FlowContext| async move {
                 let input = ctx.input::<#input>()?;
                 ::core::result::Result::map_err(#ident(ctx, input).await, ::core::convert::Into::into)
             })
             .input::<#input>()
         },
         None => quote! {
-            #krate::Flow::new(Self::NAME, |ctx: #krate::FlowContext| async move {
+            #krate::builder::Flow::new(Self::NAME, |ctx: #krate::FlowContext| async move {
                 ::core::result::Result::map_err(#ident(ctx).await, ::core::convert::Into::into)
             })
         },
@@ -228,7 +228,7 @@ pub fn webhook(arguments: Arguments, item: ItemFn) -> syn::Result<TokenStream> {
             /// The topics the webhook handles.
             pub const TOPICS: &'static [&'static str] = &[#(#topics),*];
         },
-        quote!(app #(.webhook(#topics, #krate::Webhook::new(#run)))*),
+        quote!(app #(.webhook(#topics, #krate::builder::Webhook::new(#run)))*),
     ))
 }
 
@@ -340,7 +340,7 @@ pub fn proxy(arguments: Arguments, item: ItemFn) -> syn::Result<TokenStream> {
         quote! {
             app.proxy(
                 Self::PATH,
-                #krate::Proxy::new(#krate::ProxyResponseType::#response).#setter(
+                #krate::builder::Proxy::new(#krate::builder::ProxyResponseType::#response).#setter(
                     |ctx: #krate::ProxyContext| async move {
                         #krate::Result::<#krate::Value>::Ok(#krate::serde_json::to_value({ #call })?)
                     },
@@ -395,8 +395,8 @@ pub fn route(arguments: Arguments, item: ItemFn) -> syn::Result<TokenStream> {
         quote!(#krate::response::IntoResponse::into_response(#call))
     };
     let definition = match auth {
-        Some(auth) => quote!(#krate::Route::authenticated(#auth)),
-        None => quote!(#krate::Route::public()),
+        Some(auth) => quote!(#krate::builder::Route::authenticated(#auth)),
+        None => quote!(#krate::builder::Route::public()),
     };
     let setter = &endpoint.setter;
 
@@ -451,7 +451,7 @@ fn capability_option(argument: &Argument, description: &mut Option<LitStr>) -> s
             let permissions = values(permissions.clone())?;
             // A key or a `McpPermission`, in any mix.
             Ok(Some(quote! {
-                .permissions([#(::core::convert::Into::<::openshop::RequiredPermission>::into(#permissions)),*])
+                .permissions([#(::core::convert::Into::<::openshop::builder::RequiredPermission>::into(#permissions)),*])
             }))
         }
         _ => Ok(None),
@@ -511,17 +511,17 @@ pub fn mcp_tool(arguments: Arguments, item: ItemFn) -> syn::Result<TokenStream> 
 
     let tool = match extra.first() {
         Some(input) => quote! {
-            #krate::McpTool::new(
+            #krate::builder::McpTool::new(
                 #description,
                 |ctx: #krate::McpContext, input: #krate::JsonMap| async move {
                     let input: #input = #krate::serde_json::from_value(#krate::Value::Object(input))?;
                     #krate::Result::<#krate::Value>::Ok(#krate::serde_json::to_value(#ident(ctx, input).await?)?)
                 },
             )
-            .input_schema(#krate::InputSchema::of::<#input>().json_schema)
+            .input_schema(#krate::builder::InputSchema::of::<#input>().json_schema)
         },
         None => quote! {
-            #krate::McpTool::new(
+            #krate::builder::McpTool::new(
                 #description,
                 |ctx: #krate::McpContext, _input: #krate::JsonMap| async move {
                     #krate::Result::<#krate::Value>::Ok(#krate::serde_json::to_value(#ident(ctx).await?)?)
@@ -595,7 +595,7 @@ pub fn mcp_resource(arguments: Arguments, item: ItemFn) -> syn::Result<TokenStre
         quote! {
             app.mcp_resource(
                 Self::URI,
-                #krate::McpResource::new(#name, |ctx: #krate::McpContext| async move {
+                #krate::builder::McpResource::new(#name, |ctx: #krate::McpContext| async move {
                     #krate::Result::<#krate::McpResourceContent>::Ok(::core::convert::Into::into(#ident(ctx).await?))
                 })
                 #description
@@ -649,7 +649,7 @@ mod tests {
                 "pub async fn sync_orders (ctx : FlowContext , input : SyncOrdersInput) -> Result < () > { Ok (()) }",
                 "# [allow (non_camel_case_types)] pub enum sync_orders { }",
                 "pub const NAME : & 'static str = \"syncOrders\" ;",
-                "impl :: openshop :: Declared for sync_orders { type Kind = :: openshop :: declare :: kind :: Flow ;",
+                "impl :: openshop :: declare :: Declared for sync_orders { type Kind = :: openshop :: declare :: kind :: Flow ;",
                 "let input = ctx . input :: < SyncOrdersInput > () ? ;",
                 "sync_orders (ctx , input) . await",
                 ". input :: < SyncOrdersInput > () . timeout (Duration :: from_secs (60)) . concurrency (Concurrency :: Allow)",
@@ -721,8 +721,8 @@ mod tests {
                 "pub const TOPICS : & 'static [& 'static str] = & [\"orders/create\" , \"orders/updated\"] ;",
                 "type Kind = :: openshop :: declare :: kind :: Webhook ;",
                 "let payload : Order = :: openshop :: serde_json :: from_value (ctx . payload . clone ()) ? ;",
-                "app . webhook (\"orders/create\" , :: openshop :: Webhook :: new (",
-                ". webhook (\"orders/updated\" , :: openshop :: Webhook :: new (",
+                "app . webhook (\"orders/create\" , :: openshop :: builder :: Webhook :: new (",
+                ". webhook (\"orders/updated\" , :: openshop :: builder :: Webhook :: new (",
             ],
         );
         assert_eq!(
@@ -744,7 +744,7 @@ mod tests {
                 "pub const METHOD : & 'static str = \"GET\" ;",
                 "pub const PATH : & 'static str = \"/reviews\" ;",
                 "type Kind = :: openshop :: declare :: kind :: Proxy ;",
-                "app . proxy (Self :: PATH , :: openshop :: Proxy :: new (:: openshop :: ProxyResponseType :: Liquid) . get (",
+                "app . proxy (Self :: PATH , :: openshop :: builder :: Proxy :: new (:: openshop :: builder :: ProxyResponseType :: Liquid) . get (",
                 ":: openshop :: serde_json :: to_value ({ reviews (ctx) . await ? }) ?",
             ],
         );
@@ -797,13 +797,13 @@ mod tests {
             &generated(route, quote!(GET, "/ping"), handler.clone()),
             &[
                 "type Kind = :: openshop :: declare :: kind :: Route ;",
-                "app . route (Self :: PATH , :: openshop :: Route :: public () . get (",
+                "app . route (Self :: PATH , :: openshop :: builder :: Route :: public () . get (",
                 ":: openshop :: response :: IntoResponse :: into_response (ping (ctx) . await ?)",
             ],
         );
         assert_contains(
             &generated(route, quote!(OPTIONS, "/ping", auth = partner::verify), handler.clone()),
-            &[":: openshop :: Route :: authenticated (partner :: verify) . options ("],
+            &[":: openshop :: builder :: Route :: authenticated (partner :: verify) . options ("],
         );
         // `json` serializes the result; a second argument is the typed input.
         assert_contains(
@@ -849,10 +849,10 @@ mod tests {
             &[
                 "pub const NAME : & 'static str = \"reviews.count\" ;",
                 "type Kind = :: openshop :: declare :: kind :: McpTool ;",
-                ":: openshop :: McpTool :: new (\"Counts reviews.\\n\\nReads only.\" ,",
+                ":: openshop :: builder :: McpTool :: new (\"Counts reviews.\\n\\nReads only.\" ,",
                 "let input : CountInput = :: openshop :: serde_json :: from_value (:: openshop :: Value :: Object (input)) ? ;",
-                ". input_schema (:: openshop :: InputSchema :: of :: < CountInput > () . json_schema)",
-                ". permissions ([:: core :: convert :: Into :: < :: openshop :: RequiredPermission > :: into (\"reviews:read\") , :: core :: convert :: Into :: < :: openshop :: RequiredPermission > :: into (OTHER)])",
+                ". input_schema (:: openshop :: builder :: InputSchema :: of :: < CountInput > () . json_schema)",
+                ". permissions ([:: core :: convert :: Into :: < :: openshop :: builder :: RequiredPermission > :: into (\"reviews:read\") , :: core :: convert :: Into :: < :: openshop :: builder :: RequiredPermission > :: into (OTHER)])",
                 ". risk (:: openshop :: McpRiskLevel :: High)",
                 ". confirmation_hint (\"Sure?\")",
             ],
@@ -865,7 +865,7 @@ mod tests {
                 undocumented.clone(),
             ),
             &[
-                ":: openshop :: McpTool :: new (\"Stated.\" ,",
+                ":: openshop :: builder :: McpTool :: new (\"Stated.\" ,",
                 "\"additionalProperties\" : false",
             ],
         );
@@ -899,7 +899,7 @@ mod tests {
             &[
                 "pub const URI : & 'static str = \"app://guide\" ;",
                 "type Kind = :: openshop :: declare :: kind :: McpResource ;",
-                ":: openshop :: McpResource :: new (\"Guide\" ,",
+                ":: openshop :: builder :: McpResource :: new (\"Guide\" ,",
                 ":: core :: convert :: Into :: into (guide (ctx) . await ?)",
                 ". description (\"The guide.\") . mime_type (\"text/markdown\")",
             ],

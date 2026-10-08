@@ -6,6 +6,8 @@ pub mod registry;
 pub mod schema;
 pub mod tokens;
 
+pub use crate::types::{McpAuditStatus, McpCapabilityType};
+
 use std::panic::AssertUnwindSafe;
 use std::time::{Duration, Instant};
 
@@ -27,7 +29,7 @@ use crate::engine::step::error_message;
 use crate::server::connectors::Connectors;
 use crate::server::shop_domain::normalize_shop_domain;
 use crate::shopify::client::ShopifyClient;
-use crate::types::{JsonMap, McpAuditStatus, McpCapabilityType, McpContext};
+use crate::types::{JsonMap, McpContext};
 
 pub const MCP_PROTOCOL_VERSION: &str = "2025-11-25";
 const MAX_MCP_PAYLOAD_BYTES: usize = 1_000_000;

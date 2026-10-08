@@ -4,10 +4,9 @@
 mod common;
 
 use common::{noop_flow, shop_connectors as connectors};
+use openshop::builder::{Field, Flow, OpenShopBuilder, Provider, ProviderCall};
 use openshop::testing::TestContext;
-use openshop::{
-    Field, Flow, OpenShopBuilder, OpenShopConfig, Provider, ProviderCall, RunOutcome, Value, json, validators,
-};
+use openshop::{OpenShopConfig, RunOutcome, Value, json, validators};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Deserialize)]

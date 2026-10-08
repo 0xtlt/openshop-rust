@@ -278,7 +278,7 @@ A `Table` describes a table without typed rows. It is what
 that is only known at run time:
 
 ```rust,ignore
-use openshop::Table;
+use openshop::builder::Table;
 
 pub fn reviews() -> Table {
     Table::conventional("reviews")

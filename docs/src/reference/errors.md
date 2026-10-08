@@ -14,7 +14,8 @@ and are recovered with `downcast_ref`.
 | `FlowCanceledError` | — | `Flow was canceled` | The run was canceled and its signal fired. | Stop external work and propagate the error. |
 | `SleepSignal` | `resume_at` | `Flow sleeping until <timestamp>` | Internal continuation signal created by `step.sleep()`. | Propagate it; do not treat it as an application failure. |
 
-All five are exported from the crate root.
+The four errors are exported from the crate root. `SleepSignal`, which an
+application only propagates, is `openshop::engine::SleepSignal`.
 
 ```rust,ignore
 use openshop::FlowConcurrencyError;

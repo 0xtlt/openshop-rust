@@ -177,7 +177,7 @@ the shop is such an error; see [Concurrency](flows.md#concurrency).
 that is only known at run time, or in a test:
 
 ```rust,ignore
-use openshop::Webhook;
+use openshop::builder::Webhook;
 use openshop::prelude::*;
 
 pub fn orders_create() -> Webhook {

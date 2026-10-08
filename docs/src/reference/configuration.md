@@ -125,7 +125,8 @@ run time.
 
 ```rust,ignore
 use openshop::prelude::*;
-use openshop::{Flow, OpenShopConfig};
+use openshop::builder::Flow;
+use openshop::OpenShopConfig;
 
 // The declaration, with one more flow.
 fn extended() -> Result<OpenShopConfig> {
@@ -295,7 +296,8 @@ builder to a function, so that a module adds everything it holds:
 
 ```rust,ignore
 use openshop::prelude::*;
-use openshop::{OpenShopBuilder, OpenShopConfig};
+use openshop::builder::OpenShopBuilder;
+use openshop::OpenShopConfig;
 
 // src/reviews/mod.rs
 pub fn register(builder: OpenShopBuilder) -> OpenShopBuilder {

@@ -1,13 +1,13 @@
 //! App proxy routes under `/proxy` and their extension-direct twins under `/ext`.
 
+use openshop::builder::Proxy;
 use openshop::server::proxy::create_proxy_routes;
 use openshop::testing::{
     TestContext, TestOptions, proxy_signature, session_token as signed_session_token, sign_session_token,
     to_query_string,
 };
 use openshop::{
-    IndexMap, OpenShopConfig, Proxy, ProxyAuthKind, ProxyContext, Result, ShopifyAppConfig, ShopifyConfig, Value,
-    anyhow, json,
+    IndexMap, OpenShopConfig, ProxyAuthKind, ProxyContext, Result, ShopifyAppConfig, ShopifyConfig, Value, anyhow, json,
 };
 use reqwest::{Method, RequestBuilder, Response};
 

@@ -141,7 +141,8 @@ fields or the methods are only known at run time:
 
 ```rust,ignore
 use openshop::prelude::*;
-use openshop::{Field, JsonMap, Provider};
+use openshop::builder::{Field, Provider};
+use openshop::JsonMap;
 
 pub fn warehouse() -> Provider {
     Provider::new("warehouse")
@@ -207,7 +208,7 @@ The ready-made validators return the value unchanged. On a
 
 ```rust,ignore
 use openshop::prelude::*;
-use openshop::{Field, FieldOption};
+use openshop::builder::{Field, FieldOption};
 
 fn fields() -> Vec<(&'static str, Field)> {
     vec![
@@ -244,7 +245,7 @@ When a provider configuration is saved, OpenShop:
 
 ```rust,ignore
 use openshop::prelude::*;
-use openshop::{Field, Provider};
+use openshop::builder::{Field, Provider};
 
 pub fn warehouse() -> Provider {
     Provider::new("warehouse")
@@ -335,7 +336,7 @@ the method from the same constant.
 
 ```rust,ignore
 use openshop::prelude::*;
-use openshop::{Field, Provider, ProviderCall};
+use openshop::builder::{Field, Provider, ProviderCall};
 use serde::{Deserialize, Serialize};
 
 /// The saved config, named after the fields of the provider.

@@ -6,31 +6,44 @@ The code of an application imports what it uses with the prelude:
 use openshop::prelude::*;
 ```
 
-Everything else comes from the root of the `openshop` crate, next to it:
+The root of the `openshop` crate holds what an application names, the prelude
+included: the attributes, `app!`, the contexts of the handlers, the settings,
+and the values they exchange.
 
 ```rust,ignore
 use openshop::prelude::*;
 use openshop::{DispatchOptions, OpenShop, logger, set_logger};
 ```
 
-The items documented in the reference pages are public. Other public modules
-of the crate, such as `openshop::server::*` internals, exist to support the
+What is not about writing an application is in the module it belongs to: a
+block built by hand in `openshop::builder`, workers and the scheduler in
+`openshop::engine`, the HTTP server in `openshop::server`.
+
+```rust,ignore
+use openshop::builder::{Field, Flow, Provider};
+use openshop::engine::{Scheduler, Worker};
+```
+
+The items documented in the reference pages are public. Other public items
+of the modules, such as `openshop::server::*` internals, exist to support the
 framework and its tests and can change without notice.
 
 ## Crate entry points
 
 | Path | Purpose | Detailed contract |
 | --- | --- | --- |
-| `openshop` | `app!` and the attributes that declare building blocks, the configuration builder, the `OpenShop` handle, dispatch, the Shopify client, and runtime logging | This page |
+| `openshop` | `app!` and the attributes that declare building blocks, the contexts, the settings, the `OpenShop` handle, dispatch, the Shopify client, and runtime logging | This page |
 | `openshop::prelude` | What the code of an application uses, in one import | [The prelude](#the-prelude) |
+| `openshop::builder` | `OpenShopBuilder` and the definitions it takes: `Flow`, `Provider`, `Field`, `Proxy`, `Route`, `Webhook`, `Function`, `McpTool`, `McpResource`, `AdminPage`, `Table`, `InputSchema` | [`OpenShopConfig::builder()`](#openshopconfigbuilder) |
 | `openshop::cli` | `run`, `run_with_args`, `init_logging`, and `env::load_env_file` | [CLI commands](cli.md) |
 | `openshop::db` | `connect`, `connect_to`, `pool_options`, models, and the `migrate` functions | [Database](database.md) |
-| `openshop::engine` | `Worker`, `Scheduler`, `run_flow`, `RunOutcome`, default policies, and typed errors | [Flows](flows.md), [Errors](errors.md) |
+| `openshop::engine` | `Worker`, `Scheduler`, `run_flow`, `cancel_run`, `StepExecutor`, default policies, and `SleepSignal` | [Flows](flows.md), [Errors](errors.md) |
 | `openshop::admin` | Server side of experimental custom admin pages | [Custom admin pages](custom-admin-pages.md) |
 | `openshop::response` | Helpers and re-exports for building HTTP responses | [Public server routes](server-routes.md) |
 | `openshop::server` | `router`, `listen`, and `serve`, to embed the HTTP server | [Server, worker, and scheduler](#server-worker-and-scheduler) |
 | `openshop::validators` | Ready-made field validators | [Providers](providers.md#validators) |
 | `openshop::runtime` | `RuntimeEnv`, the runtime logger, and the `HttpTransport` trait | [Logging](logging.md) |
+| `openshop::shopify` | `SHOPIFY_API_VERSION`, and `IntoVariable`, the values a `graphql!` variable accepts | [Typed GraphQL](graphql.md) |
 | `openshop::testing` | Contexts, provider fakes, factories, and signing helpers (cargo feature `testing`) | [Testing](testing.md) |
 
 The client side of custom admin pages lives in a separate crate,
@@ -152,9 +165,10 @@ The attributes are built on definitions that can be created by hand:
 `Route::authenticated(auth)`, `Webhook::new(run)`,
 `McpTool::new(description, run)`,
 `McpResource::new(name, read)`, `AdminPage::new(path)`, and
-`Table::conventional(table)`. `OpenShopConfig::builder()` collects them, along
-with declared blocks, and `build()` validates the whole. Use it for tests and
-for blocks built at run time. See [Builder methods](configuration.md#builder-methods).
+`Table::conventional(table)`. They are in `openshop::builder`, with
+`OpenShopBuilder`. `OpenShopConfig::builder()` collects them, along with
+declared blocks, and `build()` validates the whole. Use it for tests and for
+blocks built at run time. See [Builder methods](configuration.md#builder-methods).
 
 ## `#[provider]` and `Provider::new(name)`
 
@@ -337,7 +351,7 @@ Returns `QueuedRun { run_id, status }`, where `run_id` is a `Uuid` and
 when a flow with `Concurrency::Reject` already has an active run for the same
 app and shop. See [Errors](errors.md#flow-errors).
 
-The free function `openshop::dispatch_flow(db, config, params)` does the same
+The free function `openshop::engine::dispatch_flow(db, config, params)` does the same
 without an `OpenShop` handle.
 
 ## `ShopifyClient`
@@ -527,7 +541,9 @@ use std::future::Future;
 
 use openshop::prelude::*;
 use openshop::server::listen;
-use openshop::{OpenShop, OpenShopConfig, Scheduler, ServerOptions, Worker};
+use openshop::engine::{Scheduler, Worker};
+use openshop::server::ServerOptions;
+use openshop::{OpenShop, OpenShopConfig};
 
 async fn serve(config: OpenShopConfig, shutdown: impl Future<Output = ()>) -> Result<()> {
     let app = OpenShop::connect(config).await?;
@@ -563,8 +579,17 @@ or migrate the database schema.
 
 ## Public type exports
 
-The crate root exports the types for configuration, flows, providers,
-webhooks, proxies, server routes, Shopify Functions, MCP, workers, retry and
-dispatch options, the Shopify client, and runtime logging. Prefer importing
-them from `openshop` instead of module paths. [The prelude](#the-prelude)
-holds the ones the code of an application uses.
+The crate root exports what an application names: the contexts of the
+handlers, the settings of `app!` (crons, retry policy, workers, Shopify apps,
+MCP, admin pages), dispatch options and outcomes, the flow errors, the Shopify
+client, and runtime logging. [The prelude](#the-prelude) holds the ones most
+code uses.
+
+| What | Where |
+| --- | --- |
+| A block built by hand: `Flow`, `Provider`, `Field`, `Proxy`, `Route`, `Webhook`, `Function`, `McpTool`, `McpResource`, `AdminPage`, `Table`, `InputSchema`, and `OpenShopBuilder` | `openshop::builder` |
+| `Worker`, `Scheduler`, `run_flow`, `RunFlowOptions`, `cancel_run`, `dispatch_flow`, `StepExecutor`, `SleepSignal` | `openshop::engine` |
+| `router`, `listen`, `serve`, `ServerOptions`, `ShopSession` | `openshop::server` |
+| `RuntimeEnv`, `HttpTransport` | `openshop::runtime` |
+| `IntoVariable`, `SHOPIFY_API_VERSION` | `openshop::shopify` |
+| `Declared`, the trait of a declared block | `openshop::declare` |

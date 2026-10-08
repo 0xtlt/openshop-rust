@@ -562,10 +562,10 @@ pub fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
             #(#new_fields)*
         }
 
-        impl #krate::Declared for #name {
+        impl #krate::declare::Declared for #name {
             type Kind = #krate::declare::kind::Model;
 
-            fn register(app: #krate::OpenShopBuilder) -> #krate::OpenShopBuilder {
+            fn register(app: #krate::builder::OpenShopBuilder) -> #krate::builder::OpenShopBuilder {
                 app.model(<Self as #krate::db::Model>::table())
             }
         }

@@ -7,10 +7,12 @@ use std::time::{Duration, Instant};
 
 use chrono::Utc;
 use common::{TEST_SHOP, TestApp, create_config, noop_flow};
+use openshop::builder::Flow;
 use openshop::db::schema::{FlowRun, LogRow, StepResult};
+use openshop::engine::{RunFlowOptions, cancel_run, run_flow};
 use openshop::{
-    Concurrency, DispatchOptions, ErrorContext, Flow, FlowContext, FlowTimeoutError, OpenShopConfig, RetryPolicy,
-    RunFlowOptions, RunOutcome, StepOptions, StepTimeoutError, bail, cancel_run, json, run_flow,
+    Concurrency, DispatchOptions, ErrorContext, FlowContext, FlowTimeoutError, OpenShopConfig, RetryPolicy, RunOutcome,
+    StepOptions, StepTimeoutError, bail, json,
 };
 use schemars::JsonSchema;
 use serde::Deserialize;

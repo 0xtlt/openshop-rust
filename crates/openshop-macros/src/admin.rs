@@ -156,10 +156,10 @@ pub fn admin_page(arguments: Arguments, mut item: ItemImpl) -> syn::Result<Token
             }
         };
         let definition = match (marker.as_str(), input.is_some()) {
-            ("loader", true) => quote!(#krate::AdminFunction::typed_loader(Self::#ident)),
-            ("loader", false) => quote!(#krate::AdminFunction::loader(#untyped)),
-            (_, true) => quote!(#krate::AdminFunction::typed_action(Self::#ident)),
-            (_, false) => quote!(#krate::AdminFunction::action(#krate::InputSchema::any(), #untyped)),
+            ("loader", true) => quote!(#krate::builder::AdminFunction::typed_loader(Self::#ident)),
+            ("loader", false) => quote!(#krate::builder::AdminFunction::loader(#untyped)),
+            (_, true) => quote!(#krate::builder::AdminFunction::typed_action(Self::#ident)),
+            (_, false) => quote!(#krate::builder::AdminFunction::action(#krate::builder::InputSchema::any(), #untyped)),
         };
         let authorize = authorize.map(|authorize| quote!(.authorize(#authorize)));
         functions.push(quote!(.function(#name, #definition #authorize)));
@@ -177,11 +177,11 @@ pub fn admin_page(arguments: Arguments, mut item: ItemImpl) -> syn::Result<Token
             pub const PATH: &'static str = #path;
         }
 
-        impl #krate::Declared for #self_type {
+        impl #krate::declare::Declared for #self_type {
             type Kind = #krate::declare::kind::AdminPage;
 
-            fn register(app: #krate::OpenShopBuilder) -> #krate::OpenShopBuilder {
-                app.admin_page(#krate::AdminPage::new(Self::PATH) #nav #access #(#functions)*)
+            fn register(app: #krate::builder::OpenShopBuilder) -> #krate::builder::OpenShopBuilder {
+                app.admin_page(#krate::builder::AdminPage::new(Self::PATH) #nav #access #(#functions)*)
             }
         }
     })
@@ -232,13 +232,13 @@ mod tests {
             // The block itself is kept, without the markers.
             "# [doc = r\" Lists reviews.\"] async fn list_reviews (ctx : AdminContext) -> Result < Value >",
             "pub const PATH : & 'static str = \"/reviews\" ;",
-            "impl :: openshop :: Declared for ReviewsPage { type Kind = :: openshop :: declare :: kind :: AdminPage ;",
-            "app . admin_page (:: openshop :: AdminPage :: new (Self :: PATH) . access (Self :: staff)",
-            ". function (\"listReviews\" , :: openshop :: AdminFunction :: loader (",
+            "impl :: openshop :: declare :: Declared for ReviewsPage { type Kind = :: openshop :: declare :: kind :: AdminPage ;",
+            "app . admin_page (:: openshop :: builder :: AdminPage :: new (Self :: PATH) . access (Self :: staff)",
+            ". function (\"listReviews\" , :: openshop :: builder :: AdminFunction :: loader (",
             ":: openshop :: serde_json :: to_value (Self :: list_reviews (ctx) . await ?) ?",
-            ". function (\"find\" , :: openshop :: AdminFunction :: typed_loader (Self :: find_review))",
-            ". function (\"saveReview\" , :: openshop :: AdminFunction :: typed_action (Self :: save_review) . authorize (Self :: staff))",
-            ". function (\"refresh\" , :: openshop :: AdminFunction :: action (:: openshop :: InputSchema :: any () ,",
+            ". function (\"find\" , :: openshop :: builder :: AdminFunction :: typed_loader (Self :: find_review))",
+            ". function (\"saveReview\" , :: openshop :: builder :: AdminFunction :: typed_action (Self :: save_review) . authorize (Self :: staff))",
+            ". function (\"refresh\" , :: openshop :: builder :: AdminFunction :: action (:: openshop :: builder :: InputSchema :: any () ,",
         ] {
             assert!(generated.contains(expected), "missing `{expected}` in:\n{generated}");
         }
