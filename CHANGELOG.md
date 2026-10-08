@@ -2,16 +2,81 @@
 
 ## Unreleased
 
-- Typed provider calls: a `ProviderCall<A, R>` constant shared by the provider
-  (`Provider::handle`) and its callers (`Connectors::invoke`), with the saved
-  configuration deserialized into a struct. `Provider::typed_checker` does the
-  same for the connection check, and `FakeProviders::for_call` returns the fake
-  of a call.
+- Every context of a shop gives the same three things: `ctx.db`, `ctx.shopify`
+  and `ctx.connectors`, in a flow, a webhook, a proxy, an admin function, an
+  MCP tool, and on the shop a route resolves with `ctx.for_shop(…)`. Nothing
+  is read when a context is built: the access token is read at the first
+  Shopify request, the provider configuration at the first provider call.
+  `OpenShop::shopify_client` and `OpenShop::connectors` are no longer `async`.
+- `#[flow]` adds `dispatch` to the flow: `sync_orders::dispatch(&ctx,
+  SyncOrdersInput { limit: 10 })` queues a run for the shop and the Shopify
+  app of a context, with a typed input. `app.dispatch_flow(DispatchOptions::new(
+  name, shop)…)` remains for a flow known by name, a delay or a retry policy.
+- `#[input]` makes a type the input of a flow, of an MCP tool or of an admin
+  function: it derives `Deserialize`, `Serialize` and `JsonSchema` without
+  `serde` or `schemars` among the dependencies of the application, and names
+  fields in camel case outside Rust.
+- The logger of a flow takes the message first: `ctx.logger.info(message)`,
+  and `info_with(message, json!({ … }))` for data, likewise for `warn` and
+  `error`.
+- Liquid templates live in files next to their handler: `liquid!(
+  "reviews.liquid")` embeds one when the crate compiles, and
+  `.assign("name", value)` gives it what only the server knows, written as a
+  Liquid literal the value cannot close.
+- `#[route(GET, "/path", json)]`: the function returns anything that
+  serializes, like a proxy.
+- An admin page is served as soon as it is listed in `admin_pages`, and
+  `#[admin_page("/reviews", nav = "Reviews")]` gives it its entry in the menu
+  of the admin. `custom_pages` only sets the menu by hand.
+- An MCP permission is a constant, `McpPermission::new("reviews:read", "Read
+  reviews")`, and the tools and resources that list it register it.
+  `McpConfig::disabled()` turns MCP off, and the MCP page of the admin with
+  it unless the application sets a mode for that page.
+- The input of a cron is checked against the input of its flow when the
+  application is built. A cron runs for no shop, `.all_shops()`, `.shop(…)` or
+  `.shops([…])`; `"all"` and `"global"` are no longer read from a string.
+- `#[openshop::test(APP)]` makes an `async fn(ctx: &TestContext)` a test of
+  the application: started on an isolated database with its shop installed,
+  and shut down when the function returns. `TestContext::for_app`, `APP.test()`
+  and `TestOptions::installed()` do the same by hand.
+- `use openshop::prelude::*;` imports what the code of an application uses.
+- Durations are `Duration`s: `RetryPolicy::initial_interval` and
+  `max_interval`, `WorkerConfig::poll_interval`, `poll_max_interval` and
+  `lease_duration`, `DispatchOptions::delay`.
+- Names. A definition is named after what it defines: `Field`, `Fields`,
+  `Function`, `FunctionType`, `Proxy`, `Route`, `McpTool`, `McpResource`,
+  `McpPermission`, `Cron`. A context is named after its attribute:
+  `RouteContext`, `RouteAuthContext`, `AdminContext`, `McpContext`, whose
+  `app_handle` is `shopify_app` like everywhere else. `RetryPolicy` and
+  `WorkerConfig` are what an application sets. `RunOutcome` and `QueuedRun`
+  are what running and dispatching a flow return, and `DispatchOptions` what
+  `dispatch_flow` takes. Constructors are associated functions:
+  `AdminFunction::loader`, `action`, `typed_loader` and `typed_action`,
+  `Table::conventional`, `Factory::new`, `FakeProviders::new`,
+  `ShopifyClient::new`; `AdminPage::access` and `AdminFunction::authorize`
+  take the function itself. The process logger is `openshop::logger()` and
+  `set_logger`, the server is `openshop::server::router` and `listen`, and the
+  builders of MCP capabilities say `permissions` and `risk` like the
+  attributes.
+- Typed provider calls: a `ProviderCall<A, R>` constant names a method of a
+  provider (`Provider::handle`), with the saved configuration deserialized
+  into a struct. `Provider::typed_checker` does the same for the connection
+  check.
 - Providers as structs: `#[derive(ProviderConfig)]` makes the fields of a
-  struct the configuration form, and `#[provider("name")]` on its `impl` block
-  makes its public `async` methods the methods of the provider, with the
-  saved configuration as `self`. Flows call them with
+  struct the configuration form, and `#[provider]` on its `impl` block makes
+  its public `async` methods the methods of the provider, with the saved
+  configuration as `self`. The provider is named after the struct
+  (`Warehouse` is `warehouse`), or by `#[provider("name")]`, and the block
+  carries `Warehouse::NAME`. Flows call the methods with
   `Warehouse::on(&ctx.connectors).push(&orders)`.
+- Fields of a provider or of a Shopify Function state what a value must
+  satisfy in `#[field(…)]`: `url`, `non_empty`, `range(min = …, max = …)` and
+  `length(min = …, max = …)`, before any `validate = …`. A field without a
+  `label` is labeled after its name: `batch_size` is "Batch size".
+  `Field::validate` adds a validator after the ones already set.
+- In a test, `ctx.fakes.for_call(Warehouse::PUSH)` is a typed fake: `returns`
+  takes what the method returns, and its calls give the arguments as the
+  method receives them.
 - `OpenShopBuilder::providers`, `flows` and `with`.
 - Typed GraphQL: `graphql!("…", name = value)` checks a Shopify Admin
   operation against the schema at compile time and types its variables and its
@@ -19,9 +84,12 @@
   `graphql! { mod name = "…"; }`, names the generated types and input objects.
   The Admin schema of the default API version is bundled; `openshop codegen`
   downloads another one.
-- `#[derive(Model)]`: a struct as the single description of an application
-  table, with typed rows (`Review::for_shop(&db, &shop)`) for insertion,
-  lookup, filters, ordering, update and deletion, limited to a shop.
+- `#[derive(Model)]` with `#[model("reviews")]`: a struct as the single
+  description of an application table, with typed rows for insertion, lookup,
+  filters, ordering, update and deletion, limited to a shop:
+  `Review::of(&ctx)` for the shop a handler runs for, `Review::for_shop(&db,
+  &shop)` without a context. The derive implements the trait `Model`;
+  `Review::table()` is the `Table` the struct describes.
 - `migrate generate` compares the models with `migrations/schema.snapshot.json`
   and writes what changed: created and dropped tables, added, dropped, renamed
   and altered columns, indexes. Statements that can lose data or fail come with
@@ -34,20 +102,24 @@
 - Blocks declared with attributes: a block is the function or the struct
   itself, and no function builds it. `#[flow]`, `#[webhook]`, `#[proxy]`,
   `#[route]`, `#[mcp_tool]` and `#[mcp_resource]` go on `async` functions,
-  which stay ordinary functions; the input of a flow, the payload of a webhook
-  and the arguments of an MCP tool are an optional, typed second argument.
+  which stay ordinary functions; the input of a flow, the payload of a
+  webhook, the arguments of an MCP tool, and the query or the JSON body of a
+  proxy or route request are an optional, typed second argument. A proxy or a
+  route answers `422` to a request that does not fit its type.
   `#[admin_page("/path")]` goes on an `impl` block whose functions are marked
   `#[access]`, `#[loader]` or `#[action]`. `#[derive(FunctionConfig)]` with
   `#[function(…)]` makes a struct the configuration form of a Shopify
   Function. Each block carries its constants: `sync_orders::NAME`,
   `orders_create::TOPICS`, `reviews::PATH`, `ReviewsPage::PATH`,
-  `VolumeDiscount::KEY`.
+  `VolumeDiscount::NAME`.
 - `app!` declares an application as a value, an `App`: it lists the blocks by
   name (`flows: [sync_orders]`, `models: [Review]`…) and takes the settings of
   the builder (`crons: […]`, `on_error: report`…), which can fail with `?`
-  (`shopify: shopify_apps()?`). `APP.run()` runs the command given on the
-  command line, `APP.config()` returns the validated configuration and
-  `APP.builder()` the builder to add to.
+  (`shopify: shopify_apps()?`). `APP.main()` runs the command given on the
+  command line from a plain `fn main`, so an application does not depend on
+  `tokio`; `APP.run()` does it on a runtime of your own. `APP.config()`
+  returns the validated configuration and `APP.builder()` the builder to add
+  to.
 - `OpenShopBuilder::add::<Block>()` adds a declared block of any kind.
   `model_of` is removed: use `.add::<Review>()`, or `models: [Review]` in
   `app!`.
@@ -60,9 +132,11 @@
   proxy path. Each method of a route keeps its own authentication.
 - `.mcp(…)` adds to the MCP permissions, tools and resources already
   registered instead of replacing them.
-- A project created by `openshop init` starts with MCP off: `POST /mcp` is
-  refused and the admin has no token page, until the two lines are removed
-  from `src/main.rs`. Existing projects are not changed.
+- A project created by `openshop init` is written with the declared forms
+  (`app!`, `#[flow]`, `#[input]`, `#[provider]`, `graphql!`) and depends on
+  `openshop` and `serde` only. It starts with MCP off: `POST /mcp` is refused
+  and the admin has no MCP page, until `mcp: McpConfig::disabled()` is removed
+  from `src/main.rs`.
 - `OpenShopBuilder::crons`, `mcp_tool` and `mcp_resource`, and
   `CustomAdminNavigationItem::new(label, path)`.
 - Responses under 1 KB are no longer compressed: on small JSON responses the
@@ -81,11 +155,11 @@
   connecting, and the third stopped the process with a panic.
 - A worker with runs waiting is no longer held back by its poll interval or by
   the length of the queue. A run that finishes wakes the worker, which used to
-  wait a full `poll_interval_ms` while its slots were taken: 5 runs per second
+  wait a full poll interval while its slots were taken: 5 runs per second
   with the default settings, whatever the flow did. It claims as many runs as
   it has free slots in one statement, through a partial index, so a claim
   costs the same with a few runs waiting or with 80,000.
-- Runs past their deadline are failed once per `poll_interval_ms`, also while
+- Runs past their deadline are failed once per poll interval, also while
   every slot of the worker is taken, instead of before each claim. A claim
   skips them, so none starts late.
 - The framework schema has a second migration, `openshop_queue_indexes`: the

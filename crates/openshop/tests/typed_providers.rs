@@ -6,7 +6,7 @@ mod common;
 use common::{noop_flow, shop_connectors as connectors};
 use openshop::testing::TestContext;
 use openshop::{
-    FieldDef, Flow, OpenShopBuilder, OpenShopConfig, Provider, ProviderCall, RunFlowResult, Value, json, validators,
+    Field, Flow, OpenShopBuilder, OpenShopConfig, Provider, ProviderCall, RunOutcome, Value, json, validators,
 };
 use serde::{Deserialize, Serialize};
 
@@ -38,9 +38,9 @@ const PING: ProviderCall<(), String> = ProviderCall::new("warehouse", "ping");
 
 fn warehouse_named(name: &str) -> Provider {
     Provider::new(name)
-        .field("apiUrl", FieldDef::text("API URL").validate(validators::url()))
-        .field("apiKey", FieldDef::password("API key"))
-        .field("batchSize", FieldDef::number("Batch size").optional())
+        .field("apiUrl", Field::text("API URL").validate(validators::url()))
+        .field("apiKey", Field::password("API key"))
+        .field("batchSize", Field::number("Batch size").optional())
         .typed_checker(|config: WarehouseConfig| async move { Ok(config.api_key == "secret-1") })
         .handle(PUSH, |config: WarehouseConfig, orders| async move {
             Ok(PushReceipt {
@@ -121,7 +121,7 @@ async fn arguments_can_be_passed_in_their_borrowed_form() {
     let ctx = TestContext::new(OpenShopConfig::builder().provider(provider).build().unwrap())
         .await
         .unwrap();
-    let connectors = ctx.app.connectors(&ctx.shop, "default").await.unwrap();
+    let connectors = ctx.app.connectors(&ctx.shop, "default");
 
     // `&str` for a `String`, and no saved configuration needed for a `Value`.
     assert_eq!(connectors.invoke(ECHO, "hello").await.unwrap(), "hello!");
@@ -252,10 +252,10 @@ async fn flows_invoke_typed_calls_through_the_fakes() {
     });
     assert_eq!(
         ctx.run_flow("pushOrders", json!({})).await.unwrap(),
-        RunFlowResult::Completed
+        RunOutcome::Completed
     );
     assert_eq!(push.call_count(), 1);
-    assert_eq!(push.last_call().unwrap().args, json!(orders()));
+    assert_eq!(push.last_call().unwrap().args, orders());
     let (output,): (Value,) = sqlx::query_as("SELECT output FROM step_results WHERE step_name = 'record'")
         .fetch_one(&ctx.db)
         .await
@@ -268,7 +268,7 @@ async fn flows_invoke_typed_calls_through_the_fakes() {
     assert!(
         matches!(
             result,
-            RunFlowResult::Failed { ref error, .. }
+            RunOutcome::Failed { ref error, .. }
                 if error.starts_with("Invalid result from \"warehouse.push\": invalid type: null")
         ),
         "{result:?}"
@@ -310,7 +310,7 @@ fn calls_are_plain_constants() {
 // ─── Builder ─────────────────────────────────────────────────────────
 
 fn erp() -> Provider {
-    Provider::new("erp").field("token", FieldDef::password("Token"))
+    Provider::new("erp").field("token", Field::password("Token"))
 }
 
 mod reviews {

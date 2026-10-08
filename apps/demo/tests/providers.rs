@@ -1,29 +1,29 @@
-mod common;
-
+use openshop::testing::TestContext;
 use openshop::{Value, json};
+use openshop_demo::APP;
+use openshop_demo::providers::warehouse::Warehouse;
 
-#[tokio::test]
-async fn lists_providers_with_their_fields() {
-    let ctx = common::context().await;
+#[openshop::test(APP)]
+async fn lists_providers_with_their_fields(ctx: &TestContext) {
     let response = ctx.get("/api/providers").send().await.unwrap();
     assert_eq!(response.status(), 200);
 
     let providers: Vec<Value> = response.json().await.unwrap();
     assert_eq!(providers.len(), 1);
     let warehouse = &providers[0];
-    assert_eq!(warehouse["name"], "warehouse");
+    assert_eq!(warehouse["name"], Warehouse::NAME);
     assert_eq!(warehouse["configured"], false);
     assert_eq!(warehouse["config"], json!({}));
     assert_eq!(
         warehouse["fields"]["apiKey"],
         json!({ "type": "password", "label": "API Key", "placeholder": "wh_live_...", "hasValue": false })
     );
-    ctx.shutdown().await.unwrap();
+    // A field without a label is called by its name.
+    assert_eq!(warehouse["fields"]["batchSize"]["label"], "Batch size");
 }
 
-#[tokio::test]
-async fn saves_and_checks_the_warehouse_configuration() {
-    let ctx = common::context().await;
+#[openshop::test(APP)]
+async fn saves_and_checks_the_warehouse_configuration(ctx: &TestContext) {
     let saved = ctx
         .put("/api/providers/warehouse")
         .json(&json!({
@@ -46,5 +46,17 @@ async fn saves_and_checks_the_warehouse_configuration() {
         json!({ "apiUrl": "https://warehouse.example.com/api", "batchSize": 100 })
     );
     assert_eq!(warehouse["fields"]["apiKey"]["hasValue"], true);
-    ctx.shutdown().await.unwrap();
+}
+
+#[openshop::test(APP)]
+async fn refuses_a_batch_size_out_of_range(ctx: &TestContext) {
+    let refused = ctx
+        .put("/api/providers/warehouse")
+        .json(&json!({
+            "config": { "apiUrl": "https://warehouse.example.com/api", "apiKey": "wh_live_1", "batchSize": "5000" },
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(refused.status(), 400);
 }

@@ -13,8 +13,8 @@ use anyhow::{Context, Result};
 use sqlx::postgres::PgPoolOptions;
 use sqlx::{Connection, PgPool};
 
-pub use model::{ColumnDef, ForeignKeyDef, IndexDef, Model, define_model};
-pub use record::{Bindable, Column, ColumnType, Condition, Order, Query, Record, Rows, SqlBuilder};
+pub use model::{ColumnDef, ForeignKeyDef, IndexDef, Table};
+pub use record::{Bindable, Column, ColumnType, Condition, Model, Order, Query, Rows, SqlBuilder};
 
 const DEFAULT_MAX: u32 = 10;
 

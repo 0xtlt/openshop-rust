@@ -8,28 +8,40 @@ OpenShop has two logging surfaces:
 ## Flow logger
 
 ```rust,ignore
-use openshop::{FlowContext, Result, flow, json};
+use openshop::prelude::*;
 
 #[flow("syncOrders")]
 pub async fn sync_orders(ctx: FlowContext) -> Result<()> {
-    ctx.logger.info(json!({ "source": "shopify" }), "Starting order sync");
+    ctx.logger.info("Starting order sync");
 
     ctx.step
-        .run("push", || async {
+        .run("push", async || {
             if let Err(error) = ctx.connectors.call("warehouse", "push", json!([])).await {
-                ctx.logger.error(json!({ "error": format!("{error:#}") }), "Provider push failed");
+                ctx.logger.error_with("Provider push failed", json!({ "error": format!("{error:#}") }));
                 return Err(error);
             }
+            ctx.logger.info_with("Orders pushed", json!({ "source": "shopify" }));
             Ok(())
         })
         .await
 }
 ```
 
-`ctx.logger` is a `FlowLogger`. Its `info`, `warn`, and `error` methods take a
-JSON payload (`serde_json::Value`) and a message. Each line is sent to the
-runtime logger as `[LEVEL] message` and stored in the `logs` table with the
-time it was emitted. Lines are written in emission order by a background task:
+`ctx.logger` is a `FlowLogger`. The message comes first:
+
+| Method | Logs |
+| --- | --- |
+| `info(message)`, `warn(message)`, `error(message)` | A line. |
+| `info_with(message, payload)`, `warn_with(message, payload)`, `error_with(message, payload)` | A line with data the admin shows next to it. |
+
+The message is a `&str` or a `String`, such as the result of `format!`. The
+payload is a JSON value (`serde_json::Value`), usually
+`json!({ "count": 3 })`; a line logged without one is stored with an empty
+object.
+
+Each line is sent to the runtime logger as `[LEVEL] message` and stored in the
+`logs` table with the time it was emitted. Lines are written in emission order
+by a background task:
 logging never blocks or fails a flow. A line waits up to 50 ms for the next
 ones, which are written with it in one statement, and the lines a flow logged
 are stored before the outcome of its run is. `flush().await` writes the lines
@@ -82,7 +94,8 @@ public runtime adapter:
 ```rust,ignore
 use std::sync::Arc;
 
-use openshop::{RuntimeLogger, Value, set_runtime_logger};
+use openshop::prelude::*;
+use openshop::{RuntimeLogger, set_logger};
 
 struct StderrLogger;
 
@@ -101,17 +114,17 @@ impl RuntimeLogger for StderrLogger {
 }
 
 fn install_logger() {
-    set_runtime_logger(Arc::new(StderrLogger));
+    set_logger(Arc::new(StderrLogger));
 }
 ```
 
-Call `set_runtime_logger()` before starting OpenShop processes, for example at
-the top of `main`. It returns the previous logger. `get_runtime_logger()`
-returns the active adapter.
+Call `openshop::set_logger(logger)` before starting OpenShop processes, for
+example at the top of `main`. It returns the previous logger.
+`openshop::logger()` returns the active adapter.
 
 The default adapter forwards to the [`tracing`](https://docs.rs/tracing) crate
 at the matching level, with the context as a `context` field.
-`APP.run()` calls `openshop::cli::init_logging()`, which installs a
+`APP.main()` and `APP.run()` call `openshop::cli::init_logging()`, which installs a
 `tracing` formatter that writes to standard output unless the process already
 has a global subscriber. Its filter is the `RUST_LOG` environment variable,
 or `info,sqlx=warn` when the variable is unset: `info` and above, with `sqlx`
@@ -122,9 +135,9 @@ RUST_LOG=debug cargo run -- dev
 ```
 
 To send runtime logs elsewhere, either install your own `tracing` subscriber
-before calling `APP.run()`, or replace the adapter with
-`set_runtime_logger`. Startup banners of the CLI commands are printed directly
-to standard output.
+before calling `APP.main()`, or replace the adapter with
+`openshop::set_logger`. Startup banners of the CLI commands are printed
+directly to standard output.
 
 ## Retention and export
 

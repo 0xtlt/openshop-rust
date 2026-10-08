@@ -1,4 +1,4 @@
-use openshop::{Result, WebhookContext, webhook};
+use openshop::prelude::*;
 
 #[webhook("app/uninstalled")]
 pub async fn app_uninstalled(ctx: WebhookContext) -> Result<()> {

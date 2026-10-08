@@ -1495,6 +1495,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_path_to_error",
+ "serde_urlencoded",
  "sha2 0.10.9",
  "sqlx",
  "subtle",
@@ -1525,7 +1526,6 @@ name = "openshop-demo"
 version = "0.0.12-beta.0"
 dependencies = [
  "openshop",
- "schemars",
  "serde",
  "tokio",
 ]

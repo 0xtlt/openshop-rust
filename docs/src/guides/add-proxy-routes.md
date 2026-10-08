@@ -12,30 +12,49 @@ OpenShop mounts each proxy route listed in `app!` under both `/proxy/*` and
 Create `src/proxy/api_reviews.rs`:
 
 ```rust,ignore
-use openshop::{ProxyContext, Result, Value, json, proxy};
+use openshop::prelude::*;
+use serde::{Deserialize, Serialize};
+
+/// The query of `GET /api/reviews`.
+#[derive(Debug, Deserialize)]
+pub struct ListReviews {
+    pub page: Option<u32>,
+}
 
 #[proxy(GET, "/api/reviews")]
-pub async fn list_reviews(ctx: ProxyContext) -> Result<Value> {
-    let page = ctx
-        .query
-        .get("page")
-        .and_then(|page| page.parse::<u32>().ok())
-        .filter(|page| *page > 0)
-        .unwrap_or(1);
+pub async fn list_reviews(ctx: ProxyContext, query: ListReviews) -> Result<Value> {
+    let page = query.page.filter(|page| *page > 0).unwrap_or(1);
     Ok(json!({ "shop": ctx.shop, "customerId": ctx.customer_id, "page": page }))
 }
 
+/// The body of `POST /api/reviews`.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SubmittedReview {
+    pub text: String,
+    pub rating: u8,
+}
+
 #[proxy(POST, "/api/reviews")]
-pub async fn submit_review(ctx: ProxyContext) -> Result<Value> {
+pub async fn submit_review(ctx: ProxyContext, review: SubmittedReview) -> Result<Value> {
     let Some(customer_id) = ctx.customer_id else {
         return Ok(json!({ "ok": false, "error": "Customer login required" }));
     };
-    Ok(json!({ "ok": true, "shop": ctx.shop, "customerId": customer_id, "review": ctx.body }))
+    Ok(json!({ "ok": true, "shop": ctx.shop, "customerId": customer_id, "review": review }))
 }
 ```
 
 `#[proxy]` declares a function as the handler of one method of a path, so the
-two methods of `/api/reviews` are two functions. Declare the module in a new
+two methods of `/api/reviews` are two functions.
+
+The second argument of a proxy function is its typed input, a type that
+implements `Deserialize`. It is read from the query string for `GET` and
+`DELETE`, and from the JSON body for `POST`, `PUT` and `PATCH`. A request that
+does not fit the type, such as `?page=two` or a review without `rating`, is
+answered with HTTP 422 and `{ "error": "Invalid input: …" }` before the
+function runs. A function that takes the context alone accepts any request and
+reads it from `ctx.query`, `ctx.body` and `ctx.params`.
+
+Declare the module in a new
 `src/proxy/mod.rs` (`pub mod api_reviews;`), add `mod proxy;` next to the other
 `mod` lines, and list both functions in the `proxies` of `app!`, keeping your
 other entries:
@@ -57,12 +76,55 @@ compile).
 
 Supported methods are `GET`, `POST`, `PUT`, `DELETE`, and `PATCH`. A proxy
 function returns anything that serializes, sent as JSON. To answer with Liquid
-or HTML instead, name the response type after the path,
-`#[proxy(GET, "/reviews", liquid)]`, and return a `String`; the functions of
-one path share one response type. Non-GET bodies are parsed as JSON; an empty
-or invalid body becomes `None`. A body larger than 2 MB is refused with HTTP
+or HTML instead, name the response type after the path, as in
+`#[proxy(GET, "/reviews", liquid)]`; the functions of one path share one
+response type. In `ctx.body`, non-GET bodies are parsed as JSON; an empty or
+invalid body becomes `None`. A body larger than 2 MB is refused with HTTP
 413 unless you raise the limit with the `max_request_body_bytes` setting of
 `app!`.
+
+### Answer with a Liquid template
+
+Shopify renders the answer of a `liquid` proxy with the objects of the
+storefront: `shop`, `customer`, `cart`. Keep the template in a file next to
+its handler, never in a Rust string. Create `src/proxy/reviews.liquid`:
+
+```liquid
+<div class="reviews">
+  <h2>Customer reviews for {{ shop.name }}</h2>
+  <p>Loaded through the app proxy of {{ app_shop }}</p>
+  {% if customer %}
+    <p>Hello {{ customer.first_name }}! Leave a review below.</p>
+  {% endif %}
+</div>
+```
+
+Then `src/proxy/reviews.rs`:
+
+```rust,ignore
+use openshop::prelude::*;
+
+#[proxy(GET, "/reviews", liquid)]
+pub async fn reviews(ctx: ProxyContext) -> Result<Liquid> {
+    Ok(liquid!("reviews.liquid").assign("app_shop", &ctx.shop))
+}
+```
+
+`liquid!("reviews.liquid")` embeds the file when the crate compiles and gives a
+`Liquid`. The path is relative to the source file, like `include_str!`: a
+missing file is a compile error, and `openshop dev` restarts when the file
+changes.
+
+`.assign("app_shop", &ctx.shop)` gives the template a value only the server
+knows, which the template reads as `{{ app_shop }}`. The value is written as a
+Liquid `assign` tag before the content of the file, as a literal it cannot
+close: what a customer typed is displayed, never executed. Strings, numbers,
+booleans and `None` keep their Liquid type; lists and objects are assigned as
+their JSON text.
+
+Declare the module (`pub mod reviews;`) and list `reviews` in `proxies` like
+the two functions above. An `html` proxy returns its page the same way, for
+example `include_str!("page.html")`.
 
 ## 2. Check the mounted paths
 
@@ -146,14 +208,16 @@ Shopify extension, admin, storefront, local, `HOST`, and `SHOPIFY_APP_URL`
 origins receive CORS headers. Arbitrary origins do not.
 
 Handler errors and panics are logged and return
-`{ "error": "Internal proxy error" }` with HTTP 500. A successful handler value
+`{ "error": "Internal proxy error" }` with HTTP 500. A request that does not
+fit the typed input of its handler returns HTTP 422. A successful handler value
 is always HTTP 200; the current proxy API does not expose custom status or
 response headers.
 
 ## 6. Verify the endpoint
 
 Open `/apps/openshop/api/reviews?page=2` on the development storefront. Expect a
-JSON response with the verified shop and `page: 2`. An unauthenticated request
+JSON response with the verified shop and `page: 2`; with `?page=two`, expect
+HTTP 422. An unauthenticated request
 directly to the OpenShop `/proxy/api/reviews` URL should return 401:
 
 ```bash

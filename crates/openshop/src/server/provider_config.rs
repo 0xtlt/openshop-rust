@@ -2,7 +2,7 @@
 
 use serde_json::Value;
 
-use crate::types::{FieldDef, FieldType, JsonMap, Provider, is_missing};
+use crate::types::{Field, FieldType, JsonMap, Provider, is_missing};
 
 /// JavaScript's `Number(string)` for the inputs a form can send.
 pub(crate) fn js_number(text: &str) -> Value {
@@ -30,7 +30,7 @@ pub(crate) fn js_truthy(value: &Value) -> bool {
 }
 
 /// Form inputs arrive as strings: numbers and checkboxes are coerced to their types.
-pub(crate) fn coerce_field_value(field: &FieldDef, value: Option<Value>) -> Option<Value> {
+pub(crate) fn coerce_field_value(field: &Field, value: Option<Value>) -> Option<Value> {
     let value = value?;
     match (field.field_type, &value) {
         (FieldType::Number, Value::String(text)) if !text.trim().is_empty() => Some(js_number(text)),
@@ -137,21 +137,21 @@ mod tests {
 
     fn warehouse() -> Provider {
         Provider::new("warehouse")
-            .field("endpoint", FieldDef::text("Endpoint").validate(validators::url()))
-            .field("apiKey", FieldDef::password("API key"))
-            .field("note", FieldDef::text("Note").optional())
-            .field("enabled", FieldDef::checkbox("Enabled"))
+            .field("endpoint", Field::text("Endpoint").validate(validators::url()))
+            .field("apiKey", Field::password("API key"))
+            .field("note", Field::text("Note").optional())
+            .field("enabled", Field::checkbox("Enabled"))
             .field(
                 "retries",
-                FieldDef::number("Retries").validate(validators::number_range(0.0, 10.0)),
+                Field::number("Retries").validate(validators::number_range(0.0, 10.0)),
             )
     }
 
     #[test]
     fn is_incomplete_when_a_required_field_is_missing() {
         let provider = Provider::new("warehouse")
-            .field("endpoint", FieldDef::text("Endpoint"))
-            .field("apiKey", FieldDef::password("API key"));
+            .field("endpoint", Field::text("Endpoint"))
+            .field("apiKey", Field::password("API key"));
 
         assert!(!provider_config_is_complete(&provider, &JsonMap::new()));
         assert!(!provider_config_is_complete(
@@ -180,7 +180,7 @@ mod tests {
     #[test]
     fn treats_a_provider_with_no_required_fields_as_configured() {
         assert!(provider_config_is_complete(&Provider::new("empty"), &JsonMap::new()));
-        let provider = Provider::new("notes").field("note", FieldDef::text("Note").optional());
+        let provider = Provider::new("notes").field("note", Field::text("Note").optional());
         assert!(provider_config_is_complete(&provider, &JsonMap::new()));
     }
 
@@ -271,7 +271,7 @@ mod tests {
     #[test]
     fn applies_the_transformer_before_validation() {
         let provider = Provider::new("warehouse")
-            .field("endpoint", FieldDef::text("Endpoint").validate(validators::url()))
+            .field("endpoint", Field::text("Endpoint").validate(validators::url()))
             .transformer(|mut data| {
                 if let Some(Value::String(endpoint)) = data.get("endpoint").cloned() {
                     data.insert(
@@ -290,7 +290,7 @@ mod tests {
         assert_eq!(parsed["endpoint"], "https://warehouse.test");
 
         let broken = Provider::new("warehouse")
-            .field("endpoint", FieldDef::text("Endpoint"))
+            .field("endpoint", Field::text("Endpoint"))
             .transformer(|_| Value::Null);
         let error = parse_provider_config(&broken, Some(&json!({ "endpoint": "x" })), &JsonMap::new()).unwrap_err();
         assert_eq!(error, "Provider transformer must return an object");

@@ -27,7 +27,7 @@ use std::time::{Duration, Instant};
 use openshop::db::migrate::push_schema;
 use openshop::runtime::RuntimeEnv;
 use openshop::sqlx::postgres::PgConnectOptions;
-use openshop::{Concurrency, Flow, FlowContext, OpenShop, OpenShopConfig, PartialWorkerConfig, Result, Worker};
+use openshop::{Concurrency, Flow, FlowContext, OpenShop, OpenShopConfig, Result, Worker, WorkerConfig};
 
 const FLOW: &str = "bench-flow";
 
@@ -45,9 +45,9 @@ async fn main() -> Result<()> {
     let backlog: i64 = option("backlog").unwrap_or(2_000);
     let seconds: u64 = option("seconds").unwrap_or(20);
     let workers: usize = option("workers").unwrap_or(1);
-    let mut settings = PartialWorkerConfig::new();
+    let mut settings = WorkerConfig::new();
     settings.concurrency = option("concurrency");
-    settings.poll_interval_ms = option("poll-interval-ms");
+    settings.poll_interval = option("poll-interval-ms").map(Duration::from_millis);
 
     let url = std::env::var("DATABASE_URL")
         .unwrap_or_else(|_| "postgresql://openshop:openshop@localhost:5432/openshop".to_string());
@@ -144,8 +144,8 @@ async fn main() -> Result<()> {
             .concurrency
             .map_or("default".to_string(), |value| value.to_string()),
         settings
-            .poll_interval_ms
-            .map_or("default".to_string(), |value| value.to_string()),
+            .poll_interval
+            .map_or("default".to_string(), |value| value.as_millis().to_string()),
         flag("deadlines"),
         elapsed.as_secs_f64(),
         done as f64 / elapsed.as_secs_f64(),

@@ -1,10 +1,10 @@
-use openshop::{FlowContext, Result, flow, graphql, json};
-use schemars::JsonSchema;
+use openshop::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::providers::warehouse::{Warehouse, WarehouseRecord};
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[input]
+#[derive(Debug)]
 pub struct SyncOrdersInput {
     #[schemars(range(min = 1))]
     pub limit: u32,
@@ -22,17 +22,17 @@ struct WarehouseOrder {
 pub async fn sync_orders(ctx: FlowContext, input: SyncOrdersInput) -> Result<()> {
     let orders: Vec<WarehouseOrder> = ctx
         .step
-        .run("fetch-orders", || async {
-            ctx.logger.info(
-                json!({ "limit": input.limit }),
+        .run("fetch-orders", async || {
+            ctx.logger.info_with(
                 "Fetching latest orders from Shopify...",
+                json!({ "limit": input.limit }),
             );
 
             // Checked against Shopify's schema when the crate compiles; `data` is typed.
             let data = ctx
                 .shopify
                 .execute(graphql!(
-                    "#graphql
+                    "
                       query GetRecentOrders($first: Int!) {
                         orders(first: $first, sortKey: CREATED_AT, reverse: true) {
                           edges {
@@ -60,21 +60,21 @@ pub async fn sync_orders(ctx: FlowContext, input: SyncOrdersInput) -> Result<()>
                 .map(|edge| WarehouseOrder {
                     id: edge.node.id,
                     name: edge.node.name,
-                    total: edge.node.total_price_set.shop_money.currency_code,
+                    total: edge.node.total_price_set.shop_money.amount,
                     items: edge.node.line_items.edges.len(),
                 })
                 .collect())
         })
         .await?;
 
-    ctx.logger.info(
-        json!({ "count": orders.len() }),
+    ctx.logger.info_with(
         format!("Fetched {} orders", orders.len()),
+        json!({ "count": orders.len() }),
     );
 
     let transformed: Vec<WarehouseRecord> = ctx
         .step
-        .run("transform-data", || async {
+        .run("transform-data", async || {
             let exported_at = openshop::runtime::time::to_iso(&openshop::chrono::Utc::now());
             Ok(orders
                 .iter()
@@ -89,11 +89,11 @@ pub async fn sync_orders(ctx: FlowContext, input: SyncOrdersInput) -> Result<()>
         .await?;
 
     ctx.step
-        .run("send-to-warehouse", || async {
+        .run("send-to-warehouse", async || {
             ctx.logger
-                .info(json!({ "records": transformed.len() }), "Sending to warehouse API...");
+                .info_with("Sending to warehouse API...", json!({ "records": transformed.len() }));
             Warehouse::on(&ctx.connectors).push(&transformed).await?;
-            ctx.logger.info(json!({}), "Successfully sent to warehouse");
+            ctx.logger.info("Successfully sent to warehouse");
             Ok(())
         })
         .await

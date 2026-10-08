@@ -7,7 +7,7 @@ its fields are the configuration a merchant saves for a shop, and its methods
 are what flows do with that configuration.
 
 ```rust,ignore
-use openshop::{FlowContext, ProviderConfig, Result, provider, validators};
+use openshop::prelude::*;
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize)]
@@ -17,15 +17,15 @@ pub struct Order {
 
 #[derive(ProviderConfig)]
 pub struct Warehouse {
-    #[field(label = "API URL", validate = validators::url())]
+    #[field(label = "API URL", placeholder = "https://warehouse.example.com/api", url)]
     api_url: String,
-    #[field(label = "API key", password)]
+    #[field(label = "API key", password, non_empty)]
     api_key: String,
-    #[field(label = "Batch size", validate = validators::integer_min(1))]
+    #[field(range(max = 1000), validate = validators::integer_min(1))]
     batch_size: Option<u32>,
 }
 
-#[provider("warehouse")]
+#[provider]
 impl Warehouse {
     #[checker]
     async fn check(&self) -> Result<bool> {
@@ -48,8 +48,8 @@ async fn push(ctx: &FlowContext, orders: &Vec<Order>) -> Result<usize> {
 ```
 
 List it in the `providers` of [`app!`](configuration.md):
-`providers: [Warehouse]`. It is registered under the name given to
-`#[provider]`.
+`providers: [Warehouse]`. It is registered under the name of the provider,
+here `warehouse`, after the struct.
 
 ## Provider structs
 
@@ -63,19 +63,29 @@ case: `api_url` is `apiUrl`.
 | --- | --- | --- |
 | `String` | Text | With `password`, a secret; with `select(…)`, a list of choices. |
 | `bool` | Checkbox | |
-| Integer and float types | Number | Add `validators::integer_min(…)` to an integer field, so that `2.5` is refused when the configuration is saved. |
+| Integer and float types | Number | Add `validate = validators::integer_min(…)` to an integer field, so that `2.5` is refused when the configuration is saved. |
 | `Option<T>` | The input of `T` | The field may be left blank. Every other field is required. |
 
-Options go in `#[field(…)]`:
+Options go in `#[field(…)]`. All of them are optional, and so is the
+attribute:
 
 | Option | |
 | --- | --- |
-| `label = "API URL"` | The label of the input. Required. |
+| `label = "API URL"` | The label of the input. Left out, the field is labeled after its name: `batch_size` is `Batch size`. |
 | `placeholder = "https://…"` | |
 | `password` | A secret: never returned by the Admin API, and kept when the form is saved without it. |
 | `select("Europe" = "eu", "United States" = "us")` | A list of choices, each a label and the value saved. |
-| `validate = validators::url()` | A [validator](#validators). The value it returns is the one saved. |
+| `url` | The value must be an absolute URL. |
+| `non_empty` | The value must be a string with at least one character. |
+| `range(min = 1, max = 1000)` | The value must be a number within the bounds. Either bound may be left out. |
+| `length(min = 1, max = 8)` | The value must be a string whose number of characters is within the bounds. Either bound may be left out. |
+| `validate = validators::integer_min(1)` | A [validator](#validators), for anything else. The value it returns is the one saved. |
 | `name = "endpoint"` | The key the value is saved under, instead of the field name in camel case. |
+
+`url`, `non_empty`, `range(…)` and `length(…)` are the constraints of a field:
+each applies the [validator](#validators) of the same name. They are checked
+in the order they are written, then `validate` runs. A field is `password` or
+`select(…)`, not both.
 
 A struct without fields, `struct Clock;`, is a provider without configuration.
 The derive also implements `Deserialize` from the saved configuration: do not
@@ -85,8 +95,10 @@ configuration, through the `ProviderConfig` trait.
 
 ### The methods
 
-`#[provider("warehouse")]` goes on the `impl` block of the struct. `&self` is
-the configuration of the shop the method runs for.
+`#[provider]` goes on the `impl` block of the struct. The provider is named
+after the struct, with a lowercase initial: `Warehouse` is `warehouse`.
+`#[provider("wms")]` states another name. `&self` is the configuration of the
+shop the method runs for.
 
 | In the block | |
 | --- | --- |
@@ -99,9 +111,10 @@ the code directly, which is how a unit test exercises it. The macro adds:
 
 | Added | |
 | --- | --- |
+| `Warehouse::NAME` | The name of the provider, `"warehouse"`. |
 | `Warehouse::provider()` | The [`Provider`](#providers-without-a-struct) the struct describes. The struct itself is what `providers` lists; take the `Provider` to extend it, for example with `.transformer(…)`, and register the result with `.provider(…)` on the [builder](configuration.md#builder-methods) instead. |
 | `Warehouse::on(&connectors)` | The same public methods, run with the configuration the shop saved: `Warehouse::on(&ctx.connectors).push(&orders)`. An argument is passed by value or by reference. |
-| `Warehouse::PUSH`, one constant per method | A [`ProviderCall`](#typed-calls), for `connectors.invoke(…)` and for the [fake](testing.md#configure-provider-fakes) of a test: `ctx.fakes.for_call(Warehouse::PUSH)`. |
+| `Warehouse::PUSH`, one constant per method | A [`ProviderCall`](#typed-calls), for the [fake](testing.md#configure-provider-fakes) of a test: `ctx.fakes.for_call(Warehouse::PUSH)`. |
 
 Calls go through the connectors of the shop, so a test that fakes the provider
 replaces every one of them, and `connectors.call("warehouse", "push", …)` still
@@ -127,12 +140,13 @@ The struct form is built on `Provider`, which can be used directly when the
 fields or the methods are only known at run time:
 
 ```rust,ignore
-use openshop::{FieldDef, JsonMap, Provider, Value, json};
+use openshop::prelude::*;
+use openshop::{Field, JsonMap, Provider};
 
 pub fn warehouse() -> Provider {
     Provider::new("warehouse")
-        .field("apiUrl", FieldDef::text("API URL"))
-        .field("apiKey", FieldDef::password("API key"))
+        .field("apiUrl", Field::text("API URL"))
+        .field("apiKey", Field::password("API key"))
         .checker(|config| async move {
             Ok(config.get("apiUrl").and_then(Value::as_str).is_some())
         })
@@ -156,15 +170,16 @@ non-empty label.
 
 | Constructor | Type | Saved value | Notes |
 | --- | --- | --- | --- |
-| `FieldDef::text(label)` | `text` | String-like input | Supports `.placeholder(…)`. |
-| `FieldDef::password(label)` | `password` | Secret input | Omitted from read responses; an empty update preserves the stored value. |
-| `FieldDef::number(label)` | `number` | Number | A non-empty string is converted to a number. A string that is not a number counts as missing. |
-| `FieldDef::select(label, options)` | `select` | Selected string | Requires non-empty, uniquely valued `FieldOption::new(label, value)` options. |
-| `FieldDef::checkbox(label)` | `checkbox` | Boolean | The string `"true"` is true; other strings are false. |
+| `Field::text(label)` | `text` | String-like input | Supports `.placeholder(…)`. |
+| `Field::password(label)` | `password` | Secret input | Omitted from read responses; an empty update preserves the stored value. |
+| `Field::number(label)` | `number` | Number | A non-empty string is converted to a number. A string that is not a number counts as missing. |
+| `Field::select(label, options)` | `select` | Selected string | Requires non-empty, uniquely valued `FieldOption::new(label, value)` options. |
+| `Field::checkbox(label)` | `checkbox` | Boolean | The string `"true"` is true; other strings are false. |
 
 Fields are required by default. Call `.optional()` or `.required(false)` to
 make a field optional. `.validate(…)` accepts a validator; the value it returns
-becomes the saved value.
+becomes the saved value. Called again, it adds a validator that runs after the
+ones already set, on the value they return.
 
 ### Validators
 
@@ -179,25 +194,32 @@ provides the common ones:
 | `validators::url()` | An absolute URL | `must be a URL string (was …)` |
 | `validators::number()` | Any finite number | `must be a number (was …)` |
 | `validators::number_range(min, max)` | A number within `min..=max` | `must be at least <min> (was …)`, `must be at most <max> (was …)`, or `must be a number (was …)` |
+| `validators::range(min, max)` | A number within the bounds that are given, each an `Option<f64>` | `must be at least <min> (was …)`, `must be at most <max> (was …)`, or `must be a number (was …)` |
+| `validators::length(min, max)` | A string whose number of characters is within the bounds that are given, each an `Option<usize>` | `must be at least <min> characters (was …)`, `must be at most <max> characters (was …)`, or `must be a string (was …)` |
 | `validators::integer_min(min)` | A whole number greater than or equal to `min` | `must be an integer (was …)`, `must be at least <min> (was …)`, or `must be a number (was …)` |
 | `validators::one_of([..])` | One of the listed strings | `must be one of "a", "b" (was …)` |
 
-The ready-made validators return the value unchanged.
+The ready-made validators return the value unchanged. On a
+[provider struct](#the-configuration), the `url`, `non_empty`, `range(…)` and
+`length(…)` options of `#[field(…)]` apply `validators::url()`,
+`validators::non_empty()`, `validators::range(…)` and
+`validators::length(…)`.
 
 ```rust,ignore
-use openshop::{FieldDef, FieldOption, Value, validators};
+use openshop::prelude::*;
+use openshop::{Field, FieldOption};
 
-fn fields() -> Vec<(&'static str, FieldDef)> {
+fn fields() -> Vec<(&'static str, Field)> {
     vec![
-        ("apiUrl", FieldDef::text("API URL").validate(validators::url())),
-        ("batchSize", FieldDef::number("Batch size").validate(validators::number_range(1.0, 1000.0))),
+        ("apiUrl", Field::text("API URL").validate(validators::url())),
+        ("batchSize", Field::number("Batch size").validate(validators::number_range(1.0, 1000.0))),
         (
             "region",
-            FieldDef::select("Region", [FieldOption::new("Europe", "eu"), FieldOption::new("United States", "us")]),
+            Field::select("Region", [FieldOption::new("Europe", "eu"), FieldOption::new("United States", "us")]),
         ),
         (
             "warehouseCode",
-            FieldDef::text("Warehouse code").optional().validate(|value: &Value| match value.as_str() {
+            Field::text("Warehouse code").optional().validate(|value: &Value| match value.as_str() {
                 Some(code) if code.len() == 4 => Ok(Value::from(code.to_uppercase())),
                 _ => Err("must be a 4-character code".to_string()),
             }),
@@ -221,11 +243,12 @@ When a provider configuration is saved, OpenShop:
 `.transformer(…)` can normalize fields or add provider-specific values:
 
 ```rust,ignore
-use openshop::{FieldDef, Provider, Value};
+use openshop::prelude::*;
+use openshop::{Field, Provider};
 
 pub fn warehouse() -> Provider {
     Provider::new("warehouse")
-        .field("apiUrl", FieldDef::text("API URL"))
+        .field("apiUrl", Field::text("API URL"))
         .transformer(|mut data| {
             if let Some(Value::String(api_url)) = data.get("apiUrl").cloned() {
                 data.insert("apiUrl".into(), Value::from(api_url.trim_end_matches('/')));
@@ -250,20 +273,24 @@ The saved config is the first argument of each provider method.
 | `.typed_method(name, f)` | `Fn(JsonMap, A) -> impl Future<Output = Result<R>>` | `A: DeserializeOwned`, `R: Serialize`. Arguments that do not deserialize fail with `Invalid arguments for "<name>": …`. |
 | `.handle(call, f)` | `Fn(C, A) -> impl Future<Output = Result<R>>` | Typed configuration, arguments and result, named by a `ProviderCall`. See [Typed calls](#typed-calls). |
 
-Flows call the method through `ctx.connectors` without the config argument:
+Flows call the method by name through `ctx.connectors`, without the config
+argument:
 
 ```rust,ignore
-use openshop::{FlowContext, JsonMap, Result, Value};
+use openshop::prelude::*;
+use openshop::JsonMap;
+use serde::Deserialize;
+
+#[derive(Deserialize)]
+struct Pushed {
+    accepted: u64,
+}
 
 async fn push(ctx: &FlowContext, rows: &[JsonMap]) -> Result<u64> {
     // Raw result.
     let result: Value = ctx.connectors.call("warehouse", "push", rows).await?;
 
     // Typed result.
-    #[derive(serde::Deserialize)]
-    struct Pushed {
-        accepted: u64,
-    }
     let pushed: Pushed = ctx.connectors.call_as("warehouse", "push", rows).await?;
 
     Ok(pushed.accepted.max(result["accepted"].as_u64().unwrap_or(0)))
@@ -272,37 +299,43 @@ async fn push(ctx: &FlowContext, rows: &[JsonMap]) -> Result<u64> {
 
 | Call | Returns |
 | --- | --- |
-| `connectors.call(provider, method, args)` | `Result<Value>` |
-| `connectors.call_as::<T>(provider, method, args)` | `Result<T>` |
-| `connectors.invoke(call, &args)` | `Result<R>` for a `ProviderCall<A, R>`. See [Typed calls](#typed-calls). |
-| `connectors.get(provider)` | `Result<&Connector>`, with the same `call` / `call_as` plus `has(method)` and `method_names()` |
+| `connectors.call(provider, method, args).await` | `Result<Value>` |
+| `connectors.call_as::<T>(provider, method, args).await` | `Result<T>`. A result that is not a `T` fails with `Invalid result from "<provider>.<method>": …`. |
+| `connectors.get(provider).await` | `Result<&Connector>`, with `call(method, args)` and `call_as::<T>(method, args)` plus `has(method)` and `method_names()` |
 | `connectors.names()` | Iterator over the provider keys |
+
+These are the calls by name. For a [provider struct](#the-methods), prefer
+`Warehouse::on(&ctx.connectors).push(&orders)`, which the compiler checks.
 
 `args` is one serializable value. Pass a tuple or a struct when a method needs
 several arguments. An unregistered provider fails with
 `Unknown provider "<name>"` and an unregistered method with
 `Unknown provider method "<name>"`.
 
-OpenShop loads the app- and shop-specific config before building connectors. A
-shop without a saved configuration gets an empty object. It does not
-automatically run the checker before a method call.
+The connectors of a context read nothing when the context is built: the
+configuration the shop saved for the app is loaded at the first call, once,
+and kept. A shop without a saved configuration gets an empty object. The
+checker is not run before a method call.
 
-Connectors are also available outside flows: `ctx.connectors` in admin
-functions, `ctx.for_shop(…)` in server routes, and
-`app.connectors(shop, shopify_app)` everywhere else.
+Every context that belongs to a shop has `ctx.connectors`: flows, webhooks,
+app proxies, admin functions, and MCP tools and resources. In a server route,
+`ctx.for_shop(…)` returns a context that has it. For code without a context,
+`app.connectors(shop, shopify_app)` returns the same `Connectors`.
 
 ## Typed calls
 
-`.method` and `.typed_method` name a method with a string and receive the saved
-config as a JSON object, so a misspelled name or key only fails when the call
-happens. A `ProviderCall` constant moves those checks to compile time. It
-carries the provider key, the method name, and the types of the arguments and
-of the result, and it is shared by the provider that implements the method and
-by the code that calls it. `#[provider]` declares one per method; with the
-builder, you declare them:
+A `ProviderCall` constant names a method once: the provider key, the method
+name, and the types of the arguments and of the result. `#[provider]` declares
+one per method, such as `Warehouse::PUSH`. With the builder, you declare them.
+`.handle(call, f)` then implements the method with the saved config as a typed
+value: the compiler checks every field `f` reads, where `.method` and
+`.typed_method` hand it a JSON object whose keys are only looked up when the
+call happens. A test takes the [fake](testing.md#configure-provider-fakes) of
+the method from the same constant.
 
 ```rust,ignore
-use openshop::{FieldDef, FlowContext, Provider, ProviderCall, Result, validators};
+use openshop::prelude::*;
+use openshop::{Field, Provider, ProviderCall};
 use serde::{Deserialize, Serialize};
 
 /// The saved config, named after the fields of the provider.
@@ -323,11 +356,11 @@ pub const PUSH: ProviderCall<Vec<Order>, usize> = ProviderCall::new("warehouse",
 
 pub fn warehouse() -> Provider {
     Provider::new("warehouse")
-        .field("apiUrl", FieldDef::text("API URL").validate(validators::url()))
-        .field("apiKey", FieldDef::password("API key"))
+        .field("apiUrl", Field::text("API URL").validate(validators::url()))
+        .field("apiKey", Field::password("API key"))
         .field(
             "batchSize",
-            FieldDef::number("Batch size").optional().validate(validators::integer_min(1)),
+            Field::number("Batch size").optional().validate(validators::integer_min(1)),
         )
         .typed_checker(|config: WarehouseConfig| async move {
             // Call `{api_url}/health` with your HTTP client and report the outcome.
@@ -342,7 +375,7 @@ pub fn warehouse() -> Provider {
 }
 
 async fn push(ctx: &FlowContext, orders: &[Order]) -> Result<usize> {
-    ctx.connectors.invoke(PUSH, orders).await
+    ctx.connectors.call_as(PUSH.provider(), PUSH.method(), orders).await
 }
 ```
 
@@ -351,11 +384,11 @@ async fn push(ctx: &FlowContext, orders: &[Order]) -> Result<usize> {
 | `ProviderCall::<A, R>::new(provider, method)` | `const fn` | `provider` is the key the provider is registered under. `.provider()` and `.method()` return the two names. |
 | `.handle(call, f)` | `f: Fn(C, A) -> impl Future<Output = Result<R>>` | Registers `call.method()`. `C: DeserializeOwned`. |
 | `.typed_checker(f)` | `f: Fn(C) -> impl Future<Output = Result<bool>>` | The [checker](#checker) with a typed config. |
-| `connectors.invoke(call, &args)` | `Result<R>` | `args` is a reference to `A`, or to what `A` borrows as: `&[T]` for a `Vec<T>`, `&str` for a `String`. |
+| `ctx.fakes.for_call(call)` | `TypedFake<A, R>` | The [fake](testing.md#configure-provider-fakes) of the method in a test: it returns an `R` and records its arguments as an `A`. |
 
-`A` and `R` are used on both sides of the call, so they implement both
-`Serialize` and `Deserialize`. Use `()` for a method without arguments:
-`connectors.invoke(PING, &())`.
+`A` and `R` travel as JSON between the caller and the method, so they
+implement both `Serialize` and `Deserialize`. Use `()` for a method without
+arguments, and call it with `()`: `connectors.call("warehouse", "ping", ())`.
 
 The config type `C` is any `serde` type whose fields are the fields of the
 provider:
@@ -369,8 +402,12 @@ provider:
 
 What is and is not checked:
 
-- The compiler checks the name of the method and the types of the arguments
-  and of the result at every `invoke`.
+- The compiler checks the function given to `.handle` against the constant:
+  it takes an `A` and returns an `R`. It also checks what a test gives to and
+  reads from `ctx.fakes.for_call(…)`.
+- A call by name, `connectors.call(…)` or `connectors.call_as(…)`, is only
+  checked when it happens. The calls of a provider struct,
+  `Warehouse::on(..).push(..)`, are checked by the compiler.
 - `build()` checks that each call names the key its provider is registered
   under. With `.provider_as("mainWarehouse", warehouse())` it fails with
   `[openshop] Invalid config: providers.mainWarehouse.methods.push implements a call declared for provider "warehouse"; declare it as ProviderCall::new("mainWarehouse", "push")`.
@@ -383,8 +420,9 @@ What is and is not checked:
 A typed call is still an ordinary method. `connectors.call("warehouse", "push", …)`
 reaches it, with arguments that do not deserialize refused as
 `Invalid arguments for "warehouse.push": …`, and tests replace it with a
-[fake](testing.md#configure-provider-fakes). A result that is not an `R`, for
-example the `null` of a fake without a rule, fails with
+[fake](testing.md#configure-provider-fakes). With `connectors.call_as(…)` and
+with `Warehouse::on(..)`, a result that is not an `R`, for example the `null`
+of a fake without a rule, fails with
 `Invalid result from "warehouse.push": …`.
 
 ## Checker

@@ -6,7 +6,7 @@ use super::{database_url, shutdown_signal};
 use crate::app::{OpenShop, OpenShopConfig};
 use crate::engine::Worker;
 use crate::runtime::RuntimeEnv;
-use crate::types::PartialWorkerConfig;
+use crate::types::WorkerConfig;
 
 pub async fn start_worker(config: OpenShopConfig, concurrency: Option<usize>) -> Result<()> {
     println!("[openshop] Starting worker...");
@@ -18,7 +18,7 @@ pub async fn start_worker(config: OpenShopConfig, concurrency: Option<usize>) ->
 
     let worker = Worker::new(
         app,
-        PartialWorkerConfig {
+        WorkerConfig {
             concurrency,
             ..Default::default()
         },

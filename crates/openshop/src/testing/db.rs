@@ -8,7 +8,7 @@ use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use sqlx::{Connection, PgConnection, PgPool};
 
 use crate::db::migrate::push_schema;
-use crate::db::{Model, ping_after_idle};
+use crate::db::{Table, ping_after_idle};
 use crate::runtime::env::DEFAULT_DATABASE_URL;
 
 /// A PostgreSQL schema created for one test, with the framework tables pushed.
@@ -30,7 +30,7 @@ impl TestDb {
         Self::create_with_models(&[]).await
     }
 
-    pub async fn create_with_models(models: &[Model]) -> Result<Self> {
+    pub async fn create_with_models(models: &[Table]) -> Result<Self> {
         let url = std::env::var("TEST_DATABASE_URL")
             .or_else(|_| std::env::var("DATABASE_URL"))
             .unwrap_or_else(|_| DEFAULT_DATABASE_URL.to_string());

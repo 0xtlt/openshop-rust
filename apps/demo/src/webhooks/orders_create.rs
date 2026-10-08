@@ -1,4 +1,4 @@
-use openshop::{Result, WebhookContext, webhook};
+use openshop::prelude::*;
 use serde::Deserialize;
 
 /// What the handler reads from the order Shopify sends.

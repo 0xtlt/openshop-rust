@@ -21,7 +21,8 @@ starts, so a mistake stops the process with a message instead of failing later
 requests:
 
 - `[openshop] Invalid config: …` names the entry of the application to fix,
-  such as a cron that references an unknown flow or an invalid schedule.
+  such as a cron that references an unknown flow, an invalid schedule, or a
+  cron `input` that its flow does not accept.
 - `… have the same route shape` means two proxy routes, server routes, or custom
   admin pages can match the same URL.
 - `[openshop] Shopify app "<handle>" TOML not found` or
@@ -67,9 +68,9 @@ worker that does not know a flow fails its runs with
 `Flow "<name>" not registered`. If a run is scheduled in the future, inspect
 `availableAt`.
 
-If the worker repeatedly loses work, compare `lease_duration_ms` with the
-15-second interval at which a worker renews its leases: keep the lease well
-above it. Also look for blocking code that stalls the process for longer than
+If the worker repeatedly loses work, compare the `lease_duration` of the
+`worker` setting with the 15-second interval at which a worker renews its
+leases: keep the lease well above it. Also look for blocking code that stalls the process for longer than
 the lease, because the renewal only happens while the worker can run its tasks.
 
 ## A run retries or fails unexpectedly
@@ -108,8 +109,9 @@ is intentionally blocked, and so is the schema push of `dev`.
   Confirm the query against the API version in use and that the configured
   Shopify scopes allow the operation.
 
-Responses are not type-checked at build time. A field that is absent from the
-query is simply missing from the returned JSON.
+An operation written with `graphql!` is checked against the schema when the
+project compiles. One sent with `ctx.shopify.graphql()` is not: a field that is
+absent from the query is simply missing from the returned JSON.
 
 ## Proxy or extension calls return 401
 

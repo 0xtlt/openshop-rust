@@ -6,7 +6,7 @@ use super::{database_url, port, shutdown_signal};
 use crate::app::{OpenShop, OpenShopConfig};
 use crate::engine::Scheduler;
 use crate::runtime::RuntimeEnv;
-use crate::server::{ServerOptions, UiSource, start_api_server};
+use crate::server::{ServerOptions, UiSource, listen};
 
 /// The admin UI to serve: `OPENSHOP_UI_DIR`, then the bundle set on the
 /// configuration, then the one built into the framework.
@@ -33,7 +33,7 @@ pub async fn start_prod(config: OpenShopConfig) -> Result<()> {
         app.config().providers.len()
     );
 
-    let server = start_api_server(&app, port, ServerOptions::production().ui(ui)).await?;
+    let server = listen(&app, port, ServerOptions::production().ui(ui)).await?;
     let mut scheduler = Scheduler::start(&app)?;
     println!("[openshop] Production server running on http://localhost:{port}");
 

@@ -6,8 +6,8 @@ mod common;
 use common::shop_connectors as connectors;
 use openshop::testing::TestContext;
 use openshop::{
-    FieldDef, FieldOption, Flow, OpenShopConfig, Provider, ProviderConfig, Result, RunFlowResult, Value, json,
-    provider, validators,
+    Field, FieldOption, Flow, OpenShopConfig, Provider, ProviderConfig, Result, RunOutcome, Value, json, provider,
+    validators,
 };
 use serde::{Deserialize, Serialize};
 
@@ -126,17 +126,14 @@ fn built_by_hand() -> Provider {
     Provider::new("warehouse")
         .field(
             "apiUrl",
-            FieldDef::text("API URL")
+            Field::text("API URL")
                 .placeholder("https://warehouse.example.com")
                 .validate(validators::url()),
         )
-        .field(
-            "apiKey",
-            FieldDef::password("API key").validate(validators::non_empty()),
-        )
+        .field("apiKey", Field::password("API key").validate(validators::non_empty()))
         .field(
             "region",
-            FieldDef::select(
+            Field::select(
                 "Region",
                 [
                     FieldOption::new("Europe", "eu"),
@@ -147,11 +144,11 @@ fn built_by_hand() -> Provider {
         )
         .field(
             "batchSize",
-            FieldDef::number("Batch size")
+            Field::number("Batch size")
                 .optional()
                 .validate(validators::integer_min(1)),
         )
-        .field("useSandbox", FieldDef::checkbox("Sandbox"))
+        .field("useSandbox", Field::checkbox("Sandbox"))
 }
 
 #[test]
@@ -409,10 +406,10 @@ async fn flows_call_the_provider_and_tests_fake_it() {
     });
     assert_eq!(
         ctx.run_flow("pushOrders", json!({})).await.unwrap(),
-        RunFlowResult::Completed
+        RunOutcome::Completed
     );
     assert_eq!(push.call_count(), 1);
-    assert_eq!(push.last_call().unwrap().args, json!(orders()));
+    assert_eq!(push.last_call().unwrap().args, orders());
     let (output,): (Value,) = sqlx::query_as("SELECT output FROM step_results WHERE step_name = 'record'")
         .fetch_one(&ctx.db)
         .await

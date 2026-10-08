@@ -91,7 +91,7 @@ pub type FieldValidator = Arc<dyn Fn(&Value) -> Result<Value, String> + Send + S
 
 /// A configuration field rendered by the admin UI for providers and Shopify Functions.
 #[derive(Clone)]
-pub struct FieldDef {
+pub struct Field {
     pub field_type: FieldType,
     pub label: String,
     pub placeholder: Option<String>,
@@ -102,7 +102,7 @@ pub struct FieldDef {
     pub validate: Option<FieldValidator>,
 }
 
-impl FieldDef {
+impl Field {
     pub fn new(field_type: FieldType, label: impl Into<String>) -> Self {
         Self {
             field_type,
@@ -150,8 +150,13 @@ impl FieldDef {
         self.required(false)
     }
 
+    /// Adds a validator. It runs after the ones already added, on the value
+    /// they return.
     pub fn validate(mut self, validate: impl Fn(&Value) -> Result<Value, String> + Send + Sync + 'static) -> Self {
-        self.validate = Some(Arc::new(validate));
+        self.validate = Some(match self.validate.take() {
+            Some(first) => Arc::new(move |value| validate(&first(value)?)),
+            None => Arc::new(validate),
+        });
         self
     }
 
@@ -177,9 +182,9 @@ impl FieldDef {
     }
 }
 
-impl std::fmt::Debug for FieldDef {
+impl std::fmt::Debug for Field {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("FieldDef")
+        f.debug_struct("Field")
             .field("field_type", &self.field_type)
             .field("label", &self.label)
             .field("placeholder", &self.placeholder)
@@ -190,7 +195,7 @@ impl std::fmt::Debug for FieldDef {
     }
 }
 
-pub type FieldDefinitions = IndexMap<String, FieldDef>;
+pub type Fields = IndexMap<String, Field>;
 
 /// A provider method receives the shop's stored configuration and the call arguments.
 pub type ProviderMethod = Arc<dyn Fn(JsonMap, Value) -> BoxFuture<'static, Result<Value>> + Send + Sync>;
@@ -201,9 +206,11 @@ pub type ProviderTransformer = Arc<dyn Fn(JsonMap) -> Value + Send + Sync>;
 /// A typed reference to a provider method: the provider it belongs to, its
 /// name, and the types of its arguments (`A`) and of its result (`R`).
 ///
-/// Declare it once as a constant, implement it with [`Provider::handle`] and
-/// call it with [`Connectors::invoke`]. The names are then written in a single
-/// place, and the compiler checks the arguments and the result of every call.
+/// A `#[provider]` block declares one per method, `Warehouse::PUSH`: it is
+/// what [`Provider::handle`] implements, and what names the fake of the
+/// method in a test, `ctx.fakes.for_call(Warehouse::PUSH)`. The names are
+/// then written in a single place, and the compiler checks the arguments and
+/// the result of every call.
 ///
 /// ```
 /// use openshop::ProviderCall;
@@ -262,7 +269,7 @@ impl<A, R> fmt::Debug for ProviderCall<A, R> {
 /// fields of the configuration form. Implemented by `#[derive(ProviderConfig)]`.
 pub trait ProviderConfig: Sized {
     /// The fields of the form, in the order of the struct.
-    fn fields() -> FieldDefinitions;
+    fn fields() -> Fields;
 
     /// Reads a saved configuration. The error names the field that does not fit.
     fn from_config(config: JsonMap) -> std::result::Result<Self, String>;
@@ -285,37 +292,42 @@ pub trait ProviderField: DeserializeOwned {
     const OPTIONAL: bool = false;
 
     /// The field of the form for a value of this type.
-    fn field(label: &str) -> FieldDef;
+    fn field(label: &str) -> Field;
 }
 
 impl ProviderField for String {
-    fn field(label: &str) -> FieldDef {
-        FieldDef::text(label)
+    fn field(label: &str) -> Field {
+        Field::text(label)
     }
 }
 
 impl ProviderField for bool {
-    fn field(label: &str) -> FieldDef {
-        FieldDef::checkbox(label)
+    fn field(label: &str) -> Field {
+        Field::checkbox(label)
     }
 }
 
 macro_rules! number_field {
-    ($($number:ty),+) => {$(
+    ($($number:ty),+ => $field:expr) => {$(
         impl ProviderField for $number {
-            fn field(label: &str) -> FieldDef {
-                FieldDef::number(label)
+            fn field(label: &str) -> Field {
+                let field: fn(&str) -> Field = $field;
+                field(label)
             }
         }
     )+};
 }
 
-number_field!(i8, i16, i32, i64, u8, u16, u32, u64, usize, isize, f32, f64);
+// The form refuses what the type cannot hold when the value is saved: a
+// fraction for an integer, a negative number for an unsigned one.
+number_field!(i8, i16, i32, i64, isize => |label| Field::number(label).validate(crate::validators::integer()));
+number_field!(u8, u16, u32, u64, usize => |label| Field::number(label).validate(crate::validators::integer_min(0)));
+number_field!(f32, f64 => |label| Field::number(label));
 
 impl<T: ProviderField> ProviderField for Option<T> {
     const OPTIONAL: bool = true;
 
-    fn field(label: &str) -> FieldDef {
+    fn field(label: &str) -> Field {
         T::field(label).optional()
     }
 }
@@ -370,7 +382,7 @@ fn typed_arguments<A: DeserializeOwned>(label: &str, args: Value) -> Result<A> {
 #[derive(Clone)]
 pub struct Provider {
     pub name: String,
-    pub fields: FieldDefinitions,
+    pub fields: Fields,
     pub transformer: Option<ProviderTransformer>,
     pub checker: Option<ProviderChecker>,
     pub methods: IndexMap<String, ProviderMethod>,
@@ -390,13 +402,13 @@ impl Provider {
         }
     }
 
-    pub fn field(mut self, name: impl Into<String>, field: FieldDef) -> Self {
+    pub fn field(mut self, name: impl Into<String>, field: Field) -> Self {
         self.fields.insert(name.into(), field);
         self
     }
 
     /// Adds several fields, such as those of a [`ProviderConfig`] struct.
-    pub fn fields(mut self, fields: FieldDefinitions) -> Self {
+    pub fn fields(mut self, fields: Fields) -> Self {
         self.fields.extend(fields);
         self
     }
@@ -482,6 +494,42 @@ impl Provider {
         })
     }
 }
+
+// ─── Shop scope ──────────────────────────────────────────────────────
+
+/// What a handler runs for: a shop, the Shopify app that serves it, and the
+/// application. Implemented by the contexts that belong to a shop, so that
+/// what needs one takes the context itself: `sync_orders::dispatch(&ctx, …)`,
+/// `Review::of(&ctx)`.
+pub trait ShopScope {
+    /// The domain of the shop.
+    fn shop(&self) -> &str;
+
+    /// The handle of the Shopify app the shop is served by.
+    fn shopify_app(&self) -> &str;
+
+    fn app(&self) -> &OpenShop;
+}
+
+macro_rules! shop_scope {
+    ($($context:ty),+ $(,)?) => {$(
+        impl ShopScope for $context {
+            fn shop(&self) -> &str {
+                &self.shop
+            }
+
+            fn shopify_app(&self) -> &str {
+                &self.shopify_app
+            }
+
+            fn app(&self) -> &OpenShop {
+                &self.app
+            }
+        }
+    )+};
+}
+
+shop_scope!(FlowContext, WebhookContext, ProxyContext, RouteShopContext, McpContext);
 
 // ─── Flow ────────────────────────────────────────────────────────────
 
@@ -586,7 +634,7 @@ pub struct Flow {
     pub timeout: Option<Duration>,
     pub step_timeout: Option<Duration>,
     pub concurrency: Option<Concurrency>,
-    pub retry_policy: PartialRetryPolicy,
+    pub retry_policy: RetryPolicy,
     pub run: FlowRunFn,
 }
 
@@ -602,7 +650,7 @@ impl Flow {
             timeout: None,
             step_timeout: None,
             concurrency: None,
-            retry_policy: PartialRetryPolicy::default(),
+            retry_policy: RetryPolicy::default(),
             run: Arc::new(move |ctx| Box::pin(run(ctx))),
         }
     }
@@ -634,7 +682,7 @@ impl Flow {
         self
     }
 
-    pub fn retry_policy(mut self, policy: PartialRetryPolicy) -> Self {
+    pub fn retry_policy(mut self, policy: RetryPolicy) -> Self {
         self.retry_policy = policy;
         self
     }
@@ -666,24 +714,16 @@ impl CronShops {
     }
 }
 
-impl From<&str> for CronShops {
-    fn from(value: &str) -> Self {
-        match value {
-            "global" => Self::Global,
-            "all" => Self::All,
-            shop => Self::Shop(shop.to_string()),
-        }
-    }
-}
-
 impl From<Vec<String>> for CronShops {
     fn from(value: Vec<String>) -> Self {
         Self::Shops(value)
     }
 }
 
+/// A schedule on which a flow runs. Without [`Cron::all_shops`],
+/// [`Cron::shop`] or [`Cron::shops`], the flow runs once, for no shop.
 #[derive(Debug, Clone, PartialEq)]
-pub struct CronEntry {
+pub struct Cron {
     pub name: Option<String>,
     pub schedule: String,
     pub flow: String,
@@ -691,7 +731,7 @@ pub struct CronEntry {
     pub shops: Option<CronShops>,
 }
 
-impl CronEntry {
+impl Cron {
     pub fn new(schedule: impl Into<String>, flow: impl Into<String>) -> Self {
         Self {
             name: None,
@@ -712,8 +752,25 @@ impl CronEntry {
         self
     }
 
-    pub fn shops(mut self, shops: impl Into<CronShops>) -> Self {
-        self.shops = Some(shops.into());
+    /// Runs once for each shop the application is installed on.
+    pub fn all_shops(mut self) -> Self {
+        self.shops = Some(CronShops::All);
+        self
+    }
+
+    /// Runs for this shop only.
+    pub fn shop(mut self, shop: impl Into<String>) -> Self {
+        self.shops = Some(CronShops::Shop(shop.into()));
+        self
+    }
+
+    /// Runs for each of these shops.
+    pub fn shops<I, S>(mut self, shops: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.shops = Some(CronShops::Shops(shops.into_iter().map(Into::into).collect()));
         self
     }
 
@@ -727,6 +784,7 @@ impl CronEntry {
     }
 }
 
+/// Everything the handler of a webhook can use.
 #[derive(Clone)]
 pub struct WebhookContext {
     pub topic: String,
@@ -734,6 +792,11 @@ pub struct WebhookContext {
     pub shopify_app: String,
     pub payload: Value,
     pub api_version: String,
+    pub db: PgPool,
+    /// The Admin API of the shop. Nothing is read before the first request.
+    pub shopify: ShopifyClient,
+    /// The providers of the shop. Nothing is read before the first call.
+    pub connectors: Connectors,
     pub app: OpenShop,
 }
 
@@ -820,7 +883,7 @@ pub struct ErrorContext {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
-pub enum ShopifyFunctionType {
+pub enum FunctionType {
     Discount,
     CartTransform,
     DeliveryCustomization,
@@ -829,7 +892,7 @@ pub enum ShopifyFunctionType {
     FulfillmentConstraints,
 }
 
-impl ShopifyFunctionType {
+impl FunctionType {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Discount => "discount",
@@ -959,18 +1022,18 @@ impl FunctionOwner {
 
 /// A Shopify Function whose instances are managed from the admin UI.
 #[derive(Clone)]
-pub struct FunctionDefinition {
-    pub function_type: ShopifyFunctionType,
+pub struct Function {
+    pub function_type: FunctionType,
     pub handle: String,
     /// Merchant-facing label used by OpenShop. Shopify owners may not have a title.
     pub label: Option<String>,
     pub modes: Option<Vec<DiscountMode>>,
     pub owner: Option<FunctionOwner>,
-    pub config: FieldDefinitions,
+    pub config: Fields,
 }
 
-impl FunctionDefinition {
-    pub fn new(function_type: ShopifyFunctionType, handle: impl Into<String>) -> Self {
+impl Function {
+    pub fn new(function_type: FunctionType, handle: impl Into<String>) -> Self {
         Self {
             function_type,
             handle: handle.into(),
@@ -996,7 +1059,7 @@ impl FunctionDefinition {
         self
     }
 
-    pub fn field(mut self, name: impl Into<String>, field: FieldDef) -> Self {
+    pub fn field(mut self, name: impl Into<String>, field: Field) -> Self {
         self.config.insert(name.into(), field);
         self
     }
@@ -1012,11 +1075,11 @@ impl FunctionDefinition {
 /// A struct that is the configuration of a Shopify Function: its fields are
 /// the form of an instance. Implemented by `#[derive(FunctionConfig)]`.
 pub trait FunctionConfig: Sized {
-    /// The key the function is registered under.
-    const KEY: &'static str;
+    /// The name the function is registered under.
+    const NAME: &'static str;
 
     /// The function, with the fields of the struct as its form.
-    fn definition() -> FunctionDefinition;
+    fn definition() -> Function;
 
     /// Reads the configuration of an instance.
     fn from_config(config: JsonMap) -> Result<Self, String>;
@@ -1067,6 +1130,11 @@ pub struct ProxyContext {
     pub path: String,
     pub method: String,
     pub body: Option<Value>,
+    pub db: PgPool,
+    /// The Admin API of the shop. Nothing is read before the first request.
+    pub shopify: ShopifyClient,
+    /// The providers of the shop. Nothing is read before the first call.
+    pub connectors: Connectors,
     pub app: OpenShop,
 }
 
@@ -1075,7 +1143,7 @@ pub type ProxyHandler = Arc<dyn Fn(ProxyContext) -> BoxFuture<'static, Result<Va
 /// Handlers for a storefront app proxy path. A string result is sent as Liquid
 /// or HTML for those response types; everything else is sent as JSON.
 #[derive(Clone, Default)]
-pub struct ProxyDefinition {
+pub struct Proxy {
     pub response_type: Option<ProxyResponseType>,
     pub get: Option<ProxyHandler>,
     pub post: Option<ProxyHandler>,
@@ -1107,7 +1175,7 @@ macro_rules! proxy_methods {
     };
 }
 
-impl ProxyDefinition {
+impl Proxy {
     pub fn new(response_type: ProxyResponseType) -> Self {
         Self {
             response_type: Some(response_type),
@@ -1174,14 +1242,21 @@ impl ProxyDefinition {
 
 // ─── Public server routes ──────────────────────────────────────────
 
-/// Connectors and identity of an actively installed shop.
+/// An actively installed shop, as a public route resolves it: its identity
+/// and what the other contexts give for a shop.
 #[derive(Clone)]
 pub struct RouteShopContext {
     pub shop: String,
     pub shopify_app: String,
+    pub db: PgPool,
+    pub shopify: ShopifyClient,
     pub connectors: Connectors,
+    pub app: OpenShop,
 }
 
+/// The shop a public route asks for: its domain and, when the application
+/// serves several Shopify apps, the handle of the app. A domain alone names
+/// the shop for the single-app setup: `ctx.for_shop("demo.myshopify.com")`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RouteShopInput {
     pub shop: String,
@@ -1199,6 +1274,24 @@ impl RouteShopInput {
     pub fn shopify_app(mut self, handle: impl Into<String>) -> Self {
         self.shopify_app = Some(handle.into());
         self
+    }
+}
+
+impl From<&str> for RouteShopInput {
+    fn from(shop: &str) -> Self {
+        Self::new(shop)
+    }
+}
+
+impl From<String> for RouteShopInput {
+    fn from(shop: String) -> Self {
+        Self::new(shop)
+    }
+}
+
+impl From<&String> for RouteShopInput {
+    fn from(shop: &String) -> Self {
+        Self::new(shop.as_str())
     }
 }
 
@@ -1230,32 +1323,36 @@ impl RouteRequest {
     }
 }
 
+/// What the authentication function of a route receives.
 #[derive(Clone)]
-pub struct ServerRouteRequestContext {
+pub struct RouteAuthContext {
     pub request: RouteRequest,
     pub params: IndexMap<String, String>,
+    pub db: PgPool,
     pub app: OpenShop,
 }
 
-impl ServerRouteRequestContext {
-    /// Resolves an installed shop and builds its provider connectors.
-    pub async fn for_shop(&self, input: RouteShopInput) -> Result<RouteShopContext> {
-        crate::server::routes::resolve_shop_context(&self.app, input).await
+impl RouteAuthContext {
+    /// Resolves an installed shop, and gives what a context gives for it:
+    /// its database, its Shopify client and its providers.
+    pub async fn for_shop(&self, shop: impl Into<RouteShopInput>) -> Result<RouteShopContext> {
+        crate::server::routes::resolve_shop_context(&self.app, shop.into()).await
     }
 }
 
 #[derive(Clone)]
-pub struct ServerRouteContext {
+pub struct RouteContext {
     pub request: RouteRequest,
     pub params: IndexMap<String, String>,
     /// Value produced by the route's authentication function (`Null` for public routes).
     pub auth: Value,
+    pub db: PgPool,
     pub app: OpenShop,
 }
 
-impl ServerRouteContext {
-    pub async fn for_shop(&self, input: RouteShopInput) -> Result<RouteShopContext> {
-        crate::server::routes::resolve_shop_context(&self.app, input).await
+impl RouteContext {
+    pub async fn for_shop(&self, shop: impl Into<RouteShopInput>) -> Result<RouteShopContext> {
+        crate::server::routes::resolve_shop_context(&self.app, shop.into()).await
     }
 }
 
@@ -1269,33 +1366,31 @@ pub enum RouteAuthOutcome {
     Response(axum::response::Response),
 }
 
-pub type ServerRouteAuthFn =
-    Arc<dyn Fn(ServerRouteRequestContext) -> BoxFuture<'static, Result<RouteAuthOutcome>> + Send + Sync>;
-pub type ServerRouteHandler =
-    Arc<dyn Fn(ServerRouteContext) -> BoxFuture<'static, Result<axum::response::Response>> + Send + Sync>;
+pub type RouteAuthFn = Arc<dyn Fn(RouteAuthContext) -> BoxFuture<'static, Result<RouteAuthOutcome>> + Send + Sync>;
+pub type RouteHandler = Arc<dyn Fn(RouteContext) -> BoxFuture<'static, Result<axum::response::Response>> + Send + Sync>;
 
 #[derive(Clone)]
-pub enum ServerRouteAuth {
+pub enum RouteAuth {
     /// Public route: no authentication.
     None,
-    Custom(ServerRouteAuthFn),
+    Custom(RouteAuthFn),
 }
 
-pub const SERVER_ROUTE_METHODS: [&str; 7] = ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"];
+pub const ROUTE_METHODS: [&str; 7] = ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"];
 
 /// The handler of one HTTP method, with the authentication it was declared under.
 #[derive(Clone)]
-pub struct ServerRouteMethod {
-    pub auth: ServerRouteAuth,
-    pub handler: ServerRouteHandler,
+pub struct RouteMethod {
+    pub auth: RouteAuth,
+    pub handler: RouteHandler,
 }
 
 /// A public HTTP route mounted under `/routes` with an explicit authentication contract.
 #[derive(Clone)]
-pub struct ServerRoute {
+pub struct Route {
     /// Authentication of the handlers added to this definition.
-    pub auth: ServerRouteAuth,
-    pub handlers: IndexMap<&'static str, ServerRouteMethod>,
+    pub auth: RouteAuth,
+    pub handlers: IndexMap<&'static str, RouteMethod>,
 }
 
 macro_rules! route_methods {
@@ -1303,7 +1398,7 @@ macro_rules! route_methods {
         $(
             pub fn $name<F, Fut>(self, handler: F) -> Self
             where
-                F: Fn(ServerRouteContext) -> Fut + Send + Sync + 'static,
+                F: Fn(RouteContext) -> Fut + Send + Sync + 'static,
                 Fut: Future<Output = Result<axum::response::Response>> + Send + 'static,
             {
                 self.handler($method, handler)
@@ -1312,34 +1407,34 @@ macro_rules! route_methods {
     };
 }
 
-impl ServerRoute {
+impl Route {
     /// A route without authentication (`auth: 'none'`).
     pub fn public() -> Self {
         Self {
-            auth: ServerRouteAuth::None,
+            auth: RouteAuth::None,
             handlers: IndexMap::new(),
         }
     }
 
     pub fn authenticated<F, Fut>(auth: F) -> Self
     where
-        F: Fn(ServerRouteRequestContext) -> Fut + Send + Sync + 'static,
+        F: Fn(RouteAuthContext) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Result<RouteAuthOutcome>> + Send + 'static,
     {
         Self {
-            auth: ServerRouteAuth::Custom(Arc::new(move |ctx| Box::pin(auth(ctx)))),
+            auth: RouteAuth::Custom(Arc::new(move |ctx| Box::pin(auth(ctx)))),
             handlers: IndexMap::new(),
         }
     }
 
     fn handler<F, Fut>(mut self, method: &'static str, handler: F) -> Self
     where
-        F: Fn(ServerRouteContext) -> Fut + Send + Sync + 'static,
+        F: Fn(RouteContext) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Result<axum::response::Response>> + Send + 'static,
     {
         self.handlers.insert(
             method,
-            ServerRouteMethod {
+            RouteMethod {
                 auth: self.auth.clone(),
                 handler: Arc::new(move |ctx| Box::pin(handler(ctx))),
             },
@@ -1363,7 +1458,7 @@ impl ServerRoute {
 
     /// Declared methods in canonical order.
     pub(crate) fn allowed_methods(&self) -> Vec<&'static str> {
-        SERVER_ROUTE_METHODS
+        ROUTE_METHODS
             .into_iter()
             .filter(|method| self.handlers.contains_key(method))
             .collect()
@@ -1414,80 +1509,168 @@ impl McpAuditStatus {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+/// A permission an MCP token can be granted, and that tools and resources
+/// require.
+///
+/// Declare it once, as a constant, next to what requires it. A tool that
+/// lists it registers it with the application:
+///
+/// ```
+/// use openshop::{McpPermission, McpRiskLevel};
+///
+/// pub const READ_REVIEWS: McpPermission = McpPermission::new("reviews:read", "Read reviews")
+///     .group("Reviews")
+///     .risk(McpRiskLevel::Low);
+/// assert_eq!(READ_REVIEWS.key, "reviews:read");
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct McpPermissionDefinition {
-    pub label: String,
+pub struct McpPermission {
+    /// What tokens are granted and capabilities require: `namespace:action`.
+    #[serde(skip)]
+    pub key: &'static str,
+    pub label: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
+    pub description: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub group: Option<String>,
+    pub group: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub risk_level: Option<McpRiskLevel>,
 }
 
-impl McpPermissionDefinition {
-    pub fn new(label: impl Into<String>) -> Self {
+impl McpPermission {
+    pub const fn new(key: &'static str, label: &'static str) -> Self {
         Self {
-            label: label.into(),
+            key,
+            label,
             description: None,
             group: None,
             risk_level: None,
         }
     }
 
-    pub fn description(mut self, description: impl Into<String>) -> Self {
-        self.description = Some(description.into());
+    pub const fn description(mut self, description: &'static str) -> Self {
+        self.description = Some(description);
         self
     }
 
-    pub fn group(mut self, group: impl Into<String>) -> Self {
-        self.group = Some(group.into());
+    /// The heading the admin lists the permission under. Defaults to the
+    /// namespace of the key.
+    pub const fn group(mut self, group: &'static str) -> Self {
+        self.group = Some(group);
         self
     }
 
-    pub fn risk_level(mut self, level: McpRiskLevel) -> Self {
+    pub const fn risk(mut self, level: McpRiskLevel) -> Self {
         self.risk_level = Some(level);
         self
     }
 }
 
+/// A permission a tool or a resource requires: its key, or the
+/// [`McpPermission`] itself, which is then registered with the capability.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RequiredPermission {
+    Key(String),
+    Declared(McpPermission),
+}
+
+impl RequiredPermission {
+    pub fn key(&self) -> &str {
+        match self {
+            Self::Key(key) => key,
+            Self::Declared(permission) => permission.key,
+        }
+    }
+}
+
+impl From<&str> for RequiredPermission {
+    fn from(key: &str) -> Self {
+        Self::Key(key.to_string())
+    }
+}
+
+impl From<String> for RequiredPermission {
+    fn from(key: String) -> Self {
+        Self::Key(key)
+    }
+}
+
+impl From<McpPermission> for RequiredPermission {
+    fn from(permission: McpPermission) -> Self {
+        Self::Declared(permission)
+    }
+}
+
+impl From<&McpPermission> for RequiredPermission {
+    fn from(permission: &McpPermission) -> Self {
+        Self::Declared(*permission)
+    }
+}
+
+/// The keys of the permissions, and those that come with their definition.
+fn required_permissions<I, P>(permissions: I) -> (Vec<String>, Vec<McpPermission>)
+where
+    I: IntoIterator<Item = P>,
+    P: Into<RequiredPermission>,
+{
+    let mut keys = Vec::new();
+    let mut declared = Vec::new();
+    for permission in permissions {
+        let permission = permission.into();
+        keys.push(permission.key().to_string());
+        if let RequiredPermission::Declared(permission) = permission {
+            declared.push(permission);
+        }
+    }
+    (keys, declared)
+}
+
+/// Everything an MCP tool or resource can use.
 #[derive(Clone)]
-pub struct McpExecutionContext {
-    pub app_handle: String,
+pub struct McpContext {
     pub shop: String,
+    /// The handle of the Shopify app the token belongs to.
+    pub shopify_app: String,
     pub token_id: String,
     pub permissions: Vec<String>,
     /// Cancelled when the request is aborted or exceeds the execution limit.
     pub signal: CancellationToken,
     pub db: PgPool,
+    /// The Admin API of the shop. Nothing is read before the first request.
+    pub shopify: ShopifyClient,
+    /// The providers of the shop. Nothing is read before the first call.
+    pub connectors: Connectors,
     pub app: OpenShop,
 }
 
 /// A tool result may be a string, an object with `content` / `structuredContent`,
 /// or any other JSON value (rendered as text and structured content).
-pub type McpToolFn = Arc<dyn Fn(McpExecutionContext, JsonMap) -> BoxFuture<'static, Result<Value>> + Send + Sync>;
+pub type McpToolFn = Arc<dyn Fn(McpContext, JsonMap) -> BoxFuture<'static, Result<Value>> + Send + Sync>;
 
 #[derive(Clone)]
-pub struct McpToolDefinition {
+pub struct McpTool {
     pub description: String,
     pub input_schema: Option<Value>,
     pub required_permissions: Vec<String>,
+    /// The required permissions that came with their definition.
+    pub declared_permissions: Vec<McpPermission>,
     pub risk_level: Option<McpRiskLevel>,
     pub confirmation_hint: Option<String>,
     pub run: McpToolFn,
 }
 
-impl McpToolDefinition {
+impl McpTool {
     pub fn new<F, Fut>(description: impl Into<String>, run: F) -> Self
     where
-        F: Fn(McpExecutionContext, JsonMap) -> Fut + Send + Sync + 'static,
+        F: Fn(McpContext, JsonMap) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Result<Value>> + Send + 'static,
     {
         Self {
             description: description.into(),
             input_schema: None,
             required_permissions: Vec::new(),
+            declared_permissions: Vec::new(),
             risk_level: None,
             confirmation_hint: None,
             run: Arc::new(move |ctx, input| Box::pin(run(ctx, input))),
@@ -1499,16 +1682,18 @@ impl McpToolDefinition {
         self
     }
 
-    pub fn required_permissions<I, S>(mut self, permissions: I) -> Self
+    /// The permissions a token needs: keys, or [`McpPermission`]s, which
+    /// are registered with the application.
+    pub fn permissions<I, P>(mut self, permissions: I) -> Self
     where
-        I: IntoIterator<Item = S>,
-        S: Into<String>,
+        I: IntoIterator<Item = P>,
+        P: Into<RequiredPermission>,
     {
-        self.required_permissions = permissions.into_iter().map(Into::into).collect();
+        (self.required_permissions, self.declared_permissions) = required_permissions(permissions);
         self
     }
 
-    pub fn risk_level(mut self, level: McpRiskLevel) -> Self {
+    pub fn risk(mut self, level: McpRiskLevel) -> Self {
         self.risk_level = Some(level);
         self
     }
@@ -1537,23 +1722,24 @@ impl From<&str> for McpResourceContent {
     }
 }
 
-pub type McpResourceFn =
-    Arc<dyn Fn(McpExecutionContext) -> BoxFuture<'static, Result<McpResourceContent>> + Send + Sync>;
+pub type McpResourceFn = Arc<dyn Fn(McpContext) -> BoxFuture<'static, Result<McpResourceContent>> + Send + Sync>;
 
 #[derive(Clone)]
-pub struct McpResourceDefinition {
+pub struct McpResource {
     pub name: String,
     pub description: Option<String>,
     pub mime_type: Option<String>,
     pub required_permissions: Vec<String>,
+    /// The required permissions that came with their definition.
+    pub declared_permissions: Vec<McpPermission>,
     pub risk_level: Option<McpRiskLevel>,
     pub read: McpResourceFn,
 }
 
-impl McpResourceDefinition {
+impl McpResource {
     pub fn new<F, Fut>(name: impl Into<String>, read: F) -> Self
     where
-        F: Fn(McpExecutionContext) -> Fut + Send + Sync + 'static,
+        F: Fn(McpContext) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Result<McpResourceContent>> + Send + 'static,
     {
         Self {
@@ -1561,6 +1747,7 @@ impl McpResourceDefinition {
             description: None,
             mime_type: None,
             required_permissions: Vec::new(),
+            declared_permissions: Vec::new(),
             risk_level: None,
             read: Arc::new(move |ctx| Box::pin(read(ctx))),
         }
@@ -1576,16 +1763,18 @@ impl McpResourceDefinition {
         self
     }
 
-    pub fn required_permissions<I, S>(mut self, permissions: I) -> Self
+    /// The permissions a token needs: keys, or [`McpPermission`]s, which
+    /// are registered with the application.
+    pub fn permissions<I, P>(mut self, permissions: I) -> Self
     where
-        I: IntoIterator<Item = S>,
-        S: Into<String>,
+        I: IntoIterator<Item = P>,
+        P: Into<RequiredPermission>,
     {
-        self.required_permissions = permissions.into_iter().map(Into::into).collect();
+        (self.required_permissions, self.declared_permissions) = required_permissions(permissions);
         self
     }
 
-    pub fn risk_level(mut self, level: McpRiskLevel) -> Self {
+    pub fn risk(mut self, level: McpRiskLevel) -> Self {
         self.risk_level = Some(level);
         self
     }
@@ -1595,9 +1784,9 @@ impl McpResourceDefinition {
 pub struct McpConfig {
     /// MCP is enabled unless this is `Some(false)`.
     pub enabled: Option<bool>,
-    pub custom_permissions: IndexMap<String, McpPermissionDefinition>,
-    pub tools: IndexMap<String, McpToolDefinition>,
-    pub resources: IndexMap<String, McpResourceDefinition>,
+    pub custom_permissions: IndexMap<String, McpPermission>,
+    pub tools: IndexMap<String, McpTool>,
+    pub resources: IndexMap<String, McpResource>,
 }
 
 impl McpConfig {
@@ -1610,17 +1799,40 @@ impl McpConfig {
         self
     }
 
-    pub fn permission(mut self, key: impl Into<String>, permission: McpPermissionDefinition) -> Self {
-        self.custom_permissions.insert(key.into(), permission);
+    /// The permissions of the application: the ones registered here, and the
+    /// ones its tools and resources came with. The first definition of a key
+    /// is kept; building the application refuses two different ones.
+    pub fn permissions(&self) -> IndexMap<String, McpPermission> {
+        let mut permissions = self.custom_permissions.clone();
+        let declared = self.tools.values().flat_map(|tool| &tool.declared_permissions).chain(
+            self.resources
+                .values()
+                .flat_map(|resource| &resource.declared_permissions),
+        );
+        for permission in declared {
+            permissions.entry(permission.key.to_string()).or_insert(*permission);
+        }
+        permissions
+    }
+
+    /// MCP turned off: `POST /mcp` is refused, and the admin has no MCP page.
+    pub fn disabled() -> Self {
+        Self::new().enabled(false)
+    }
+
+    /// Registers a permission no tool or resource of the application lists.
+    /// The ones they list are registered with them.
+    pub fn permission(mut self, permission: McpPermission) -> Self {
+        self.custom_permissions.insert(permission.key.to_string(), permission);
         self
     }
 
-    pub fn tool(mut self, name: impl Into<String>, tool: McpToolDefinition) -> Self {
+    pub fn tool(mut self, name: impl Into<String>, tool: McpTool) -> Self {
         self.tools.insert(name.into(), tool);
         self
     }
 
-    pub fn resource(mut self, uri: impl Into<String>, resource: McpResourceDefinition) -> Self {
+    pub fn resource(mut self, uri: impl Into<String>, resource: McpResource) -> Self {
         self.resources.insert(uri.into(), resource);
         self
     }
@@ -1639,7 +1851,7 @@ fn lenient_u64<'de, D: Deserializer<'de>>(deserializer: D) -> Result<u64, D::Err
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct RetryPolicy {
+pub struct ResolvedRetryPolicy {
     #[serde(deserialize_with = "lenient_u64")]
     pub max_attempts: u64,
     #[serde(deserialize_with = "lenient_u64")]
@@ -1649,36 +1861,43 @@ pub struct RetryPolicy {
     pub max_interval_ms: u64,
 }
 
+/// The retry policy of a flow, of an application or of one dispatch. A value
+/// left unset falls back to the next level, then to the defaults: 3 attempts,
+/// 1 second doubling up to 30 seconds.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
-pub struct PartialRetryPolicy {
+pub struct RetryPolicy {
     pub max_attempts: Option<u64>,
-    pub initial_interval_ms: Option<u64>,
+    pub initial_interval: Option<Duration>,
     pub backoff_coefficient: Option<f64>,
-    pub max_interval_ms: Option<u64>,
+    pub max_interval: Option<Duration>,
 }
 
-impl PartialRetryPolicy {
+impl RetryPolicy {
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// How many times a run is attempted.
     pub fn max_attempts(mut self, value: u64) -> Self {
         self.max_attempts = Some(value);
         self
     }
 
-    pub fn initial_interval_ms(mut self, value: u64) -> Self {
-        self.initial_interval_ms = Some(value);
+    /// The delay before the second attempt.
+    pub fn initial_interval(mut self, value: Duration) -> Self {
+        self.initial_interval = Some(value);
         self
     }
 
+    /// What the delay is multiplied by after each attempt.
     pub fn backoff_coefficient(mut self, value: f64) -> Self {
         self.backoff_coefficient = Some(value);
         self
     }
 
-    pub fn max_interval_ms(mut self, value: u64) -> Self {
-        self.max_interval_ms = Some(value);
+    /// The longest delay between two attempts.
+    pub fn max_interval(mut self, value: Duration) -> Self {
+        self.max_interval = Some(value);
         self
     }
 
@@ -1687,8 +1906,9 @@ impl PartialRetryPolicy {
     }
 }
 
+/// The settings of a worker, with the defaults applied.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct WorkerConfig {
+pub struct ResolvedWorkerConfig {
     pub concurrency: usize,
     pub poll_interval_ms: u64,
     pub poll_max_interval_ms: u64,
@@ -1696,51 +1916,51 @@ pub struct WorkerConfig {
     pub lease_duration_ms: u64,
 }
 
+/// The settings of the workers of an application. A value left unset keeps
+/// its default.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
-pub struct PartialWorkerConfig {
+pub struct WorkerConfig {
     pub concurrency: Option<usize>,
-    pub poll_interval_ms: Option<u64>,
-    pub poll_max_interval_ms: Option<u64>,
+    pub poll_interval: Option<Duration>,
+    pub poll_max_interval: Option<Duration>,
     pub poll_backoff_coefficient: Option<f64>,
-    pub lease_duration_ms: Option<u64>,
+    pub lease_duration: Option<Duration>,
 }
 
-impl PartialWorkerConfig {
+impl WorkerConfig {
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// How many runs a worker executes at once.
     pub fn concurrency(mut self, value: usize) -> Self {
         self.concurrency = Some(value);
         self
     }
 
-    pub fn poll_interval_ms(mut self, value: u64) -> Self {
-        self.poll_interval_ms = Some(value);
+    /// How long an idle worker waits before looking for work again.
+    pub fn poll_interval(mut self, value: Duration) -> Self {
+        self.poll_interval = Some(value);
         self
     }
 
-    pub fn poll_max_interval_ms(mut self, value: u64) -> Self {
-        self.poll_max_interval_ms = Some(value);
+    /// The longest an idle worker waits between two looks.
+    pub fn poll_max_interval(mut self, value: Duration) -> Self {
+        self.poll_max_interval = Some(value);
         self
     }
 
+    /// What the wait is multiplied by each time a worker finds nothing.
     pub fn poll_backoff_coefficient(mut self, value: f64) -> Self {
         self.poll_backoff_coefficient = Some(value);
         self
     }
 
-    pub fn lease_duration_ms(mut self, value: u64) -> Self {
-        self.lease_duration_ms = Some(value);
+    /// How long a worker owns a run without extending its lease.
+    pub fn lease_duration(mut self, value: Duration) -> Self {
+        self.lease_duration = Some(value);
         self
     }
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
-pub struct DispatchOptions {
-    /// Delay before the run becomes available to workers.
-    pub delay_ms: Option<u64>,
-    pub retry_policy: Option<PartialRetryPolicy>,
 }
 
 // ─── Row status types ────────────────────────────────────────────────

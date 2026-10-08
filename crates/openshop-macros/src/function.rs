@@ -5,9 +5,9 @@ use quote::quote;
 use syn::{DeriveInput, Expr, Ident, LitStr};
 
 use crate::provider::{Form, form};
-use crate::util::{Argument, Arguments, plain_name, set_once, text};
+use crate::util::{Argument, Arguments, lower_initial, plain_name, set_once, text};
 
-/// The option naming the type of a function, and the variant of `ShopifyFunctionType`.
+/// The option naming the type of a function, and the variant of `FunctionType`.
 const TYPES: [(&str, &str); 6] = [
     ("discount", "Discount"),
     ("cart_transform", "CartTransform"),
@@ -22,17 +22,7 @@ const OWNER_FLAGS: [&str; 5] = ["starts_at", "ends_at", "usage_limit", "applies_
 
 const COMBINATIONS: [&str; 3] = ["product_discounts", "order_discounts", "shipping_discounts"];
 
-const EXPECTED: &str = "unknown function option; expected the key of the function, its type and handle (`discount = \"handle\"`), `label`, `modes(…)`, `title`, `starts_at`, `ends_at`, `usage_limit`, `applies_on_each_item`, `enabled` or `combines_with(…)`";
-
-/// `VolumeDiscount` → `volumeDiscount`.
-fn default_key(name: &Ident) -> String {
-    let name = plain_name(name);
-    let mut characters = name.chars();
-    match characters.next() {
-        Some(first) => first.to_lowercase().chain(characters).collect(),
-        None => name,
-    }
-}
+const EXPECTED: &str = "unknown function option; expected the name of the function, its type and handle (`discount = \"handle\"`), `label`, `modes(…)`, `title`, `starts_at`, `ends_at`, `usage_limit`, `applies_on_each_item`, `enabled` or `combines_with(…)`";
 
 /// `modes(automatic, code)`.
 fn modes(list: TokenStream) -> syn::Result<TokenStream> {
@@ -127,7 +117,7 @@ pub fn derive(input: DeriveInput) -> syn::Result<TokenStream> {
             "a function states its type and its handle: `#[function(discount = \"volume-discount\")]`",
         ));
     };
-    let key = key.unwrap_or_else(|| LitStr::new(&default_key(name), name.span()));
+    let key = key.unwrap_or_else(|| LitStr::new(&lower_initial(&plain_name(name)), name.span()));
 
     // What an instance is called when its configuration cannot be read.
     let fallback = label.clone().unwrap_or_else(|| handle.clone());
@@ -160,12 +150,12 @@ pub fn derive(input: DeriveInput) -> syn::Result<TokenStream> {
 
     Ok(quote! {
         impl #krate::FunctionConfig for #name {
-            const KEY: &'static str = #key;
+            const NAME: &'static str = #key;
 
-            fn definition() -> #krate::FunctionDefinition {
-                let mut fields = #krate::FieldDefinitions::new();
+            fn definition() -> #krate::Function {
+                let mut fields = #krate::Fields::new();
                 #(#definitions)*
-                let mut function = #krate::FunctionDefinition::new(#krate::ShopifyFunctionType::#function_type, #handle)
+                let mut function = #krate::Function::new(#krate::FunctionType::#function_type, #handle)
                     #label
                     #(#definition_options)*
                     #owner;
@@ -183,7 +173,7 @@ pub fn derive(input: DeriveInput) -> syn::Result<TokenStream> {
 
             fn register(app: #krate::OpenShopBuilder) -> #krate::OpenShopBuilder {
                 app.function(
-                    <Self as #krate::FunctionConfig>::KEY,
+                    <Self as #krate::FunctionConfig>::NAME,
                     <Self as #krate::FunctionConfig>::definition(),
                 )
             }
@@ -225,9 +215,9 @@ mod tests {
         .to_string();
 
         for expected in [
-            "impl :: openshop :: FunctionConfig for VolumeDiscount { const KEY : & 'static str = \"volumeDiscount\" ;",
+            "impl :: openshop :: FunctionConfig for VolumeDiscount { const NAME : & 'static str = \"volumeDiscount\" ;",
             "String :: from (\"minQuantity\") , < u32 as :: openshop :: ProviderField > :: field (\"Minimum quantity\")",
-            ":: openshop :: FunctionDefinition :: new (:: openshop :: ShopifyFunctionType :: Discount , \"volume-discount\") . label (\"Volume discount\")",
+            ":: openshop :: Function :: new (:: openshop :: FunctionType :: Discount , \"volume-discount\") . label (\"Volume discount\")",
             ". modes ([:: openshop :: DiscountMode :: Automatic , :: openshop :: DiscountMode :: Code])",
             ". owner (:: openshop :: FunctionOwner :: dynamic_title (",
             ":: core :: result :: Result :: Ok (config) => (Self :: title) (& config)",
@@ -247,9 +237,12 @@ mod tests {
         })
         .unwrap()
         .to_string();
-        assert!(plain.contains("const KEY : & 'static str = \"cartRules\" ;"), "{plain}");
         assert!(
-            plain.contains("ShopifyFunctionType :: CartTransform , \"cart-rules\") ;"),
+            plain.contains("const NAME : & 'static str = \"cartRules\" ;"),
+            "{plain}"
+        );
+        assert!(
+            plain.contains("FunctionType :: CartTransform , \"cart-rules\") ;"),
             "{plain}"
         );
     }
@@ -278,10 +271,6 @@ mod tests {
         assert_eq!(
             refusal(parse_quote! { #[function(discount = "a", weight = 3)] struct F; }),
             EXPECTED
-        );
-        assert_eq!(
-            refusal(parse_quote! { #[function(discount = "a")] struct F { quantity: u32 } }),
-            "the form needs a label for `quantity`: add `#[field(label = \"…\")]`"
         );
         assert_eq!(
             refusal(parse_quote! { #[function(discount = "a")] struct F<T> { #[field(label = "A")] a: T } }),

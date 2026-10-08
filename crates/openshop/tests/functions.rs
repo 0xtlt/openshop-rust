@@ -5,10 +5,10 @@ use std::sync::{Arc, Mutex};
 
 use chrono::{DateTime, Utc};
 use openshop::runtime::OutboundRequest;
-use openshop::testing::{MockTransport, TestContext, TestOptions, create_session_token};
+use openshop::testing::{MockTransport, TestContext, TestOptions, session_token};
 use openshop::{
-    CombinesWith, DiscountMode, FieldDef, FieldOption, FunctionDefinition, FunctionOwner, IndexMap, OpenShopBuilder,
-    OpenShopConfig, ShopifyAppConfig, ShopifyConfig, ShopifyFunctionType, Value, json, validators,
+    CombinesWith, DiscountMode, Field, FieldOption, Function, FunctionOwner, FunctionType, IndexMap, OpenShopBuilder,
+    OpenShopConfig, ShopifyAppConfig, ShopifyConfig, Value, json, validators,
 };
 use reqwest::{Method, RequestBuilder};
 
@@ -19,11 +19,11 @@ const API_VERSION: &str = "2026-04";
 // ─── Application under test ──────────────────────────────────────────
 
 fn functions_builder() -> OpenShopBuilder {
-    let message = || FieldDef::text("Message");
+    let message = || Field::text("Message");
     OpenShopConfig::builder()
         .function(
             "discount",
-            FunctionDefinition::new(ShopifyFunctionType::Discount, "volume-discount")
+            Function::new(FunctionType::Discount, "volume-discount")
                 .modes([DiscountMode::Automatic, DiscountMode::Code])
                 .owner(
                     FunctionOwner::dynamic_title(|config| format!("Volume {}", config["percent"])).combines_with(
@@ -35,35 +35,34 @@ fn functions_builder() -> OpenShopBuilder {
                 )
                 .field(
                     "percent",
-                    FieldDef::number("Percent").validate(validators::number_range(0.0, f64::INFINITY)),
+                    Field::number("Percent").validate(validators::number_range(0.0, f64::INFINITY)),
                 ),
         )
         .function(
             "cartTransform",
-            FunctionDefinition::new(ShopifyFunctionType::CartTransform, "cart-transform")
+            Function::new(FunctionType::CartTransform, "cart-transform")
                 .label("Bundle cart transform")
                 .field("message", message()),
         )
         .function(
             "fulfillmentConstraints",
-            FunctionDefinition::new(ShopifyFunctionType::FulfillmentConstraints, "fulfillment-rules")
-                .field("message", message()),
+            Function::new(FunctionType::FulfillmentConstraints, "fulfillment-rules").field("message", message()),
         )
         .function(
             "deliveryCustomization",
-            FunctionDefinition::new(ShopifyFunctionType::DeliveryCustomization, "delivery-rules")
+            Function::new(FunctionType::DeliveryCustomization, "delivery-rules")
                 .owner(FunctionOwner::new("Delivery rules"))
                 .field("message", message()),
         )
         .function(
             "paymentCustomization",
-            FunctionDefinition::new(ShopifyFunctionType::PaymentCustomization, "payment-rules")
+            Function::new(FunctionType::PaymentCustomization, "payment-rules")
                 .owner(FunctionOwner::new("Payment rules"))
                 .field("message", message()),
         )
         .function(
             "checkoutValidation",
-            FunctionDefinition::new(ShopifyFunctionType::CheckoutValidation, "checkout-validation")
+            Function::new(FunctionType::CheckoutValidation, "checkout-validation")
                 .owner(FunctionOwner::new("Checkout validation"))
                 .field("message", message()),
         )
@@ -72,36 +71,33 @@ fn functions_builder() -> OpenShopBuilder {
 /// Definitions exercising defaults: discounts without modes or owner, and every field type.
 fn extras_config() -> OpenShopConfig {
     OpenShopConfig::builder()
-        .function(
-            "free_shipping",
-            FunctionDefinition::new(ShopifyFunctionType::Discount, "free-shipping"),
-        )
+        .function("free_shipping", Function::new(FunctionType::Discount, "free-shipping"))
         .function(
             "codeOnly",
-            FunctionDefinition::new(ShopifyFunctionType::Discount, "code-only")
+            Function::new(FunctionType::Discount, "code-only")
                 .modes([DiscountMode::Code])
                 .owner(FunctionOwner::new("Code only")),
         )
         .function(
             "tiers",
-            FunctionDefinition::new(ShopifyFunctionType::PaymentCustomization, "tiered-rules")
+            Function::new(FunctionType::PaymentCustomization, "tiered-rules")
                 .owner(FunctionOwner::dynamic_title(|config| {
                     format!("Tier {}", config["tier"].as_str().unwrap_or_default())
                 }))
                 .field(
                     "threshold",
-                    FieldDef::number("Threshold").validate(validators::integer_min(1)),
+                    Field::number("Threshold").validate(validators::integer_min(1)),
                 )
                 .field(
                     "tier",
-                    FieldDef::select(
+                    Field::select(
                         "Tier",
                         [FieldOption::new("Gold", "gold"), FieldOption::new("Silver", "silver")],
                     )
                     .validate(validators::one_of(["gold", "silver"])),
                 )
-                .field("note", FieldDef::text("Note").placeholder("Shown to staff").optional())
-                .field("strict", FieldDef::checkbox("Strict").optional()),
+                .field("note", Field::text("Note").placeholder("Shown to staff").optional())
+                .field("strict", Field::checkbox("Strict").optional()),
         )
         .build()
         .unwrap()
@@ -721,7 +717,7 @@ async fn uses_the_installation_of_the_session_shopify_app() {
     let shop = ctx.shop.clone();
     install(&ctx, "client-a", &shop, "token-a").await;
     install(&ctx, "client-b", &shop, "token-b").await;
-    let session_b = create_session_token(&shop, "secret-b", "key-b", "1");
+    let session_b = session_token(&shop, "secret-b", "key-b", "1");
 
     let (status, _) = send(ctx.get("/api/functions/volume-discount/instances")).await;
     assert_eq!(status, 200);

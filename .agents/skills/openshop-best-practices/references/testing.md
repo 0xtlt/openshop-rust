@@ -43,6 +43,7 @@ Use targeted tests when the change is narrow:
 - Engine behavior: `crates/openshop/tests/engine_*.rs` (dispatch, runner, step, worker, scheduler) and the unit tests in `crates/openshop/src/engine`.
 - Server, Admin API, auth, security, proxy, routes, and webhooks: `api.rs`, `auth.rs`, `security.rs`, `proxy_routes.rs`, `server_routes.rs`, `server_limits.rs`, `webhooks.rs`, `pages.rs`, `static_ui.rs`, `functions.rs`, `mcp.rs`, and `custom_admin_pages.rs` in `crates/openshop/tests`.
 - Declared blocks (`#[flow]`, `#[webhook]`, `#[proxy]`, `#[route]`, `#[admin_page]`, `#[mcp_tool]`, `#[mcp_resource]`, `#[derive(FunctionConfig)]`), `app!` and what the builder refuses: `crates/openshop/tests/declared.rs`, and the unit tests of the macros in `crates/openshop-macros/src`.
+- What a context of a shop gives and what takes one (`dispatch`, `Model::of`), the typed inputs of proxies and routes, Liquid templates, and the input of a cron: `crates/openshop/tests/contexts.rs`.
 - Migrations: `crates/openshop/tests/migrations.rs` and the unit tests in `crates/openshop/src/db/migrate.rs`.
 - CLI behavior (`init`, `dev` watcher, restarts): unit tests in `crates/openshop-cli/src`.
 - Shared rules: unit tests in `crates/openshop-shared/src`.
@@ -64,7 +65,7 @@ when the UI changes.
 
 ## Demo App
 
-For changes affecting app usage, flows, providers, app proxy, or demo conventions, check `apps/demo/tests` and run `cargo test -p openshop-demo`. `apps/demo/tests/common/mod.rs` shows how to boot an application with Shopify GraphQL answered by fixtures.
+For changes affecting app usage, flows, providers, app proxy, or demo conventions, check `apps/demo/tests` and run `cargo test -p openshop-demo`. `apps/demo/tests` shows the tests of an application in their recommended form, and `apps/demo/tests/common/mod.rs` how to answer Shopify GraphQL with fixtures (`answer_shopify(ctx)`).
 
 ## Test Style
 
@@ -72,9 +73,12 @@ For changes affecting app usage, flows, providers, app proxy, or demo convention
 - Add regression tests for bugs in retries, step persistence, scheduling, auth, signatures, migrations, or generated templates.
 - Keep integration tests for behavior that depends on DB state, HTTP requests, Shopify signatures/JWTs, worker execution, or generated app structure.
 - Use the harness in `openshop::testing` (feature `testing`): `TestContext` starts the app on a random port against an isolated schema, `ctx.fakes` replaces provider methods with recording fakes, `ctx.transport` (`MockTransport`) scripts Shopify HTTP responses, `ctx.proxy()` signs app proxy requests, and `ctx.get(..)` / `ctx.post(..)` send requests with a session token.
-- Test an application through its declaration: `TestContext::new(my_app::APP.config()?)` boots what `app!` lists. `APP.config()` builds a new configuration at each call.
-- Build a small test-only configuration with `OpenShopConfig::builder()`: `.add::<Block>()` for a declared block (`.add::<Warehouse>().add::<sync_orders>()`), the builder types (`Flow::new(..)`, `Provider::new(..)`, `ServerRoute::public()`…) for blocks made up in the test, and `APP.builder()?` to add to the whole application. `build()` refuses a key registered twice.
+- Test an application through its declaration, with `#[openshop::test(APP)]` on `async fn(ctx: &TestContext)`: it starts what `app!` lists on an isolated database with its shop installed, and shuts the context down when the function returns. Do not write `#[tokio::test]`, `TestContext::with_options(..)` or `ctx.shutdown().await` in such a test. Take `&mut TestContext` to create resources with a factory (`Factory::new(create, destroy)`, `ctx.create(..)`). The function returns `()` or a `Result`. Put `#[ignore]` and the other attributes of the test below `#[openshop::test(APP)]`.
+- Write the attribute with its path: `openshop::prelude` does not have `test`, which would hide `#[test]`.
+- Build a small test-only configuration with `OpenShopConfig::builder()`: `.add::<Block>()` for a declared block (`.add::<Warehouse>().add::<sync_orders>()`), the builder types (`Flow::new(..)`, `Provider::new(..)`, `Route::public()`…) for blocks made up in the test, and `APP.builder()?` to add to the whole application. `build()` refuses a key registered twice. Start it with `TestContext::new(config)` or `TestContext::with_options(config, TestOptions::installed())`, where `installed()` is the options of a shop with an access token, and end that test with `ctx.shutdown().await` so the test schema is dropped. `TestContext::for_app(&APP)` and `APP.test()` start a declared application the same way, by hand.
 - Name a block by its constant: `ctx.run_flow(sync_orders::NAME, json!({ … }))`, `ctx.fakes.for_call(Warehouse::PUSH)`, `ReviewsPage::PATH`.
-- Test admin loaders and actions with `create_admin_function_test_context` and `invoke_admin_function` on `config.admin_pages[..].functions["listReviews"]`; a function is keyed by its name in camel case, or by the name given to `#[loader]` or `#[action]`.
-- End each test with `ctx.shutdown().await` so the test schema is dropped.
-- Assert on `RunFlowResult` returned by `ctx.run_flow(..)` instead of reading run rows when the outcome is enough.
+- Fake a provider method with its typed fake, `ctx.fakes.for_call(Warehouse::PUSH)`: `.returns(value)` takes the type the method returns, and `.last_call().unwrap().args` and `.calls()` give the arguments as the method receives them (a `Vec<WarehouseRecord>` for `push(records: Vec<WarehouseRecord>)`). It also has `.called()`, `.call_count()`, `.rejects(..)`, `.on_call_returns(n, value)`, `.on_call_rejects(n, ..)`, `.reset()`, and `.untyped()` for the raw `FakeMethod`. Keep `ctx.fakes.method("warehouse", "push")`, with JSON arguments and results, for a method only known by name.
+- Give the input of a run the names it has outside Rust: an `#[input]` type reads `json!({ "productId": "…" })` for its field `product_id`.
+- Read the rows of a model in a test with `Review::for_shop(&ctx.db, &ctx.shop)`: a `TestContext` is not the context of a handler, so `Review::of` does not take it.
+- Test admin loaders and actions with `admin_context` and `invoke_admin_function` on `config.admin_pages[..].functions["listReviews"]`; a function is keyed by its name in camel case, or by the name given to `#[loader]` or `#[action]`.
+- Assert on `RunOutcome` returned by `ctx.run_flow(..)` instead of reading run rows when the outcome is enough.

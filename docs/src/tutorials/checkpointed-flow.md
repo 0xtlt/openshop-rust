@@ -16,11 +16,11 @@ Create `src/flows/prepare_report.rs`:
 use std::time::Duration;
 
 use openshop::chrono::Utc;
-use openshop::{Flow, json};
-use schemars::JsonSchema;
+use openshop::prelude::*;
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[input]
+#[derive(Debug)]
 pub struct PrepareReportInput {
     #[schemars(length(min = 1))]
     pub label: String,
@@ -33,36 +33,36 @@ struct Report {
     prepared_at: String,
 }
 
-pub fn prepare_report() -> Flow {
-    Flow::new("prepareReport", |ctx| async move {
-        let input: PrepareReportInput = ctx.input()?;
+#[flow("prepareReport")]
+pub async fn prepare_report(ctx: FlowContext, input: PrepareReportInput) -> Result<()> {
+    let report: Report = ctx
+        .step
+        .run("prepare-report", async || {
+            let report = Report {
+                label: input.label.clone(),
+                prepared_at: Utc::now().to_rfc3339(),
+            };
+            ctx.logger.info_with("Prepared report", json!(report));
+            Ok(report)
+        })
+        .await?;
 
-        let report: Report = ctx
-            .step
-            .run("prepare-report", || async {
-                let report = Report {
-                    label: input.label.clone(),
-                    prepared_at: Utc::now().to_rfc3339(),
-                };
-                ctx.logger.info(json!(report), "Prepared report");
-                Ok(report)
-            })
-            .await?;
+    ctx.step
+        .sleep("wait-before-publishing", Duration::from_secs(10))
+        .await?;
 
-        ctx.step
-            .sleep("wait-before-publishing", Duration::from_secs(10))
-            .await?;
-
-        ctx.step
-            .run("publish-report", || async {
-                ctx.logger.info(json!(report), "Published report");
-                Ok(())
-            })
-            .await
-    })
-    .input::<PrepareReportInput>()
+    ctx.step
+        .run("publish-report", async || {
+            ctx.logger.info_with("Published report", json!(report));
+            Ok(())
+        })
+        .await
 }
 ```
+
+`#[flow("prepareReport")]` makes the function the flow of that name. Its second
+argument is the input of a run: `#[input]` makes `PrepareReportInput` a type a
+run can receive, and a run with an empty `label` is refused.
 
 `Report` derives both `Serialize` and `Deserialize`. `ctx.step.run()` saves the
 returned value as JSON so the resumed flow can read the same timestamp back.
@@ -76,24 +76,24 @@ pub mod prepare_report;
 pub mod sync_orders;
 ```
 
-In `src/main.rs`, replace the `config` function with:
+In `src/main.rs`, import the flow next to `sync_orders`:
 
 ```rust
-fn config() -> Result<OpenShopConfig> {
-    OpenShopConfig::builder()
-        .provider(providers::warehouse::warehouse())
-        .flow(flows::sync_orders::sync_orders())
-        .flow(flows::prepare_report::prepare_report())
-        .mcp(McpConfig::new().enabled(false))
-        .page(AdminPageId::Mcp, AdminPageMode::Disabled)
-        .on_error(|error, context| async move {
-            eprintln!(
-                "[openshop:error] Flow \"{}\" failed: {error}",
-                context.flow.unwrap_or_default()
-            );
-        })
-        .build()
-}
+use flows::prepare_report::prepare_report;
+use flows::sync_orders::sync_orders;
+```
+
+Then list it in the `flows` of `app!`:
+
+```rust
+static APP: App = app! {
+    providers: [Warehouse],
+    flows: [sync_orders, prepare_report],
+    // MCP is off: `POST /mcp` is refused and the admin has no MCP page.
+    // Remove this line to turn it on.
+    mcp: McpConfig::disabled(),
+    on_error: report_failure,
+};
 ```
 
 Leave the rest of the file unchanged.
@@ -133,11 +133,11 @@ The new run prepares a new timestamp. Checkpoints belong to a particular run;
 they are not shared between independent runs.
 
 Run `cargo test` from a second terminal in the project directory. The generated
-`config_is_valid` test now also validates the new flow definition.
+`the_application_is_valid` test now also validates the new flow.
 
 ## What you built
 
-You wrote and registered a flow, validated its input, and observed a saved
+You wrote and listed a flow, validated its input, and observed a saved
 checkpoint across a pause. Read [Checkpoints and retries](../concepts/checkpoints-and-retries.md)
 for the failure cases and why external writes still need idempotency.
 When you are ready to call a real service, use

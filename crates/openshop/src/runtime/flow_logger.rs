@@ -7,7 +7,7 @@ use serde_json::Value;
 use sqlx::PgPool;
 use tokio::sync::{mpsc, oneshot};
 
-use super::logger::get_runtime_logger;
+use super::logger::logger;
 
 /// How long a line may wait for the next ones before it is written.
 const WRITE_DELAY: Duration = Duration::from_millis(50);
@@ -76,7 +76,7 @@ impl FlowLogger {
 
     fn log(&self, level: &'static str, payload: Value, message: &str) {
         let line = format!("[{}] {message}", level.to_uppercase());
-        let logger = get_runtime_logger();
+        let logger = logger();
         match level {
             "warn" => logger.warn(&line, Some(&payload)),
             "error" => logger.error(&line, Some(&payload)),
@@ -91,15 +91,29 @@ impl FlowLogger {
         }));
     }
 
-    pub fn info(&self, payload: Value, message: impl AsRef<str>) {
+    /// Logs a line of the run.
+    pub fn info(&self, message: impl AsRef<str>) {
+        self.info_with(message, Value::Object(Default::default()));
+    }
+
+    /// Logs a line with data the admin shows next to it: `json!({ "count": 3 })`.
+    pub fn info_with(&self, message: impl AsRef<str>, payload: Value) {
         self.log("info", payload, message.as_ref());
     }
 
-    pub fn warn(&self, payload: Value, message: impl AsRef<str>) {
+    pub fn warn(&self, message: impl AsRef<str>) {
+        self.warn_with(message, Value::Object(Default::default()));
+    }
+
+    pub fn warn_with(&self, message: impl AsRef<str>, payload: Value) {
         self.log("warn", payload, message.as_ref());
     }
 
-    pub fn error(&self, payload: Value, message: impl AsRef<str>) {
+    pub fn error(&self, message: impl AsRef<str>) {
+        self.error_with(message, Value::Object(Default::default()));
+    }
+
+    pub fn error_with(&self, message: impl AsRef<str>, payload: Value) {
         self.log("error", payload, message.as_ref());
     }
 

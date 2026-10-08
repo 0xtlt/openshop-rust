@@ -7,10 +7,10 @@ use serde_json::{Value, json};
 
 use crate::app::OpenShop;
 use crate::server::http::json_response;
-use crate::types::{CronEntry, JsonMap};
+use crate::types::{Cron, JsonMap};
 
 /// A cron entry as configured; unset fields are omitted.
-fn cron_json(cron: &CronEntry) -> Value {
+fn cron_json(cron: &Cron) -> Value {
     let mut entry = JsonMap::new();
     if let Some(name) = &cron.name {
         entry.insert("name".into(), Value::from(name.clone()));

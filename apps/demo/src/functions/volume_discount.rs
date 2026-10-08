@@ -1,4 +1,4 @@
-use openshop::{FunctionConfig, validators};
+use openshop::prelude::*;
 
 /// A percentage off once the cart holds enough items. The fields are what a
 /// merchant fills for each discount created from the admin.
@@ -15,7 +15,7 @@ use openshop::{FunctionConfig, validators};
 pub struct VolumeDiscount {
     #[field(label = "Minimum quantity", validate = validators::integer_min(1))]
     pub min_quantity: u32,
-    #[field(label = "Discount percentage", validate = validators::number_range(0.0, 100.0))]
+    #[field(label = "Discount percentage", range(min = 0, max = 100))]
     pub percentage: f64,
     #[field(label = "Excluded product tags", placeholder = "gift, sample")]
     pub excluded_tags: Option<String>,

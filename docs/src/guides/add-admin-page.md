@@ -14,7 +14,7 @@ cargo install trunk --locked
 ```
 
 > **Caution: experimental API.**
-> Custom admin pages are enabled with the `custom_pages` setting of `app!`. Check the
+> Custom admin pages are experimental. Check the
 > [custom admin page reference](../reference/custom-admin-pages.md) when upgrading.
 
 ## 1. Create the server loader
@@ -22,14 +22,14 @@ cargo install trunk --locked
 Create `src/admin/store.rs`:
 
 ```rust,ignore
-use openshop::{AdminServerContext, Result, Value, admin_page, json};
+use openshop::prelude::*;
 
 pub struct StorePage;
 
-#[admin_page("/store")]
+#[admin_page("/store", nav = "Store")]
 impl StorePage {
     #[loader]
-    async fn store_summary(ctx: AdminServerContext) -> Result<Value> {
+    async fn store_summary(ctx: AdminContext) -> Result<Value> {
         Ok(json!({ "shop": ctx.shop, "shopifyApp": ctx.shopify_app }))
     }
 }
@@ -39,12 +39,20 @@ Declare the module in a new `src/admin/mod.rs` (`pub mod store;`) and add
 `mod admin;` next to the other `mod` lines of `src/main.rs`.
 
 `#[admin_page("/store")]` makes the `impl` block of `StorePage` the server side
-of the page, and `#[loader]` makes `store_summary` a loader of that page, called
+of the page, and `nav = "Store"` gives the page an entry in the menu of the
+admin. `#[loader]` makes `store_summary` a loader of that page, called
 `storeSummary`: the name of the function in camel case.
 
 The loader receives the identity verified by OpenShop. Keep database access,
 provider credentials, and other server-only work in loaders and actions: their
 context also carries `ctx.db`, `ctx.shopify`, and `ctx.connectors`.
+
+A loader or an action can take what the page sends as a second argument. Mark
+the type of that argument with `#[input]`: the input is validated against it
+before the function runs, and its fields are named in camel case outside Rust
+(`display_name` is `displayName`). The
+[custom admin page reference](../reference/custom-admin-pages.md#loaders-and-actions)
+shows an action with its input.
 
 ## 2. Create the page
 
@@ -113,35 +121,35 @@ cd ui
 trunk build --release
 ```
 
-## 3. Enable navigation
+## 3. List the page and serve the bundle
 
-In `src/main.rs`, where the application is declared, list the page and add its
-sidebar entry and the bundle to serve, keeping your flows and other settings:
+In `src/main.rs`, where the application is declared, list the page and add the
+bundle to serve, keeping your flows and other settings:
 
 ```rust,ignore
-use openshop::{App, CustomAdminNavigationItem, UiSource, app};
+use openshop::UiSource;
+use openshop::prelude::*;
 
 use admin::store::StorePage;
 
 static APP: App = app! {
     // ... providers, flows and other settings ...
     admin_pages: [StorePage],
-    custom_pages: [CustomAdminNavigationItem::new("Store", StorePage::PATH)],
     admin_ui: UiSource::Dir("ui/dist".into()),
 };
 ```
 
-`StorePage::PATH` is the path given to `#[admin_page]`. The configuration is
-refused, and the app does not start, when a navigation path does not match a
-listed page. `admin_ui` replaces the built-in bundle with yours; the directory
-is resolved from the working directory of the process. The `OPENSHOP_UI_DIR`
-environment variable overrides it.
+Listing the page in `admin_pages` is enough to serve it, and its `nav` label
+is its entry in the menu. `admin_ui` replaces the built-in bundle with yours;
+the directory is resolved from the working directory of the process. The
+`OPENSHOP_UI_DIR` environment variable overrides it.
 
-The generated `src/main.rs` builds its configuration with
-`OpenShopConfig::builder()`, the lower level of `app!`. To keep it as it is,
-add `.add::<admin::store::StorePage>()` to the builder, which adds a declared
-block, and give the two settings to the methods of their name:
-`.custom_pages([…])` and `.admin_ui(…)`.
+To set the menu by hand, for another order or another label, add the
+`custom_pages` setting:
+`custom_pages: [openshop::CustomAdminNavigationItem::new("Store", StorePage::PATH)]`.
+It replaces the entries the pages declare. `StorePage::PATH` is the path given
+to `#[admin_page]`; the configuration is refused, and the app does not start,
+when a path of that list does not match a listed page.
 
 Restart `openshop dev` so that it picks up the new `ui/` directory. Open the
 app from Shopify admin and select **Store**. You should see the current shop
@@ -164,7 +172,8 @@ To keep a single binary, compile the bundle into it instead. Add the
 `rust-embed` crate (`cargo add rust-embed`) and serve the embedded files:
 
 ```rust,ignore
-use openshop::{App, UiSource, app};
+use openshop::UiSource;
+use openshop::prelude::*;
 use rust_embed::RustEmbed;
 
 #[derive(RustEmbed)]
@@ -187,21 +196,21 @@ a page rule with `#[access]` and per-function rules with `authorize = ..` on
 `#[loader]` and `#[action]`:
 
 ```rust,ignore
-use openshop::{AdminServerContext, Result, Value, admin_page, json};
+use openshop::prelude::*;
 
 const ALLOWED_STAFF: [&str; 1] = ["1234567890"];
 
 pub struct StorePage;
 
-#[admin_page("/store")]
+#[admin_page("/store", nav = "Store")]
 impl StorePage {
     #[access]
-    async fn staff_only(ctx: AdminServerContext) -> Result<bool> {
+    async fn staff_only(ctx: AdminContext) -> Result<bool> {
         Ok(ALLOWED_STAFF.contains(&ctx.actor.id.as_str()))
     }
 
     #[loader]
-    async fn store_summary(ctx: AdminServerContext) -> Result<Value> {
+    async fn store_summary(ctx: AdminContext) -> Result<Value> {
         Ok(json!({ "shop": ctx.shop, "shopifyApp": ctx.shopify_app }))
     }
 }
@@ -210,5 +219,6 @@ impl StorePage {
 `ctx.actor.id` is the Shopify staff user of the session token. The rules are
 described in the
 [authorization reference](../reference/custom-admin-pages.md#authorization-and-errors).
-When querying app-owned tables, filter by the trusted shop and app identity;
-`sqlx` does not add those filters automatically.
+When querying app-owned tables, read a model through the rows of the shop of
+the context, as in `Review::of(&ctx)`, and filter by the app identity where it
+matters; a query written with `sqlx` has no such filter.

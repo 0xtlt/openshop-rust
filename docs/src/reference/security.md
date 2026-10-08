@@ -68,10 +68,10 @@ See [Authentication](authentication.md) for request formats.
 ## Multi-app isolation
 
 Framework state is scoped by `(app_handle, shop)`. For custom tables, the rows
-returned by `Model::for_shop(db, shop)` are limited to that shop in every
-operation. Everything else must apply its own tenant filter: a query written
-with `sqlx`, `Model::all_shops(db)`, and the app handle when several apps
-share a table.
+of a model returned by `Review::of(&ctx)` or `Review::for_shop(&db, shop)` are
+limited to that shop in every operation. Everything else must apply its own
+tenant filter: a query written with `sqlx`, `Review::all_shops(&db)`, and the
+app handle when several apps share a table.
 
 ## MCP permissions
 
@@ -83,7 +83,12 @@ and duration; they do not replace external security monitoring.
 ## Proxy and webhook handlers
 
 - Treat request bodies and Shopify payloads as untrusted input.
-- Validate input before provider or database writes.
+- Validate input before provider or database writes. A `#[proxy]` or
+  `#[route]` function with a typed input refuses a request that does not fit
+  it with `422` before the function runs.
+- Give server values to a Liquid template with `.assign(…)`, which writes them
+  as literals that their text cannot close. Do not build a template from
+  request data.
 - Make webhook and retryable flow side effects idempotent.
 - Trust the verified context identity, not duplicated query/body fields.
 - Do not return secrets or raw upstream error bodies to clients.

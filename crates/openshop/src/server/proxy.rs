@@ -23,8 +23,11 @@ use super::jwt::{customer_id_from_jwt_sub, read_jwt_audience, verify_session_tok
 use super::shop_domain::normalize_shop_domain;
 use super::shopify_apps::ResolvedShopifyApp;
 use crate::app::OpenShop;
+use crate::declare::InvalidInput;
 use crate::engine::step::error_message;
 use crate::runtime::logger;
+use crate::server::connectors::Connectors;
+use crate::shopify::client::ShopifyClient;
 use crate::types::{ProxyAuthKind, ProxyContext, ProxyHandler, ProxyResponseType};
 
 struct ResolvedProxyAuth {
@@ -159,6 +162,9 @@ async fn handle(
 
     let context = ProxyContext {
         query: sanitized_query(&query, &auth),
+        db: app.db().clone(),
+        shopify: ShopifyClient::new(&app, &auth.shop, &auth.shopify_app.handle),
+        connectors: Connectors::for_shop(&app, &auth.shop, &auth.shopify_app.handle),
         shop: auth.shop,
         shopify_app: auth.shopify_app.handle,
         customer_id: auth.customer_id,
@@ -177,6 +183,10 @@ async fn handle(
 
     let failure = match AssertUnwindSafe((route.handler)(context)).catch_unwind().await {
         Ok(Ok(result)) => return send_response(result, route.response_type),
+        // The request does not fit the typed input of the handler.
+        Ok(Err(error)) if error.is::<InvalidInput>() => {
+            return json_error(StatusCode::UNPROCESSABLE_ENTITY, error.to_string());
+        }
         Ok(Err(error)) => error_message(&error),
         Err(_) => "handler panicked".to_string(),
     };

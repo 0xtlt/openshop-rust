@@ -13,15 +13,18 @@ use uuid::Uuid;
 
 use super::db::TestDb;
 use super::factory::{Factory, FactoryScope};
-use super::fake::{FakeProviders, create_fake_providers};
+use super::fake::FakeProviders;
 use super::transport::MockTransport;
-use super::{create_session_token, to_query_string};
+use super::{session_token, to_query_string};
 use crate::app::{OpenShop, OpenShopConfig};
-use crate::engine::dispatch::DispatchFlowParams;
-use crate::engine::runner::{RunFlowOptions, RunFlowResult, run_flow};
+use crate::declare::App;
+use crate::engine::dispatch::DispatchOptions;
+use crate::engine::runner::{RunFlowOptions, RunOutcome, run_flow};
 use crate::runtime::RuntimeEnv;
 use crate::server::hmac::proxy_signature;
+use crate::server::shopify_apps::DEFAULT_SHOPIFY_APP_HANDLE;
 use crate::server::{ServerHandle, ServerOptions, create_router, serve};
+use crate::types::ShopScope;
 
 #[derive(Debug, Clone)]
 pub struct ProxyResponse {
@@ -225,9 +228,42 @@ pub struct TestContext {
     server: ServerHandle,
 }
 
+/// A test stands for its shop, in the single-app setup: what takes a context
+/// takes the test context, `Review::of(ctx)` or `sync_orders::dispatch(ctx, …)`.
+impl ShopScope for TestContext {
+    fn shop(&self) -> &str {
+        &self.shop
+    }
+
+    fn shopify_app(&self) -> &str {
+        DEFAULT_SHOPIFY_APP_HANDLE
+    }
+
+    fn app(&self) -> &OpenShop {
+        &self.app
+    }
+}
+
+impl TestOptions {
+    /// The options of a test whose shop has installed the application: the
+    /// flows, the proxies and the admin find an access token for it.
+    pub fn installed() -> Self {
+        Self {
+            access_token: Some("test-access-token".to_string()),
+            ..Self::default()
+        }
+    }
+}
+
 impl TestContext {
     pub async fn new(config: OpenShopConfig) -> Result<Self> {
         Self::with_options(config, TestOptions::default()).await
+    }
+
+    /// Starts a declared application for a test, with its shop installed.
+    /// What `#[openshop::test(APP)]` gives a test.
+    pub async fn for_app(app: &App) -> Result<Self> {
+        Self::with_options(app.config()?, TestOptions::installed()).await
     }
 
     pub async fn with_options(config: OpenShopConfig, options: TestOptions) -> Result<Self> {
@@ -267,8 +303,8 @@ impl TestContext {
         let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
         let server = serve(listener, create_router(&app, options.server.clone(), false)?).await?;
         let port = server.addr.port();
-        let fakes = create_fake_providers(&app.config().providers);
-        let shopify = app.shopify_client(&options.shop, "default").await?;
+        let fakes = FakeProviders::new(&app.config().providers);
+        let shopify = app.shopify_client(&options.shop, "default");
 
         Ok(Self {
             url: format!("http://127.0.0.1:{port}"),
@@ -290,12 +326,12 @@ impl TestContext {
     }
 
     /// Run a flow with faked providers
-    pub async fn run_flow(&self, flow_name: &str, input: Value) -> Result<RunFlowResult> {
+    pub async fn run_flow(&self, flow_name: &str, input: Value) -> Result<RunOutcome> {
         let shop = self.shop.clone();
         self.run_flow_for(flow_name, input, &shop).await
     }
 
-    pub async fn run_flow_for(&self, flow_name: &str, input: Value, shop: &str) -> Result<RunFlowResult> {
+    pub async fn run_flow_for(&self, flow_name: &str, input: Value, shop: &str) -> Result<RunOutcome> {
         let (run_id,): (Uuid,) = sqlx::query_as(
             "INSERT INTO flow_runs (shop, flow_name, status, input, available_at) \
              VALUES ($1, $2, 'running', $3::json, now()) RETURNING id",
@@ -324,7 +360,7 @@ impl TestContext {
     pub async fn dispatch_flow_for(&self, flow_name: &str, input: Value, shop: &str) -> Result<Uuid> {
         let result = self
             .app
-            .dispatch_flow(DispatchFlowParams::new(flow_name, shop).input(input))
+            .dispatch_flow(DispatchOptions::new(flow_name, shop).input(input))
             .await?;
         Ok(result.run_id)
     }
@@ -345,7 +381,7 @@ impl TestContext {
     }
 
     pub fn session_token_for(&self, shop: &str, sub: &str) -> String {
-        create_session_token(shop, &self.secret, &self.api_key, sub)
+        session_token(shop, &self.secret, &self.api_key, sub)
     }
 
     /// Authorization header value for authenticated API requests.

@@ -25,8 +25,9 @@ Keep that line. `migrate generate` and `migrate check` read it to know which
 parts of the framework schema your project already covers. Files are applied in
 file-name order and recorded in the `__openshop_migrations` table.
 
-Your own tables are described by structs with `#[derive(Model)]`, listed in
-the `models` of `app!`. `dev` and the test harness create them directly, and
+Your own tables are described by structs with `#[derive(Model)]`, which name
+their table in `#[model("reviews")]` and are listed in the `models` of `app!`.
+`dev` and the test harness create them directly, and
 `migrate generate` writes the migrations that create and change them
 elsewhere. See the [model reference](../reference/database.md#app-models).
 
@@ -60,10 +61,10 @@ For this model:
 
 ```rust,ignore
 use openshop::chrono::{DateTime, Utc};
-use openshop::{Model, Uuid};
+use openshop::prelude::*;
 
 #[derive(Debug, Clone, Model)]
-#[model(table = "reviews", index(shop, product_id))]
+#[model("reviews", index(shop, product_id))]
 pub struct Review {
     pub id: Uuid,
     pub shop: String,

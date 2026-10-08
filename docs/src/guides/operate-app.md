@@ -64,7 +64,7 @@ Operational signals:
 | Repeated `sleeping` runs | Explicit `ctx.step.sleep` | Inspect run logs and `availableAt`. |
 | Runs returning to `pending` | Retrying failures | Inspect the run's `error`, `attempts`, and `availableAt`. |
 | Many `failed` runs | Provider, Shopify, validation, or deployment regression | Filter logs by error and compare the first failure time with deployments. |
-| Cron absent | Disabled per-shop override, no installed shop for a cron targeting `all`, an active run of the same flow, or web process down | Check the cron toggle, the cron's `shops` target, and the web/scheduler process logs. |
+| Cron absent | Disabled per-shop override, no installed shop for a cron declared with `.all_shops()`, an active run of the same flow, or web process down | Check the cron toggle, the cron's `shops` target, and the web/scheduler process logs. |
 
 ## 4. Scale workers
 
@@ -76,16 +76,18 @@ Configure defaults with the `worker` setting of `app!`, keeping your other
 entries:
 
 ```rust,ignore
-use openshop::PartialWorkerConfig;
+use std::time::Duration;
+
+use openshop::prelude::*;
 
 pub static APP: App = app! {
     // ... providers, flows and other entries ...
-    worker: PartialWorkerConfig::new()
+    worker: WorkerConfig::new()
         .concurrency(5)
-        .poll_interval_ms(1_000)
-        .poll_max_interval_ms(5_000)
+        .poll_interval(Duration::from_secs(1))
+        .poll_max_interval(Duration::from_secs(5))
         .poll_backoff_coefficient(1.5)
-        .lease_duration_ms(30_000),
+        .lease_duration(Duration::from_secs(30)),
 };
 ```
 
@@ -122,24 +124,26 @@ run that writes to another system.
 
 - A cancel request marks an active run `canceled` and interrupts the step being
   executed. A worker in another process notices at its next heartbeat, within
-  about 15 seconds, or half the lease when `lease_duration_ms` is below 30
-  seconds.
+  about 15 seconds, or half the lease when the `lease_duration` of the worker
+  is below 30 seconds.
 - Work that a step moved off its own future, such as a `tokio::spawn` task or
   `spawn_blocking` code, keeps running unless it watches `ctx.signal`.
 - Resume retry keeps completed steps; reset retry discards all step results.
 - Active runs must be canceled before deletion.
 - Bulk delete accepts at most 100 IDs and skips active runs.
 
-Pass the cancellation token to work the engine cannot interrupt:
+Pass the cancellation token to work the engine cannot interrupt. The example
+runs blocking code with `tokio::task::spawn_blocking`: add the crate to the
+project with `cargo add tokio --features rt`.
 
 ```rust,ignore
-use openshop::{FlowContext, Result, flow};
+use openshop::prelude::*;
 
 #[flow("refreshCatalog")]
 pub async fn refresh_catalog(ctx: FlowContext) -> Result<()> {
     let total: u64 = ctx
         .step
-        .run("hash catalog", || async {
+        .run("hash catalog", async || {
             let signal = ctx.signal.clone();
             let total = tokio::task::spawn_blocking(move || {
                 let mut total = 0u64;
@@ -156,7 +160,7 @@ pub async fn refresh_catalog(ctx: FlowContext) -> Result<()> {
         })
         .await?;
 
-    ctx.logger.info(openshop::json!({ "total": total }), "Catalog hashed");
+    ctx.logger.info_with("Catalog hashed", json!({ "total": total }));
     Ok(())
 }
 
@@ -169,7 +173,8 @@ fn checksum(chunk: u64) -> u64 {
 
 1. Stop routing new HTTP traffic to the old web process.
 2. Send `SIGTERM` to old workers.
-3. Allow at least `lease_duration_ms` for active work to finish.
+3. Allow at least the lease duration of the workers, 30 seconds by default, for
+   active work to finish.
 4. Apply committed database migrations.
 5. Start the new web process and workers from the same build.
 6. Dispatch one harmless flow and confirm completion.

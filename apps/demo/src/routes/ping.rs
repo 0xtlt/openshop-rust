@@ -1,7 +1,6 @@
-use openshop::response::Response;
-use openshop::{Result, ServerRouteContext, json, response, route};
+use openshop::prelude::*;
 
-#[route(GET, "/ping")]
-pub async fn ping(_ctx: ServerRouteContext) -> Result<Response> {
-    Ok(response::json(json!({ "ok": true, "source": "server-route" })))
+#[route(GET, "/ping", json)]
+pub async fn ping(_ctx: RouteContext) -> Result<Value> {
+    Ok(json!({ "ok": true, "source": "server-route" }))
 }

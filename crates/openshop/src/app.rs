@@ -9,21 +9,21 @@ use sqlx::PgPool;
 
 use crate::admin::{AdminPage, CustomAdminPage};
 use crate::config::validate::validate_openshop_config;
-use crate::db::Model;
+use crate::db::Table;
 use crate::declare::Declared;
-use crate::engine::dispatch::{DispatchFlowParams, DispatchFlowResult, dispatch_flow};
+use crate::engine::dispatch::{DispatchOptions, QueuedRun, dispatch_flow};
 use crate::runtime::{HttpTransport, ReqwestTransport, RuntimeEnv};
-use crate::server::connectors::{Connectors, build_connectors};
+use crate::server::connectors::Connectors;
 use crate::server::crypto::Crypto;
 use crate::server::mcp::core::create_core_mcp_capabilities;
 use crate::server::mcp::registry::{McpRegistry, build_mcp_registry};
 use crate::server::shopify_apps::ShopifyApps;
 use crate::server::static_ui::UiSource;
-use crate::shopify::client::{ShopifyClient, create_shopify_client};
+use crate::shopify::client::ShopifyClient;
 use crate::types::{
-    AdminPageId, AdminPageMode, AdminPagesConfig, CronEntry, CustomAdminNavigationItem, CustomPagesConfig,
-    ErrorContext, ExperimentalConfig, Flow, FunctionDefinition, McpConfig, McpResourceDefinition, McpToolDefinition,
-    OnErrorFn, PartialRetryPolicy, PartialWorkerConfig, Provider, ProxyDefinition, ServerRoute, ShopifyConfig, Webhook,
+    AdminPageId, AdminPageMode, AdminPagesConfig, Cron, CustomAdminNavigationItem, CustomPagesConfig, ErrorContext,
+    ExperimentalConfig, Flow, Function, McpConfig, McpResource, McpTool, OnErrorFn, Provider, Proxy, RetryPolicy,
+    Route, ShopifyConfig, Webhook, WorkerConfig,
 };
 
 /// The validated definition of an OpenShop application.
@@ -32,24 +32,24 @@ pub struct OpenShopConfig {
     pub shopify: Option<ShopifyConfig>,
     pub providers: IndexMap<String, Provider>,
     pub flows: IndexMap<String, Flow>,
-    pub functions: IndexMap<String, FunctionDefinition>,
+    pub functions: IndexMap<String, Function>,
     pub mcp: Option<McpConfig>,
     /// Keyed by topic, either `orders/create` or `ORDERS_CREATE`.
     pub webhooks: IndexMap<String, Webhook>,
-    pub crons: Vec<CronEntry>,
+    pub crons: Vec<Cron>,
     pub pages: Option<AdminPagesConfig>,
     pub experimental: Option<ExperimentalConfig>,
-    pub worker: PartialWorkerConfig,
-    pub retry_policy: PartialRetryPolicy,
+    pub worker: WorkerConfig,
+    pub retry_policy: RetryPolicy,
     pub on_error: Option<OnErrorFn>,
     /// App proxy handlers by route path (`/reviews`, `/api/reviews/:id`), served under `/proxy` and `/ext`.
-    pub proxies: IndexMap<String, ProxyDefinition>,
+    pub proxies: IndexMap<String, Proxy>,
     /// Public server routes by route path, served under `/routes`.
-    pub routes: IndexMap<String, ServerRoute>,
+    pub routes: IndexMap<String, Route>,
     /// Server side of application-defined admin pages.
     pub admin_pages: Vec<AdminPage>,
     /// Application tables created by the development schema push.
-    pub models: Vec<Model>,
+    pub models: Vec<Table>,
     /// Admin UI bundle served by `dev` and `start` instead of the built-in one,
     /// for applications with custom admin pages.
     pub admin_ui: Option<UiSource>,
@@ -62,18 +62,32 @@ impl OpenShopConfig {
         OpenShopBuilder::default()
     }
 
+    /// Whether the application has admin pages of its own: it lists some,
+    /// or sets `custom_pages`.
     pub fn custom_pages_enabled(&self) -> bool {
-        self.experimental
-            .as_ref()
-            .is_some_and(|experimental| experimental.custom_pages.is_some())
+        !self.admin_pages.is_empty() || self.explicit_navigation().is_some()
     }
 
-    pub fn custom_navigation(&self) -> &[CustomAdminNavigationItem] {
+    /// The menu set with `custom_pages`, which then replaces the entries the pages declare.
+    fn explicit_navigation(&self) -> Option<&[CustomAdminNavigationItem]> {
         self.experimental
             .as_ref()
             .and_then(|experimental| experimental.custom_pages.as_ref())
             .map(|pages| pages.navigation.as_slice())
-            .unwrap_or_default()
+    }
+
+    /// The entries of the admin menu for the pages of the application: the
+    /// ones set with `custom_pages`, else one per page that declares a `nav`
+    /// label, in the order the pages are listed.
+    pub fn custom_navigation(&self) -> Vec<CustomAdminNavigationItem> {
+        match self.explicit_navigation() {
+            Some(navigation) => navigation.to_vec(),
+            None => self
+                .admin_pages
+                .iter()
+                .filter_map(|page| Some(CustomAdminNavigationItem::new(page.nav.clone()?, page.path.clone())))
+                .collect(),
+        }
     }
 
     /// Custom admin pages sorted by specificity. Fails on reserved or ambiguous routes.
@@ -162,7 +176,7 @@ impl OpenShopBuilder {
         register(self)
     }
 
-    pub fn function(mut self, key: impl Into<String>, function: FunctionDefinition) -> Self {
+    pub fn function(mut self, key: impl Into<String>, function: Function) -> Self {
         insert_once(
             &mut self.config.functions,
             &mut self.problems,
@@ -204,11 +218,11 @@ impl OpenShopBuilder {
         self
     }
 
-    pub fn mcp_tool(self, name: impl Into<String>, tool: McpToolDefinition) -> Self {
+    pub fn mcp_tool(self, name: impl Into<String>, tool: McpTool) -> Self {
         self.mcp(McpConfig::new().tool(name, tool))
     }
 
-    pub fn mcp_resource(self, uri: impl Into<String>, resource: McpResourceDefinition) -> Self {
+    pub fn mcp_resource(self, uri: impl Into<String>, resource: McpResource) -> Self {
         self.mcp(McpConfig::new().resource(uri, resource))
     }
 
@@ -223,12 +237,12 @@ impl OpenShopBuilder {
         self
     }
 
-    pub fn cron(mut self, cron: CronEntry) -> Self {
+    pub fn cron(mut self, cron: Cron) -> Self {
         self.config.crons.push(cron);
         self
     }
 
-    pub fn crons(mut self, crons: impl IntoIterator<Item = CronEntry>) -> Self {
+    pub fn crons(mut self, crons: impl IntoIterator<Item = Cron>) -> Self {
         self.config.crons.extend(crons);
         self
     }
@@ -245,7 +259,9 @@ impl OpenShopBuilder {
         self
     }
 
-    /// Enables experimental custom admin pages and sets their sidebar entries.
+    /// Sets the entries of the admin menu for the pages of the application,
+    /// in place of the ones the pages declare (`#[admin_page("/path", nav =
+    /// "Label")]`): for another order, or another label.
     pub fn custom_pages(mut self, navigation: impl IntoIterator<Item = CustomAdminNavigationItem>) -> Self {
         self.config.experimental = Some(ExperimentalConfig {
             custom_pages: Some(CustomPagesConfig {
@@ -260,12 +276,12 @@ impl OpenShopBuilder {
         self
     }
 
-    pub fn worker(mut self, worker: PartialWorkerConfig) -> Self {
+    pub fn worker(mut self, worker: WorkerConfig) -> Self {
         self.config.worker = worker;
         self
     }
 
-    pub fn retry_policy(mut self, policy: PartialRetryPolicy) -> Self {
+    pub fn retry_policy(mut self, policy: RetryPolicy) -> Self {
         self.config.retry_policy = policy;
         self
     }
@@ -281,7 +297,7 @@ impl OpenShopBuilder {
 
     /// Registers handlers of an app proxy path such as `/reviews` or
     /// `/api/reviews/:id`. The methods of a path can be registered separately.
-    pub fn proxy(mut self, path: impl Into<String>, proxy: ProxyDefinition) -> Self {
+    pub fn proxy(mut self, path: impl Into<String>, proxy: Proxy) -> Self {
         let path = path.into();
         match self.config.proxies.get_mut(&path) {
             Some(registered) => {
@@ -299,7 +315,7 @@ impl OpenShopBuilder {
     /// Registers handlers of a public server route such as `/ping` or
     /// `/orders/:id`. The methods of a path can be registered separately, each
     /// with its own authentication.
-    pub fn route(mut self, path: impl Into<String>, route: ServerRoute) -> Self {
+    pub fn route(mut self, path: impl Into<String>, route: Route) -> Self {
         let path = path.into();
         match self.config.routes.get_mut(&path) {
             Some(registered) => {
@@ -319,7 +335,7 @@ impl OpenShopBuilder {
         self
     }
 
-    pub fn model(mut self, model: Model) -> Self {
+    pub fn model(mut self, model: Table) -> Self {
         if self.config.models.iter().any(|known| known.table == model.table) {
             self.problems
                 .push(format!("models.{} is registered twice", model.table));
@@ -438,17 +454,19 @@ impl OpenShop {
 
     /// Queues a flow run. Fails with [`crate::engine::FlowConcurrencyError`] when the
     /// flow rejects concurrent runs and one is already active for the shop.
-    pub async fn dispatch_flow(&self, params: DispatchFlowParams) -> Result<DispatchFlowResult> {
-        dispatch_flow(self.db(), self.config(), params).await
+    pub async fn dispatch_flow(&self, options: DispatchOptions) -> Result<QueuedRun> {
+        dispatch_flow(self.db(), self.config(), options).await
     }
 
-    /// Provider connectors bound to the shop's stored configuration.
-    pub async fn connectors(&self, shop: &str, shopify_app: &str) -> Result<Connectors> {
-        build_connectors(self, shop, shopify_app).await
+    /// The providers of a shop, bound to the configuration it saved. The
+    /// configuration is read at the first call.
+    pub fn connectors(&self, shop: &str, shopify_app: &str) -> Connectors {
+        Connectors::for_shop(self, shop, shopify_app)
     }
 
-    /// Shopify Admin API client using the shop's stored access token.
-    pub async fn shopify_client(&self, shop: &str, shopify_app: &str) -> Result<ShopifyClient> {
-        create_shopify_client(self, shop, shopify_app, None).await
+    /// The Shopify Admin API of a shop. The access token of the installation
+    /// is read at the first request.
+    pub fn shopify_client(&self, shop: &str, shopify_app: &str) -> ShopifyClient {
+        ShopifyClient::new(self, shop, shopify_app)
     }
 }

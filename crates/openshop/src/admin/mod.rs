@@ -16,7 +16,7 @@ use sqlx::PgPool;
 use crate::app::OpenShop;
 use crate::server::connectors::Connectors;
 use crate::shopify::client::ShopifyClient;
-use crate::types::{CustomAdminNavigationItem, InputSchema};
+use crate::types::{CustomAdminNavigationItem, InputSchema, ShopScope};
 use openshop_shared::{custom_admin_route_shape_key, is_safe_custom_admin_path, match_custom_admin_path};
 
 /// The Shopify staff member behind the session token.
@@ -28,7 +28,7 @@ pub struct AdminActor {
 }
 
 #[derive(Clone)]
-pub struct AdminServerContext {
+pub struct AdminContext {
     pub shop: String,
     pub shopify_app: String,
     pub actor: AdminActor,
@@ -42,14 +42,27 @@ pub struct AdminServerContext {
     pub app: OpenShop,
 }
 
-pub type AdminAuthorize = Arc<dyn Fn(AdminServerContext) -> BoxFuture<'static, Result<bool>> + Send + Sync>;
-pub type AdminHandler = Arc<dyn Fn(AdminServerContext, Value) -> BoxFuture<'static, Result<Value>> + Send + Sync>;
+impl ShopScope for AdminContext {
+    fn shop(&self) -> &str {
+        &self.shop
+    }
+
+    fn shopify_app(&self) -> &str {
+        &self.shopify_app
+    }
+
+    fn app(&self) -> &OpenShop {
+        &self.app
+    }
+}
+
+pub type AdminAuthorize = Arc<dyn Fn(AdminContext) -> BoxFuture<'static, Result<bool>> + Send + Sync>;
+pub type AdminHandler = Arc<dyn Fn(AdminContext, Value) -> BoxFuture<'static, Result<Value>> + Send + Sync>;
 pub type AdminOutputValidator = Arc<dyn Fn(&Value) -> Result<(), String> + Send + Sync>;
 
-/// Defines an access rule for a page or a single function.
-pub fn define_admin_page_access<F, Fut>(authorize: F) -> AdminAuthorize
+fn boxed_authorize<F, Fut>(authorize: F) -> AdminAuthorize
 where
-    F: Fn(AdminServerContext) -> Fut + Send + Sync + 'static,
+    F: Fn(AdminContext) -> Fut + Send + Sync + 'static,
     Fut: Future<Output = Result<bool>> + Send + 'static,
 {
     Arc::new(move |context| Box::pin(authorize(context)))
@@ -83,82 +96,85 @@ pub struct AdminFunction {
 
 fn boxed_handler<F, Fut>(handler: F) -> AdminHandler
 where
-    F: Fn(AdminServerContext, Value) -> Fut + Send + Sync + 'static,
+    F: Fn(AdminContext, Value) -> Fut + Send + Sync + 'static,
     Fut: Future<Output = Result<Value>> + Send + 'static,
 {
     Arc::new(move |context, input| Box::pin(handler(context, input)))
 }
 
-/// Defines a loader. Its input is passed through unless [`AdminFunction::input`] is set.
-pub fn define_admin_loader<F, Fut>(handler: F) -> AdminFunction
-where
-    F: Fn(AdminServerContext, Value) -> Fut + Send + Sync + 'static,
-    Fut: Future<Output = Result<Value>> + Send + 'static,
-{
-    AdminFunction {
-        kind: AdminFunctionKind::Loader,
-        input: None,
-        output: None,
-        authorize: None,
-        handler: boxed_handler(handler),
-    }
-}
-
-/// Defines an action with a validated input.
-pub fn define_admin_action<F, Fut>(input: InputSchema, handler: F) -> AdminFunction
-where
-    F: Fn(AdminServerContext, Value) -> Fut + Send + Sync + 'static,
-    Fut: Future<Output = Result<Value>> + Send + 'static,
-{
-    AdminFunction {
-        kind: AdminFunctionKind::Action,
-        input: Some(input),
-        output: None,
-        authorize: None,
-        handler: boxed_handler(handler),
-    }
-}
-
-/// Defines a loader whose input is deserialized into `T`.
-#[cfg(feature = "schema")]
-pub fn define_typed_admin_loader<T, R, F, Fut>(handler: F) -> AdminFunction
-where
-    T: DeserializeOwned + schemars::JsonSchema + Send + 'static,
-    R: Serialize + 'static,
-    F: Fn(AdminServerContext, T) -> Fut + Send + Sync + 'static,
-    Fut: Future<Output = Result<R>> + Send + 'static,
-{
-    let handler = Arc::new(handler);
-    define_admin_loader(move |context, input| {
-        let handler = handler.clone();
-        async move {
-            let input: T = serde_json::from_value(input)?;
-            Ok(serde_json::to_value(handler(context, input).await?)?)
-        }
-    })
-    .input(InputSchema::of::<T>())
-}
-
-/// Defines an action whose input is deserialized into `T`.
-#[cfg(feature = "schema")]
-pub fn define_typed_admin_action<T, R, F, Fut>(handler: F) -> AdminFunction
-where
-    T: DeserializeOwned + schemars::JsonSchema + Send + 'static,
-    R: Serialize + 'static,
-    F: Fn(AdminServerContext, T) -> Fut + Send + Sync + 'static,
-    Fut: Future<Output = Result<R>> + Send + 'static,
-{
-    let handler = Arc::new(handler);
-    define_admin_action(InputSchema::of::<T>(), move |context, input| {
-        let handler = handler.clone();
-        async move {
-            let input: T = serde_json::from_value(input)?;
-            Ok(serde_json::to_value(handler(context, input).await?)?)
-        }
-    })
-}
-
 impl AdminFunction {
+    /// A loader: a read. Its input is passed through unless
+    /// [`AdminFunction::input`] gives it a schema.
+    pub fn loader<F, Fut>(handler: F) -> Self
+    where
+        F: Fn(AdminContext, Value) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<Value>> + Send + 'static,
+    {
+        Self {
+            kind: AdminFunctionKind::Loader,
+            input: None,
+            output: None,
+            authorize: None,
+            handler: boxed_handler(handler),
+        }
+    }
+
+    /// An action: a write, whose input is validated by `input`.
+    pub fn action<F, Fut>(input: InputSchema, handler: F) -> Self
+    where
+        F: Fn(AdminContext, Value) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<Value>> + Send + 'static,
+    {
+        Self {
+            kind: AdminFunctionKind::Action,
+            input: Some(input),
+            output: None,
+            authorize: None,
+            handler: boxed_handler(handler),
+        }
+    }
+
+    /// A loader whose input is validated against the schema of `T` and
+    /// deserialized into it.
+    #[cfg(feature = "schema")]
+    pub fn typed_loader<T, R, F, Fut>(handler: F) -> Self
+    where
+        T: DeserializeOwned + schemars::JsonSchema + Send + 'static,
+        R: Serialize + 'static,
+        F: Fn(AdminContext, T) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<R>> + Send + 'static,
+    {
+        let handler = Arc::new(handler);
+        Self::loader(move |context, input| {
+            let handler = handler.clone();
+            async move {
+                let input: T = serde_json::from_value(input)?;
+                Ok(serde_json::to_value(handler(context, input).await?)?)
+            }
+        })
+        .input(InputSchema::of::<T>())
+    }
+
+    /// An action whose input is validated against the schema of `T` and
+    /// deserialized into it.
+    #[cfg(feature = "schema")]
+    pub fn typed_action<T, R, F, Fut>(handler: F) -> Self
+    where
+        T: DeserializeOwned + schemars::JsonSchema + Send + 'static,
+        R: Serialize + 'static,
+        F: Fn(AdminContext, T) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<R>> + Send + 'static,
+    {
+        let handler = Arc::new(handler);
+        Self::action(InputSchema::of::<T>(), move |context, input| {
+            let handler = handler.clone();
+            async move {
+                let input: T = serde_json::from_value(input)?;
+                Ok(serde_json::to_value(handler(context, input).await?)?)
+            }
+        })
+    }
+
     pub fn input(mut self, input: InputSchema) -> Self {
         self.input = Some(input);
         self
@@ -169,8 +185,14 @@ impl AdminFunction {
         self
     }
 
-    pub fn authorize(mut self, authorize: AdminAuthorize) -> Self {
-        self.authorize = Some(authorize);
+    /// Adds a rule of its own: the function runs only when `authorize`
+    /// answers `true`.
+    pub fn authorize<F, Fut>(mut self, authorize: F) -> Self
+    where
+        F: Fn(AdminContext) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<bool>> + Send + 'static,
+    {
+        self.authorize = Some(boxed_authorize(authorize));
         self
     }
 }
@@ -179,6 +201,8 @@ impl AdminFunction {
 #[derive(Clone)]
 pub struct AdminPage {
     pub path: String,
+    /// The label of the page in the menu of the admin, when it has an entry there.
+    pub nav: Option<String>,
     /// Gate for the page and every page nested under it.
     pub page_access: Option<AdminAuthorize>,
     pub functions: IndexMap<String, AdminFunction>,
@@ -188,13 +212,27 @@ impl AdminPage {
     pub fn new(path: impl Into<String>) -> Self {
         Self {
             path: path.into(),
+            nav: None,
             page_access: None,
             functions: IndexMap::new(),
         }
     }
 
-    pub fn access(mut self, authorize: AdminAuthorize) -> Self {
-        self.page_access = Some(authorize);
+    /// Gives the page an entry in the menu of the admin. A page with a
+    /// dynamic segment (`/reviews/:id`) cannot have one.
+    pub fn nav(mut self, label: impl Into<String>) -> Self {
+        self.nav = Some(label.into());
+        self
+    }
+
+    /// Gates the page and the pages nested under it: they open only when
+    /// `authorize` answers `true`.
+    pub fn access<F, Fut>(mut self, authorize: F) -> Self
+    where
+        F: Fn(AdminContext) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<bool>> + Send + 'static,
+    {
+        self.page_access = Some(boxed_authorize(authorize));
         self
     }
 
@@ -203,22 +241,22 @@ impl AdminPage {
         self
     }
 
-    /// Shorthand for `.function(name, define_admin_loader(handler))`.
+    /// Shorthand for `.function(name, AdminFunction::loader(handler))`.
     pub fn loader<F, Fut>(self, name: impl Into<String>, handler: F) -> Self
     where
-        F: Fn(AdminServerContext, Value) -> Fut + Send + Sync + 'static,
+        F: Fn(AdminContext, Value) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Result<Value>> + Send + 'static,
     {
-        self.function(name, define_admin_loader(handler))
+        self.function(name, AdminFunction::loader(handler))
     }
 
-    /// Shorthand for `.function(name, define_admin_action(input, handler))`.
+    /// Shorthand for `.function(name, AdminFunction::action(input, handler))`.
     pub fn action<F, Fut>(self, name: impl Into<String>, input: InputSchema, handler: F) -> Self
     where
-        F: Fn(AdminServerContext, Value) -> Fut + Send + Sync + 'static,
+        F: Fn(AdminContext, Value) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Result<Value>> + Send + 'static,
     {
-        self.function(name, define_admin_action(input, handler))
+        self.function(name, AdminFunction::action(input, handler))
     }
 }
 
@@ -426,7 +464,7 @@ pub fn validate_custom_admin_navigation(
 /// Calls a loader or action directly, applying its authorization and input validation.
 pub async fn invoke_admin_function<T: DeserializeOwned>(
     function: &AdminFunction,
-    context: AdminServerContext,
+    context: AdminContext,
     input: impl Serialize,
 ) -> Result<T> {
     if let Some(authorize) = &function.authorize

@@ -3,15 +3,14 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use openshop::admin::define_typed_admin_action;
 use openshop::testing::{
-    AdminFunctionTestOptions, MockTransport, TestContext, TestOptions, create_admin_function_test_context,
-    create_session_token, invoke_admin_function, sign_session_token,
+    AdminTestOptions, MockTransport, TestContext, TestOptions, admin_context, invoke_admin_function, session_token,
+    sign_session_token,
 };
 use openshop::{
-    AdminActor, AdminFunction, AdminPage, AdminPublicError, AdminServerContext, CustomAdminNavigationItem, FieldDef,
+    AdminActor, AdminContext, AdminFunction, AdminPage, AdminPublicError, CustomAdminNavigationItem, Field,
     InputSchema, OpenShopBuilder, OpenShopConfig, Provider, Result, ShopifyAppConfig, ShopifyConfig, Value, anyhow,
-    define_admin_action, define_admin_loader, define_admin_page_access, json,
+    json,
 };
 use openshop_shared::build_admin_function_rpc_url;
 use reqwest::{Method, RequestBuilder, Response};
@@ -30,7 +29,7 @@ fn navigation(label: &str, path: &str) -> CustomAdminNavigationItem {
     }
 }
 
-async fn details(ctx: AdminServerContext, _input: Value) -> Result<Value> {
+async fn details(ctx: AdminContext, _input: Value) -> Result<Value> {
     Ok(json!({
         "id": ctx.params.get("id"),
         "actorId": ctx.actor.id,
@@ -41,9 +40,7 @@ async fn details(ctx: AdminServerContext, _input: Value) -> Result<Value> {
 
 /// `/reviews`, only for [`REVIEWER`].
 fn reviews_page() -> AdminPage {
-    AdminPage::new("/reviews").access(define_admin_page_access(
-        |ctx| async move { Ok(ctx.actor.id == REVIEWER) },
-    ))
+    AdminPage::new("/reviews").access(|ctx| async move { Ok(ctx.actor.id == REVIEWER) })
 }
 
 fn review_details_page() -> AdminPage {
@@ -325,7 +322,7 @@ async fn rejects_rpc_requests_without_a_session_token() {
         assert_eq!(response.status(), 401, "{path}");
     }
 
-    let forged = create_session_token(TEST_SHOP, "not-the-secret", &ctx.api_key, REVIEWER);
+    let forged = session_token(TEST_SHOP, "not-the-secret", &ctx.api_key, REVIEWER);
     let response = ctx
         .http
         .post(&rpc_url)
@@ -393,13 +390,8 @@ async fn lists_navigation_and_page_access_for_the_actor() {
 }
 
 #[tokio::test]
-async fn custom_pages_are_unavailable_when_the_experimental_feature_is_off() {
-    let config = OpenShopConfig::builder()
-        .admin_page(reviews_page())
-        .admin_page(review_details_page())
-        .build()
-        .unwrap();
-    let ctx = context(config).await;
+async fn an_application_without_pages_has_no_custom_pages() {
+    let ctx = context(OpenShopConfig::builder().build().unwrap()).await;
 
     let custom_pages = request_as(&ctx, REVIEWER, Method::GET, "/api/pages/custom")
         .send()
@@ -424,22 +416,67 @@ async fn custom_pages_are_unavailable_when_the_experimental_feature_is_off() {
 }
 
 #[tokio::test]
+async fn listing_a_page_serves_it_and_its_nav_label_is_its_menu_entry() {
+    // No `custom_pages`: the pages are served because they are listed, and
+    // the menu is made of the ones that declare a label.
+    let config = OpenShopConfig::builder()
+        .admin_page(reviews_page().nav("Reviews"))
+        .admin_page(review_details_page())
+        .build()
+        .unwrap();
+    assert_eq!(
+        config.custom_navigation(),
+        [CustomAdminNavigationItem::new("Reviews", "/reviews")]
+    );
+    let ctx = context(config).await;
+
+    let custom_pages = request_as(&ctx, REVIEWER, Method::GET, "/api/pages/custom")
+        .send()
+        .await
+        .unwrap();
+    let body = json_body(custom_pages).await;
+    assert_eq!(body["navigation"], json!([{ "label": "Reviews", "path": "/reviews" }]));
+    assert_eq!(body["pages"].as_array().unwrap().len(), 2);
+    ctx.shutdown().await.unwrap();
+
+    // A menu set by hand replaces the entries the pages declare.
+    let by_hand = OpenShopConfig::builder()
+        .admin_page(reviews_page().nav("Reviews"))
+        .custom_pages([CustomAdminNavigationItem::new("Customer reviews", "/reviews")])
+        .build()
+        .unwrap();
+    assert_eq!(
+        by_hand.custom_navigation(),
+        [CustomAdminNavigationItem::new("Customer reviews", "/reviews")]
+    );
+
+    // A page with a dynamic segment cannot be a menu entry.
+    let error = OpenShopConfig::builder()
+        .admin_page(review_details_page().nav("Details"))
+        .build()
+        .err()
+        .unwrap()
+        .to_string();
+    assert_eq!(
+        error,
+        "[openshop] Invalid config: adminPages./reviews/:id.nav: a page with a dynamic segment cannot have a menu entry"
+    );
+}
+
+#[tokio::test]
 async fn page_access_reports_whether_the_actor_may_open_a_path() {
     let config = OpenShopConfig::builder()
         .admin_page(reviews_page())
         .admin_page(
-            AdminPage::new("/reviews/:id").access(define_admin_page_access(|ctx| async move {
-                Ok(ctx.params.get("id").is_some_and(|id| id != "archived"))
-            })),
+            AdminPage::new("/reviews/:id")
+                .access(|ctx| async move { Ok(ctx.params.get("id").is_some_and(|id| id != "archived")) }),
         )
-        .admin_page(
-            AdminPage::new("/broken").access(define_admin_page_access(|ctx| async move {
-                if ctx.actor.id != REVIEWER {
-                    panic!("permission service panicked");
-                }
-                Err(anyhow!("permission service unavailable"))
-            })),
-        )
+        .admin_page(AdminPage::new("/broken").access(|ctx| async move {
+            if ctx.actor.id != REVIEWER {
+                panic!("permission service panicked");
+            }
+            Err(anyhow!("permission service unavailable"))
+        }))
         .custom_pages([navigation("Reviews", "/reviews"), navigation("Broken", "/broken")])
         .build()
         .unwrap();
@@ -500,7 +537,7 @@ async fn returns_404_for_unknown_pages_functions_and_kind_mismatches() {
         .loader("list", |_ctx, _input| async move { Ok(json!({ "items": [] })) })
         .function(
             "save",
-            define_admin_action(
+            AdminFunction::action(
                 InputSchema::custom(json!({}), Ok),
                 |_ctx, input| async move { Ok(input) },
             ),
@@ -550,7 +587,7 @@ async fn returns_404_for_unknown_pages_functions_and_kind_mismatches() {
 async fn function_authorize_rejects_with_403() {
     let calls = Arc::new(AtomicUsize::new(0));
     let handler_calls = calls.clone();
-    let publish = define_admin_action(
+    let publish = AdminFunction::action(
         InputSchema::custom(json!({ "type": "boolean" }), |value| {
             value
                 .is_boolean()
@@ -562,9 +599,7 @@ async fn function_authorize_rejects_with_403() {
             async move { Ok(json!({ "published": input })) }
         },
     )
-    .authorize(define_admin_page_access(
-        |ctx| async move { Ok(ctx.actor.id == REVIEWER) },
-    ));
+    .authorize(|ctx| async move { Ok(ctx.actor.id == REVIEWER) });
     let page = AdminPage::new("/tools")
         .loader("list", |_ctx, _input| async move { Ok(json!([])) })
         .function("publish", publish);
@@ -616,13 +651,13 @@ async fn validates_input_and_rejects_with_422() {
     let page = AdminPage::new("/tools")
         .function(
             "save",
-            define_typed_admin_action(|ctx, input: SaveReview| async move {
+            AdminFunction::typed_action(|ctx, input: SaveReview| async move {
                 Ok(json!({ "title": input.title, "rating": input.rating, "savedBy": ctx.actor.id }))
             }),
         )
         .function(
             "search",
-            define_admin_loader(|_ctx, input| async move { Ok(json!({ "query": input })) }).input(search_input),
+            AdminFunction::loader(|_ctx, input| async move { Ok(json!({ "query": input })) }).input(search_input),
         )
         .loader("echo", |_ctx, input| async move { Ok(json!({ "input": input })) });
     let ctx = context(tools_app(page)).await;
@@ -693,7 +728,7 @@ async fn actions_without_an_input_schema_are_refused() {
     let handler_calls = calls.clone();
     let unchecked = AdminFunction {
         input: None,
-        ..define_admin_action(InputSchema::custom(json!({}), Ok), move |_ctx, input| {
+        ..AdminFunction::action(InputSchema::custom(json!({}), Ok), move |_ctx, input| {
             handler_calls.fetch_add(1, Ordering::SeqCst);
             async move { Ok(input) }
         })
@@ -720,12 +755,12 @@ async fn public_errors_expose_their_status_code_and_field_errors() {
         })
         .function(
             "premium",
-            define_admin_loader(|_ctx, _input| async move { Ok(json!("unreachable")) }).authorize(
-                define_admin_page_access(|_ctx| async move {
+            AdminFunction::loader(|_ctx, _input| async move { Ok(json!("unreachable")) }).authorize(
+                |_ctx| async move {
                     Err(AdminPublicError::new("PLAN_REQUIRED", "Upgrade to use this feature")
                         .status(402)
                         .into())
-                }),
+                },
             ),
         );
     let ctx = context(tools_app(page)).await;
@@ -770,9 +805,8 @@ async fn unexpected_errors_return_500_without_leaking_details() {
         })
         .function(
             "guarded",
-            define_admin_loader(|_ctx, _input| async move { Ok(json!("unreachable")) }).authorize(
-                define_admin_page_access(|_ctx| async move { Err(anyhow!("permission lookup failed: hunter2")) }),
-            ),
+            AdminFunction::loader(|_ctx, _input| async move { Ok(json!("unreachable")) })
+                .authorize(|_ctx| async move { Err(anyhow!("permission lookup failed: hunter2")) }),
         )
         .loader("works", |_ctx, _input| async move { Ok(json!({ "ok": true })) });
     let ctx = context(tools_app(page)).await;
@@ -798,7 +832,7 @@ async fn unexpected_errors_return_500_without_leaking_details() {
 
 #[tokio::test]
 async fn output_validator_failure_returns_500() {
-    let count = define_admin_loader(|_ctx, input| async move { Ok(json!({ "count": input })) }).output(|output| {
+    let count = AdminFunction::loader(|_ctx, input| async move { Ok(json!({ "count": input })) }).output(|output| {
         output["count"]
             .is_u64()
             .then_some(())
@@ -822,7 +856,7 @@ async fn output_validator_failure_returns_500() {
 
 #[tokio::test]
 async fn decodes_dynamic_route_params_and_function_names() {
-    let params = |ctx: AdminServerContext, _input: Value| async move { Ok(json!(ctx.params)) };
+    let params = |ctx: AdminContext, _input: Value| async move { Ok(json!(ctx.params)) };
     let config = OpenShopConfig::builder()
         .admin_page(
             AdminPage::new("/reviews/[id]")
@@ -856,7 +890,7 @@ async fn decodes_dynamic_route_params_and_function_names() {
 async fn exposes_the_idempotency_key_and_request_id() {
     let page = AdminPage::new("/tools").function(
         "charge",
-        define_admin_action(InputSchema::custom(json!({}), Ok), |ctx, _input| async move {
+        AdminFunction::action(InputSchema::custom(json!({}), Ok), |ctx, _input| async move {
             Ok(json!({ "idempotencyKey": ctx.idempotency_key, "requestId": ctx.request_id }))
         }),
     );
@@ -928,7 +962,7 @@ async fn takes_the_actor_from_the_session_token() {
 
 fn vault_provider() -> Provider {
     Provider::new("Vault")
-        .field("secret", FieldDef::password("Secret"))
+        .field("secret", Field::password("Secret"))
         .typed_method("reveal", |config, prefix: String| async move {
             let secret = config.get("secret").and_then(Value::as_str).unwrap_or_default();
             Ok(format!("{prefix}:{secret}"))
@@ -936,7 +970,7 @@ fn vault_provider() -> Provider {
 }
 
 /// Reads everything a function can reach for its tenant.
-async fn tenant(ctx: AdminServerContext, _input: Value) -> Result<Value> {
+async fn tenant(ctx: AdminContext, _input: Value) -> Result<Value> {
     let secret: String = ctx.connectors.call_as("vault", "reveal", "vault").await?;
     let shopify = ctx.shopify.graphql("{ shop { name } }", None).await?;
     let (installations,): (i64,) = sqlx::query_as("SELECT count(*) FROM installations")
@@ -1089,7 +1123,7 @@ async fn resolves_the_shopify_app_from_the_token_audience() {
         ("clientA", "client-a-key", "client-a-secret", "vault:secret-a"),
         ("clientB", "client-b-key", "client-b-secret", "vault:secret-b"),
     ] {
-        let token = create_session_token(TEST_SHOP, api_secret, api_key, REVIEWER);
+        let token = session_token(TEST_SHOP, api_secret, api_key, REVIEWER);
         let response = ctx.http.post(&url).bearer_auth(token).send().await.unwrap();
         assert_eq!(response.status(), 200, "{handle}");
         let body = json_body(response).await;
@@ -1099,7 +1133,7 @@ async fn resolves_the_shopify_app_from_the_token_audience() {
     assert_eq!(access_token_sent_to(&ctx, TEST_SHOP), ["token-a", "token-b"]);
 
     // A token signed with another app's secret is not a session.
-    let token = create_session_token(TEST_SHOP, "client-a-secret", "client-b-key", REVIEWER);
+    let token = session_token(TEST_SHOP, "client-a-secret", "client-b-key", REVIEWER);
     let response = ctx.http.post(&url).bearer_auth(token).send().await.unwrap();
     assert_eq!(response.status(), 401);
     ctx.shutdown().await.unwrap();
@@ -1115,16 +1149,12 @@ struct SavedReview {
 #[tokio::test]
 async fn functions_can_be_invoked_without_http() {
     let ctx = context(reviews_app().build().unwrap()).await;
-    let save = define_typed_admin_action(|ctx, input: SaveReview| async move {
+    let save = AdminFunction::typed_action(|ctx, input: SaveReview| async move {
         Ok(json!({ "title": input.title, "rating": input.rating, "savedBy": ctx.actor.id }))
     })
-    .authorize(define_admin_page_access(
-        |ctx| async move { Ok(ctx.actor.id == REVIEWER) },
-    ));
+    .authorize(|ctx| async move { Ok(ctx.actor.id == REVIEWER) });
 
-    let defaults = create_admin_function_test_context(&ctx.app, AdminFunctionTestOptions::default())
-        .await
-        .unwrap();
+    let defaults = admin_context(&ctx.app, AdminTestOptions::default()).await.unwrap();
     assert_eq!(defaults.shop, "test.myshopify.com");
     assert_eq!(defaults.shopify_app, "default");
     assert_eq!(
@@ -1138,15 +1168,15 @@ async fn functions_can_be_invoked_without_http() {
     assert_eq!(defaults.idempotency_key, None);
     assert!(defaults.params.is_empty());
 
-    let options = AdminFunctionTestOptions {
+    let options = AdminTestOptions {
         shop: TEST_SHOP.to_string(),
         actor_id: REVIEWER.to_string(),
         params: [("id".to_string(), "42".to_string())].into(),
         ..Default::default()
     };
-    let reviewer = create_admin_function_test_context(&ctx.app, options).await.unwrap();
+    let reviewer = admin_context(&ctx.app, options).await.unwrap();
 
-    let output: Value = invoke_admin_function(&define_admin_loader(details), reviewer.clone(), Value::Null)
+    let output: Value = invoke_admin_function(&AdminFunction::loader(details), reviewer.clone(), Value::Null)
         .await
         .unwrap();
     assert_eq!(

@@ -9,11 +9,11 @@ use chrono::{DateTime, SubsecRound, Utc};
 use common::{create_config, noop_flow};
 use openshop::db::schema::FlowRun;
 use openshop::runtime::time::to_iso;
-use openshop::testing::{TestContext, TestOptions, create_session_token, sign_session_token};
+use openshop::testing::{TestContext, TestOptions, session_token, sign_session_token};
 use openshop::{
-    Concurrency, CronEntry, DispatchFlowParams, DispatchOptions, FieldDef, Flow, FlowCanceledError, FlowContext,
-    FunctionDefinition, IndexMap, OpenShopConfig, PartialRetryPolicy, PgPool, Provider, RunFlowOptions, RunFlowResult,
-    ServerOptions, ShopifyAppConfig, ShopifyConfig, ShopifyFunctionType, Value, anyhow, json, run_flow, validators,
+    Concurrency, Cron, DispatchOptions, Field, Flow, FlowCanceledError, FlowContext, Function, FunctionType, IndexMap,
+    OpenShopConfig, PgPool, Provider, RetryPolicy, RunFlowOptions, RunOutcome, ServerOptions, ShopifyAppConfig,
+    ShopifyConfig, Value, anyhow, json, run_flow, validators,
 };
 use reqwest::header::{
     ACCESS_CONTROL_ALLOW_HEADERS, ACCESS_CONTROL_ALLOW_METHODS, ACCESS_CONTROL_ALLOW_ORIGIN,
@@ -30,9 +30,9 @@ const NIL_RUN: &str = "00000000-0000-0000-0000-000000000000";
 
 fn warehouse() -> Provider {
     Provider::new("warehouse")
-        .field("endpoint", FieldDef::text("Endpoint"))
-        .field("apiKey", FieldDef::password("API key"))
-        .field("optionalNote", FieldDef::text("Optional note").optional())
+        .field("endpoint", Field::text("Endpoint"))
+        .field("apiKey", Field::password("API key"))
+        .field("optionalNote", Field::text("Optional note").optional())
         .checker(|config| async move {
             Ok(
                 config.get("endpoint").and_then(Value::as_str) == Some("https://warehouse.test")
@@ -45,7 +45,7 @@ fn api_config_with(flow: Flow) -> OpenShopConfig {
     OpenShopConfig::builder()
         .flow(flow)
         .provider(warehouse())
-        .cron(CronEntry::new("*/5 * * * *", "test-flow").name("Test cron"))
+        .cron(Cron::new("*/5 * * * *", "test-flow").name("Test cron"))
         .build()
         .expect("valid config")
 }
@@ -203,17 +203,14 @@ async fn log_messages(db: &PgPool, run_id: Uuid) -> Vec<String> {
 async fn dispatch_without_retries(ctx: &TestContext, flow_name: &str) -> Uuid {
     ctx.app
         .dispatch_flow(
-            DispatchFlowParams::new(flow_name, ctx.shop.clone()).options(DispatchOptions {
-                retry_policy: Some(PartialRetryPolicy::new().max_attempts(0)),
-                ..Default::default()
-            }),
+            DispatchOptions::new(flow_name, ctx.shop.clone()).retry_policy(RetryPolicy::new().max_attempts(0)),
         )
         .await
         .unwrap()
         .run_id
 }
 
-async fn execute(ctx: &TestContext, run_id: Uuid, flow_name: &str) -> RunFlowResult {
+async fn execute(ctx: &TestContext, run_id: Uuid, flow_name: &str) -> RunOutcome {
     run_flow(&ctx.app, RunFlowOptions::new(run_id, flow_name, ctx.shop.clone()))
         .await
         .unwrap()
@@ -260,7 +257,7 @@ async fn get_flows_exposes_the_generated_input_schema() {
     let typed = Flow::new("typed-flow", |ctx: FlowContext| async move {
         let input: SyncInput = ctx.input()?;
         ctx.logger
-            .info(json!({ "since": input.since, "limit": input.limit }), "Syncing");
+            .info_with("Syncing", json!({ "since": input.since, "limit": input.limit }));
         Ok(())
     })
     .input::<SyncInput>();
@@ -268,9 +265,9 @@ async fn get_flows_exposes_the_generated_input_schema() {
         .flow(typed)
         .flow(noop_flow("plain-flow"))
         .cron(
-            CronEntry::new("0 * * * *", "plain-flow")
+            Cron::new("0 * * * *", "plain-flow")
                 .input(json!({ "full": true }))
-                .shops("all"),
+                .all_shops(),
         )
         .build()
         .unwrap();
@@ -572,7 +569,7 @@ async fn get_run_returns_run_with_steps() {
     });
     let ctx = context(api_config_with(flow)).await;
     let run_id = ctx.dispatch_flow("test-flow", json!({ "order": 7 })).await.unwrap();
-    assert_eq!(execute(&ctx, run_id, "test-flow").await, RunFlowResult::Completed);
+    assert_eq!(execute(&ctx, run_id, "test-flow").await, RunOutcome::Completed);
 
     let (status, data) = send(ctx.get(&format!("/api/runs/{run_id}"))).await;
     assert_eq!(status, StatusCode::OK);
@@ -781,7 +778,7 @@ async fn post_run_cancel_aborts_a_run_in_progress() {
         .expect("the flow observes the cancellation")
         .unwrap()
         .unwrap();
-    assert_eq!(result, RunFlowResult::Canceled);
+    assert_eq!(result, RunOutcome::Canceled);
     assert_eq!(run_status(&ctx.db, run_id).await, "canceled");
     ctx.shutdown().await.unwrap();
 }
@@ -1096,11 +1093,11 @@ async fn request_with_forged_or_expired_token_returns_401() {
 
     let cases = [
         (
-            create_session_token(&ctx.shop, "wrong-secret", &ctx.api_key, "1"),
+            session_token(&ctx.shop, "wrong-secret", &ctx.api_key, "1"),
             "Unauthorized: Invalid JWT signature",
         ),
         (
-            create_session_token(&ctx.shop, &ctx.secret, "another-app", "1"),
+            session_token(&ctx.shop, &ctx.secret, "another-app", "1"),
             "Unauthorized: [openshop] No Shopify app matches the session token audience",
         ),
         (
@@ -1216,9 +1213,9 @@ async fn session_token_exchange_installs_the_shop_once() {
 
 fn logging_flow() -> Flow {
     Flow::new("test-flow", |ctx: FlowContext| async move {
-        ctx.logger.info(json!({ "key": "val" }), "info message");
-        ctx.logger.warn(json!({}), "warn message");
-        ctx.logger.error(json!({}), "error message");
+        ctx.logger.info_with("info message", json!({ "key": "val" }));
+        ctx.logger.warn("warn message");
+        ctx.logger.error("error message");
         Ok(())
     })
 }
@@ -1871,12 +1868,12 @@ async fn put_providers_rejects_missing_required_fields() {
 #[tokio::test]
 async fn put_providers_validates_coerces_and_transforms_fields() {
     let erp = Provider::new("erp")
-        .field("endpoint", FieldDef::text("Endpoint").validate(validators::url()))
+        .field("endpoint", Field::text("Endpoint").validate(validators::url()))
         .field(
             "retries",
-            FieldDef::number("Retries").validate(validators::number_range(0.0, 10.0)),
+            Field::number("Retries").validate(validators::number_range(0.0, 10.0)),
         )
-        .field("sandbox", FieldDef::checkbox("Sandbox"))
+        .field("sandbox", Field::checkbox("Sandbox"))
         .transformer(|mut data| {
             if let Some(Value::String(endpoint)) = data.get("endpoint").cloned() {
                 data.insert("endpoint".into(), json!(endpoint.trim_end_matches('/')));
@@ -1921,7 +1918,7 @@ async fn put_providers_validates_coerces_and_transforms_fields() {
 async fn provider_routes_reject_unknown_providers_and_missing_checkers() {
     let config = OpenShopConfig::builder()
         .flow(noop_flow("test-flow"))
-        .provider(Provider::new("plain").field("token", FieldDef::password("Token")))
+        .provider(Provider::new("plain").field("token", Field::password("Token")))
         .build()
         .unwrap();
     let ctx = context(config).await;
@@ -1947,7 +1944,7 @@ async fn provider_routes_reject_unknown_providers_and_missing_checkers() {
 #[tokio::test]
 async fn post_providers_check_reports_checker_failures() {
     let flaky = Provider::new("flaky")
-        .field("token", FieldDef::password("Token"))
+        .field("token", Field::password("Token"))
         .checker(|config| async move {
             match config.get("token").and_then(Value::as_str) {
                 Some("panic") => panic!("checker exploded"),
@@ -2012,8 +2009,7 @@ async fn get_functions_returns_definitions_without_calling_shopify() {
         .flow(noop_flow("test-flow"))
         .function(
             "testFn",
-            FunctionDefinition::new(ShopifyFunctionType::CartTransform, "test-fn")
-                .field("note", FieldDef::text("Note")),
+            Function::new(FunctionType::CartTransform, "test-fn").field("note", Field::text("Note")),
         )
         .build()
         .unwrap();
@@ -2185,20 +2181,20 @@ async fn sessions_cannot_reach_data_of_another_shopify_app() {
         })
         .flow(noop_flow("test-flow"))
         .provider(warehouse())
-        .cron(CronEntry::new("*/5 * * * *", "test-flow").name("Test cron"))
+        .cron(Cron::new("*/5 * * * *", "test-flow").name("Test cron"))
         .build()
         .unwrap();
     let ctx = context(config).await;
     let key = "test-flow:*/5 * * * *";
-    let token_a = create_session_token(&ctx.shop, "client-a-secret", "client-a-key", "1");
-    let token_b = create_session_token(&ctx.shop, "client-b-secret", "client-b-key", "1");
+    let token_a = session_token(&ctx.shop, "client-a-secret", "client-a-key", "1");
+    let token_b = session_token(&ctx.shop, "client-b-secret", "client-b-key", "1");
     let as_a = |method: Method, path: &str| request_as(&ctx, &token_a, method, path);
     let as_b = |method: Method, path: &str| request_as(&ctx, &token_b, method, path);
 
     // The single-app credentials of the environment are not accepted, nor is a mixed-up secret.
     let (status, _) = send(ctx.get("/api/flows")).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
-    let forged = create_session_token(&ctx.shop, "client-b-secret", "client-a-key", "1");
+    let forged = session_token(&ctx.shop, "client-b-secret", "client-a-key", "1");
     let (status, body) = send(request_as(&ctx, &forged, Method::GET, "/api/flows")).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
     assert_eq!(body, error("Unauthorized: Invalid JWT signature"));

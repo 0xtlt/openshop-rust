@@ -20,10 +20,10 @@ use super::step::{StepExecutor, error_message};
 use crate::app::OpenShop;
 use crate::runtime::FlowLogger;
 use crate::runtime::time::to_iso;
-use crate::server::connectors::{Connectors, build_connectors};
+use crate::server::connectors::Connectors;
 use crate::server::shopify_apps::DEFAULT_SHOPIFY_APP_HANDLE;
-use crate::shopify::client::create_shopify_client;
-use crate::types::{ErrorContext, FlowContext, JsonMap, RetryPolicy};
+use crate::shopify::client::ShopifyClient;
+use crate::types::{ErrorContext, FlowContext, JsonMap, ResolvedRetryPolicy};
 
 /// Default delay between two lease extensions.
 pub const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15);
@@ -92,7 +92,7 @@ impl RunFlowOptions {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum RunFlowResult {
+pub enum RunOutcome {
     Completed,
     Sleeping {
         resume_at: DateTime<Utc>,
@@ -106,7 +106,7 @@ pub enum RunFlowResult {
     LeaseLost,
 }
 
-impl RunFlowResult {
+impl RunOutcome {
     pub fn status(&self) -> &'static str {
         match self {
             Self::Completed => "completed",
@@ -199,7 +199,7 @@ async fn finish_run(db: &PgPool, run_id: Uuid, worker_id: Option<&str>, update: 
     Ok(result.rows_affected() > 0)
 }
 
-pub async fn run_flow(app: &OpenShop, opts: RunFlowOptions) -> Result<RunFlowResult> {
+pub async fn run_flow(app: &OpenShop, opts: RunFlowOptions) -> Result<RunOutcome> {
     let db = app.db();
     let config = app.config();
     let flow_name = opts.flow_name.as_str();
@@ -254,9 +254,9 @@ pub async fn run_flow(app: &OpenShop, opts: RunFlowOptions) -> Result<RunFlowRes
     );
     let connectors = match opts.connectors.clone() {
         Some(connectors) => connectors,
-        None => build_connectors(app, &opts.shop, &shopify_app).await?,
+        None => Connectors::for_shop(app, &opts.shop, &shopify_app),
     };
-    let shopify = create_shopify_client(app, &opts.shop, &shopify_app, None).await?;
+    let shopify = ShopifyClient::new(app, &opts.shop, &shopify_app);
 
     let execution = async {
         let validated_input = match &flow.input {
@@ -266,9 +266,9 @@ pub async fn run_flow(app: &OpenShop, opts: RunFlowOptions) -> Result<RunFlowRes
             None => input,
         };
 
-        logger.info(
-            json!({ "flowName": flow_name }),
+        logger.info_with(
             format!("Flow \"{flow_name}\" started"),
+            json!({ "flowName": flow_name }),
         );
 
         let context = FlowContext {
@@ -309,13 +309,13 @@ pub async fn run_flow(app: &OpenShop, opts: RunFlowOptions) -> Result<RunFlowRes
     let result = match outcome {
         Ok(()) => {
             if finish_run(db, run_id, worker_id, RunUpdate::status("completed").completed()).await? {
-                logger.info(
-                    json!({ "flowName": flow_name }),
+                logger.info_with(
                     format!("Flow \"{flow_name}\" completed"),
+                    json!({ "flowName": flow_name }),
                 );
-                RunFlowResult::Completed
+                RunOutcome::Completed
             } else {
-                RunFlowResult::LeaseLost
+                RunOutcome::LeaseLost
             }
         }
         Err(error) => {
@@ -329,23 +329,23 @@ pub async fn run_flow(app: &OpenShop, opts: RunFlowOptions) -> Result<RunFlowRes
                 )
                 .await?
                 {
-                    logger.info(
-                        json!({ "flowName": flow_name, "resumeAt": to_iso(&resume_at) }),
+                    logger.info_with(
                         format!("Flow \"{flow_name}\" sleeping"),
+                        json!({ "flowName": flow_name, "resumeAt": to_iso(&resume_at) }),
                     );
-                    RunFlowResult::Sleeping { resume_at }
+                    RunOutcome::Sleeping { resume_at }
                 } else {
-                    RunFlowResult::LeaseLost
+                    RunOutcome::LeaseLost
                 }
             } else if error.downcast_ref::<FlowCanceledError>().is_some() || signal.is_cancelled() {
                 if finish_run(db, run_id, worker_id, RunUpdate::status("canceled").completed()).await? {
-                    logger.info(
-                        json!({ "flowName": flow_name }),
+                    logger.info_with(
                         format!("Flow \"{flow_name}\" was canceled"),
+                        json!({ "flowName": flow_name }),
                     );
-                    RunFlowResult::Canceled
+                    RunOutcome::Canceled
                 } else {
-                    RunFlowResult::LeaseLost
+                    RunOutcome::LeaseLost
                 }
             } else {
                 record_failure(app, run_id, worker_id, flow_name, &logger, error).await?
@@ -364,7 +364,7 @@ async fn record_failure(
     flow_name: &str,
     logger: &FlowLogger,
     error: anyhow::Error,
-) -> Result<RunFlowResult> {
+) -> Result<RunOutcome> {
     let db = app.db();
     let error_message = error_message(&error);
 
@@ -375,7 +375,7 @@ async fn record_failure(
             .await?;
 
     let next_at = run.and_then(|(attempts, deadline_at, retry_policy)| {
-        let policy: RetryPolicy = serde_json::from_value(retry_policy?).ok()?;
+        let policy: ResolvedRetryPolicy = serde_json::from_value(retry_policy?).ok()?;
         compute_next_retry_at(attempts as i64, &policy, deadline_at)
     });
 
@@ -386,12 +386,12 @@ async fn record_failure(
     };
     let owned = finish_run(db, run_id, worker_id, update).await?;
     if !owned {
-        return Ok(RunFlowResult::LeaseLost);
+        return Ok(RunOutcome::LeaseLost);
     }
 
-    logger.error(
-        json!({ "flowName": flow_name, "error": error_message, "willRetry": will_retry }),
+    logger.error_with(
         format!("Flow \"{flow_name}\" failed: {error_message}"),
+        json!({ "flowName": flow_name, "error": error_message, "willRetry": will_retry }),
     );
 
     if let Some(on_error) = &app.config().on_error {
@@ -405,7 +405,7 @@ async fn record_failure(
             .await;
     }
 
-    Ok(RunFlowResult::Failed {
+    Ok(RunOutcome::Failed {
         error: error_message,
         will_retry,
     })

@@ -6,13 +6,13 @@ use std::time::{Duration, Instant};
 use common::{TestApp, noop_flow, test_env};
 use openshop::db::schema::FlowRun;
 use openshop::testing::{MockTransport, TestDb};
-use openshop::{Concurrency, CronEntry, Flow, IndexMap, OpenShop, OpenShopConfig, Scheduler, json};
+use openshop::{Concurrency, Cron, Flow, IndexMap, OpenShop, OpenShopConfig, Scheduler, json};
 
 const EVERY_SECOND: &str = "* * * * * *";
 /// Long enough for an every-second cron to fire at least once.
 const ONE_TICK: Duration = Duration::from_millis(1_200);
 
-fn config(flows: impl IntoIterator<Item = Flow>, crons: impl IntoIterator<Item = CronEntry>) -> OpenShopConfig {
+fn config(flows: impl IntoIterator<Item = Flow>, crons: impl IntoIterator<Item = Cron>) -> OpenShopConfig {
     let builder = flows
         .into_iter()
         .fold(OpenShopConfig::builder(), |builder, flow| builder.flow(flow));
@@ -89,7 +89,7 @@ async fn override_cron(test: &TestApp, shop: &str, cron_key: &str, enabled: bool
 async fn registers_cron_and_triggers_flow_dispatch() {
     let test = TestApp::new(config(
         [noop_flow("quick-flow")],
-        [CronEntry::new(EVERY_SECOND, "quick-flow")],
+        [Cron::new(EVERY_SECOND, "quick-flow")],
     ))
     .await;
 
@@ -109,7 +109,7 @@ async fn registers_cron_and_triggers_flow_dispatch() {
 async fn keeps_ticking_after_a_rejected_dispatch() {
     let test = TestApp::new(config(
         [noop_flow("quick-flow")],
-        [CronEntry::new(EVERY_SECOND, "quick-flow")],
+        [Cron::new(EVERY_SECOND, "quick-flow")],
     ))
     .await;
     let mut scheduler = Scheduler::start(&test.app).unwrap();
@@ -134,7 +134,7 @@ async fn keeps_ticking_after_a_rejected_dispatch() {
 // scheduler here, it is rejected when the configuration or the application is built.
 #[tokio::test]
 async fn cron_referencing_an_unknown_flow_is_rejected_before_the_scheduler_starts() {
-    let cron = CronEntry::new("* * * * *", "nonexistent");
+    let cron = Cron::new("* * * * *", "nonexistent");
     let expected = "[openshop] Invalid config: crons[0].flow references unknown flow \"nonexistent\"";
 
     let error = OpenShopConfig::builder()
@@ -168,7 +168,7 @@ async fn invalid_schedules_are_rejected_before_the_scheduler_starts() {
     ] {
         let error = OpenShopConfig::builder()
             .flow(noop_flow("quick-flow"))
-            .cron(CronEntry::new(schedule, "quick-flow"))
+            .cron(Cron::new(schedule, "quick-flow"))
             .build()
             .err()
             .unwrap_or_else(|| panic!("\"{schedule}\" must be rejected"))
@@ -185,7 +185,7 @@ async fn invalid_schedules_are_rejected_before_the_scheduler_starts() {
 async fn resolves_shops_all_from_installations() {
     let test = TestApp::new(config(
         [concurrent_flow("quick-flow")],
-        [CronEntry::new(EVERY_SECOND, "quick-flow").shops("all")],
+        [Cron::new(EVERY_SECOND, "quick-flow").all_shops()],
     ))
     .await;
     install(&test, "default", "shop-a.myshopify.com", false).await;
@@ -220,7 +220,7 @@ async fn resolves_shops_all_from_installations() {
 async fn shops_all_is_resolved_again_at_every_tick() {
     let test = TestApp::new(config(
         [noop_flow("quick-flow")],
-        [CronEntry::new(EVERY_SECOND, "quick-flow").shops("all")],
+        [Cron::new(EVERY_SECOND, "quick-flow").all_shops()],
     ))
     .await;
     let mut scheduler = Scheduler::start(&test.app).unwrap();
@@ -242,8 +242,8 @@ async fn respects_cron_override_disabled() {
     let test = TestApp::new(config(
         [noop_flow("quick-flow"), noop_flow("witness-flow")],
         [
-            CronEntry::new(EVERY_SECOND, "quick-flow"),
-            CronEntry::new(EVERY_SECOND, "witness-flow"),
+            Cron::new(EVERY_SECOND, "quick-flow"),
+            Cron::new(EVERY_SECOND, "witness-flow"),
         ],
     ))
     .await;
@@ -268,7 +268,7 @@ async fn cron_override_only_disables_its_own_shop() {
         "shop-off.myshopify.com".to_string(),
         "shop-on.myshopify.com".to_string(),
     ];
-    let cron = CronEntry::new(EVERY_SECOND, "quick-flow").shops(shops);
+    let cron = Cron::new(EVERY_SECOND, "quick-flow").shops(shops);
     let key = cron.key();
     assert_eq!(key, "quick-flow:* * * * * *");
     let test = TestApp::new(config([concurrent_flow("quick-flow")], [cron])).await;
@@ -288,7 +288,7 @@ async fn cron_override_only_disables_its_own_shop() {
 async fn stop_clears_all_crons() {
     let test = TestApp::new(config(
         [noop_flow("quick-flow")],
-        [CronEntry::new(EVERY_SECOND, "quick-flow")],
+        [Cron::new(EVERY_SECOND, "quick-flow")],
     ))
     .await;
 
@@ -307,7 +307,7 @@ async fn stop_clears_all_crons() {
 async fn resolves_shops_as_string_single_shop() {
     let test = TestApp::new(config(
         [noop_flow("quick-flow")],
-        [CronEntry::new(EVERY_SECOND, "quick-flow").shops("specific.myshopify.com")],
+        [Cron::new(EVERY_SECOND, "quick-flow").shop("specific.myshopify.com")],
     ))
     .await;
 
@@ -324,7 +324,7 @@ async fn resolves_shops_as_string_single_shop() {
 async fn single_shop_runs_once_per_app_it_is_installed_on() {
     let test = TestApp::new(config(
         [noop_flow("quick-flow")],
-        [CronEntry::new(EVERY_SECOND, "quick-flow").shops("specific.myshopify.com")],
+        [Cron::new(EVERY_SECOND, "quick-flow").shop("specific.myshopify.com")],
     ))
     .await;
     install(&test, "client-a", "specific.myshopify.com", false).await;
@@ -353,7 +353,7 @@ async fn resolves_shops_as_array() {
     let shops = vec!["shop-x.myshopify.com".to_string(), "shop-y.myshopify.com".to_string()];
     let test = TestApp::new(config(
         [concurrent_flow("quick-flow")],
-        [CronEntry::new(EVERY_SECOND, "quick-flow").shops(shops)],
+        [Cron::new(EVERY_SECOND, "quick-flow").shops(shops)],
     ))
     .await;
     install(&test, "client-a", "shop-y.myshopify.com", false).await;
@@ -382,11 +382,11 @@ async fn passes_the_cron_input_to_the_run() {
     let test = TestApp::new(config(
         [noop_flow("full-sync"), noop_flow("plain-sync")],
         [
-            CronEntry::new(EVERY_SECOND, "full-sync")
+            Cron::new(EVERY_SECOND, "full-sync")
                 .name("Nightly sync")
                 .input(json!({ "mode": "full", "limit": 50 })),
             // Only objects are valid run input; anything else falls back to `{}`.
-            CronEntry::new(EVERY_SECOND, "plain-sync").input(json!("not-an-object")),
+            Cron::new(EVERY_SECOND, "plain-sync").input(json!("not-an-object")),
         ],
     ))
     .await;
@@ -410,9 +410,9 @@ async fn registers_one_job_per_cron_including_nicknames() {
     let test = TestApp::new(config(
         [noop_flow("quick-flow"), noop_flow("other-flow")],
         [
-            CronEntry::new("@yearly", "quick-flow"),
-            CronEntry::new("0 0 1 1 *", "quick-flow").shops("all"),
-            CronEntry::new("  0 0 0 1 1 *  ", "other-flow"),
+            Cron::new("@yearly", "quick-flow"),
+            Cron::new("0 0 1 1 *", "quick-flow").all_shops(),
+            Cron::new("  0 0 0 1 1 *  ", "other-flow"),
         ],
     ))
     .await;

@@ -26,11 +26,10 @@ cargo add subtle
 Create `src/routes/status.rs`:
 
 ```rust,ignore
-use openshop::response::{self, Response};
-use openshop::{Result, RouteAuthOutcome, ServerRouteContext, ServerRouteRequestContext, json, route};
+use openshop::prelude::*;
 use subtle::ConstantTimeEq;
 
-async fn service_token(ctx: ServerRouteRequestContext) -> Result<RouteAuthOutcome> {
+async fn service_token(ctx: RouteAuthContext) -> Result<RouteAuthOutcome> {
     let Some(token) = std::env::var("INBOUND_API_TOKEN").ok().filter(|token| !token.is_empty()) else {
         return Ok(RouteAuthOutcome::Unauthorized);
     };
@@ -44,15 +43,16 @@ async fn service_token(ctx: ServerRouteRequestContext) -> Result<RouteAuthOutcom
     })
 }
 
-#[route(GET, "/status", auth = service_token)]
-pub async fn status(ctx: ServerRouteContext) -> Result<Response> {
-    Ok(response::json(json!({ "ok": true, "service": ctx.auth["service"] })))
+#[route(GET, "/status", json, auth = service_token)]
+pub async fn status(ctx: RouteContext) -> Result<Value> {
+    Ok(json!({ "ok": true, "service": ctx.auth["service"] }))
 }
 ```
 
 `#[route]` declares the function as the handler of one method of a path, and
 `auth = service_token` names the function that authenticates its requests.
-Without `auth`, a route is public.
+Without `auth`, a route is public. With `json`, the function returns anything
+that serializes, and the answer is sent as JSON.
 
 Declare the module in a new `src/routes/mod.rs` (`pub mod status;`), add
 `mod routes;` next to the other `mod` lines, and list the function in the
@@ -75,18 +75,42 @@ does not compile, because the module has the same name.
 The route is served at `GET /routes/status`. Returning
 `RouteAuthOutcome::Unauthorized` from the authentication function rejects the
 request with 401; the value inside `RouteAuthOutcome::Authenticated` becomes
-`ctx.auth` in the route function. The route function returns anything that is
-an HTTP response: use the helpers in `openshop::response` (`json`,
-`json_with_status`, `text`, `status`) or build any response with the custom
-status and headers you need.
+`ctx.auth` in the route function. Without `json`, the route function returns
+anything that is an HTTP response: use the helpers of the `response` module
+(`response::json`, `response::json_with_status`, `response::text`,
+`response::status`) or build any response with the custom status and headers
+you need.
 
 Both functions read the request through `ctx.request`: `header(name)`,
 `query()`, `json()`, `text()`, and the raw `body`. A body larger than 2 MB is
 refused with HTTP 413 before your code runs; change the limit with the
 `max_request_body_bytes` setting of `app!`.
 
+A route function can also take its input as a second argument, a type that
+implements `Deserialize`:
+
+```rust,ignore
+use serde::Deserialize;
+
+#[derive(Debug, Deserialize)]
+pub struct StockUpdate {
+    pub sku: String,
+    pub quantity: i64,
+}
+
+#[route(POST, "/stock", json, auth = service_token)]
+pub async fn update_stock(_ctx: RouteContext, update: StockUpdate) -> Result<Value> {
+    Ok(json!({ "ok": true, "sku": update.sku, "quantity": update.quantity }))
+}
+```
+
+The input is read from the query string for `GET`, `HEAD`, `DELETE` and
+`OPTIONS`, and from the JSON body for `POST`, `PUT` and `PATCH`. A request
+that does not fit the type is answered with HTTP 422 and
+`{ "error": "Invalid input: …" }` before the function runs.
+
 To answer another method on the same path, declare another function, such as
-`#[route(POST, "/status", auth = service_token)]`, and list it too. Each
+`#[route(POST, "/status", json, auth = service_token)]`, and list it too. Each
 route function names its own authentication.
 
 ## 3. Check both authentication paths
@@ -111,7 +135,21 @@ calling from a remote service. Run `cargo check` before deploying.
 ## Add shop-specific work
 
 This token identifies a service, not a Shopify shop. Before using
-`ctx.for_shop(RouteShopInput::new(shop))`, map the authenticated caller to a
+`ctx.for_shop("example.myshopify.com")`, map the authenticated caller to a
 shop it is authorized to access; a shop name in a request is not proof of
-access. The [server route reference](../reference/server-routes.md)
+access.
+
+`ctx.for_shop(..)` takes the domain of a shop, or
+`RouteShopInput::new(domain).shopify_app(handle)` when the application serves
+several Shopify apps, and fails when the shop is not actively installed. What
+it returns belongs to that shop: it carries `db`, `shopify` and `connectors`,
+and it is what `sync_orders::dispatch(&shop, ..)` and `Review::of(&shop)`
+take. The route context itself has `ctx.db`.
+
+```rust,ignore
+let shop = ctx.for_shop("example.myshopify.com").await?;
+let accepted = Warehouse::on(&shop.connectors).push(&orders).await?;
+```
+
+The [server route reference](../reference/server-routes.md)
 shows the context contract and how an authenticated route dispatches a flow.

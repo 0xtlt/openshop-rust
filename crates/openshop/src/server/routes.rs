@@ -17,12 +17,10 @@ use serde_json::{Value, json};
 use super::file_routes::{resolve_route_paths, to_router_path};
 use super::http::json_error;
 use crate::app::OpenShop;
+use crate::declare::InvalidInput;
 use crate::engine::step::error_message;
 use crate::runtime::logger;
-use crate::types::{
-    RouteAuthOutcome, RouteRequest, ServerRoute, ServerRouteAuth, ServerRouteContext, ServerRouteMethod,
-    ServerRouteRequestContext,
-};
+use crate::types::{Route, RouteAuth, RouteAuthContext, RouteAuthOutcome, RouteContext, RouteMethod, RouteRequest};
 
 pub use super::connectors::resolve_shop_context;
 
@@ -32,7 +30,7 @@ fn internal_error() -> Response {
 
 struct RegisteredRoute {
     path: String,
-    definition: ServerRoute,
+    definition: Route,
 }
 
 async fn handle(
@@ -49,7 +47,7 @@ async fn handle(
         definition: route,
     } = &*registered;
     let method_name = method.as_str().to_uppercase();
-    let Some(ServerRouteMethod {
+    let Some(RouteMethod {
         auth: authentication,
         handler,
     }) = route.handlers.get(method_name.as_str()).cloned()
@@ -74,10 +72,11 @@ async fn handle(
     };
 
     let mut auth = Value::Null;
-    if let ServerRouteAuth::Custom(authenticate) = &authentication {
-        let context = ServerRouteRequestContext {
+    if let RouteAuth::Custom(authenticate) = &authentication {
+        let context = RouteAuthContext {
             request: request.clone(),
             params: params.clone(),
+            db: app.db().clone(),
             app: app.clone(),
         };
         match AssertUnwindSafe(authenticate(context)).catch_unwind().await {
@@ -98,14 +97,17 @@ async fn handle(
         }
     }
 
-    let context = ServerRouteContext {
+    let context = RouteContext {
         request,
         params,
         auth,
+        db: app.db().clone(),
         app,
     };
     match AssertUnwindSafe(handler(context)).catch_unwind().await {
         Ok(Ok(response)) => response,
+        // The handler refused its input.
+        Ok(Err(error)) if error.is::<InvalidInput>() => json_error(StatusCode::UNPROCESSABLE_ENTITY, error.to_string()),
         outcome => {
             let error = match outcome {
                 Ok(Err(error)) => error_message(&error),
@@ -121,7 +123,7 @@ async fn handle(
 }
 
 /// Fails when a route declares no HTTP method.
-pub fn assert_route_definition(route: &ServerRoute, route_path: &str) -> anyhow::Result<()> {
+pub fn assert_route_definition(route: &Route, route_path: &str) -> anyhow::Result<()> {
     if route.handlers.is_empty() {
         anyhow::bail!("[openshop] Invalid server route {route_path}: define at least one HTTP method");
     }

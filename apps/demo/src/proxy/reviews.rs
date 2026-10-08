@@ -1,17 +1,8 @@
-use openshop::{ProxyContext, Result, proxy};
+use openshop::prelude::*;
 
+/// Shopify renders the template with the objects of the storefront; what only
+/// the server knows reaches it as a variable.
 #[proxy(GET, "/reviews", liquid)]
-pub async fn reviews(ctx: ProxyContext) -> Result<String> {
-    Ok(format!(
-        r#"
-      <div class="openshop-reviews">
-        <h2>Customer Reviews for {{{{ shop.name }}}}</h2>
-        <p>Reviews loaded via OpenShop App Proxy from {}</p>
-        {{% if customer %}}
-          <p>Hello {{{{ customer.first_name }}}}! Leave a review below.</p>
-        {{% endif %}}
-      </div>
-    "#,
-        ctx.shop
-    ))
+pub async fn reviews(ctx: ProxyContext) -> Result<Liquid> {
+    Ok(liquid!("reviews.liquid").assign("app_shop", &ctx.shop))
 }

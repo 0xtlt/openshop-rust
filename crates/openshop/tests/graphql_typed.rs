@@ -5,7 +5,7 @@ mod common;
 
 use common::noop_flow;
 use openshop::testing::{TestContext, TestOptions};
-use openshop::{Flow, OpenShopConfig, RunFlowResult, ShopifyClient, Value, graphql, json};
+use openshop::{Flow, OpenShopConfig, RunOutcome, ShopifyClient, Value, graphql, json};
 
 /// A context whose shop is installed, so that it has a Shopify client.
 async fn context_with(config: OpenShopConfig) -> TestContext {
@@ -27,7 +27,7 @@ async fn context() -> TestContext {
 }
 
 async fn shopify(ctx: &TestContext) -> ShopifyClient {
-    ctx.app.shopify_client(&ctx.shop, "default").await.unwrap()
+    ctx.app.shopify_client(&ctx.shop, "default")
 }
 
 /// Makes Shopify answer every operation with `data`.
@@ -362,7 +362,7 @@ async fn typed_data_is_a_step_output() {
 
     assert_eq!(
         ctx.run_flow("shopName", json!({})).await.unwrap(),
-        RunFlowResult::Completed
+        RunOutcome::Completed
     );
 
     let outputs: Vec<(String, Value)> =

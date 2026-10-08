@@ -26,17 +26,20 @@ impl<T> Clone for Factory<T> {
     }
 }
 
-/// Define a test factory from a `create` (client, overrides) and a `destroy` (client, resource) function.
-pub fn define_factory<T, C, CFut, D, DFut>(create: C, destroy: D) -> Factory<T>
-where
-    C: Fn(ShopifyClient, Value) -> CFut + Send + Sync + 'static,
-    CFut: Future<Output = Result<T>> + Send + 'static,
-    D: Fn(ShopifyClient, T) -> DFut + Send + Sync + 'static,
-    DFut: Future<Output = Result<()>> + Send + 'static,
-{
-    Factory {
-        create: Arc::new(move |shopify, overrides| Box::pin(create(shopify, overrides))),
-        destroy: Arc::new(move |shopify, resource| Box::pin(destroy(shopify, resource))),
+impl<T> Factory<T> {
+    /// A factory from what creates a resource (the client of the shop, then
+    /// the overrides of a test) and what destroys it afterwards.
+    pub fn new<C, CFut, D, DFut>(create: C, destroy: D) -> Self
+    where
+        C: Fn(ShopifyClient, Value) -> CFut + Send + Sync + 'static,
+        CFut: Future<Output = Result<T>> + Send + 'static,
+        D: Fn(ShopifyClient, T) -> DFut + Send + Sync + 'static,
+        DFut: Future<Output = Result<()>> + Send + 'static,
+    {
+        Self {
+            create: Arc::new(move |shopify, overrides| Box::pin(create(shopify, overrides))),
+            destroy: Arc::new(move |shopify, resource| Box::pin(destroy(shopify, resource))),
+        }
     }
 }
 

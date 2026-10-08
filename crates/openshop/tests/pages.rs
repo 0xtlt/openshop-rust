@@ -6,8 +6,8 @@ use common::{create_config, noop_flow};
 use openshop::server::mcp::tokens::create_mcp_token;
 use openshop::testing::TestContext;
 use openshop::{
-    AdminPageId, AdminPageMode, CronEntry, FieldDef, FunctionDefinition, McpConfig, OpenShopBuilder, OpenShopConfig,
-    Provider, ShopifyFunctionType, Value, json,
+    AdminPageId, AdminPageMode, Cron, Field, Function, FunctionType, McpConfig, OpenShopBuilder, OpenShopConfig,
+    Provider, Value, json,
 };
 use reqwest::{Method, RequestBuilder, StatusCode};
 
@@ -22,12 +22,9 @@ fn builder() -> OpenShopBuilder {
 /// A configuration with one resource behind every built-in page.
 fn full_builder() -> OpenShopBuilder {
     builder()
-        .provider(Provider::new("warehouse").field("token", FieldDef::password("Token")))
-        .cron(CronEntry::new("*/5 * * * *", "test-flow"))
-        .function(
-            "testFn",
-            FunctionDefinition::new(ShopifyFunctionType::CartTransform, "test-fn"),
-        )
+        .provider(Provider::new("warehouse").field("token", Field::password("Token")))
+        .cron(Cron::new("*/5 * * * *", "test-flow"))
+        .function("testFn", Function::new(FunctionType::CartTransform, "test-fn"))
 }
 
 async fn context(builder: OpenShopBuilder) -> TestContext {
@@ -125,7 +122,7 @@ async fn get_pages_shows_pages_backed_by_resources() {
 
     // Explicit modes win over the resource-based default, and a flow-less app hides Flows.
     let config = OpenShopConfig::builder()
-        .provider(Provider::new("warehouse").field("token", FieldDef::password("Token")))
+        .provider(Provider::new("warehouse").field("token", Field::password("Token")))
         .page(AdminPageId::Providers, AdminPageMode::Hidden)
         .page(AdminPageId::Crons, AdminPageMode::Visible)
         .page(AdminPageId::Functions, AdminPageMode::Disabled);
@@ -377,14 +374,29 @@ async fn disabling_the_mcp_admin_page_does_not_disable_the_mcp_protocol() {
 
 #[tokio::test]
 async fn mcp_enabled_false_rejects_mcp_protocol_requests() {
-    let ctx = context(builder().mcp(McpConfig::new().enabled(false))).await;
+    let ctx = context(builder().mcp(McpConfig::disabled())).await;
     let token = insert_mcp_token(&ctx, "disabled protocol token").await;
 
     let (status, body) = send(mcp_initialize(&ctx, &token)).await;
     assert_eq!(status, StatusCode::FORBIDDEN);
     assert_eq!(body, json!({ "error": "MCP is disabled" }));
 
-    // The admin page is a separate switch.
+    // The admin page follows: there is nothing to manage.
+    let (_, pages) = send(ctx.get("/api/pages")).await;
+    assert_eq!(pages["mcp"], "disabled");
+    assert_eq!(status_of(ctx.get("/api/mcp/capabilities")).await, StatusCode::NOT_FOUND);
+    ctx.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn the_mcp_page_stays_when_the_application_asks_for_it() {
+    let ctx = context(
+        builder()
+            .mcp(McpConfig::disabled())
+            .page(AdminPageId::Mcp, AdminPageMode::Visible),
+    )
+    .await;
+
     let (_, pages) = send(ctx.get("/api/pages")).await;
     assert_eq!(pages["mcp"], "visible");
     assert_eq!(status_of(ctx.get("/api/mcp/capabilities")).await, StatusCode::OK);

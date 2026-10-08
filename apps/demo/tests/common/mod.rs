@@ -1,7 +1,7 @@
-//! Boots the demo application for a test, with Shopify GraphQL answered by fixtures.
+//! Shopify GraphQL answered by fixtures, for the tests and the preview of the demo.
 #![allow(dead_code)]
 
-use openshop::testing::{MockTransport, TestContext, TestOptions};
+use openshop::testing::{MockTransport, TestContext};
 use openshop::{Value, json};
 
 pub fn graphql_fixture(query: &str) -> Value {
@@ -61,20 +61,10 @@ pub fn graphql_fixture(query: &str) -> Value {
     json!({})
 }
 
-pub async fn context() -> TestContext {
-    let ctx = TestContext::with_options(
-        openshop_demo::APP.config().expect("valid demo config"),
-        TestOptions {
-            access_token: Some("test-access-token".to_string()),
-            ..Default::default()
-        },
-    )
-    .await
-    .expect("test context");
-
+/// Answers the Shopify GraphQL requests of a test with the fixtures.
+pub fn answer_shopify(ctx: &TestContext) {
     ctx.transport.respond_with(|request| {
         let query = request.body["query"].as_str().unwrap_or_default();
         Ok(MockTransport::json(200, json!({ "data": graphql_fixture(query) })))
     });
-    ctx
 }

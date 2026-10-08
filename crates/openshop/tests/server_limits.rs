@@ -4,11 +4,11 @@ use std::borrow::Cow;
 
 use common::noop_flow;
 use openshop::testing::{TestContext, TestOptions, sign_query, to_query_string};
-use openshop::{OpenShopConfig, ServerOptions, ServerRoute, UiSource, Value, json, response};
+use openshop::{OpenShopConfig, Route, ServerOptions, UiSource, Value, json, response};
 use reqwest::Method;
 
-fn echo_size() -> ServerRoute {
-    ServerRoute::public().post(|ctx| async move { Ok(response::json(json!({ "bytes": ctx.request.body.len() }))) })
+fn echo_size() -> Route {
+    Route::public().post(|ctx| async move { Ok(response::json(json!({ "bytes": ctx.request.body.len() }))) })
 }
 
 #[tokio::test]

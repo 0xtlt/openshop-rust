@@ -24,8 +24,10 @@ use self::registry::{McpRegistry, has_all_permissions};
 use self::schema::validate_mcp_tool_arguments;
 use crate::app::OpenShop;
 use crate::engine::step::error_message;
+use crate::server::connectors::Connectors;
 use crate::server::shop_domain::normalize_shop_domain;
-use crate::types::{JsonMap, McpAuditStatus, McpCapabilityType, McpExecutionContext};
+use crate::shopify::client::ShopifyClient;
+use crate::types::{JsonMap, McpAuditStatus, McpCapabilityType, McpContext};
 
 pub const MCP_PROTOCOL_VERSION: &str = "2025-11-25";
 const MAX_MCP_PAYLOAD_BYTES: usize = 1_000_000;
@@ -141,14 +143,16 @@ async fn audit(app: &OpenShop, entry: AuditEntry<'_>) -> Result<()> {
     Ok(())
 }
 
-fn create_context(app: &OpenShop, token: &ResolvedMcpToken, signal: CancellationToken) -> McpExecutionContext {
-    McpExecutionContext {
-        app_handle: token.app_handle.clone(),
+fn create_context(app: &OpenShop, token: &ResolvedMcpToken, signal: CancellationToken) -> McpContext {
+    McpContext {
         shop: token.shop.clone(),
+        shopify_app: token.app_handle.clone(),
         token_id: token.token_id.clone(),
         permissions: token.permissions.clone(),
         signal,
         db: app.db().clone(),
+        shopify: ShopifyClient::new(app, &token.shop, &token.app_handle),
+        connectors: Connectors::for_shop(app, &token.shop, &token.app_handle),
         app: app.clone(),
     }
 }

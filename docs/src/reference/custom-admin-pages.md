@@ -3,7 +3,7 @@
 To build a screen, see [Add a custom admin page](../guides/add-admin-page.md).
 
 Custom admin pages let an OpenShop app add embedded screens without forking the
-framework UI. The API is experimental and must be enabled explicitly.
+framework UI. The API is experimental.
 
 A custom page has two halves:
 
@@ -16,27 +16,50 @@ A custom page has two halves:
 // src/main.rs
 mod admin;
 
-use openshop::{App, CustomAdminNavigationItem, Result, app};
+use openshop::prelude::*;
 
 use admin::reviews::{ReviewDetailPage, ReviewsPage};
 
 static APP: App = app! {
     admin_pages: [ReviewsPage, ReviewDetailPage],
-    custom_pages: [CustomAdminNavigationItem::new("Reviews", ReviewsPage::PATH)],
 };
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    APP.run().await
+fn main() -> Result<()> {
+    APP.main()
 }
 ```
 
-`admin_pages` lists the pages. The `custom_pages` setting enables the feature
-and takes the sidebar entries; `custom_pages: []` enables it without any.
-Navigation entries are appended after built-in links. Each path must be a
-static path of a listed page; dynamic detail pages remain routable without
-appearing in navigation. Without `custom_pages`, the listed pages are not
-served.
+`admin_pages` lists the pages. A listed page is served: there is no other
+switch.
+
+## Navigation
+
+`nav = "Label"` in the attribute gives a page an entry in the menu of the
+admin: `#[admin_page("/reviews", nav = "Reviews")]`. Entries are appended after
+the built-in links, in the order `admin_pages` lists the pages. A page without
+`nav` is served without appearing in the menu. A page with a dynamic segment,
+such as `/reviews/:id`, cannot have an entry: a `nav` on it is rejected when
+the configuration is built.
+
+The `custom_pages` setting of `app!` sets the menu by hand, for another order
+or another label:
+
+```rust,ignore
+use openshop::CustomAdminNavigationItem;
+use openshop::prelude::*;
+
+static APP: App = app! {
+    admin_pages: [ReviewsPage, ReviewDetailPage, ModerationPage],
+    custom_pages: [
+        CustomAdminNavigationItem::new("Moderation", ModerationPage::PATH),
+        CustomAdminNavigationItem::new("All reviews", ReviewsPage::PATH),
+    ],
+};
+```
+
+It replaces the entries the pages declare: with `custom_pages`, every `nav` is
+ignored, and `custom_pages: []` leaves the menu without any entry of the
+application. Each path must be a static path of a listed page.
 
 ## Server pages
 
@@ -47,11 +70,11 @@ the constant `PATH` of the type.
 
 ```rust,ignore
 // src/admin/reviews.rs
-use openshop::{AdminPublicError, AdminServerContext, Result, Value, admin_page, bail, json};
-use schemars::JsonSchema;
-use serde::Deserialize;
+use openshop::AdminPublicError;
+use openshop::prelude::*;
 
-#[derive(Deserialize, JsonSchema)]
+#[input]
+#[derive(Debug)]
 pub struct SaveReview {
     #[schemars(length(min = 1))]
     pub title: String,
@@ -59,21 +82,21 @@ pub struct SaveReview {
 
 pub struct ReviewsPage;
 
-#[admin_page("/reviews")]
+#[admin_page("/reviews", nav = "Reviews")]
 impl ReviewsPage {
     #[access]
-    async fn signed_in(ctx: AdminServerContext) -> Result<bool> {
+    async fn signed_in(ctx: AdminContext) -> Result<bool> {
         Ok(!ctx.actor.id.is_empty())
     }
 
     #[loader]
-    async fn list_reviews(ctx: AdminServerContext) -> Result<Value> {
+    async fn list_reviews(ctx: AdminContext) -> Result<Value> {
         // Always filter your own queries by the trusted shop and app identity.
         Ok(json!([{ "id": "1", "title": format!("First review of {}", ctx.shop) }]))
     }
 
     #[action]
-    async fn save_review(ctx: AdminServerContext, input: SaveReview) -> Result<Value> {
+    async fn save_review(ctx: AdminContext, input: SaveReview) -> Result<Value> {
         if input.title.len() > 120 {
             bail!(
                 AdminPublicError::new("TITLE_TOO_LONG", "Title is too long")
@@ -90,7 +113,7 @@ pub struct ReviewDetailPage;
 #[admin_page("/reviews/:id")]
 impl ReviewDetailPage {
     #[loader]
-    async fn review(ctx: AdminServerContext) -> Result<Value> {
+    async fn review(ctx: AdminContext) -> Result<Value> {
         let id = ctx.params.get("id").cloned().unwrap_or_default();
         let title = format!("Review {id}");
         Ok(json!({ "id": id, "title": title }))
@@ -124,20 +147,26 @@ the same name.
 
 | Function | Input |
 | --- | --- |
-| `#[loader] async fn(ctx: AdminServerContext) -> Result<T>` | None. Whatever the page sends is ignored. |
-| `#[loader] async fn(ctx: AdminServerContext, input: I) -> Result<T>` | Validated against the JSON Schema of `I` and deserialized into it. |
-| `#[action] async fn(ctx: AdminServerContext) -> Result<T>` | None. Any JSON value is accepted and ignored. |
-| `#[action] async fn(ctx: AdminServerContext, input: I) -> Result<T>` | Validated against the JSON Schema of `I` and deserialized into it. |
+| `#[loader] async fn(ctx: AdminContext) -> Result<T>` | None. Whatever the page sends is ignored. |
+| `#[loader] async fn(ctx: AdminContext, input: I) -> Result<T>` | Validated against the JSON Schema of `I` and deserialized into it. |
+| `#[action] async fn(ctx: AdminContext) -> Result<T>` | None. Any JSON value is accepted and ignored. |
+| `#[action] async fn(ctx: AdminContext, input: I) -> Result<T>` | Validated against the JSON Schema of `I` and deserialized into it. |
 
-`I` implements `Deserialize` and `JsonSchema`. A typed input needs the `schema`
-cargo feature, which is enabled by default. `T` is any `Serialize` value.
+`I` is a type marked `#[input]`. The attribute derives `Deserialize`,
+`Serialize`, and `JsonSchema` for it, without `serde` or `schemars` among the
+dependencies of the application, and names its fields in camel case outside
+Rust: `product_id` is `productId` in what the page sends. A
+`#[serde(rename_all = "…")]` on the type states another rule. The attributes
+of `serde` and `schemars` work on the type and on its fields; put `#[input]`
+above the other attributes of the type. A typed input needs the `schema` cargo
+feature, which is enabled by default. `T` is any `Serialize` value.
 `authorize = <rule>` in the marker adds an
 [access rule](#authorization-and-errors) of its own to the function. A function
 of the block without a marker is an ordinary helper.
 
-The functions receive an `AdminServerContext`:
+The functions receive an `AdminContext`:
 
-| `AdminServerContext` field | Type | Contract |
+| `AdminContext` field | Type | Contract |
 | --- | --- | --- |
 | `shop` | `String` | Shop of the verified session token. |
 | `shopify_app` | `String` | App handle of the verified session token. |
@@ -150,8 +179,17 @@ The functions receive an `AdminServerContext`:
 | `idempotency_key` | `Option<String>` | The `Idempotency-Key` request header, when the client sent one. |
 | `app` | `OpenShop` | The running application. |
 
-Database access is not automatically tenant-scoped: every app query must filter
-by the trusted shop and app handle where applicable.
+Nothing is read when the context is built: the access token of the shop is
+read at the first Shopify request, and the provider configuration at the first
+provider call.
+
+`AdminContext` belongs to a shop, so what needs one takes the context itself:
+`Review::of(&ctx)` gives the rows of the shop of the session token, and
+`sync_orders::dispatch(&ctx, SyncOrdersInput { limit: 10 }).await?` queues a
+run of a flow for it.
+
+SQL written with `sqlx` on `ctx.db` is not tenant-scoped: every such query
+must filter by the trusted shop, and by the app handle where applicable.
 
 Custom actions are synchronous and use the hosting platform's request limits. Use
 an ordinary server route or an OpenShop flow for long-running or retryable work.
@@ -299,7 +337,8 @@ of:
 ```rust,ignore
 use std::borrow::Cow;
 
-use openshop::{App, UiSource, app};
+use openshop::UiSource;
+use openshop::prelude::*;
 
 #[derive(rust_embed::RustEmbed)]
 #[folder = "ui/dist/"]
@@ -331,7 +370,7 @@ The function marked `#[access]` filters navigation and guards direct page
 visits; a page has at most one. Add `authorize = <rule>` to the marker of each
 loader or action that needs a narrower policy:
 `#[action(authorize = Self::signed_in)]`. A rule is an
-`async fn(ctx: AdminServerContext) -> Result<bool>`, in the block or outside
+`async fn(ctx: AdminContext) -> Result<bool>`, in the block or outside
 it. OpenShop evaluates the page's rule, the rule of every listed parent page
 (`/reviews` for `/reviews/:id`), and the function's own rule on the server, for
 every request. All of them must allow the request.
@@ -345,7 +384,7 @@ error is logged with a request ID and returned without details.
 | --- | --- | --- |
 | `200` | — | The handler's JSON output is the response body. |
 | `403` | `FORBIDDEN` | A page or function rule rejected the request. |
-| `404` | `NOT_FOUND` | Custom pages are not enabled, or the page, function, or kind does not exist. |
+| `404` | `NOT_FOUND` | The page, function, or kind does not exist. |
 | `422` | `INVALID_INPUT` | The input does not satisfy the function's schema. |
 | Your status | Your code | The handler returned an `AdminPublicError`. |
 | `500` | `INTERNAL_ERROR` | Any other handler error, a panic, an access rule that failed, or an output rejected by [`.output(…)`](#without-the-attribute). |
@@ -361,7 +400,7 @@ status, but not request or response payloads.
 
 ## Testing
 
-`openshop::testing` exports `create_admin_function_test_context` and
+`openshop::testing` exports `admin_context` and
 `invoke_admin_function` for handler tests. Keep HTTP integration tests for
 session token validation, policies, route params, and tenant isolation. See
 [Testing](testing.md#test-admin-functions).
@@ -373,11 +412,13 @@ functions of a page are only known at run time, or need what the attribute
 does not state, such as an output validator:
 
 ```rust,ignore
-use openshop::{AdminPage, InputSchema, define_admin_page_access, json};
+use openshop::prelude::*;
+use openshop::{AdminPage, InputSchema};
 
 pub fn reviews_page() -> AdminPage {
     AdminPage::new("/reviews")
-        .access(define_admin_page_access(|ctx| async move { Ok(!ctx.actor.id.is_empty()) }))
+        .nav("Reviews")
+        .access(|ctx| async move { Ok(!ctx.actor.id.is_empty()) })
         .loader("listReviews", |ctx, _input| async move {
             Ok(json!([{ "id": "1", "title": format!("First review of {}", ctx.shop) }]))
         })
@@ -390,22 +431,27 @@ pub fn reviews_page() -> AdminPage {
 Register it with `.admin_page(reviews_page())` on the builder:
 `APP.builder()?` is the builder of the declaration, to add to.
 
+`AdminPage::new(path)` starts a page. `.nav(label)` gives it its entry in the
+menu, and `.access(rule)` its access rule.
+
 Loaders and actions are `AdminFunction` values registered under a name on
 their page:
 
 | Constructor | Kind | Input |
 | --- | --- | --- |
-| `page.loader(name, handler)` / `define_admin_loader(handler)` | Loader | Passed through as a `serde_json::Value` (`null` when absent) unless `.input(schema)` is added. |
-| `define_typed_admin_loader(handler)` | Loader | Validated against the JSON Schema of `T` and deserialized into it. |
-| `page.action(name, schema, handler)` / `define_admin_action(schema, handler)` | Action | Validated by the given `InputSchema`. `InputSchema::any()` accepts any JSON value. |
-| `define_typed_admin_action(handler)` | Action | Validated against the JSON Schema of `T` and deserialized into it. |
+| `page.loader(name, handler)` / `AdminFunction::loader(handler)` | Loader | Passed through as a `serde_json::Value` (`null` when absent) unless `.input(schema)` is added. |
+| `AdminFunction::typed_loader(handler)` | Loader | Validated against the JSON Schema of `T` and deserialized into it. |
+| `page.action(name, schema, handler)` / `AdminFunction::action(schema, handler)` | Action | Validated by the given `InputSchema`. `InputSchema::any()` accepts any JSON value. |
+| `AdminFunction::typed_action(handler)` | Action | Validated against the JSON Schema of `T` and deserialized into it. |
 
-`page.function(name, function)` registers the result of a `define_*`
-constructor. The typed constructors need the `schema` cargo feature. An action
-always has an input schema. `AdminFunction` also has the builder methods
-`.input(schema)`, `.output(validate)`, and `.authorize(access)`; `.access(rule)`
-on the page is its access rule. Rules are created with
-`define_admin_page_access(|ctx| async move { Ok(bool) })`.
+`page.function(name, function)` registers an `AdminFunction`. The typed
+constructors need the `schema` cargo feature. An action always has an input
+schema. `AdminFunction` also has the builder methods `.input(schema)`,
+`.output(validate)`, and `.authorize(rule)`.
 
-Handlers receive the `AdminServerContext` and the input, and return a JSON
+A rule, for `.access(…)` and `.authorize(…)`, is an async function or a
+closure that takes the `AdminContext` and returns `Result<bool>`. It is passed
+as it is: `.authorize(|ctx| async move { Ok(ctx.actor.id == "1") })`.
+
+Handlers receive the `AdminContext` and the input, and return a JSON
 value, or any `Serialize` value for the typed constructors.

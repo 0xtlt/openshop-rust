@@ -9,11 +9,11 @@ use chrono::{DateTime, Utc};
 use openshop::db::schema::McpAuditLog;
 use openshop::runtime::OutboundRequest;
 use openshop::server::mcp::core::latest_stable_shopify_admin_api_version;
-use openshop::testing::{MockTransport, TestContext, TestOptions, create_session_token};
+use openshop::testing::{MockTransport, TestContext, TestOptions, session_token};
 use openshop::{
-    CancellationToken, CronEntry, DispatchFlowParams, Flow, FlowContext, IndexMap, InputSchema, McpConfig,
-    McpExecutionContext, McpPermissionDefinition, McpResourceContent, McpResourceDefinition, McpToolDefinition,
-    OpenShopConfig, RunFlowOptions, ShopifyAppConfig, ShopifyConfig, Value, anyhow, json, run_flow,
+    AdminPageId, AdminPageMode, CancellationToken, Cron, DispatchOptions, Flow, FlowContext, IndexMap, InputSchema,
+    McpConfig, McpContext, McpPermission, McpResource, McpResourceContent, McpTool, OpenShopConfig, RunFlowOptions,
+    ShopifyAppConfig, ShopifyConfig, Value, anyhow, json, run_flow,
 };
 use reqwest::{Method, RequestBuilder};
 use uuid::Uuid;
@@ -54,23 +54,23 @@ const CORE_RESOURCES: [&str; 4] = [
 
 fn log_flow() -> Flow {
     Flow::new("log-flow", |ctx: FlowContext| async move {
-        ctx.logger.info(json!({ "area": "mcp" }), "mcp info");
-        ctx.logger.warn(json!({ "area": "mcp" }), "mcp warn");
+        ctx.logger.info_with("mcp info", json!({ "area": "mcp" }));
+        ctx.logger.warn_with("mcp warn", json!({ "area": "mcp" }));
         Ok(())
     })
 }
 
 fn demo_mcp() -> McpConfig {
     McpConfig::new()
-        .permission("demo:read_status", McpPermissionDefinition::new("Read demo status"))
+        .permission(McpPermission::new("demo:read_status", "Read demo status"))
         .tool(
             "demo.status",
-            McpToolDefinition::new("Read status", |_ctx, _input| async { Ok(json!({ "ok": true })) })
-                .required_permissions(["demo:read_status"]),
+            McpTool::new("Read status", |_ctx, _input| async { Ok(json!({ "ok": true })) })
+                .permissions(["demo:read_status"]),
         )
         .resource(
             "openshop://demo/status",
-            McpResourceDefinition::new("Demo status docs", |_ctx| async {
+            McpResource::new("Demo status docs", |_ctx| async {
                 Ok(McpResourceContent::from("demo"))
             }),
         )
@@ -103,7 +103,7 @@ async fn multi_app_context() -> TestContext {
             apps: Some(apps),
         })
         .flow(log_flow())
-        .cron(CronEntry::new("0 * * * *", "log-flow"))
+        .cron(Cron::new("0 * * * *", "log-flow"))
         .build()
         .unwrap();
     let options = TestOptions {
@@ -320,7 +320,7 @@ async fn uninstall(ctx: &TestContext, shop: &str) {
 async fn logged_run(ctx: &TestContext, app_handle: &str, shop: &str) -> Uuid {
     let dispatched = ctx
         .app
-        .dispatch_flow(DispatchFlowParams::new("log-flow", shop).shopify_app(app_handle))
+        .dispatch_flow(DispatchOptions::new("log-flow", shop).shopify_app(app_handle))
         .await
         .unwrap();
     let result = run_flow(
@@ -1143,9 +1143,15 @@ async fn mcp_calls_update_last_used_at() {
 
 #[tokio::test]
 async fn mcp_is_rejected_when_disabled_in_the_config() {
-    let ctx = TestContext::new(config_with(McpConfig::new().enabled(false)))
-        .await
+    // Turning MCP off turns its admin page off too: this application keeps
+    // the page, to manage tokens while the protocol is refused.
+    let config = OpenShopConfig::builder()
+        .flow(log_flow())
+        .mcp(McpConfig::disabled())
+        .page(AdminPageId::Mcp, AdminPageMode::Visible)
+        .build()
         .unwrap();
+    let ctx = TestContext::new(config).await.unwrap();
 
     let (_, capabilities) = send(ctx.get("/api/mcp/capabilities")).await;
     assert_eq!(capabilities["enabled"], false);
@@ -1591,7 +1597,7 @@ async fn tools_call_validates_arguments_before_running_a_tool() {
     let counter = runs.clone();
     let mcp = McpConfig::new().tool(
         "demo.count",
-        McpToolDefinition::new("Counts its runs", move |_ctx, _input| {
+        McpTool::new("Counts its runs", move |_ctx, _input| {
             let counter = counter.clone();
             async move { Ok(json!(counter.fetch_add(1, Ordering::SeqCst) + 1)) }
         })
@@ -1728,78 +1734,75 @@ async fn custom_tools_and_resources_are_served_and_audited() {
 
 fn showcase_mcp() -> McpConfig {
     McpConfig::new()
-        .permission("demo:use_tools", McpPermissionDefinition::new("Use demo tools"))
+        .permission(McpPermission::new("demo:use_tools", "Use demo tools"))
         .tool(
             "demo.context",
-            McpToolDefinition::new(
-                "Echo the execution context",
-                |ctx: McpExecutionContext, input| async move {
-                    let (tokens,): (i64,) = sqlx::query_as("SELECT count(*) FROM mcp_tokens")
-                        .fetch_one(&ctx.db)
-                        .await?;
-                    Ok(json!({
-                        "shop": ctx.shop,
-                        "appHandle": ctx.app_handle,
-                        "tokenId": ctx.token_id,
-                        "permissions": ctx.permissions,
-                        "cancelled": ctx.signal.is_cancelled(),
-                        "flows": ctx.app.config().flows.keys().collect::<Vec<_>>(),
-                        "tokens": tokens,
-                        "input": input,
-                    }))
-                },
-            )
-            .required_permissions(["demo:use_tools", "demo:use_tools"]),
+            McpTool::new("Echo the execution context", |ctx: McpContext, input| async move {
+                let (tokens,): (i64,) = sqlx::query_as("SELECT count(*) FROM mcp_tokens")
+                    .fetch_one(&ctx.db)
+                    .await?;
+                Ok(json!({
+                    "shop": ctx.shop,
+                    "appHandle": ctx.shopify_app,
+                    "tokenId": ctx.token_id,
+                    "permissions": ctx.permissions,
+                    "cancelled": ctx.signal.is_cancelled(),
+                    "flows": ctx.app.config().flows.keys().collect::<Vec<_>>(),
+                    "tokens": tokens,
+                    "input": input,
+                }))
+            })
+            .permissions(["demo:use_tools", "demo:use_tools"]),
         )
         .tool(
             "demo.text",
-            McpToolDefinition::new("Plain text", |_ctx, _input| async { Ok(json!("plain text")) }),
+            McpTool::new("Plain text", |_ctx, _input| async { Ok(json!("plain text")) }),
         )
         .tool(
             "demo.content",
-            McpToolDefinition::new("Explicit content", |_ctx, _input| async {
+            McpTool::new("Explicit content", |_ctx, _input| async {
                 Ok(json!({ "content": [{ "type": "text", "text": "custom" }], "isError": false }))
             }),
         )
         .tool(
             "demo.list",
-            McpToolDefinition::new("A JSON array", |_ctx, _input| async { Ok(json!([1, "two"])) }),
+            McpTool::new("A JSON array", |_ctx, _input| async { Ok(json!([1, "two"])) }),
         )
         .tool(
             "demo.nothing",
-            McpToolDefinition::new("No result", |_ctx, _input| async { Ok(Value::Null) }),
+            McpTool::new("No result", |_ctx, _input| async { Ok(Value::Null) }),
         )
         .tool(
             "demo.fail",
-            McpToolDefinition::new("Always fails", |_ctx, _input| async { Err(anyhow!("boom")) }),
+            McpTool::new("Always fails", |_ctx, _input| async { Err(anyhow!("boom")) }),
         )
         .tool(
             "demo.panic",
-            McpToolDefinition::new("Always panics", |_ctx, input| async move {
+            McpTool::new("Always panics", |_ctx, input| async move {
                 let missing: Option<&Value> = input.get("missing");
                 Ok(missing.expect("tool exploded").clone())
             }),
         )
         .resource(
             "demo://report",
-            McpResourceDefinition::new("Report", |ctx: McpExecutionContext| async move {
+            McpResource::new("Report", |ctx: McpContext| async move {
                 Ok(McpResourceContent {
                     text: json!({ "shop": ctx.shop }).to_string(),
                     mime_type: Some("application/json".to_string()),
                 })
             })
             .mime_type("text/plain")
-            .required_permissions(["demo:use_tools"]),
+            .permissions(["demo:use_tools"]),
         )
         .resource(
             "demo://notes",
-            McpResourceDefinition::new("Notes", |_ctx| async { Ok("# Notes".into()) })
+            McpResource::new("Notes", |_ctx| async { Ok("# Notes".into()) })
                 .description("Markdown notes")
                 .mime_type("text/markdown"),
         )
         .resource(
             "demo://broken",
-            McpResourceDefinition::new("Broken", |_ctx| async { Err(anyhow!("unreadable")) }),
+            McpResource::new("Broken", |_ctx| async { Err(anyhow!("unreadable")) }),
         )
 }
 
@@ -1959,7 +1962,7 @@ fn slow_tool_config(probe: &Arc<SlowToolProbe>) -> OpenShopConfig {
     let shared = probe.clone();
     config_with(McpConfig::new().tool(
         "demo.slow",
-        McpToolDefinition::new("Never finishes", move |ctx: McpExecutionContext, _input| {
+        McpTool::new("Never finishes", move |ctx: McpContext, _input| {
             let probe = shared.clone();
             async move {
                 let _marker = MarkDropped(probe.clone());
@@ -2513,10 +2516,10 @@ fn automation_config() -> OpenShopConfig {
             Flow::new("typed-flow", |_ctx: FlowContext| async move { Ok(()) })
                 .input_schema(InputSchema::custom(schema, Ok)),
         )
-        .cron(CronEntry::new("0 * * * *", "log-flow").name("hourly"))
+        .cron(Cron::new("0 * * * *", "log-flow").name("hourly"))
         .cron(
-            CronEntry::new("*/5 * * * *", "log-flow")
-                .shops("all")
+            Cron::new("*/5 * * * *", "log-flow")
+                .all_shops()
                 .input(json!({ "source": "cron" })),
         )
         .build()
@@ -2748,7 +2751,7 @@ async fn openshop_crons_list_and_set_enabled_are_scoped_to_the_token_shop() {
 async fn mcp_tokens_only_reach_the_data_of_their_own_shopify_app() {
     let ctx = multi_app_context().await;
     let shop = ctx.shop.clone();
-    let session_b = create_session_token(&shop, "secret-b", "key-b", "1");
+    let session_b = session_token(&shop, "secret-b", "key-b", "1");
     install(&ctx, "client-a", &shop, Some("token-a")).await;
     install(&ctx, "client-a", SHOP_B, Some("token-a2")).await;
     install(&ctx, "client-b", &shop, Some("token-b")).await;
@@ -2862,12 +2865,12 @@ async fn mcp_tokens_only_reach_the_data_of_their_own_shopify_app() {
 
 // ─── Registry validation ─────────────────────────────────────────────
 
-fn noop_tool(description: &str) -> McpToolDefinition {
-    McpToolDefinition::new(description, |_ctx, _input| async { Ok(json!("ok")) })
+fn noop_tool(description: &str) -> McpTool {
+    McpTool::new(description, |_ctx, _input| async { Ok(json!("ok")) })
 }
 
-fn noop_resource(name: &str) -> McpResourceDefinition {
-    McpResourceDefinition::new(name, |_ctx| async { Ok("ok".into()) })
+fn noop_resource(name: &str) -> McpResource {
+    McpResource::new(name, |_ctx| async { Ok("ok".into()) })
 }
 
 fn build_error(mcp: McpConfig) -> String {
@@ -2881,38 +2884,38 @@ fn build_error(mcp: McpConfig) -> String {
 
 #[test]
 fn mcp_config_is_validated_when_the_config_is_built() {
-    let permission = || McpPermissionDefinition::new("Read inventory");
+    let permission = |key: &'static str| McpPermission::new(key, "Read inventory");
     let valid = McpConfig::new()
-        .permission("warehouse:read_inventory", permission())
+        .permission(permission("warehouse:read_inventory"))
         .tool(
             "warehouse.inventory.list",
-            noop_tool("List inventory").required_permissions(["warehouse:read_inventory"]),
+            noop_tool("List inventory").permissions(["warehouse:read_inventory"]),
         )
         .resource(
             "openshop://warehouse/inventory",
-            noop_resource("Inventory help").required_permissions(["warehouse:read_inventory"]),
+            noop_resource("Inventory help").permissions(["warehouse:read_inventory"]),
         );
     assert!(OpenShopConfig::builder().mcp(valid).build().is_ok());
 
     let cases = [
         (
-            McpConfig::new().permission("admin", permission()),
+            McpConfig::new().permission(permission("admin")),
             "permission \"admin\" is not allowed",
         ),
         (
-            McpConfig::new().permission("*", permission()),
+            McpConfig::new().permission(permission("*")),
             "permission \"*\" is not allowed",
         ),
         (
-            McpConfig::new().permission("read_logs", permission()),
+            McpConfig::new().permission(permission("read_logs")),
             "custom permission \"read_logs\" must use namespace:action_resource",
         ),
         (
-            McpConfig::new().permission("Warehouse:Read", permission()),
+            McpConfig::new().permission(permission("Warehouse:Read")),
             "custom permission \"Warehouse:Read\" must use namespace:action_resource",
         ),
         (
-            McpConfig::new().permission("warehouse:read_inventory", McpPermissionDefinition::new("  ")),
+            McpConfig::new().permission(McpPermission::new("warehouse:read_inventory", "  ")),
             "permissions.custom.warehouse:read_inventory.label must be a non-empty string",
         ),
         (
@@ -2930,7 +2933,7 @@ fn mcp_config_is_validated_when_the_config_is_built() {
         (
             McpConfig::new().tool(
                 "warehouse.list",
-                noop_tool("List inventory").required_permissions(["warehouse:read_inventory"]),
+                noop_tool("List inventory").permissions(["warehouse:read_inventory"]),
             ),
             "mcp.tools.warehouse.list references unknown permission \"warehouse:read_inventory\"",
         ),
@@ -2947,7 +2950,7 @@ fn mcp_config_is_validated_when_the_config_is_built() {
             "mcp.resources.warehouse://help.name must be a non-empty string",
         ),
         (
-            McpConfig::new().resource("warehouse://help", noop_resource("Help").required_permissions(["nope"])),
+            McpConfig::new().resource("warehouse://help", noop_resource("Help").permissions(["nope"])),
             "mcp.resources.warehouse://help references unknown permission \"nope\"",
         ),
     ];

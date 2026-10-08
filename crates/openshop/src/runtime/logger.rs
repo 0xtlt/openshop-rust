@@ -42,12 +42,12 @@ fn default_logger() -> Arc<dyn RuntimeLogger> {
 }
 
 /// Replaces the process logger and returns the previous one.
-pub fn set_runtime_logger(next: Arc<dyn RuntimeLogger>) -> Arc<dyn RuntimeLogger> {
+pub fn set_logger(next: Arc<dyn RuntimeLogger>) -> Arc<dyn RuntimeLogger> {
     let mut slot = LOGGER.write().unwrap_or_else(|poisoned| poisoned.into_inner());
     slot.replace(next).unwrap_or_else(default_logger)
 }
 
-pub fn get_runtime_logger() -> Arc<dyn RuntimeLogger> {
+pub fn logger() -> Arc<dyn RuntimeLogger> {
     LOGGER
         .read()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -56,23 +56,23 @@ pub fn get_runtime_logger() -> Arc<dyn RuntimeLogger> {
 }
 
 pub(crate) fn info(message: impl AsRef<str>) {
-    get_runtime_logger().info(message.as_ref(), None);
+    logger().info(message.as_ref(), None);
 }
 
 pub(crate) fn warn(message: impl AsRef<str>) {
-    get_runtime_logger().warn(message.as_ref(), None);
+    logger().warn(message.as_ref(), None);
 }
 
 pub(crate) fn warn_with(message: impl AsRef<str>, context: Value) {
-    get_runtime_logger().warn(message.as_ref(), Some(&context));
+    logger().warn(message.as_ref(), Some(&context));
 }
 
 pub(crate) fn info_with(message: impl AsRef<str>, context: Value) {
-    get_runtime_logger().info(message.as_ref(), Some(&context));
+    logger().info(message.as_ref(), Some(&context));
 }
 
 pub(crate) fn error_with(message: impl AsRef<str>, context: Value) {
-    get_runtime_logger().error(message.as_ref(), Some(&context));
+    logger().error(message.as_ref(), Some(&context));
 }
 
 #[cfg(test)]
@@ -101,13 +101,13 @@ mod tests {
     #[test]
     fn swaps_the_runtime_logger_and_restores_the_previous_one() {
         let capture = Arc::new(Capture::default());
-        let previous = set_runtime_logger(capture.clone());
+        let previous = set_logger(capture.clone());
 
-        get_runtime_logger().info("hello", None);
-        get_runtime_logger().warn("careful", None);
-        get_runtime_logger().error("boom", Some(&serde_json::json!({ "code": 1 })));
+        logger().info("hello", None);
+        logger().warn("careful", None);
+        logger().error("boom", Some(&serde_json::json!({ "code": 1 })));
 
-        let restored = set_runtime_logger(previous);
+        let restored = set_logger(previous);
         restored.info("after", None);
 
         let lines = capture.0.lock().unwrap().clone();

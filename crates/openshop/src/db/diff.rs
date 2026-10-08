@@ -6,7 +6,7 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
-use super::model::{ColumnDef, ForeignKeyDef, Model, quote};
+use super::model::{ColumnDef, ForeignKeyDef, Table, quote};
 
 /// The file, next to the migrations, that records the models as of the last
 /// generated migration.
@@ -18,7 +18,7 @@ const SNAPSHOT_VERSION: u32 = 1;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SchemaSnapshot {
     pub version: u32,
-    pub tables: Vec<Model>,
+    pub tables: Vec<Table>,
 }
 
 impl Default for SchemaSnapshot {
@@ -28,7 +28,7 @@ impl Default for SchemaSnapshot {
 }
 
 impl SchemaSnapshot {
-    pub fn of(models: &[Model]) -> Self {
+    pub fn of(models: &[Table]) -> Self {
         Self {
             version: SNAPSHOT_VERSION,
             tables: models.to_vec(),
@@ -231,7 +231,7 @@ struct TableChanges {
 }
 
 /// Compares the columns. Returns the old and new names of those renamed.
-fn diff_columns<'a>(before: &'a Model, model: &'a Model, changes: &mut TableChanges) -> Renames<'a> {
+fn diff_columns<'a>(before: &'a Table, model: &'a Table, changes: &mut TableChanges) -> Renames<'a> {
     let table = quote(&model.table);
     let mut kept: Vec<&str> = Vec::new();
     let mut renames: Renames = Vec::new();
@@ -285,8 +285,8 @@ fn diff_columns<'a>(before: &'a Model, model: &'a Model, changes: &mut TableChan
 /// Compares the foreign keys. A foreign key is the same link when its column
 /// and its target are, renames followed.
 fn diff_foreign_keys(
-    before: &Model,
-    model: &Model,
+    before: &Table,
+    model: &Table,
     column_renames: &Renames,
     table_renames: &Renames,
     changes: &mut TableChanges,
@@ -341,7 +341,7 @@ fn diff_foreign_keys(
 }
 
 /// Compares the indexes: one that changed is dropped and created again.
-fn diff_indexes(before: &Model, model: &Model, changes: &mut TableChanges) {
+fn diff_indexes(before: &Table, model: &Table, changes: &mut TableChanges) {
     for index in before.indexes() {
         if !model.indexes().contains(index) {
             changes.dropped_constraints.push(Change::new(index.drop_sql()));
@@ -373,8 +373,8 @@ fn diff_indexes(before: &Model, model: &Model, changes: &mut TableChanges) {
 /// with `renamed_from`. What matches nothing is created or dropped. Foreign
 /// keys are added after every table exists, and tables are dropped starting
 /// with those that reference others.
-pub fn diff(previous: &SchemaSnapshot, models: &[Model]) -> Vec<Change> {
-    let matched: Vec<(&Model, Option<&Model>)> = models
+pub fn diff(previous: &SchemaSnapshot, models: &[Table]) -> Vec<Change> {
+    let matched: Vec<(&Table, Option<&Table>)> = models
         .iter()
         .map(|model| {
             let before = continued(
@@ -430,7 +430,7 @@ pub fn diff(previous: &SchemaSnapshot, models: &[Model]) -> Vec<Change> {
     changes.extend(added_foreign_keys);
 
     // A table is dropped once no other table to drop references it.
-    let mut dropped: Vec<&Model> = previous
+    let mut dropped: Vec<&Table> = previous
         .tables
         .iter()
         .filter(|table| {
@@ -462,16 +462,16 @@ pub fn diff(previous: &SchemaSnapshot, models: &[Model]) -> Vec<Change> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::define_model;
+    use crate::db::Table;
 
-    fn reviews() -> Model {
-        define_model("reviews")
+    fn reviews() -> Table {
+        Table::conventional("reviews")
             .with_column(ColumnDef::new("product_id", "text"))
             .with_column(ColumnDef::new("rating", "integer"))
             .index("reviews_shop_product_idx", &["shop", "product_id"])
     }
 
-    fn sql(previous: &[Model], current: &[Model]) -> String {
+    fn sql(previous: &[Table], current: &[Table]) -> String {
         render(&diff(&SchemaSnapshot::of(previous), current))
     }
 
@@ -479,7 +479,7 @@ mod tests {
     fn identical_models_need_no_statement() {
         assert!(diff(&SchemaSnapshot::of(&[reviews()]), &[reviews()]).is_empty());
         // A definition written as a string compares on what it means.
-        let written = define_model("reviews")
+        let written = Table::conventional("reviews")
             .column("product_id", "TEXT not null")
             .column("rating", "int NOT NULL")
             .index("reviews_shop_product_idx", &["shop", "product_id"]);
@@ -488,7 +488,7 @@ mod tests {
 
     #[test]
     fn new_tables_are_created_and_removed_ones_dropped() {
-        let votes = define_model("review_votes").with_column(ColumnDef::new("value", "integer"));
+        let votes = Table::conventional("review_votes").with_column(ColumnDef::new("value", "integer"));
         assert_eq!(
             sql(&[reviews()], &[reviews(), votes.clone()]),
             format!("{}\n", votes.create_sql())
@@ -527,11 +527,11 @@ mod tests {
 
     #[test]
     fn changed_columns_are_altered_in_place() {
-        let previous = define_model("reviews")
+        let previous = Table::conventional("reviews")
             .with_column(ColumnDef::new("rating", "integer"))
             .with_column(ColumnDef::new("note", "text").nullable(true).default("''"))
             .with_column(ColumnDef::new("approved", "boolean"));
-        let current = define_model("reviews")
+        let current = Table::conventional("reviews")
             .with_column(ColumnDef::new("rating", "bigint").nullable(true))
             .with_column(ColumnDef::new("note", "text"))
             .with_column(ColumnDef::new("approved", "boolean").default("false"));
@@ -553,10 +553,10 @@ mod tests {
 
     #[test]
     fn renames_need_the_previous_name() {
-        let previous = define_model("reviews").with_column(ColumnDef::new("stars", "integer"));
+        let previous = Table::conventional("reviews").with_column(ColumnDef::new("stars", "integer"));
 
         // Without it, a rename is a column dropped and another added.
-        let guessed = define_model("reviews").with_column(ColumnDef::new("rating", "integer"));
+        let guessed = Table::conventional("reviews").with_column(ColumnDef::new("rating", "integer"));
         let statements = sql(std::slice::from_ref(&previous), &[guessed]);
         assert!(
             statements.contains("ADD COLUMN IF NOT EXISTS \"rating\""),
@@ -564,7 +564,7 @@ mod tests {
         );
         assert!(statements.contains("DROP COLUMN IF EXISTS \"stars\""), "{statements}");
 
-        let renamed = define_model("product_reviews")
+        let renamed = Table::conventional("product_reviews")
             .renamed_from("reviews")
             .with_column(ColumnDef::new("rating", "bigint").renamed_from("stars"));
         assert_eq!(
@@ -584,7 +584,7 @@ mod tests {
     #[test]
     fn indexes_are_created_dropped_and_replaced() {
         let previous = reviews().index("reviews_rating_idx", &["rating"]);
-        let current = define_model("reviews")
+        let current = Table::conventional("reviews")
             .with_column(ColumnDef::new("product_id", "text"))
             .with_column(ColumnDef::new("rating", "integer"))
             .index("reviews_shop_product_idx", &["shop", "product_id", "rating"])
@@ -602,8 +602,8 @@ mod tests {
         );
     }
 
-    fn votes() -> Model {
-        define_model("review_votes")
+    fn votes() -> Table {
+        Table::conventional("review_votes")
             .with_column(ColumnDef::new("review_id", "uuid"))
             .with_foreign_key(ForeignKeyDef::new("review_id", "reviews").on_delete("cascade"))
     }
@@ -629,7 +629,7 @@ mod tests {
 
     #[test]
     fn foreign_keys_are_added_changed_and_dropped_on_existing_tables() {
-        let plain = define_model("review_votes").with_column(ColumnDef::new("review_id", "uuid"));
+        let plain = Table::conventional("review_votes").with_column(ColumnDef::new("review_id", "uuid"));
 
         assert_eq!(
             sql(&[reviews(), plain.clone()], &[reviews(), votes()]),
@@ -639,7 +639,7 @@ mod tests {
         );
 
         // Another action on the same link: the constraint is replaced, without warning.
-        let restricted = define_model("review_votes")
+        let restricted = Table::conventional("review_votes")
             .with_column(ColumnDef::new("review_id", "uuid"))
             .with_foreign_key(ForeignKeyDef::new("review_id", "reviews").on_delete("restrict"));
         assert_eq!(
@@ -658,12 +658,12 @@ mod tests {
 
     #[test]
     fn renames_keep_foreign_keys_and_rename_their_constraints() {
-        let renamed_reviews = define_model("product_reviews")
+        let renamed_reviews = Table::conventional("product_reviews")
             .renamed_from("reviews")
             .with_column(ColumnDef::new("product_id", "text"))
             .with_column(ColumnDef::new("rating", "integer"))
             .index("reviews_shop_product_idx", &["shop", "product_id"]);
-        let renamed_votes = define_model("votes")
+        let renamed_votes = Table::conventional("votes")
             .renamed_from("review_votes")
             .with_column(ColumnDef::new("target_id", "uuid").renamed_from("review_id"))
             .with_foreign_key(ForeignKeyDef::new("target_id", "product_reviews").on_delete("cascade"));
@@ -681,7 +681,7 @@ mod tests {
 
     #[test]
     fn tables_that_reference_others_are_dropped_first() {
-        let replies = define_model("vote_replies")
+        let replies = Table::conventional("vote_replies")
             .with_column(ColumnDef::new("vote_id", "uuid"))
             .with_foreign_key(ForeignKeyDef::new("vote_id", "review_votes"));
         let statements = sql(&[reviews(), votes(), replies], &[]);
@@ -690,7 +690,7 @@ mod tests {
         assert!(position("review_votes") < position("reviews"), "{statements}");
 
         // A column dropped with its foreign key loses the constraint first.
-        let without = define_model("review_votes");
+        let without = Table::conventional("review_votes");
         assert_eq!(
             sql(&[reviews(), votes()], &[reviews(), without]),
             "ALTER TABLE \"review_votes\" DROP CONSTRAINT IF EXISTS \"review_votes_review_id_fkey\";\n\
@@ -702,8 +702,8 @@ mod tests {
 
     #[test]
     fn constraints_that_changed_are_left_to_write() {
-        let previous = define_model("reviews").column("product_id", "text NOT NULL");
-        let current = define_model("reviews").column("product_id", "text NOT NULL REFERENCES products(id)");
+        let previous = Table::conventional("reviews").column("product_id", "text NOT NULL");
+        let current = Table::conventional("reviews").column("product_id", "text NOT NULL REFERENCES products(id)");
         let changes = diff(&SchemaSnapshot::of(&[previous]), &[current]);
         assert_eq!(
             render(&changes),

@@ -25,8 +25,8 @@ contract. For a complete procedure, start with the [how-to guides](../guides/ind
 
 - [Authentication](authentication.md) — credentials and identity for each HTTP surface.
 - [Admin API](admin-api.md) — authenticated endpoint contracts.
-- [Proxy routes](proxy-routes.md) — storefront and Customer Account endpoints.
-- [Public server routes](server-routes.md) — explicit authentication and `Response` handlers.
+- [Proxy routes](proxy-routes.md) — storefront and Customer Account endpoints, typed input, and Liquid templates.
+- [Public server routes](server-routes.md) — explicit authentication, typed input, and JSON or `Response` handlers.
 - [Webhooks](webhooks.md) — topic matching, context, and acknowledgment behavior.
 - [Shopify Functions](shopify-functions.md) — Function definitions and configuration.
 - [Custom admin pages](custom-admin-pages.md) — experimental pages, loaders, actions, and policies.

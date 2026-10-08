@@ -1,7 +1,7 @@
 //! Admin UI bundle: the built-in OpenShop screens plus this app's custom pages.
 //!
 //! Build with `trunk build --release`. The server side of each page (access
-//! rules, loaders and actions) is registered with `AdminPage` in the app.
+//! rules, loaders and actions) is an `#[admin_page]` block of the app.
 
 use leptos::prelude::*;
 use openshop_ui::App;

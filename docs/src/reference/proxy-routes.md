@@ -7,7 +7,7 @@ and listed in the `proxies` of `app!`.
 
 ```rust,ignore
 // src/proxy/reviews.rs
-use openshop::{ProxyContext, Result, Value, json, proxy};
+use openshop::prelude::*;
 
 #[proxy(GET, "/reviews")]
 pub async fn reviews(ctx: ProxyContext) -> Result<Value> {
@@ -16,7 +16,7 @@ pub async fn reviews(ctx: ProxyContext) -> Result<Value> {
 ```
 
 ```rust,ignore
-use openshop::{App, app};
+use openshop::prelude::*;
 
 use proxy::reviews::reviews;
 
@@ -67,6 +67,61 @@ An empty or invalid JSON body becomes `None`; it is not an automatic 400.
 GET bodies are not read. A body larger than the
 [request body limit](configuration.md#settings) is answered with `413`.
 
+## Typed input
+
+A proxy function can take a second argument: its input, read into a type that
+implements `Deserialize`.
+
+| Method | Input |
+| --- | --- |
+| `GET`, `DELETE` | The query string, `ctx.query`. |
+| `POST`, `PUT`, `PATCH` | The JSON body, `ctx.body`. |
+
+```rust,ignore
+// src/proxy/api_reviews.rs
+use openshop::prelude::*;
+use serde::{Deserialize, Serialize};
+
+/// The query of `GET /api/reviews`.
+#[derive(Debug, Deserialize)]
+pub struct ListReviews {
+    pub page: Option<u32>,
+}
+
+#[proxy(GET, "/api/reviews")]
+pub async fn list_reviews(ctx: ProxyContext, query: ListReviews) -> Result<Value> {
+    Ok(json!({ "shop": ctx.shop, "page": query.page.unwrap_or(1) }))
+}
+
+/// The body of `POST /api/reviews`.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SubmittedReview {
+    pub text: String,
+    pub rating: u8,
+}
+
+#[proxy(POST, "/api/reviews")]
+pub async fn submit_review(ctx: ProxyContext, review: SubmittedReview) -> Result<Value> {
+    Ok(json!({ "ok": true, "shop": ctx.shop, "review": review }))
+}
+```
+
+A request that does not fit the type is answered with `422` and
+`{ "error": "Invalid input: <reason>" }` before the function runs.
+
+The values of a query string are text: a field that is a number or a boolean
+is read from its text. The parameters Shopify adds to sign a request (`shop`,
+`path_prefix`, `timestamp`, `signature`, `logged_in_customer_id`) are not part
+of the input; the verified shop and customer are in the context. A missing,
+empty, or invalid JSON body is read as `null`, which fits only a type that
+accepts it, such as an `Option`.
+
+A function refuses an input the same way by returning `InvalidInput`:
+`bail!(InvalidInput("rating is 1 to 5".into()))` is answered with `422` and
+`{ "error": "Invalid input: rating is 1 to 5" }`.
+
+`ctx.query`, `ctx.body`, and `ctx.params` stay available next to the input.
+
 ## Response types
 
 A proxy function returns `Result<T>`, where `T` is anything that serializes.
@@ -76,16 +131,7 @@ The response type follows the path in the attribute.
 | --- | --- | --- |
 | `#[proxy(GET, "/path")]` or `#[proxy(GET, "/path", json)]` | The value serialized as JSON | `application/json` |
 | `#[proxy(GET, "/path", html)]` | A string, sent as the body | `text/html` |
-| `#[proxy(GET, "/path", liquid)]` | A string, sent as the body | `application/liquid` |
-
-```rust,ignore
-use openshop::{ProxyContext, Result, proxy};
-
-#[proxy(GET, "/banner", liquid)]
-pub async fn banner(ctx: ProxyContext) -> Result<String> {
-    Ok(format!("<p>{{{{ shop.name }}}} via {}</p>", ctx.shop))
-}
-```
+| `#[proxy(GET, "/path", liquid)]` | A `Liquid` template, sent as the body | `application/liquid` |
 
 `html` or `liquid` falls back to JSON when the returned value does not
 serialize to a string. The functions of one path share one response type; a
@@ -93,6 +139,69 @@ path declared with two is rejected when the configuration is built
 (`[openshop] Invalid config: proxies./banner answers with both liquid and json; a path has one response type`).
 Proxy functions return values, not a status/headers response object; the
 current API always sends successful results with HTTP 200.
+
+An `html` function can return the content of a file next to it:
+`Ok(include_str!("page.html"))`.
+
+## Liquid templates
+
+Shopify renders the answer of a `liquid` proxy with the objects of the
+storefront: `shop`, `customer`, `cart`, and so on. The template is a file next
+to the function that answers with it, never a Rust string.
+
+`src/proxy/banner.liquid`:
+
+```liquid
+<p>{{ shop.name }} via {{ app_shop }}</p>
+```
+
+`src/proxy/banner.rs`:
+
+```rust,ignore
+use openshop::prelude::*;
+
+#[proxy(GET, "/banner", liquid)]
+pub async fn banner(ctx: ProxyContext) -> Result<Liquid> {
+    Ok(liquid!("banner.liquid").assign("app_shop", &ctx.shop))
+}
+```
+
+`liquid!("banner.liquid")` embeds the file when the crate compiles and gives a
+`Liquid`. The path is relative to the source file that names it, like
+`include_str!`. A missing file is a compile error, the binary carries its
+templates, and `openshop dev` restarts when one changes.
+
+`.assign(name, value)` gives the template a variable, which it reads as
+`{{ name }}`. The value is anything that serializes. Each variable is written
+as a Liquid `assign` tag before the content of the file, in the order of the
+calls. For `demo.myshopify.com`, the function above sends:
+
+```liquid
+{%- assign app_shop = "demo.myshopify.com" -%}
+<p>{{ shop.name }} via {{ app_shop }}</p>
+```
+
+A value keeps its type where Liquid has one:
+
+| Rust value | Liquid value |
+| --- | --- |
+| A string | A string. |
+| A number | A number. |
+| `true`, `false` | A boolean. |
+| `None` | `nil`. |
+| A list or an object | A string holding its JSON text, to print in a `<script type="application/json">` for the scripts of the page. |
+
+A value is never pasted into the template. A string is written as a literal
+that its text cannot close: `"`, `%`, `{`, and `}` each go in a literal of
+their own, joined with `append`. What a customer typed is displayed and never
+executed.
+
+The name of a variable is made of letters, digits, `_`, and `-`, and starts
+with a letter or `_`. Another name, or a value that does not serialize, is a
+handler error: the request is answered with `500`.
+
+`Liquid::new(source)` builds a template from a string, for a test for
+example, and `.render()` returns the text that is sent.
 
 ## Context
 
@@ -107,7 +216,19 @@ current API always sends successful results with HTTP 200.
 | `headers` | `IndexMap<String, String>` | Request headers with lower-cased names. |
 | `path`, `method` | `String` | Request pathname and method. |
 | `body` | `Option<Value>` | Parsed JSON for non-GET requests, otherwise `None`. |
-| `app` | `OpenShop` | The running application, for dispatch, database, and connector access. |
+| `db` | `PgPool` | The database of the application. |
+| `shopify` | `ShopifyClient` | The Admin API of the shop. |
+| `connectors` | `Connectors` | The providers of the shop. |
+| `app` | `OpenShop` | The running application. |
+
+Nothing is read when the context is built: the access token of the shop is
+read at the first Shopify request, and the provider configuration at the first
+provider call.
+
+`ProxyContext` belongs to a shop, so what needs one takes the context itself:
+`Review::of(&ctx)` gives the rows of the shop, and
+`sync_orders::dispatch(&ctx, SyncOrdersInput { limit: 10 }).await?` queues a
+run of a flow for it.
 
 ## Authentication mounts
 
@@ -160,6 +281,7 @@ Error bodies are JSON objects of the form `{ "error": "<message>" }`.
 | `401` | `Unauthorized: missing token audience` | The bearer token has no readable `aud` claim. |
 | `401` | `Unauthorized: invalid or expired session token` | The audience matches no single app, or the token fails verification. |
 | `401` | `Unauthorized: missing session token` | `/ext` request without a bearer token. |
+| `422` | `Invalid input: <reason>` | The request does not fit the [typed input](#typed-input) of the function. |
 | `500` | `SHOPIFY_API_SECRET is not configured` | No Shopify secret is configured. |
 | `500` | `Internal proxy error` | The handler returned an error or panicked. |
 
@@ -168,14 +290,15 @@ signature. Handler errors are logged without exposing their details.
 
 ## Without the attribute
 
-`#[proxy]` is built on `ProxyDefinition`, which can be used directly for a
+`#[proxy]` is built on `Proxy`, which can be used directly for a
 route that is only known at run time, or in a test:
 
 ```rust,ignore
-use openshop::{ProxyDefinition, json};
+use openshop::Proxy;
+use openshop::prelude::*;
 
-pub fn reviews() -> ProxyDefinition {
-    ProxyDefinition::json().get(|ctx| async move {
+pub fn reviews() -> Proxy {
+    Proxy::json().get(|ctx| async move {
         Ok(json!({ "shop": ctx.shop, "customerId": ctx.customer_id, "query": ctx.query }))
     })
 }
@@ -185,12 +308,13 @@ Register it with `.proxy("/reviews", reviews())` on
 `OpenShopConfig::builder()`, or on `APP.builder()?` to add it to a declared
 application.
 
-`ProxyDefinition::json()`, `ProxyDefinition::html()`, and
-`ProxyDefinition::liquid()` start a definition with its response type;
-`ProxyDefinition::default()` answers with JSON. It has one method per
+`Proxy::json()`, `Proxy::html()`, and
+`Proxy::liquid()` start a definition with its response type;
+`Proxy::default()` answers with JSON. It has one method per
 supported HTTP method: `.get(…)`, `.post(…)`, `.put(…)`, `.delete(…)`, and
 `.patch(…)`. Each takes a handler that returns `Result<serde_json::Value>`; a
-`Value::String` is the body of an HTML or Liquid response.
+`Value::String` is the body of an HTML or Liquid response. A handler has no
+typed input: it reads `ctx.query` and `ctx.body`.
 
 Calling `.proxy(path, …)` again for a path adds methods to it. A method
 registered twice, or a second response type, is rejected as for proxy

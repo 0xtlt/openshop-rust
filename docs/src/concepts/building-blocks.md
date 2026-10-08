@@ -11,8 +11,9 @@ fields are the editable configuration, and its public methods, such as `push`,
 are what flows can do with a saved configuration, which they read as `&self`.
 OpenShop uses the fields to render a form in the embedded admin.
 
-A merchant saves a different configuration for each shop. When work runs,
-OpenShop loads that shop's configuration and binds it to the provider methods.
+A merchant saves a different configuration for each shop. At the first call
+to a provider, OpenShop loads that shop's configuration and binds it to the
+provider methods.
 The resulting **connector** is called with the arguments only, as in
 `Warehouse::on(&ctx.connectors).push(&orders)`: application code does not have
 to retrieve or pass credentials on every call.
@@ -42,7 +43,7 @@ A block is declared where it is written, with an attribute on the function or
 the struct itself, and the application lists its blocks in one place:
 
 ```text
-src/providers/warehouse.rs    #[provider("warehouse")] on the impl block of Warehouse
+src/providers/warehouse.rs    #[provider] on the impl block of Warehouse
 src/flows/sync_orders.rs      #[flow("syncOrders")] on the function sync_orders
         ↓ both listed by
 src/main.rs                   app! { providers: [Warehouse], flows: [sync_orders], … }
@@ -51,7 +52,7 @@ src/main.rs                   app! { providers: [Warehouse], flows: [sync_orders
 
 `app!` declares an `App`: a value that names the blocks and holds the settings.
 `APP.config()` validates them as a whole and returns the configuration, and
-`APP.run()` turns it into the commands of your binary. Underneath, the
+`APP.main()` turns it into the commands of your binary. Underneath, the
 declaration fills a builder, which is also used directly in tests and for
 blocks built at run time.
 
@@ -69,41 +70,54 @@ A method can also be reached by name, with
 `ctx.connectors.call("warehouse", "push", &orders)`, when the provider or the
 method is only known at run time. Nothing is checked at compile time then.
 
-Code that needs the running application receives it as a value. Every handler
-context carries `ctx.app`, an `OpenShop` handle that exposes `dispatch_flow()`,
-the database pool, and the connectors and Shopify client of any shop:
+## Every context of a shop gives the same accesses
+
+A handler receives a context. Every context that belongs to a shop carries
+`ctx.db`, the database pool, `ctx.shopify`, the Admin API of the shop, and
+`ctx.connectors`, its providers: the context of a flow, of a webhook, of a
+proxy request, of a loader or an action of an admin page, of an MCP tool or
+resource, and what `ctx.for_shop(..)` returns in a server route. Nothing is
+read when a context is built: the access token is read at the first Shopify
+request, and the provider configuration at the first provider call.
+
+Such a context also names the shop and the Shopify app it runs for, so what
+needs them takes the context itself. A webhook queues a run of a flow this way:
 
 ```rust
-use openshop::{DispatchFlowParams, Result, WebhookContext, json, webhook};
+use openshop::prelude::*;
+
+use crate::flows::sync_orders::{SyncOrdersInput, sync_orders};
 
 #[webhook("orders/create")]
 pub async fn orders_create(ctx: WebhookContext) -> Result<()> {
-    ctx.app
-        .dispatch_flow(
-            DispatchFlowParams::new("syncOrders", ctx.shop.clone())
-                .shopify_app(ctx.shopify_app.clone())
-                .input(json!({ "limit": 10 })),
-        )
-        .await?;
+    sync_orders::dispatch(&ctx, SyncOrdersInput { limit: 10 }).await?;
     Ok(())
 }
 ```
 
-The flow is named by its registered key, which a declared flow also exposes as
-a constant: `sync_orders::NAME`. With the default concurrency policy,
-`dispatch_flow()` returns a `FlowConcurrencyError` while another run of the same
-flow is active for that shop.
+`#[flow]` adds `dispatch` to the flow it declares: it queues a run for the
+shop and the Shopify app of the context, with an input of the type the flow
+takes. With the default concurrency policy, it fails with a
+`FlowConcurrencyError` while another run of the same flow is active for that
+shop. The rows of a model are reached the same way, with `Review::of(&ctx)`.
+
+Every context also carries `ctx.app`, the `OpenShop` handle of the running
+application, for what the context does not cover:
+`ctx.app.dispatch_flow(DispatchOptions::new(name, shop))` queues a flow only
+known by name, or for another shop, and `ctx.app.shopify_client(shop, app)`
+and `ctx.app.connectors(shop, app)` reach any shop. A declared flow exposes
+its name as a constant, `sync_orders::NAME`.
 
 ## Different entry points serve different callers
 
 | Entry point | Typical caller | Role | Declared with |
 | --- | --- | --- | --- |
 | Embedded admin | Merchant or shop staff | Configure providers and inspect or trigger work | Built in |
-| Cron | OpenShop scheduler | Dispatch work on a schedule | A `CronEntry` in `crons` |
+| Cron | OpenShop scheduler | Dispatch work on a schedule | A `Cron` in `crons` |
 | Webhook | Shopify | Handle an event or enqueue a flow | `#[webhook("topic")]`, listed in `webhooks` |
 | Proxy route | Storefront or Customer Account extension | Serve a Shopify-authenticated request | `#[proxy(GET, "/path")]`, listed in `proxies` |
 | Server route | Another service | Handle an HTTP request with app-defined authentication | `#[route(GET, "/path")]`, listed in `routes` |
-| Custom admin page (experimental) | Shop staff | Use app-owned screens and authenticated loaders/actions | `#[admin_page("/path")]`, listed in `admin_pages`, and `custom_pages` |
+| Custom admin page (experimental) | Shop staff | Use app-owned screens and authenticated loaders/actions | `#[admin_page("/path", nav = "Label")]`, listed in `admin_pages` |
 
 Apart from the embedded admin, each of these is an entry of `app!`. Nothing is
 discovered from the file system.

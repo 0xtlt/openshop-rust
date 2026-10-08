@@ -6,17 +6,17 @@ use std::time::Duration;
 
 use anyhow::{Result, bail};
 use regex::Regex;
+use serde_json::Value;
 
 use crate::admin::validate_custom_admin_navigation;
 use crate::app::OpenShopConfig;
 use crate::engine::scheduler::parse_schedule;
+use crate::runtime::time::millis;
 use crate::server::file_routes::resolve_route_paths;
 use crate::server::mcp::core::create_core_mcp_capabilities;
 use crate::server::mcp::registry::build_mcp_registry;
 use crate::server::routes::assert_route_definition;
-use crate::types::{
-    FieldDef, FieldType, PartialRetryPolicy, PartialWorkerConfig, ShopifyAppConfig, ShopifyConfig, ShopifyFunctionType,
-};
+use crate::types::{Field, FieldType, FunctionType, RetryPolicy, ShopifyAppConfig, ShopifyConfig, WorkerConfig};
 
 macro_rules! fail {
     ($($arg:tt)*) => {
@@ -45,19 +45,22 @@ fn assert_positive_duration(value: Option<Duration>, path: &str) -> Result<()> {
     Ok(())
 }
 
-fn validate_retry_policy(policy: &PartialRetryPolicy, path: &str) -> Result<()> {
+fn validate_retry_policy(policy: &RetryPolicy, path: &str) -> Result<()> {
     assert_positive_integer(policy.max_attempts, &format!("{path}.maxAttempts"))?;
-    assert_positive_integer(policy.initial_interval_ms, &format!("{path}.initialIntervalMs"))?;
+    assert_positive_integer(
+        policy.initial_interval.map(millis),
+        &format!("{path}.initialIntervalMs"),
+    )?;
     assert_positive_number(policy.backoff_coefficient, &format!("{path}.backoffCoefficient"))?;
-    assert_positive_integer(policy.max_interval_ms, &format!("{path}.maxIntervalMs"))
+    assert_positive_integer(policy.max_interval.map(millis), &format!("{path}.maxIntervalMs"))
 }
 
-fn validate_worker_config(worker: &PartialWorkerConfig) -> Result<()> {
+fn validate_worker_config(worker: &WorkerConfig) -> Result<()> {
     assert_positive_integer(worker.concurrency.map(|value| value as u64), "worker.concurrency")?;
-    assert_positive_integer(worker.poll_interval_ms, "worker.pollIntervalMs")?;
-    assert_positive_integer(worker.poll_max_interval_ms, "worker.pollMaxIntervalMs")?;
+    assert_positive_integer(worker.poll_interval.map(millis), "worker.pollIntervalMs")?;
+    assert_positive_integer(worker.poll_max_interval.map(millis), "worker.pollMaxIntervalMs")?;
     assert_positive_number(worker.poll_backoff_coefficient, "worker.pollBackoffCoefficient")?;
-    assert_positive_integer(worker.lease_duration_ms, "worker.leaseDurationMs")
+    assert_positive_integer(worker.lease_duration.map(millis), "worker.leaseDurationMs")
 }
 
 static APP_HANDLE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^[a-zA-Z0-9_-]+$").expect("valid regex"));
@@ -93,7 +96,7 @@ fn validate_shopify_config(config: Option<&ShopifyConfig>) -> Result<()> {
     Ok(())
 }
 
-fn validate_field(field: &FieldDef, path: &str) -> Result<()> {
+fn validate_field(field: &Field, path: &str) -> Result<()> {
     if field.label.trim().is_empty() {
         fail!("{path}.label must be a non-empty string");
     }
@@ -145,8 +148,21 @@ pub fn validate_openshop_config(config: &OpenShopConfig) -> Result<()> {
         if cron.schedule.trim().is_empty() {
             fail!("crons[{index}].schedule must be a non-empty string");
         }
-        if !config.flows.contains_key(&cron.flow) {
+        let Some(flow) = config.flows.get(&cron.flow) else {
             fail!("crons[{index}].flow references unknown flow \"{}\"", cron.flow);
+        };
+        // What the scheduler dispatches: the input when it is an object, else `{}`.
+        if let Some(schema) = &flow.input {
+            let input = match &cron.input {
+                Some(input @ Value::Object(_)) => input.clone(),
+                _ => Value::Object(Default::default()),
+            };
+            if let Err(summary) = schema.parse(input) {
+                fail!(
+                    "crons[{index}].input is not an input of flow \"{}\": {summary}",
+                    cron.flow
+                );
+            }
         }
         if let Err(error) = parse_schedule(&cron.schedule, &cron.flow) {
             let message = error.to_string();
@@ -168,7 +184,7 @@ pub fn validate_openshop_config(config: &OpenShopConfig) -> Result<()> {
         if !function_handles.insert(function.handle.as_str()) {
             fail!("functions.{key}.handle duplicates \"{}\"", function.handle);
         }
-        if function.function_type != ShopifyFunctionType::Discount && function.modes.is_some() {
+        if function.function_type != FunctionType::Discount && function.modes.is_some() {
             fail!("functions.{key}.modes is only supported for discount functions");
         }
         for (field_name, field) in &function.config {
@@ -176,6 +192,21 @@ pub fn validate_openshop_config(config: &OpenShopConfig) -> Result<()> {
         }
     }
 
+    // A menu entry opens a page: one with a dynamic segment has no address to open.
+    for page in &config.admin_pages {
+        let Some(label) = &page.nav else {
+            continue;
+        };
+        if label.trim().is_empty() {
+            fail!("adminPages.{}.nav must be a non-empty string", page.path);
+        }
+        if page.path.contains(':') || page.path.contains('[') {
+            fail!(
+                "adminPages.{}.nav: a page with a dynamic segment cannot have a menu entry",
+                page.path
+            );
+        }
+    }
     for (index, item) in config.custom_navigation().iter().enumerate() {
         if item.label.trim().is_empty() {
             fail!("experimental.customPages.navigation[{index}].label must be a non-empty string");
@@ -186,7 +217,7 @@ pub fn validate_openshop_config(config: &OpenShopConfig) -> Result<()> {
     }
     let admin_pages = config.resolved_admin_pages()?;
     if config.custom_pages_enabled() {
-        validate_custom_admin_navigation(config.custom_navigation(), &admin_pages)?;
+        validate_custom_admin_navigation(&config.custom_navigation(), &admin_pages)?;
     }
 
     for (path, route) in resolve_route_paths("server", config.routes.keys().map(String::as_str))? {

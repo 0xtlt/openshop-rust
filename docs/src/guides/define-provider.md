@@ -10,39 +10,42 @@ makes real HTTP requests. Use the service's development credentials first.
 
 ## 1. Create the provider
 
-The provider calls the warehouse over HTTP. Add an HTTP client and `serde` to
-the `[dependencies]` of `Cargo.toml`. This is the version and feature set
-OpenShop itself uses, so nothing is compiled twice:
+The provider calls the warehouse over HTTP. Add an HTTP client to the
+`[dependencies]` of `Cargo.toml`, next to `serde`, which the generated project
+already lists. This is the version and feature set OpenShop itself uses, so
+nothing is compiled twice:
 
 ```toml
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
-serde = { version = "1", features = ["derive"] }
 ```
 
 A provider is a struct. Its fields are the configuration a merchant saves, and
 its methods are what flows do with it. Replace `src/providers/warehouse.rs`:
 
 ```rust,ignore
-use openshop::{ProviderConfig, Result, bail, provider, validators};
+use openshop::prelude::*;
 use serde::{Deserialize, Serialize};
 
-#[derive(Serialize, Deserialize)]
+/// One order as the warehouse receives it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Order {
     pub id: String,
+    pub name: String,
 }
 
 /// What a merchant saves for the warehouse.
 #[derive(ProviderConfig)]
 pub struct Warehouse {
-    #[field(label = "API URL", validate = validators::url())]
+    #[field(label = "API URL", url)]
     api_url: String,
-    #[field(label = "API key", password, validate = validators::non_empty())]
+    #[field(label = "API key", password, non_empty)]
     api_key: String,
-    #[field(label = "Batch size", validate = validators::integer_min(1))]
+    #[field(range(min = 1, max = 1000))]
     batch_size: Option<u32>,
 }
 
-#[provider("warehouse")]
+/// Named `warehouse`, after the struct.
+#[provider]
 impl Warehouse {
     /// The connection check of the provider page.
     #[checker]
@@ -74,19 +77,27 @@ The generated project already declares the module in `src/providers/mod.rs`
 (`pub mod warehouse;`).
 
 `#[derive(ProviderConfig)]` turns the fields into the form of the provider
-page: a text input, a secret and an optional number. The validators reject
-invalid URLs and empty API keys before a configuration is saved.
-`#[provider("warehouse")]` makes the public `async` methods of the block the
-methods of the provider; inside them, `self` is the configuration of the shop
-the method runs for. For every option, see [Providers](../reference/providers.md).
+page: a text input, a secret and an optional number. `batch_size` has no
+`label`, so the form labels it after its name, "Batch size". The constraints
+are options of `#[field(…)]`: `url` and `non_empty` reject invalid URLs and
+empty API keys, and `range(min = 1, max = 1000)` a batch size out of bounds,
+before a configuration is saved. `length(min = …, max = …)` bounds the length
+of a text, and `validate = <validator>` takes one of `openshop::validators` or
+a validator of your own for anything else.
+
+`#[provider]` makes the public `async` methods of the block the methods of the
+provider; inside them, `self` is the configuration of the shop the method runs
+for. The provider is named after the struct, `warehouse`;
+`#[provider("wms")]` states another name. For every option, see
+[Providers](../reference/providers.md).
 
 ## 2. Register it
 
-In `src/main.rs`, list the provider in the application, keeping its other
-entries:
+In `src/main.rs`, list the provider in the `providers` of `app!`, keeping its
+other entries. The generated project already does:
 
 ```rust,ignore
-use openshop::{App, app};
+use openshop::prelude::*;
 
 use providers::warehouse::Warehouse;
 
@@ -96,13 +107,8 @@ static APP: App = app! {
 };
 ```
 
-The provider is registered under the name given to `#[provider]`, `warehouse`.
-
-The generated `src/main.rs` builds its configuration with
-`OpenShopConfig::builder()`, the lower level of `app!`, and registers
-`providers::warehouse::warehouse()`. To keep it as it is, replace that line by
-`.add::<providers::warehouse::Warehouse>()`, which adds a declared block to a
-builder.
+The provider is registered under its name, `warehouse`, which is also the
+constant `Warehouse::NAME`.
 
 ## 3. Save and check credentials
 
@@ -122,17 +128,23 @@ Call the method inside a flow, on the connectors of the shop:
 ```rust,ignore
 use crate::providers::warehouse::{Order, Warehouse};
 
-let orders = vec![Order { id: "order-1".to_string() }];
+let orders = vec![Order { id: "gid://shopify/Order/1".to_string(), name: "#1001".to_string() }];
 let sent = ctx
     .step
-    .run("push-orders", || async { Warehouse::on(&ctx.connectors).push(&orders).await })
+    .run("push-orders", async || { Warehouse::on(&ctx.connectors).push(&orders).await })
     .await?;
 ```
 
 `Warehouse::on(&ctx.connectors)` has the public methods of the provider. They
 run with the configuration the shop saved, so the call passes the arguments
 only, and the compiler checks them: passing anything other than a
-`Vec<Order>` does not compile, and `sent` is a `usize`.
+`Vec<Order>` does not compile, and `sent` is a `usize`. The flow of the
+generated project calls `push` this way, with the orders it read from Shopify.
+
+`ctx.connectors` is there in every context that belongs to a shop: a flow, a
+webhook, a proxy handler, a loader or an action of an admin page, an MCP tool,
+and what `ctx.for_shop(..)` returns in a server route. The configuration of the
+shop is read at the first call.
 
 Whether the shop saved its credentials is a run-time question: without them
 the call fails with
@@ -140,10 +152,11 @@ the call fails with
 it fails with `Unknown provider "warehouse"`, check that the application lists
 the provider.
 
-The flow of the generated project calls
-`ctx.connectors.call("warehouse", "push", &orders)`, by name. That still
-reaches the method, without the checks: the orders it passes must have the
-fields of `Order`.
+A method can also be called by name, with
+`ctx.connectors.call("warehouse", "push", &orders)`, or
+`call_as::<usize>(..)` to read its result. That reaches the same method
+without the checks of the compiler: keep it for a provider or a method only
+known at run time.
 
 ## 5. Verify the integration
 

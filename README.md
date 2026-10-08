@@ -31,11 +31,11 @@ sources change. Run it through `shopify app dev` to open the app in a store.
 ## What an application looks like
 
 ```rust
-use openshop::{App, FlowContext, ProviderConfig, Result, app, flow, graphql, provider, validators};
-use schemars::JsonSchema;
+use openshop::prelude::*;
 use serde::{Deserialize, Serialize};
 
-#[derive(Deserialize, JsonSchema)]
+/// The input of a run: it is validated, and the admin builds its form from it.
+#[input]
 struct SyncInput {
     #[schemars(range(min = 1))]
     limit: u32,
@@ -50,14 +50,15 @@ struct Order {
 /// A provider is a struct: its fields are the form a merchant fills per shop…
 #[derive(ProviderConfig)]
 struct Warehouse {
-    #[field(label = "API URL", validate = validators::url())]
+    #[field(label = "API URL", url)]
     api_url: String,
-    #[field(label = "API Key", password, validate = validators::non_empty())]
+    #[field(label = "API Key", password, non_empty)]
     api_key: String,
 }
 
 /// …and its public methods are what flows can call, with that configuration as `self`.
-#[provider("warehouse")]
+/// The provider is named `warehouse`, after the struct.
+#[provider]
 impl Warehouse {
     pub async fn push(&self, orders: Vec<Order>) -> Result<usize> {
         // call the service at `self.api_url` with `self.api_key`
@@ -71,7 +72,7 @@ async fn sync_orders(ctx: FlowContext, input: SyncInput) -> Result<()> {
     // Each step is checkpointed: a retried run reuses its stored output.
     let orders: Vec<Order> = ctx
         .step
-        .run("fetch-orders", || async {
+        .run("fetch-orders", async || {
             // Checked against Shopify's schema when the crate compiles; `data` is typed.
             let data = ctx
                 .shopify
@@ -86,7 +87,7 @@ async fn sync_orders(ctx: FlowContext, input: SyncInput) -> Result<()> {
         .await?;
 
     ctx.step
-        .run("send-to-warehouse", || async {
+        .run("send-to-warehouse", async || {
             // Checked by the compiler: a `Vec<Order>` in, a `usize` out.
             Warehouse::on(&ctx.connectors).push(&orders).await?;
             Ok(())
@@ -100,9 +101,8 @@ static APP: App = app! {
     flows: [sync_orders],
 };
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    APP.run().await
+fn main() -> Result<()> {
+    APP.main()
 }
 ```
 
@@ -133,17 +133,18 @@ Rust conventions.
 | TypeScript | Rust |
 | --- | --- |
 | `defineOpenShop({ providers }).defineConfig({ … })` | `app! { providers: […], flows: […], … }`, a value of type `App` |
-| `defineFlow({ name, input: type({…}), run })` | `#[flow("name")]` on an `async fn(ctx, input)`, the input being a `serde` + `schemars` type |
-| `await step('name', fn)` / `step.sleep` | `ctx.step.run("name", \|\| async { … }).await?` / `ctx.step.sleep` |
-| `defineProvider({ fields, methods })` | a struct with `#[derive(ProviderConfig)]` and `#[provider("name")]` on its `impl` block |
+| `defineFlow({ name, input: type({…}), run })` | `#[flow("name")]` on an `async fn(ctx, input)`, the input being a type marked `#[input]` |
+| `await step('name', fn)` / `step.sleep` | `ctx.step.run("name", async \|\| { … }).await?` / `ctx.step.sleep` |
+| `defineProvider({ fields, methods })` | a struct with `#[derive(ProviderConfig)]` and `#[provider]` on its `impl` block |
 | `connectors.warehouse.push(data)` | `Warehouse::on(&ctx.connectors).push(&data)`, or by name with `ctx.connectors.call("warehouse", "push", data)` |
 | `proxy/*.ts`, `routes/*.ts`, `admin/pages/**` discovered from files | `#[proxy(GET, "/path")]`, `#[route(GET, "/path")]` and `#[admin_page("/path")]` on the code, listed in `app!` |
-| `validate: type('string.url')` | `validate = validators::url()` on a field, or any closure |
-| `openshop.config.ts` loaded by the `openshop` CLI | your own binary running the application it declares: `APP.run()` |
-| `defineModel('reviews', { … })` and Drizzle queries | `#[derive(Model)]` on a struct, with typed rows: `Review::for_shop(&db, &shop).filter(Review::RATING.gte(4))` |
+| A Liquid proxy that returns its template as a string | A `.liquid` file next to the handler, with the values of the server assigned to it: `liquid!("reviews.liquid").assign("name", value)` |
+| `validate: type('string.url')` | `url`, `non_empty`, `range(…)` or `length(…)` in the `#[field(…)]` of a field, and `validate = <validator>` for anything else |
+| `openshop.config.ts` loaded by the `openshop` CLI | your own binary running the application it declares: `APP.main()` |
+| `defineModel('reviews', { … })` and Drizzle queries | `#[derive(Model)]` on a struct, with typed rows: `Review::of(&ctx).filter(Review::RATING.gte(4))` |
 | `drizzle-kit` migrations in `./drizzle` | SQL migrations in `./migrations`, generated from what changed in the models (`migrate generate` / `migrate`) |
 | Preact admin UI built with Vite | Leptos admin UI compiled to WebAssembly and embedded in the binary |
-| `createTestContext()` from `openshop/test` | `openshop::testing::TestContext` (feature `testing`) |
+| `createTestContext()` from `openshop/test` | `#[openshop::test(APP)]` on an `async fn(ctx: &TestContext)` (feature `testing`) |
 | `shopify.graphql(\`#graphql …\`)` typed by codegen | `ctx.shopify.execute(graphql!("…", var = value))`, checked and typed at compile time |
 | ESLint preset | not needed |
 

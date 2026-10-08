@@ -22,7 +22,7 @@ use super::http::{ApiResult, json_error, json_object_body, json_response, parse_
 use super::shop::ShopSession;
 use crate::app::{OpenShop, OpenShopConfig};
 use crate::shopify::client::ShopifyClient;
-use crate::types::{DiscountMode, FunctionDefinition, JsonMap, ShopifyFunctionType};
+use crate::types::{DiscountMode, Function, FunctionType, JsonMap};
 
 fn discount_mode_from_body(body: &JsonMap, fallback: DiscountMode) -> DiscountMode {
     body.get("mode")
@@ -53,7 +53,7 @@ pub fn humanize(value: &str) -> String {
     result
 }
 
-fn function_label(key: &str, definition: &FunctionDefinition) -> String {
+fn function_label(key: &str, definition: &Function) -> String {
     let non_empty = |value: String| (!value.is_empty()).then_some(value);
     definition
         .label
@@ -65,7 +65,7 @@ fn function_label(key: &str, definition: &FunctionDefinition) -> String {
         .unwrap_or_else(|| humanize(&definition.handle))
 }
 
-fn find_function<'a>(config: &'a OpenShopConfig, handle: &str) -> Option<(&'a FunctionDefinition, String)> {
+fn find_function<'a>(config: &'a OpenShopConfig, handle: &str) -> Option<(&'a Function, String)> {
     config
         .functions
         .iter()
@@ -146,7 +146,7 @@ async fn list_functions(State(app): State<OpenShop>) -> Response {
                 .iter()
                 .map(|(name, field)| (name.clone(), Value::Object(field.metadata())))
                 .collect();
-            let is_discount = definition.function_type == ShopifyFunctionType::Discount;
+            let is_discount = definition.function_type == FunctionType::Discount;
 
             let mut item = JsonMap::new();
             item.insert("key".into(), Value::from(key.clone()));
@@ -164,12 +164,12 @@ async fn list_functions(State(app): State<OpenShop>) -> Response {
                 "supportsUpdate".into(),
                 Value::Bool(!matches!(
                     definition.function_type,
-                    ShopifyFunctionType::CartTransform | ShopifyFunctionType::FulfillmentConstraints
+                    FunctionType::CartTransform | FunctionType::FulfillmentConstraints
                 )),
             );
             item.insert(
                 "singleton".into(),
-                Value::Bool(definition.function_type == ShopifyFunctionType::CartTransform),
+                Value::Bool(definition.function_type == FunctionType::CartTransform),
             );
             item.insert("fields".into(), Value::Object(fields));
             Value::Object(item)
@@ -203,14 +203,14 @@ async fn list_instances(
             ),
         ));
     };
-    let shopify = app.shopify_client(&session.shop, &session.shopify_app).await?;
+    let shopify = app.shopify_client(&session.shop, &session.shopify_app);
 
-    if definition.function_type == ShopifyFunctionType::CartTransform {
+    if definition.function_type == FunctionType::CartTransform {
         let instances = list_cart_transform_instances(&shopify, &handle, &label).await?;
         return Ok(json_response(StatusCode::OK, Value::Array(instances)));
     }
 
-    if definition.function_type == ShopifyFunctionType::Discount {
+    if definition.function_type == FunctionType::Discount {
         let query = format!(
             "#graphql
         query ListDiscountInstances($query: String!) {{
@@ -314,8 +314,8 @@ async fn create_instance(
         Err(error) => return Ok(json_error(StatusCode::BAD_REQUEST, error)),
     };
     let mode = discount_mode_from_body(&body, definition.first_mode());
-    let shopify = app.shopify_client(&session.shop, &session.shopify_app).await?;
-    let is_cart_transform = definition.function_type == ShopifyFunctionType::CartTransform;
+    let shopify = app.shopify_client(&session.shop, &session.shopify_app);
+    let is_cart_transform = definition.function_type == FunctionType::CartTransform;
     let already_registered = "This Cart Transform already has an instance";
 
     if is_cart_transform
@@ -352,7 +352,7 @@ async fn create_instance(
     ))
 }
 
-fn definition_by_handle<'a>(config: &'a OpenShopConfig, handle: &str) -> Option<&'a FunctionDefinition> {
+fn definition_by_handle<'a>(config: &'a OpenShopConfig, handle: &str) -> Option<&'a Function> {
     config.functions.values().find(|definition| definition.handle == handle)
 }
 
@@ -386,7 +386,7 @@ async fn update_instance(
         Ok(config) => config,
         Err(error) => return Ok(json_error(StatusCode::BAD_REQUEST, error)),
     };
-    let shopify = app.shopify_client(&session.shop, &session.shopify_app).await?;
+    let shopify = app.shopify_client(&session.shop, &session.shopify_app);
 
     let title = resolve_title(definition.owner.as_ref(), &function_config);
     let Some(request) = build_update_mutation(definition, &handle, mode, &id, &title, &function_config, &body) else {
@@ -421,7 +421,7 @@ async fn delete_instance(
     let query = parse_query(raw_query.as_deref());
     let requested_mode = query.get("mode").and_then(|mode| DiscountMode::parse(mode));
     let has_several_modes = definition.modes.as_ref().is_some_and(|modes| modes.len() > 1);
-    if definition.function_type == ShopifyFunctionType::Discount && has_several_modes && requested_mode.is_none() {
+    if definition.function_type == FunctionType::Discount && has_several_modes && requested_mode.is_none() {
         return Ok(json_error(
             StatusCode::BAD_REQUEST,
             "mode query parameter is required for discount functions with multiple modes",
@@ -438,7 +438,7 @@ async fn delete_instance(
         ));
     };
 
-    let shopify = app.shopify_client(&session.shop, &session.shopify_app).await?;
+    let shopify = app.shopify_client(&session.shop, &session.shopify_app);
     let request = build_delete_mutation(mutations.delete, &id);
     let result = shopify.graphql(&request.mutation, Some(request.variables)).await?;
     let errors = extract_errors(&result);
@@ -476,7 +476,7 @@ mod tests {
 
     #[test]
     fn labels_prefer_explicit_label_then_key_then_handle() {
-        let definition = FunctionDefinition::new(ShopifyFunctionType::CartTransform, "bundle-builder");
+        let definition = Function::new(FunctionType::CartTransform, "bundle-builder");
         assert_eq!(function_label("bundles", &definition), "Bundles");
         assert_eq!(function_label("", &definition), "Bundle Builder");
         assert_eq!(

@@ -19,7 +19,7 @@ use uuid::Uuid;
 use super::http::{header, json_response, parse_query};
 use super::shop::ShopSession;
 use crate::admin::{
-    AdminAuthorize, AdminFunctionKind, AdminPublicError, AdminServerContext, CustomAdminPage,
+    AdminAuthorize, AdminContext, AdminFunctionKind, AdminPublicError, CustomAdminPage,
     validate_custom_admin_navigation,
 };
 use crate::app::OpenShop;
@@ -82,15 +82,15 @@ async fn create_context(
     params: IndexMap<String, String>,
     request_id: String,
     idempotency_key: Option<String>,
-) -> anyhow::Result<AdminServerContext> {
-    Ok(AdminServerContext {
+) -> anyhow::Result<AdminContext> {
+    Ok(AdminContext {
         shop: session.shop.clone(),
         shopify_app: session.shopify_app.clone(),
         actor: session.actor.clone(),
         params,
         db: app.db().clone(),
-        shopify: app.shopify_client(&session.shop, &session.shopify_app).await?,
-        connectors: app.connectors(&session.shop, &session.shopify_app).await?,
+        shopify: app.shopify_client(&session.shop, &session.shopify_app),
+        connectors: app.connectors(&session.shop, &session.shopify_app),
         request_id,
         idempotency_key,
         app: app.clone(),
@@ -99,7 +99,7 @@ async fn create_context(
 
 async fn is_allowed(
     access: &[&AdminAuthorize],
-    context: &AdminServerContext,
+    context: &AdminContext,
     authorize: Option<&AdminAuthorize>,
 ) -> anyhow::Result<bool> {
     for rule in access {
@@ -143,7 +143,7 @@ async fn list_pages(State(app): State<OpenShop>, Extension(session): Extension<S
     }
 
     let pages = app.custom_pages();
-    let navigation = match validate_custom_admin_navigation(config.custom_navigation(), pages) {
+    let navigation = match validate_custom_admin_navigation(&config.custom_navigation(), pages) {
         Ok(navigation) => navigation,
         Err(error) => {
             logger::warn_with(

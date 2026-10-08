@@ -3,9 +3,9 @@
 use serde_json::Value;
 
 use super::provider_config::{js_number, js_truthy};
-use crate::types::{FieldDef, FieldDefinitions, FieldType, JsonMap, is_missing};
+use crate::types::{Field, FieldType, Fields, JsonMap, is_missing};
 
-fn coerce_field_value(field: &FieldDef, value: Option<Value>) -> Option<Value> {
+fn coerce_field_value(field: &Field, value: Option<Value>) -> Option<Value> {
     match (field.field_type, value) {
         (FieldType::Number, Some(Value::String(text))) if !text.trim().is_empty() => Some(js_number(&text)),
         (FieldType::Checkbox, Some(Value::String(text))) => Some(Value::Bool(text == "true")),
@@ -14,7 +14,7 @@ fn coerce_field_value(field: &FieldDef, value: Option<Value>) -> Option<Value> {
     }
 }
 
-pub fn validate_function_config(fields: &FieldDefinitions, raw_config: Option<&Value>) -> Result<JsonMap, String> {
+pub fn validate_function_config(fields: &Fields, raw_config: Option<&Value>) -> Result<JsonMap, String> {
     let empty = JsonMap::new();
     let input = raw_config.and_then(Value::as_object).unwrap_or(&empty);
     let mut config = JsonMap::new();
@@ -45,21 +45,21 @@ mod tests {
     use indexmap::IndexMap;
     use serde_json::json;
 
-    fn fields() -> FieldDefinitions {
+    fn fields() -> Fields {
         IndexMap::from([
             (
                 "minQuantity".to_string(),
-                FieldDef::number("Minimum quantity").validate(validators::integer_min(1)),
+                Field::number("Minimum quantity").validate(validators::integer_min(1)),
             ),
             (
                 "percentage".to_string(),
-                FieldDef::number("Discount percentage").validate(validators::number_range(0.0, 100.0)),
+                Field::number("Discount percentage").validate(validators::number_range(0.0, 100.0)),
             ),
             (
                 "excludedTags".to_string(),
-                FieldDef::text("Excluded product tags").optional(),
+                Field::text("Excluded product tags").optional(),
             ),
-            ("stackable".to_string(), FieldDef::checkbox("Stackable").optional()),
+            ("stackable".to_string(), Field::checkbox("Stackable").optional()),
         ])
     }
 

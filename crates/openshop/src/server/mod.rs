@@ -161,7 +161,7 @@ async fn health() -> Response {
 }
 
 /// Builds the application router.
-pub fn create_server(app: &OpenShop, options: ServerOptions) -> Result<Router> {
+pub fn router(app: &OpenShop, options: ServerOptions) -> Result<Router> {
     create_router(app, options, true)
 }
 
@@ -275,15 +275,15 @@ impl ServerHandle {
 }
 
 /// Binds `0.0.0.0:port` (0 picks a free port) and serves the application.
-pub async fn start_api_server(app: &OpenShop, port: u16, options: ServerOptions) -> Result<ServerHandle> {
-    let router = create_server(app, options)?;
+pub async fn listen(app: &OpenShop, port: u16, options: ServerOptions) -> Result<ServerHandle> {
+    let router = router(app, options)?;
     let listener = TcpListener::bind(("0.0.0.0", port))
         .await
         .with_context(|| format!("[openshop] Failed to listen on port {port}"))?;
     serve(listener, router).await
 }
 
-/// Serves a router built with [`create_server`] on an existing listener.
+/// Serves a router built with [`router`] on an existing listener.
 pub async fn serve(listener: TcpListener, router: Router) -> Result<ServerHandle> {
     let addr = listener.local_addr()?;
     let (shutdown, stopped) = tokio::sync::oneshot::channel::<()>();

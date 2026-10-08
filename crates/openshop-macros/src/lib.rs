@@ -5,8 +5,10 @@ mod admin;
 mod app;
 mod block;
 mod function;
+mod input;
 mod model;
 mod provider;
+mod test;
 mod util;
 
 use std::collections::HashMap;
@@ -365,12 +367,12 @@ pub fn derive_provider_config(input: proc_macro::TokenStream) -> proc_macro::Tok
 /// See `openshop::provider`.
 #[proc_macro_attribute]
 pub fn provider(arguments: proc_macro::TokenStream, item: proc_macro::TokenStream) -> proc_macro::TokenStream {
-    let name = match syn::parse::<LitStr>(arguments) {
+    let name = match syn::parse::<Option<LitStr>>(arguments) {
         Ok(name) => name,
         Err(error) => {
             return syn::Error::new(
                 error.span(),
-                "expected the name of the provider: `#[provider(\"warehouse\")]`",
+                "expected the name of the provider, `#[provider(\"warehouse\")]`, or nothing to name it after the struct",
             )
             .into_compile_error()
             .into();
@@ -434,19 +436,27 @@ block_attribute!(
 /// See `openshop::admin_page`.
 #[proc_macro_attribute]
 pub fn admin_page(arguments: proc_macro::TokenStream, item: proc_macro::TokenStream) -> proc_macro::TokenStream {
-    let path = match syn::parse::<LitStr>(arguments) {
-        Ok(path) => path,
-        Err(error) => {
-            return syn::Error::new(
-                error.span(),
-                "expected the path of the page: `#[admin_page(\"/reviews\")]`",
-            )
-            .into_compile_error()
-            .into();
-        }
-    };
+    let arguments = syn::parse_macro_input!(arguments as util::Arguments);
     let item = syn::parse_macro_input!(item as syn::ItemImpl);
-    admin::admin_page(path, item)
+    admin::admin_page(arguments, item)
+        .unwrap_or_else(syn::Error::into_compile_error)
+        .into()
+}
+
+/// See `openshop::input`.
+#[proc_macro_attribute]
+pub fn input(arguments: proc_macro::TokenStream, item: proc_macro::TokenStream) -> proc_macro::TokenStream {
+    let item = syn::parse_macro_input!(item as syn::DeriveInput);
+    input::input(arguments.into(), item)
+        .unwrap_or_else(syn::Error::into_compile_error)
+        .into()
+}
+
+/// See `openshop::test`.
+#[proc_macro_attribute]
+pub fn test(arguments: proc_macro::TokenStream, item: proc_macro::TokenStream) -> proc_macro::TokenStream {
+    let item = syn::parse_macro_input!(item as syn::ItemFn);
+    test::test(arguments.into(), item)
         .unwrap_or_else(syn::Error::into_compile_error)
         .into()
 }
@@ -460,7 +470,8 @@ pub fn app(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    // Not `super::*`: the `test` attribute this crate defines would hide `#[test]`.
+    use super::{Arc, Input, OsStr, PathBuf, SystemTime, read_schema, schema_file};
 
     const SCHEMA: &str = r#"{"apiVersion":"2025-10","query":"QueryRoot","types":{
 "QueryRoot":{"o":{"f":{"ping":"String"}}},

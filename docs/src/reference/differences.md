@@ -8,13 +8,13 @@ This page lists every place where it intentionally differs.
 
 | TypeScript | Rust |
 | --- | --- |
-| `openshop.config.ts` loaded by the `openshop` CLI | Your binary declares an `App` with `app!` and runs it with `APP.run()` |
+| `openshop.config.ts` loaded by the `openshop` CLI | Your binary declares an `App` with `app!` and runs it with `APP.main()` |
 | `defineFlow({ … })` and `defineProvider({ … })` returning a definition | An attribute on the function or the struct itself (`#[flow]`, `#[provider]`), which `app!` lists by name |
 | `proxy/`, `routes/` and `admin/pages/` discovered from files | `#[proxy(GET, "/path")]`, `#[route(GET, "/path")]` and `#[admin_page("/path")]` on the code, listed in `app!` |
 | Hot reload of the config module in `dev` | `openshop dev` rebuilds and restarts the process |
 | `process.env` read on each request | Environment captured once in `RuntimeEnv` at startup |
 | `getDb()` and other process globals | An `OpenShop` handle (`ctx.app`, `ctx.db`) passed to every handler |
-| `arktype` schemas | `serde` types with a `schemars` JSON Schema, and validator closures |
+| `arktype` schemas | Types marked `#[input]`, read with `serde` and described by a `schemars` JSON Schema, and field validators |
 
 Consequences:
 
@@ -24,6 +24,15 @@ Consequences:
   proxy, route or admin page paths, a route without handlers, navigation that
   points to an unknown page, an invalid cron expression, a block registered
   twice under the same key.
+- The `input` of a cron is validated against the input of its flow when the
+  configuration is built. A cron whose input the flow refuses stops the
+  process at startup with
+  `[openshop] Invalid config: crons[0].input is not an input of flow "syncOrders": …`,
+  instead of producing a failed run at each occurrence.
+- Custom admin pages are served as soon as they are listed in `admin_pages`:
+  there is no separate switch to enable them. A page declares its entry in the
+  menu with `nav = "Label"`, and the `custom_pages` setting only sets the menu
+  by hand.
 - `GET /api/flows` and the MCP tool `openshop.flows.list` return `inputSchema`
   as JSON Schema (or `null`) rather than arktype's JSON format. Validation
   messages differ accordingly; they still start with
@@ -36,13 +45,13 @@ connectors are reached by name. Two additions close most of that gap and make
 larger configurations easier to split:
 
 - A provider is a struct: `#[derive(ProviderConfig)]` makes its fields the
-  configuration form, and `#[provider("name")]` makes the methods of its `impl`
+  configuration form, and `#[provider]` makes the methods of its `impl`
   block the methods of the provider, called with
   `Warehouse::on(&ctx.connectors).push(&orders)`. The compiler checks the
   method, its arguments and its result. See [Providers](providers.md).
-- Underneath, `ProviderCall<A, R>` constants with `Provider::handle`,
-  `Provider::typed_checker` and `Connectors::invoke`, for a provider built
-  without a struct. See [Typed calls](providers.md#typed-calls).
+- Underneath, `ProviderCall<A, R>` constants with `Provider::handle` and
+  `Provider::typed_checker`, for a provider built without a struct. See
+  [Typed calls](providers.md#typed-calls).
 - Blocks are declared in the module that writes them and `app!` lists them by
   name, so a large application has no registration code to split. On the
   builder underneath, `.providers([…])`, `.flows([…])` and `.with(register)`
@@ -112,6 +121,24 @@ larger configurations easier to split:
 - With custom admin pages, a static page takes precedence over a dynamic
   sibling: `/reviews/new` is handled by its own page rather than rejected as
   ambiguous with `/reviews/:id`.
+- Turning MCP off, with `mcp: McpConfig::disabled()` or `.enabled(false)`,
+  also disables the MCP page of the admin and `/api/mcp/*`, unless the
+  application sets a mode for that page with the `pages` setting or
+  `.page(AdminPageId::Mcp, …)`.
+
+## Proxy and server routes
+
+- A `#[proxy]` or `#[route]` function can take a typed input as its second
+  argument, read from the query string or from the JSON body. A request that
+  does not fit it is answered with `422` and
+  `{ "error": "Invalid input: …" }` before the function runs. A function
+  without a typed input reads the query and the body itself, and no request is
+  refused for its shape.
+- Liquid answers come from template files, embedded with `liquid!`. A value
+  of the server is passed with `.assign(name, value)` and written before the
+  template as a `{% assign %}` tag, escaped so that it cannot close its
+  literal or its tag. A template is not built by interpolating values into a
+  string.
 
 ## Security
 

@@ -8,7 +8,7 @@ use syn::{
     Type, Visibility,
 };
 
-use crate::util::{camel_case, constant_ident, plain_name, set, set_value};
+use crate::util::{camel_case, constant_ident, humanize, lower_initial, plain_name, set, set_value};
 
 // ─── #[derive(ProviderConfig)] ───────────────────────────────────────
 
@@ -20,7 +20,38 @@ struct FieldOptions {
     password: bool,
     /// Label and value of each choice.
     select: Option<Vec<(LitStr, LitStr)>>,
+    /// The constraints stated by name: `url`, `non_empty`, `range(…)`, `length(…)`.
+    constraints: Vec<TokenStream>,
     validate: Option<Expr>,
+}
+
+/// `range(min = 1, max = 1000)` or `length(min = 1)`: the bounds given, as `Option`s.
+fn parse_bounds(meta: &syn::meta::ParseNestedMeta) -> syn::Result<(TokenStream, TokenStream)> {
+    const MISSING: &str = "expected a bound: `min = …`, `max = …` or both";
+    if !meta.input.peek(syn::token::Paren) {
+        return Err(meta.error(MISSING));
+    }
+    let ahead = meta.input.fork();
+    let bounds;
+    syn::parenthesized!(bounds in ahead);
+    if bounds.is_empty() {
+        return Err(meta.error(MISSING));
+    }
+    let (mut min, mut max): (Option<Expr>, Option<Expr>) = (None, None);
+    meta.parse_nested_meta(|bound| {
+        if bound.path.is_ident("min") {
+            set_value(&mut min, &bound)
+        } else if bound.path.is_ident("max") {
+            set_value(&mut max, &bound)
+        } else {
+            Err(bound.error("expected `min = …` or `max = …`"))
+        }
+    })?;
+    let bound = |value: Option<Expr>| match value {
+        Some(value) => quote!(::core::option::Option::Some((#value) as _)),
+        None => quote!(::core::option::Option::None),
+    };
+    Ok((bound(min), bound(max)))
 }
 
 /// `select("Europe" = "eu", "United States" = "us")`.
@@ -66,11 +97,25 @@ fn field_options(field: &syn::Field) -> syn::Result<FieldOptions> {
                 Ok(())
             } else if meta.path.is_ident("select") {
                 set(&mut options.select, &meta, parse_choices)
+            } else if meta.path.is_ident("url") {
+                options.constraints.push(quote!(::openshop::validators::url()));
+                Ok(())
+            } else if meta.path.is_ident("non_empty") {
+                options.constraints.push(quote!(::openshop::validators::non_empty()));
+                Ok(())
+            } else if meta.path.is_ident("range") {
+                let (min, max) = parse_bounds(&meta)?;
+                options.constraints.push(quote!(::openshop::validators::range(#min, #max)));
+                Ok(())
+            } else if meta.path.is_ident("length") {
+                let (min, max) = parse_bounds(&meta)?;
+                options.constraints.push(quote!(::openshop::validators::length(#min, #max)));
+                Ok(())
             } else if meta.path.is_ident("validate") {
                 set_value(&mut options.validate, &meta)
             } else {
                 Err(meta.error(
-                    "unknown field option; expected `label`, `name`, `placeholder`, `password`, `select(…)` or `validate`",
+                    "unknown field option; expected `label`, `name`, `placeholder`, `password`, `select(…)`, `url`, `non_empty`, `range(…)`, `length(…)` or `validate`",
                 ))
             }
         })?;
@@ -80,7 +125,7 @@ fn field_options(field: &syn::Field) -> syn::Result<FieldOptions> {
 
 /// The form a struct describes: one field of the form per field of the struct.
 pub struct Form {
-    /// Statements adding each field to `fields`, a `FieldDefinitions`.
+    /// Statements adding each field to `fields`, a `Fields`.
     pub definitions: Vec<TokenStream>,
     /// The struct, read from `config`, a mutable `JsonMap`.
     pub construct: TokenStream,
@@ -114,12 +159,11 @@ pub fn form(input: &DeriveInput, derive: &str, what: &str) -> syn::Result<Form> 
         let ident = field.ident.as_ref().expect("a named field");
         let ty = &field.ty;
         let options = field_options(field)?;
-        let Some(label) = &options.label else {
-            return Err(syn::Error::new(
-                ident.span(),
-                format!("the form needs a label for `{ident}`: add `#[field(label = \"…\")]`"),
-            ));
-        };
+        // Without a label, the field is called by its name: `batch_size` is "Batch size".
+        let label = &options
+            .label
+            .clone()
+            .unwrap_or_else(|| LitStr::new(&humanize(&plain_name(ident)), ident.span()));
         if options.password && options.select.is_some() {
             return Err(syn::Error::new(
                 ident.span(),
@@ -139,13 +183,13 @@ pub fn form(input: &DeriveInput, derive: &str, what: &str) -> syn::Result<Form> 
 
         // A password or a choice is a string in the form; the type says whether it can be left blank.
         let stated = if options.password {
-            Some(quote!(#krate::FieldDef::password(#label)))
+            Some(quote!(#krate::Field::password(#label)))
         } else {
             options.select.as_ref().map(|choices| {
                 let choices = choices
                     .iter()
                     .map(|(label, value)| quote!(#krate::FieldOption::new(#label, #value)));
-                quote!(#krate::FieldDef::select(#label, [#(#choices),*]))
+                quote!(#krate::Field::select(#label, [#(#choices),*]))
             })
         };
         let base = match stated {
@@ -156,9 +200,14 @@ pub fn form(input: &DeriveInput, derive: &str, what: &str) -> syn::Result<Form> 
             None => quote!(<#ty as #krate::ProviderField>::field(#label)),
         };
         let placeholder = options.placeholder.as_ref().map(|text| quote!(.placeholder(#text)));
+        // The named constraints first, in the order they are written.
+        let constraints = options
+            .constraints
+            .iter()
+            .map(|constraint| quote!(.validate(#constraint)));
         let validate = options.validate.as_ref().map(|validator| quote!(.validate(#validator)));
         definitions.push(quote! {
-            fields.insert(::std::string::String::from(#key), #base #placeholder #validate);
+            fields.insert(::std::string::String::from(#key), #base #placeholder #(#constraints)* #validate);
         });
         readers.push(quote!(#ident: #krate::provider_field_value::<#ty>(&mut config, #key)?));
         keys.push(key);
@@ -181,8 +230,8 @@ pub fn derive_config(input: DeriveInput) -> syn::Result<TokenStream> {
 
     Ok(quote! {
         impl #krate::ProviderConfig for #name {
-            fn fields() -> #krate::FieldDefinitions {
-                let mut fields = #krate::FieldDefinitions::new();
+            fn fields() -> #krate::Fields {
+                let mut fields = #krate::Fields::new();
                 #(#definitions)*
                 fields
             }
@@ -276,7 +325,7 @@ fn docs(function: &ImplItemFn) -> Vec<&Attribute> {
         .collect()
 }
 
-pub fn provider(name: LitStr, mut item: ItemImpl) -> syn::Result<TokenStream> {
+pub fn provider(name: Option<LitStr>, mut item: ItemImpl) -> syn::Result<TokenStream> {
     let krate = quote!(::openshop);
     if let Some((_, path, _)) = &item.trait_ {
         return Err(syn::Error::new(
@@ -287,12 +336,6 @@ pub fn provider(name: LitStr, mut item: ItemImpl) -> syn::Result<TokenStream> {
     if !item.generics.params.is_empty() {
         return Err(syn::Error::new(item.generics.span(), "a provider cannot be generic"));
     }
-    if name.value().trim().is_empty() {
-        return Err(syn::Error::new(
-            name.span(),
-            "a provider needs a name: `#[provider(\"warehouse\")]`",
-        ));
-    }
     let self_type = (*item.self_ty).clone();
     let Type::Path(path) = &self_type else {
         return Err(syn::Error::new(
@@ -301,6 +344,14 @@ pub fn provider(name: LitStr, mut item: ItemImpl) -> syn::Result<TokenStream> {
         ));
     };
     let struct_name = &path.path.segments.last().expect("a path has a segment").ident;
+    // Without a name, the provider is named after the struct: `Warehouse` is "warehouse".
+    let name = name.unwrap_or_else(|| LitStr::new(&lower_initial(&plain_name(struct_name)), struct_name.span()));
+    if name.value().trim().is_empty() {
+        return Err(syn::Error::new(
+            name.span(),
+            "a provider needs a name: `#[provider(\"warehouse\")]`",
+        ));
+    }
     let connector = format_ident!("{}Connector", struct_name);
 
     // The marker of the connection check is ours: it does not survive the expansion.
@@ -387,7 +438,7 @@ pub fn provider(name: LitStr, mut item: ItemImpl) -> syn::Result<TokenStream> {
         };
 
         let constant_doc =
-            format!(" The call of [`{struct_name}::{ident}`], for `Connectors::invoke` and for the fakes of a test.");
+            format!(" The call of [`{struct_name}::{ident}`]: it names the fake of the method in a test.");
         constants.push(quote! {
             #[doc = #constant_doc]
             #visibility const #constant: #krate::ProviderCall<#arguments_type, #ok> =
@@ -430,6 +481,9 @@ pub fn provider(name: LitStr, mut item: ItemImpl) -> syn::Result<TokenStream> {
 
         #[allow(private_interfaces)]
         impl #self_type {
+            /// The name of the provider.
+            pub const NAME: &'static str = #name;
+
             #(#constants)*
 
             #[doc = #provider_doc]
@@ -512,8 +566,8 @@ mod tests {
         for expected in [
             "impl :: openshop :: ProviderConfig for Warehouse",
             "String :: from (\"apiUrl\") , < String as :: openshop :: ProviderField > :: field (\"API URL\") . placeholder (\"https://…\") . validate (validators :: url ())",
-            "let field = :: openshop :: FieldDef :: password (\"API key\") ; if < String as :: openshop :: ProviderField > :: OPTIONAL { field . optional () } else { field }",
-            ":: openshop :: FieldDef :: select (\"Region\" , [:: openshop :: FieldOption :: new (\"Europe\" , \"eu\") , :: openshop :: FieldOption :: new (\"United States\" , \"us\")])",
+            "let field = :: openshop :: Field :: password (\"API key\") ; if < String as :: openshop :: ProviderField > :: OPTIONAL { field . optional () } else { field }",
+            ":: openshop :: Field :: select (\"Region\" , [:: openshop :: FieldOption :: new (\"Europe\" , \"eu\") , :: openshop :: FieldOption :: new (\"United States\" , \"us\")])",
             "String :: from (\"batch\") , < u32 as :: openshop :: ProviderField > :: field (\"Batch size\")",
             "batch_size : :: openshop :: provider_field_value :: < u32 > (& mut config , \"batch\") ?",
             "impl < 'de > :: openshop :: serde :: Deserialize < 'de > for Warehouse",
@@ -530,10 +584,42 @@ mod tests {
     }
 
     #[test]
+    fn a_field_is_labeled_after_its_name_and_states_its_constraints() {
+        let generated = derive_config(parse_quote! {
+            struct Warehouse {
+                #[field(url, non_empty)]
+                api_url: String,
+                #[field(range(min = 1, max = 1000), validate = even)]
+                batch_size: u32,
+                #[field(label = "Code", length(max = 8))]
+                code: Option<String>,
+                plain: bool,
+            }
+        })
+        .unwrap()
+        .to_string();
+
+        for expected in [
+            "field (\"Api url\") . validate (:: openshop :: validators :: url ()) . validate (:: openshop :: validators :: non_empty ())",
+            // The named constraints run before the validator of the field.
+            "field (\"Batch size\") . validate (:: openshop :: validators :: range (:: core :: option :: Option :: Some ((1) as _) , :: core :: option :: Option :: Some ((1000) as _))) . validate (even)",
+            "field (\"Code\") . validate (:: openshop :: validators :: length (:: core :: option :: Option :: None , :: core :: option :: Option :: Some ((8) as _)))",
+            "< bool as :: openshop :: ProviderField > :: field (\"Plain\")",
+        ] {
+            assert!(generated.contains(expected), "missing `{expected}` in:\n{generated}");
+        }
+        assert_eq!(humanize("batch_size_max"), "Batch size max");
+    }
+
+    #[test]
     fn refuses_fields_the_form_cannot_show() {
         assert_eq!(
-            config_refusal(parse_quote! { struct W { api_url: String } }),
-            "the form needs a label for `api_url`: add `#[field(label = \"…\")]`"
+            config_refusal(parse_quote! { struct W { #[field(range())] a: u32 } }),
+            "expected a bound: `min = …`, `max = …` or both"
+        );
+        assert_eq!(
+            config_refusal(parse_quote! { struct W { #[field(length(exactly = 3))] a: String } }),
+            "expected `min = …` or `max = …`"
         );
         assert_eq!(
             config_refusal(parse_quote! { struct W { #[field(label = "A", password, select("a" = "a"))] a: String } }),
@@ -547,7 +633,7 @@ mod tests {
         );
         assert_eq!(
             config_refusal(parse_quote! { struct W { #[field(label = "A", secret)] a: String } }),
-            "unknown field option; expected `label`, `name`, `placeholder`, `password`, `select(…)` or `validate`"
+            "unknown field option; expected `label`, `name`, `placeholder`, `password`, `select(…)`, `url`, `non_empty`, `range(…)`, `length(…)` or `validate`"
         );
         assert_eq!(
             config_refusal(parse_quote! { struct W { #[field(label = "A", select())] a: String } }),

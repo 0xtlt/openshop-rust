@@ -6,13 +6,13 @@ mod common;
 use std::path::{Path, PathBuf};
 
 use common::{TEST_SHOP, TempProject, create_config, empty_database, noop_flow, test_env};
-use openshop::db::define_model;
+use openshop::db::Table;
 use openshop::db::migrate::{
     FRAMEWORK_MIGRATIONS, MigrationStatus, check_migrations, generate_migrations, get_client_migration_status,
     migrate_schema, push_schema,
 };
 use openshop::testing::{MockTransport, TestDb};
-use openshop::{DispatchFlowParams, OpenShop, PgPool};
+use openshop::{DispatchOptions, OpenShop, PgPool};
 
 const INIT: &str = "0000_project_init";
 const NEXT: &str = "0001_project_next";
@@ -424,7 +424,7 @@ async fn generate_then_migrate_creates_the_framework_tables() {
         MockTransport::new(),
     )
     .unwrap();
-    app.dispatch_flow(DispatchFlowParams::new("test-flow", TEST_SHOP))
+    app.dispatch_flow(DispatchOptions::new("test-flow", TEST_SHOP))
         .await
         .unwrap();
 
@@ -537,7 +537,7 @@ async fn generate_refuses_to_run_in_production() {
 #[tokio::test]
 async fn push_schema_creates_framework_and_model_tables() {
     let db = empty_database().await;
-    let reviews = define_model("reviews")
+    let reviews = Table::conventional("reviews")
         .column("rating", "integer NOT NULL")
         .unique_index("reviews_shop_rating_unique", &["shop", "rating"]);
 

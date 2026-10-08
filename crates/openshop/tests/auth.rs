@@ -7,7 +7,7 @@ use chrono::Utc;
 use common::noop_flow;
 use openshop::db::schema::Installation;
 use openshop::testing::{
-    MockTransport, TestContext, TestOptions, create_session_token, sign_query, sign_webhook_body, to_query_string,
+    MockTransport, TestContext, TestOptions, session_token, sign_query, sign_webhook_body, to_query_string,
 };
 use openshop::{IndexMap, OpenShopConfig, ShopifyAppConfig, ShopifyConfig, Value, anyhow, json};
 use reqwest::Response;
@@ -164,7 +164,7 @@ async fn shopify_access_token_header(ctx: &TestContext, shop: &str) -> String {
     ctx.transport.clear();
     ctx.transport
         .respond_json(json!({ "data": { "shop": { "name": "Test" } } }));
-    let client = ctx.app.shopify_client(shop, "default").await.unwrap();
+    let client = ctx.app.shopify_client(shop, "default");
     client.graphql("{ shop { name } }", None).await.unwrap();
 
     let request = ctx.transport.last_request().expect("GraphQL request");
@@ -866,7 +866,7 @@ async fn ambiguous_app_resolution_fails_closed() {
     }
     grant_access_token(&ctx, "must-not-be-stored");
 
-    let token = create_session_token(shop, "shared-secret", "shared-key", "1");
+    let token = session_token(shop, "shared-secret", "shared-key", "1");
     assert_error(
         api_get(&ctx, "/api/flows", &token).await,
         401,
@@ -1170,7 +1170,7 @@ async fn rejected_session_tokens_never_trigger_a_token_exchange() {
     let ctx = single_app().await;
     grant_access_token(&ctx, "must-not-be-stored");
 
-    let forged = create_session_token(SHOP, "wrong-secret", "test-app", "1");
+    let forged = session_token(SHOP, "wrong-secret", "test-app", "1");
     let response = api_get(&ctx, "/api/flows", &forged).await;
     assert_error(response, 401, "Unauthorized: Invalid JWT signature").await;
 
@@ -1304,7 +1304,7 @@ async fn session_token_is_resolved_by_audience_in_multi_app_mode() {
         ))
     });
 
-    let token_b = create_session_token(shop, "client-b-secret", "client-b-key", "7");
+    let token_b = session_token(shop, "client-b-secret", "client-b-key", "7");
     assert_eq!(api_get(&ctx, "/api/flows", &token_b).await.status(), 200);
 
     let requests = ctx.transport.requests();
@@ -1337,7 +1337,7 @@ async fn session_token_is_resolved_by_audience_in_multi_app_mode() {
         .unwrap();
     assert_eq!(app_handle, "clientB");
 
-    let token_a = create_session_token(shop, "client-a-secret", "client-a-key", "7");
+    let token_a = session_token(shop, "client-a-secret", "client-a-key", "7");
     assert_eq!(api_get(&ctx, "/api/flows", &token_a).await.status(), 200);
     let row_a = installation(&ctx, "clientA", shop).await;
     assert_eq!(decrypted_token(&ctx, &row_a).as_deref(), Some("token-for-client-a-key"));
@@ -1352,7 +1352,7 @@ async fn multi_app_session_tokens_cannot_be_used_across_apps() {
     grant_access_token(&ctx, "must-not-be-stored");
 
     // Audience of app A, signed with the secret of app B.
-    let crossed = create_session_token(shop, "client-b-secret", "client-a-key", "1");
+    let crossed = session_token(shop, "client-b-secret", "client-a-key", "1");
     let response = api_get(&ctx, "/api/flows", &crossed).await;
     assert_error(response, 401, "Unauthorized: Invalid JWT signature").await;
 
@@ -1367,7 +1367,7 @@ async fn multi_app_session_tokens_cannot_be_used_across_apps() {
     .await;
 
     // Neither is an app handle an audience.
-    let by_handle = create_session_token(shop, "client-a-secret", "clientA", "1");
+    let by_handle = session_token(shop, "client-a-secret", "clientA", "1");
     let response = api_get(&ctx, "/api/flows", &by_handle).await;
     assert_error(
         response,

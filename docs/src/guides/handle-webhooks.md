@@ -9,7 +9,7 @@ and the subscription in Shopify.
 Create `src/webhooks/orders_create.rs`:
 
 ```rust,ignore
-use openshop::{Result, WebhookContext, webhook};
+use openshop::prelude::*;
 
 #[webhook("orders/create")]
 pub async fn orders_create(ctx: WebhookContext) -> Result<()> {
@@ -34,7 +34,14 @@ The example logs identity and topic without logging the order payload
 `#[webhook("orders/create", "orders/updated")]`. To read fields of the order,
 give the function a second argument whose type implements `Deserialize`, such
 as `order: CreatedOrder`; the [webhook reference](../reference/webhooks.md)
-shows it.
+shows it. Derive `Deserialize` from `serde` on that type and do not mark it
+`#[input]`: Shopify names the fields of a payload in snake case.
+
+The context also carries what the handler needs to work for the shop:
+`ctx.db`, the database pool, `ctx.shopify`, the Admin API of the shop, and
+`ctx.connectors`, its providers. Nothing is read when the context is built:
+the access token is read at the first Shopify request, and the provider
+configuration at the first provider call.
 
 ## 2. Register it in OpenShop
 
@@ -109,22 +116,27 @@ with the `max_request_body_bytes` setting of `app!`.
 To enqueue a flow, dispatch it for the shop and app that received the event:
 
 ```rust,ignore
-use openshop::{DispatchFlowParams, Result, WebhookContext, json, webhook};
+use openshop::prelude::*;
+
+use crate::flows::sync_orders::{SyncOrdersInput, sync_orders};
 
 #[webhook("orders/create")]
 pub async fn orders_create(ctx: WebhookContext) -> Result<()> {
-    ctx.app
-        .dispatch_flow(
-            DispatchFlowParams::new("syncOrders", ctx.shop.clone())
-                .shopify_app(ctx.shopify_app.clone())
-                .input(json!({ "limit": 10 })),
-        )
-        .await?;
+    sync_orders::dispatch(&ctx, SyncOrdersInput { limit: 10 }).await?;
     Ok(())
 }
 ```
 
+`#[flow]` adds `dispatch` to the flow it declares. It takes the context, which
+names the shop and the Shopify app, then the input of the run, and returns a
+`QueuedRun` with the `run_id` of the queued run. A flow without input is
+dispatched with the context alone.
+
+To delay the run, to give it another retry policy, or to dispatch a flow only
+known by name, describe the run with `DispatchOptions`:
+`ctx.app.dispatch_flow(DispatchOptions::for_scope("syncOrders", &ctx).input(json!({ "limit": 10 })).delay(Duration::from_secs(60)))`.
+
 Use a stable business identifier to make duplicate deliveries safe. See the
 [webhook response contract](../reference/webhooks.md#response-behavior) and the
-[flow dispatch API](../reference/sdk.md#appdispatch_flowparams) before adding
+[flow dispatch API](../reference/sdk.md#appdispatch_flowoptions) before adding
 side effects.

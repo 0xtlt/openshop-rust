@@ -14,10 +14,7 @@ pub mod webhooks;
 
 use std::sync::Arc;
 
-use openshop::{
-    App, CronEntry, CustomAdminNavigationItem, ErrorContext, McpConfig, McpPermissionDefinition, McpRiskLevel, app,
-    json,
-};
+use openshop::prelude::*;
 
 use admin::reviews::ReviewsPage;
 use flows::count_variants::count_variants;
@@ -47,27 +44,19 @@ pub static APP: App = app! {
     functions: [VolumeDiscount],
     models: [Review],
     admin_pages: [ReviewsPage],
-    custom_pages: [CustomAdminNavigationItem::new("Reviews", ReviewsPage::PATH)],
     webhooks: [orders_create, app_uninstalled],
     proxies: [reviews, list_reviews, submit_review],
     routes: [ping],
     mcp_tools: [status],
     mcp_resources: [guide],
-    mcp: McpConfig::new().permission(
-        mcp::READ_STATUS,
-        McpPermissionDefinition::new("Read demo status")
-            .description("Allows MCP tokens to read a small demo status payload.")
-            .group("Demo")
-            .risk_level(McpRiskLevel::Low),
-    ),
     crons: [
-        CronEntry::new("*/5 * * * *", sync_orders::NAME)
+        Cron::new("*/5 * * * *", sync_orders::NAME)
             .name("Quick sync")
             .input(json!({ "limit": 10 })),
-        CronEntry::new("0 2 * * *", sync_orders::NAME)
+        Cron::new("0 2 * * *", sync_orders::NAME)
             .name("Nightly full sync")
             .input(json!({ "limit": 1000 }))
-            .shops("all"),
+            .all_shops(),
     ],
     on_error: report_failure,
 };

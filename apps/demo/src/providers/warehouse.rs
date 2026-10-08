@@ -1,15 +1,15 @@
-use openshop::{ProviderConfig, Result, provider, validators};
+use openshop::prelude::*;
 use serde::{Deserialize, Serialize};
 
 /// The warehouse of a shop: the fields are what a merchant saves in the
 /// admin, the methods are what flows can do with it.
 #[derive(Debug, ProviderConfig)]
 pub struct Warehouse {
-    #[field(label = "API URL", placeholder = "https://warehouse.example.com/api", validate = validators::url())]
+    #[field(label = "API URL", placeholder = "https://warehouse.example.com/api", url)]
     pub api_url: String,
-    #[field(label = "API Key", password, placeholder = "wh_live_...", validate = validators::non_empty())]
+    #[field(label = "API Key", password, placeholder = "wh_live_...", non_empty)]
     pub api_key: String,
-    #[field(label = "Batch Size", placeholder = "100", validate = validators::number_range(1.0, 1000.0))]
+    #[field(placeholder = "100", range(min = 1, max = 1000))]
     pub batch_size: u32,
 }
 
@@ -24,7 +24,8 @@ pub struct WarehouseRecord {
     pub exported_at: String,
 }
 
-#[provider("warehouse")]
+/// Named `warehouse`, after the struct.
+#[provider]
 impl Warehouse {
     #[checker]
     async fn check(&self) -> Result<bool> {

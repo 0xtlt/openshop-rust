@@ -19,11 +19,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use openshop::runtime::RuntimeEnv;
-use openshop::server::serve;
-use openshop::testing::{MockTransport, TestDb, create_session_token};
+use openshop::server::{router, serve};
+use openshop::testing::{MockTransport, TestDb, session_token};
 use openshop::{
-    DispatchFlowParams, OpenShop, PartialWorkerConfig, Result, Scheduler, ServerOptions, ServerRoute, UiSource, Worker,
-    create_server, json, response,
+    DispatchOptions, OpenShop, Result, Route, Scheduler, ServerOptions, UiSource, Worker, WorkerConfig, json, response,
 };
 
 const SHOP: &str = "preview.myshopify.com";
@@ -78,14 +77,8 @@ async fn main() -> Result<()> {
     let mut config = openshop_demo::APP.config()?;
     config.routes.insert(
         "/preview-token".to_string(),
-        ServerRoute::public().get(|_ctx| async move {
-            Ok(response::text(create_session_token(
-                SHOP,
-                API_SECRET,
-                API_KEY,
-                "preview-user",
-            )))
-        }),
+        Route::public()
+            .get(|_ctx| async move { Ok(response::text(session_token(SHOP, API_SECRET, API_KEY, "preview-user"))) }),
     );
 
     let database = TestDb::create_with_models(&config.models).await?;
@@ -112,9 +105,9 @@ async fn main() -> Result<()> {
         .execute(app.db())
         .await?;
     // Some history to look at: a completed run and a failed one.
-    app.dispatch_flow(DispatchFlowParams::new("syncOrders", SHOP).input(json!({ "limit": 5 })))
+    app.dispatch_flow(DispatchOptions::new("syncOrders", SHOP).input(json!({ "limit": 5 })))
         .await?;
-    app.dispatch_flow(DispatchFlowParams::new("countVariants", SHOP).input(json!({})))
+    app.dispatch_flow(DispatchOptions::new("countVariants", SHOP).input(json!({})))
         .await?;
 
     let ui = preview_ui_dir()?;
@@ -124,8 +117,8 @@ async fn main() -> Result<()> {
     };
     // Loopback only: this server hands out session tokens to anyone who asks.
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", PORT)).await?;
-    let server = serve(listener, create_server(&app, options)?).await?;
-    let worker = Worker::new(app.clone(), PartialWorkerConfig::default());
+    let server = serve(listener, router(&app, options)?).await?;
+    let worker = Worker::new(app.clone(), WorkerConfig::default());
     worker.start().await;
     let mut scheduler = Scheduler::start(&app)?;
 

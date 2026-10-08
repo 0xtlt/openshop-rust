@@ -6,7 +6,7 @@ A webhook handler is an async function declared with `#[webhook("topic")]`.
 
 ```rust,ignore
 // src/webhooks/orders_create.rs
-use openshop::{Result, WebhookContext, webhook};
+use openshop::prelude::*;
 use serde::Deserialize;
 
 /// What the handler reads from the order Shopify sends.
@@ -29,7 +29,7 @@ pub async fn orders_create(ctx: WebhookContext, order: CreatedOrder) -> Result<(
 List the function in the `webhooks` of `app!`:
 
 ```rust,ignore
-use openshop::{App, app};
+use openshop::prelude::*;
 
 use webhooks::orders_create::orders_create;
 
@@ -44,6 +44,9 @@ body. Fields the type does not name are ignored. A payload that cannot be read
 into the type is a handler error, and the function is not called; see
 [Response behavior](#response-behavior). With or without the second argument,
 the payload is available as JSON in `ctx.payload`.
+
+The payload is a plain `#[derive(Deserialize)]` type, not an `#[input]`:
+Shopify names its fields in snake case, and `#[input]` reads camel case.
 
 An attribute can name several topics,
 `#[webhook("orders/create", "orders/updated")]`; `ctx.topic` is the one that
@@ -73,9 +76,37 @@ Shopify sends all configured topics to `POST /webhooks`.
 | `shopify_app` | `String` | App selected by matching the body HMAC against its secret |
 | `payload` | `serde_json::Value` | Parsed JSON request body |
 | `api_version` | `String` | `X-Shopify-Api-Version` |
-| `app` | `OpenShop` | The running application, for dispatch, database, and connector access |
+| `db` | `PgPool` | The database of the application |
+| `shopify` | `ShopifyClient` | The Admin API of the shop |
+| `connectors` | `Connectors` | The providers of the shop |
+| `app` | `OpenShop` | The running application |
 
 A missing header yields an empty string.
+
+Nothing is read when the context is built: the access token of the shop is
+read at the first Shopify request, and the provider configuration at the first
+provider call. A handler that makes neither costs no query.
+
+```rust,ignore
+#[webhook("orders/create")]
+pub async fn orders_create(ctx: WebhookContext, order: CreatedOrder) -> Result<()> {
+    // The Admin API of the shop that sent the event.
+    let data = ctx.shopify.execute(graphql!("{ shop { name } }")).await?;
+
+    // A provider, with the configuration the shop saved.
+    let accepted = Warehouse::on(&ctx.connectors).push(&vec![order.name]).await?;
+
+    // The rows of the shop.
+    let reviews = Review::of(&ctx).count().await?;
+
+    println!("[webhook] {}: {accepted} order sent, {reviews} reviews", data.shop.name);
+    Ok(())
+}
+```
+
+`WebhookContext` belongs to a shop, so what needs one takes the context
+itself: `Review::of(&ctx)`, and `sync_orders::dispatch(&ctx, …)` as shown
+under [Idempotence and durable work](#idempotence-and-durable-work).
 
 OpenShop verifies `X-Shopify-Hmac-Sha256` against the raw request body before
 parsing JSON. In multi-app mode, exactly one configured app secret must match.
@@ -121,20 +152,20 @@ dispatch a flow whose first step checks a durable app-owned record.
 For work that must retry, keep the webhook handler short and dispatch a flow:
 
 ```rust,ignore
-use openshop::{DispatchFlowParams, Result, WebhookContext, json, webhook};
+use openshop::prelude::*;
+
+use crate::flows::sync_orders::{SyncOrdersInput, sync_orders};
 
 #[webhook("orders/create")]
 pub async fn orders_create(ctx: WebhookContext) -> Result<()> {
-    ctx.app
-        .dispatch_flow(
-            DispatchFlowParams::new("syncOrders", ctx.shop.clone())
-                .shopify_app(ctx.shopify_app.clone())
-                .input(json!({ "limit": 1 })),
-        )
-        .await?;
+    sync_orders::dispatch(&ctx, SyncOrdersInput { limit: 1 }).await?;
     Ok(())
 }
 ```
+
+`sync_orders::dispatch` is added by `#[flow]`. It queues a run for the shop
+and the Shopify app of the context, and returns a `QueuedRun`. A flow without
+input is dispatched with the context alone: `nightly::dispatch(&ctx).await?`.
 
 Do not rely on returning an error from the handler: OpenShop acknowledges the
 delivery. A dispatch rejected because the flow already has an active run for
@@ -146,7 +177,8 @@ the shop is such an error; see [Concurrency](flows.md#concurrency).
 that is only known at run time, or in a test:
 
 ```rust,ignore
-use openshop::{Value, Webhook};
+use openshop::Webhook;
+use openshop::prelude::*;
 
 pub fn orders_create() -> Webhook {
     Webhook::new(|ctx| async move {

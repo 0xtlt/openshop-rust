@@ -40,7 +40,8 @@ reason.
 
 ## Custom admin pages
 
-A custom page has two halves: loaders and actions registered on the server with `AdminPage`, and a
+A custom page has two halves: loaders and actions declared on the server, in an `impl` block
+marked `#[admin_page("/reviews", nav = "Reviews")]` and listed in the `admin_pages` of `app!`, and a
 view compiled into the UI bundle. To add views, create a binary crate next to your app (see
 `apps/demo/ui` for a complete one):
 
@@ -134,7 +135,12 @@ Build it with `trunk build --release` and start the server with `OPENSHOP_UI_DIR
 
 - **Routes** use the server's patterns: static segments and `:name` segments. Built-in prefixes
   (`/flows`, `/runs`, `/api`, …) are reserved. Navigation entries and access rules come from the
-  server; the UI asks it before showing a page.
+  server; the UI asks it before showing a page. A page has an entry in the menu when its
+  `#[admin_page]` gives it a `nav` label.
+- **Functions** are called by name: the name of the server function in camel case (`list_reviews`
+  is `listReviews`), or the name given to `#[loader]` or `#[action]`. An input the server declares
+  with `#[input]` reads its fields in camel case too (`product_id` is `productId`): give the type
+  the UI sends `#[serde(rename_all = "camelCase")]` when a field has several words.
 - **`use_loader(reference, input)`** calls a loader when the page mounts and again whenever the
   input closure yields a different JSON value or the loader is revalidated. It exposes `data`,
   `error` and `loading` signals and `revalidate()`, and discards responses of superseded calls.

@@ -113,7 +113,7 @@ mod tests {
             providers: [Warehouse],
             flows: [sync_orders, flows::count_variants],
             webhooks: [],
-            crons: [CronEntry::new("0 2 * * *", sync_orders::NAME)],
+            crons: [Cron::new("0 2 * * *", sync_orders::NAME)],
             on_error: report,
         });
         assert_eq!(
@@ -123,7 +123,7 @@ mod tests {
                     .add_as::<::openshop::declare::kind::Provider, Warehouse>()
                     .add_as::<::openshop::declare::kind::Flow, sync_orders>()
                     .add_as::<::openshop::declare::kind::Flow, flows::count_variants>()
-                    .crons([CronEntry::new("0 2 * * *", sync_orders::NAME)])
+                    .crons([Cron::new("0 2 * * *", sync_orders::NAME)])
                     .on_error(report)))
             }
             .to_string()

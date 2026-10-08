@@ -8,8 +8,8 @@ use common::noop_flow;
 use openshop::db::schema::FlowRun;
 use openshop::testing::{TestContext, TestOptions, sign_webhook_body};
 use openshop::{
-    DispatchFlowParams, OpenShopBuilder, OpenShopConfig, ShopifyAppConfig, ShopifyConfig, Value, Webhook,
-    WebhookContext, bail, json,
+    DispatchOptions, OpenShopBuilder, OpenShopConfig, ShopifyAppConfig, ShopifyConfig, Value, Webhook, WebhookContext,
+    bail, json,
 };
 use reqwest::Response;
 
@@ -359,7 +359,7 @@ async fn post_webhooks_handler_can_dispatch_a_flow_through_the_app() {
             Webhook::new(|ctx: WebhookContext| async move {
                 ctx.app
                     .dispatch_flow(
-                        DispatchFlowParams::new("wh-flow", ctx.shop.clone())
+                        DispatchOptions::new("wh-flow", ctx.shop.clone())
                             .input(json!({ "orderId": ctx.payload["id"], "topic": ctx.topic }))
                             .shopify_app(ctx.shopify_app.clone()),
                     )
@@ -460,7 +460,7 @@ async fn post_webhooks_handler_dispatches_flows_for_the_resolved_app() {
             "ORDERS_CREATE",
             Webhook::new(|ctx: WebhookContext| async move {
                 ctx.app
-                    .dispatch_flow(DispatchFlowParams::new("wh-flow", ctx.shop).shopify_app(ctx.shopify_app))
+                    .dispatch_flow(DispatchOptions::new("wh-flow", ctx.shop).shopify_app(ctx.shopify_app))
                     .await?;
                 Ok(())
             }),

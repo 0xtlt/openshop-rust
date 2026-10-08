@@ -16,8 +16,9 @@ container of the generated project:
 docker compose up -d
 ```
 
-Each `TestContext` creates its own schema in that database, pushes the framework
-tables and your registered models into it, and drops it on `shutdown()`. Your
+Each test gets a `TestContext` with its own schema in that database: the
+framework tables and the models of the application are pushed into it, and it
+is dropped when the test ends. Your
 development tables in the `public` schema are not touched, and there is no
 migration step: the harness does not read `./migrations`.
 
@@ -39,79 +40,71 @@ generated `Cargo.toml` enables it for tests only:
 openshop = { git = "https://github.com/0xtlt/openshop-rust", tag = "v<version>", features = ["testing"] }
 ```
 
-No runner file is needed: `cargo test` discovers `#[test]` and `#[tokio::test]`
-functions. The template marks tests that need PostgreSQL with
-`#[ignore = "requires PostgreSQL"]`, so a plain `cargo test` passes without a
-database and `cargo test -- --ignored` runs the database tests.
+No runner file is needed: `cargo test` discovers `#[test]` functions and those
+marked `#[openshop::test(APP)]`. That attribute makes an `async` function a
+test of the application: it starts `APP` on an isolated database with its shop
+installed, gives the function a `&TestContext`, and shuts the context down
+when the function returns. The template marks tests that need PostgreSQL with
+`#[ignore = "requires PostgreSQL"]`, below that attribute, so a plain
+`cargo test` passes without a database and `cargo test -- --ignored` runs the
+database tests.
 
 ## 3. Test a flow and an authenticated request
 
-In `src/main.rs`, add the `Value` import to the `tests` module and add the
-test below, keeping the tests that are already there:
+In `src/main.rs`, add the test below to the `tests` module, keeping the tests
+that are already there:
 
 ```rust,ignore
 #[cfg(test)]
 mod tests {
     use super::*;
-    use openshop::Value;
-    use openshop::engine::RunFlowResult;
-    use openshop::testing::{MockTransport, TestContext, TestOptions};
+    use openshop::testing::{MockTransport, TestContext};
 
     // ... existing tests ...
 
-    #[tokio::test]
+    #[openshop::test(APP)]
     #[ignore = "requires PostgreSQL"]
-    async fn syncs_an_order_with_fake_external_services() {
-        let ctx = TestContext::with_options(
-            APP.config().unwrap(),
-            TestOptions {
-                shop: "docs-test.myshopify.com".to_string(),
-                access_token: Some("test-access-token".to_string()),
-                ..Default::default()
-            },
-        )
-        .await
-        .unwrap();
-
+    async fn syncs_an_order_and_lists_its_run(ctx: &TestContext) {
         // Shopify Admin API responses.
-        let order = json!({ "id": "gid://shopify/Order/1", "name": "#1001" });
         ctx.transport.respond_json(json!({
-            "data": { "orders": { "edges": [{ "node": order }], "nodes": [order] } },
+            "data": { "orders": { "nodes": [{ "id": "gid://shopify/Order/1", "name": "#1001" }] } },
         }));
 
         // The warehouse provider is replaced by a recording fake.
-        let push = ctx.fakes.method("warehouse", "push");
-        push.returns(true);
+        let push = ctx.fakes.for_call(Warehouse::PUSH);
+        push.returns(1);
 
-        let result = ctx.run_flow(sync_orders::NAME, json!({ "limit": 10 })).await.unwrap();
+        let outcome = ctx.run_flow(sync_orders::NAME, json!({ "limit": 10 })).await.unwrap();
 
-        assert_eq!(result, RunFlowResult::Completed);
+        assert_eq!(outcome, RunOutcome::Completed);
         assert_eq!(push.call_count(), 1);
-        assert_eq!(push.last_call().unwrap().args, json!([order]));
+        let orders = push.last_call().unwrap().args;
+        assert_eq!(orders[0].name, "#1001");
 
         // An authenticated Admin API request, signed like App Bridge signs it.
         let response = ctx.get("/api/runs").send().await.unwrap();
         assert_eq!(response.status(), 200);
         let runs: Vec<Value> = response.json().await.unwrap();
         assert_eq!(runs[0]["status"], "completed");
-
-        ctx.shutdown().await.unwrap();
     }
 }
 ```
 
-`APP.config()` is the validated configuration of the application declared with
-`app!` in `src/main.rs`, and `sync_orders::NAME` is the name of the flow
-declared by `#[flow]` on `sync_orders`, `"syncOrders"`. Both come with
-`use super::*`: `src/main.rs` imports the flow to list it in `app!`.
+`APP` is the application declared with `app!` in `src/main.rs`.
+`sync_orders::NAME` is the name of the flow declared by `#[flow]` on
+`sync_orders`, `"syncOrders"`, and `Warehouse::PUSH` names the `push` method of
+the provider. They come with `use super::*`, like `json!`, `Value` and
+`RunOutcome`: `src/main.rs` imports the prelude, and the flow and the provider
+to list them in `app!`.
 
-The generated `src/main.rs` builds its configuration with
-`OpenShopConfig::builder()`, the lower level of `app!`, in a `config()`
-function. To keep it as it is, pass `config().unwrap()` to the context and
-name the flow by its string, `"syncOrders"`.
+`ctx.fakes.for_call(Warehouse::PUSH)` is the fake of the method, with its
+types: `returns` takes a `usize`, what `push` returns, and the `args` of a
+recorded call are the `Vec<Order>` the method would have received.
+`ctx.fakes.method("warehouse", "push")` is the same fake without the types,
+with arguments and results as JSON.
 
-The fixture supports both the template's `edges` query and the flow guide's
-`nodes` query. Update it when your flow requests different fields.
+The fixture answers the `nodes` query of the template and of the flow guide.
+Update it when your flow requests different fields.
 `run_flow()` executes immediately with fake provider methods; it does not need a
 worker. Shopify requests never leave the process: they are answered by
 `ctx.transport`, and a request without a configured response gets a 404.
@@ -134,10 +127,13 @@ running and that the URL from step 1 points to it.
 
 Every context owns its schema, so tests do not see each other's rows and can run
 in parallel. Each context also opens its own connection pool; pass
-`--test-threads=4` after `--` if PostgreSQL runs out of connections. End every
-test with `ctx.shutdown().await`: it stops the HTTP server and drops the schema.
-When a test panics before that line, the schema is still dropped on a
-best-effort basis as the context goes out of scope.
+`--test-threads=4` after `--` if PostgreSQL runs out of connections.
+`#[openshop::test]` shuts the context down when the function returns: it stops
+the HTTP server and drops the schema. When a test panics, the schema is still
+dropped on a best-effort basis as the context goes out of scope.
+
+A test function returns nothing, or a `Result` whose error fails the test, so
+that its body can use `?`.
 
 Provider methods are faked only inside `run_flow()`. A provider reached through
 the HTTP API, such as the provider check endpoint or a server route that calls a
@@ -153,8 +149,14 @@ tests.
   shop or app secret.
 - Use `ctx.http` with `ctx.url_for(path)` for requests without a session token,
   such as a server route or an unsigned webhook.
-- Use factories (`define_factory` and `ctx.create(..)`) when a test must create
-  resources through the Shopify client and remove them afterwards.
+- Use factories (`Factory::new(create, destroy)` and `ctx.create(..)`) when a
+  test must create resources through the Shopify client and remove them
+  afterwards. Such a test takes `ctx: &mut TestContext`.
+- Start a context by hand with `TestContext::with_options(config, options)`
+  for a configuration built in the test or for other options, such as another
+  shop. `TestOptions::installed()` is the options of a shop that has installed
+  the application. A test that starts its context ends with
+  `ctx.shutdown().await`.
 - See [custom admin page testing](../reference/custom-admin-pages.md#testing) for
   loader and action helpers.
 

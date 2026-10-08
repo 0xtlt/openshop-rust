@@ -2,9 +2,10 @@
 
 use chrono::{DateTime, Duration, Utc};
 
-use crate::types::{PartialRetryPolicy, RetryPolicy};
+use crate::runtime::time::millis;
+use crate::types::{ResolvedRetryPolicy, RetryPolicy};
 
-pub const DEFAULT_RETRY_POLICY: RetryPolicy = RetryPolicy {
+pub const DEFAULT_RETRY_POLICY: ResolvedRetryPolicy = ResolvedRetryPolicy {
     max_attempts: 3,
     initial_interval_ms: 1_000,
     backoff_coefficient: 2.0,
@@ -12,26 +13,26 @@ pub const DEFAULT_RETRY_POLICY: RetryPolicy = RetryPolicy {
 };
 
 /// Later overrides win, field by field.
-pub fn resolve_retry_policy(overrides: &[Option<PartialRetryPolicy>]) -> RetryPolicy {
+pub fn resolve_retry_policy(overrides: &[Option<RetryPolicy>]) -> ResolvedRetryPolicy {
     let mut policy = DEFAULT_RETRY_POLICY;
     for partial in overrides.iter().flatten() {
         if let Some(value) = partial.max_attempts {
             policy.max_attempts = value;
         }
-        if let Some(value) = partial.initial_interval_ms {
-            policy.initial_interval_ms = value;
+        if let Some(value) = partial.initial_interval {
+            policy.initial_interval_ms = millis(value);
         }
         if let Some(value) = partial.backoff_coefficient {
             policy.backoff_coefficient = value;
         }
-        if let Some(value) = partial.max_interval_ms {
-            policy.max_interval_ms = value;
+        if let Some(value) = partial.max_interval {
+            policy.max_interval_ms = millis(value);
         }
     }
     policy
 }
 
-pub fn compute_backoff_ms(attempt: i64, policy: &RetryPolicy) -> u64 {
+pub fn compute_backoff_ms(attempt: i64, policy: &ResolvedRetryPolicy) -> u64 {
     let delay = policy.initial_interval_ms as f64 * policy.backoff_coefficient.powi((attempt - 1) as i32);
     let rounded = if delay.is_finite() && delay > 0.0 {
         delay.round()
@@ -46,7 +47,7 @@ pub fn compute_backoff_ms(attempt: i64, policy: &RetryPolicy) -> u64 {
 /// `None` when attempts are exhausted or the retry would land past the deadline.
 pub fn compute_next_retry_at(
     attempts: i64,
-    policy: &RetryPolicy,
+    policy: &ResolvedRetryPolicy,
     deadline_at: Option<DateTime<Utc>>,
 ) -> Option<DateTime<Utc>> {
     if attempts >= policy.max_attempts as i64 {
@@ -71,7 +72,7 @@ mod tests {
 
     #[test]
     fn merges_a_single_partial_override() {
-        let policy = resolve_retry_policy(&[Some(PartialRetryPolicy::new().max_attempts(5))]);
+        let policy = resolve_retry_policy(&[Some(RetryPolicy::new().max_attempts(5))]);
         assert_eq!(policy.max_attempts, 5);
         assert_eq!(policy.initial_interval_ms, DEFAULT_RETRY_POLICY.initial_interval_ms);
     }
@@ -79,15 +80,15 @@ mod tests {
     #[test]
     fn last_override_wins() {
         let policy = resolve_retry_policy(&[
-            Some(PartialRetryPolicy::new().max_attempts(5)),
-            Some(PartialRetryPolicy::new().max_attempts(10)),
+            Some(RetryPolicy::new().max_attempts(5)),
+            Some(RetryPolicy::new().max_attempts(10)),
         ]);
         assert_eq!(policy.max_attempts, 10);
     }
 
     #[test]
     fn missing_overrides_are_skipped() {
-        let policy = resolve_retry_policy(&[None, Some(PartialRetryPolicy::new().max_attempts(7)), None]);
+        let policy = resolve_retry_policy(&[None, Some(RetryPolicy::new().max_attempts(7)), None]);
         assert_eq!(policy.max_attempts, 7);
     }
 

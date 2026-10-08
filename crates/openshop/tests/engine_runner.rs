@@ -9,9 +9,8 @@ use chrono::Utc;
 use common::{TEST_SHOP, TestApp, create_config, noop_flow};
 use openshop::db::schema::{FlowRun, LogRow, StepResult};
 use openshop::{
-    Concurrency, DispatchFlowParams, DispatchOptions, ErrorContext, Flow, FlowContext, FlowTimeoutError,
-    OpenShopConfig, PartialRetryPolicy, RunFlowOptions, RunFlowResult, StepOptions, StepTimeoutError, bail, cancel_run,
-    json, run_flow,
+    Concurrency, DispatchOptions, ErrorContext, Flow, FlowContext, FlowTimeoutError, OpenShopConfig, RetryPolicy,
+    RunFlowOptions, RunOutcome, StepOptions, StepTimeoutError, bail, cancel_run, json, run_flow,
 };
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -50,7 +49,7 @@ fn messages(logs: &[LogRow]) -> Vec<&str> {
 
 async fn dispatch(test: &TestApp) -> Uuid {
     test.app
-        .dispatch_flow(DispatchFlowParams::new(FLOW, TEST_SHOP))
+        .dispatch_flow(DispatchOptions::new(FLOW, TEST_SHOP))
         .await
         .unwrap()
         .run_id
@@ -59,10 +58,7 @@ async fn dispatch(test: &TestApp) -> Uuid {
 /// Queues a run whose first failure is final.
 async fn dispatch_without_retry(test: &TestApp) -> Uuid {
     test.app
-        .dispatch_flow(DispatchFlowParams::new(FLOW, TEST_SHOP).options(DispatchOptions {
-            retry_policy: Some(PartialRetryPolicy::new().max_attempts(0)),
-            ..Default::default()
-        }))
+        .dispatch_flow(DispatchOptions::new(FLOW, TEST_SHOP).retry_policy(RetryPolicy::new().max_attempts(0)))
         .await
         .unwrap()
         .run_id
@@ -94,7 +90,7 @@ async fn successful_flow_completes() {
         let greeted: String = ctx
             .step
             .run("greet", || async move {
-                logger.info(json!({}), "hello");
+                logger.info("hello");
                 Ok("world".to_string())
             })
             .await?;
@@ -105,7 +101,7 @@ async fn successful_flow_completes() {
     let run_id = dispatch(&test).await;
 
     let result = run_flow(&test.app, options(run_id)).await.unwrap();
-    assert_eq!(result, RunFlowResult::Completed);
+    assert_eq!(result, RunOutcome::Completed);
     assert_eq!(result.status(), "completed");
 
     let run = find_run(&test, run_id).await;
@@ -138,7 +134,7 @@ async fn returns_lease_lost_when_the_worker_no_longer_owns_the_run() {
     let result = run_flow(&test.app, options(run_id).worker_id("worker-a").attempt(1))
         .await
         .unwrap();
-    assert_eq!(result, RunFlowResult::LeaseLost);
+    assert_eq!(result, RunOutcome::LeaseLost);
     assert_eq!(result.status(), "lease_lost");
 
     let run = find_run(&test, run_id).await;
@@ -192,7 +188,7 @@ async fn lost_lease_never_records_a_failure_or_a_sleep() {
         )
         .await
         .unwrap();
-        assert_eq!(result, RunFlowResult::LeaseLost, "{then}");
+        assert_eq!(result, RunOutcome::LeaseLost, "{then}");
 
         let run = find_run(&test, run_id).await;
         assert_eq!(run.status, "running", "{then}");
@@ -214,7 +210,7 @@ async fn failing_flow_sets_status_to_failed() {
     let result = run_flow(&test.app, options(run_id)).await.unwrap();
     assert_eq!(
         result,
-        RunFlowResult::Failed {
+        RunOutcome::Failed {
             error: "boom".to_string(),
             will_retry: false
         }
@@ -231,7 +227,7 @@ async fn failing_flow_sets_status_to_failed() {
 #[tokio::test]
 async fn flow_with_retry_stays_pending_after_failure() {
     let flow = Flow::new(FLOW, |_ctx: FlowContext| async move { bail!("retry me") })
-        .retry_policy(PartialRetryPolicy::new().max_attempts(3));
+        .retry_policy(RetryPolicy::new().max_attempts(3));
     let test = TestApp::new(create_config([flow])).await;
     let run_id = dispatch(&test).await;
     let before = Utc::now();
@@ -239,7 +235,7 @@ async fn flow_with_retry_stays_pending_after_failure() {
     let result = run_flow(&test.app, options(run_id)).await.unwrap();
     assert_eq!(
         result,
-        RunFlowResult::Failed {
+        RunOutcome::Failed {
             error: "retry me".to_string(),
             will_retry: true
         }
@@ -293,7 +289,7 @@ async fn cancellation_sets_status_to_canceled() {
 
     // The in-flight step is interrupted instead of running to its end.
     let result = within(running).await.unwrap().unwrap();
-    assert_eq!(result, RunFlowResult::Canceled);
+    assert_eq!(result, RunOutcome::Canceled);
     assert!(
         !cancel_run(&run_id.to_string()),
         "the token is forgotten once the run ends"
@@ -347,7 +343,7 @@ async fn input_validation_rejects_invalid_input() {
     for input in [json!({ "limit": "not-a-number" }), json!({}), json!({ "limit": -1 })] {
         let run_id = dispatch_without_retry(&test).await;
         let result = run_flow(&test.app, options(run_id).input(input.clone())).await.unwrap();
-        let RunFlowResult::Failed { error, will_retry } = result else {
+        let RunOutcome::Failed { error, will_retry } = result else {
             panic!("expected a failure for {input}, got {result:?}");
         };
         assert!(error.starts_with("Invalid input for flow \"test-flow\": "), "{error}");
@@ -372,7 +368,7 @@ async fn typed_input_is_validated_and_exposed_to_the_flow() {
     for input in [json!({ "limit": 5 }), json!({ "limit": 7, "label": "nightly" })] {
         let run_id = dispatch(&test).await;
         let result = run_flow(&test.app, options(run_id).input(input)).await.unwrap();
-        assert_eq!(result, RunFlowResult::Completed);
+        assert_eq!(result, RunOutcome::Completed);
     }
     assert_eq!(*seen.lock().unwrap(), [(5, None), (7, Some("nightly".to_string()))]);
     test.cleanup().await;
@@ -384,7 +380,7 @@ async fn flow_creates_logs_in_db() {
         let logger = ctx.logger.clone();
         ctx.step
             .run("work", || async move {
-                logger.info(json!({ "key": "val" }), "test message");
+                logger.info_with("test message", json!({ "key": "val" }));
                 Ok(())
             })
             .await
@@ -418,10 +414,10 @@ async fn flow_creates_logs_in_db() {
 async fn logs_are_fully_persisted_when_run_flow_returns() {
     let flow = Flow::new(FLOW, |ctx: FlowContext| async move {
         for line in 0..200 {
-            ctx.logger.info(json!({ "line": line }), format!("line {line}"));
+            ctx.logger.info_with(format!("line {line}"), json!({ "line": line }));
         }
-        ctx.logger.warn(json!({ "left": 3 }), "running low");
-        ctx.logger.error(json!({ "code": "E42" }), "gave up");
+        ctx.logger.warn_with("running low", json!({ "left": 3 }));
+        ctx.logger.error_with("gave up", json!({ "code": "E42" }));
         bail!("boom")
     });
     let test = TestApp::new(create_config([flow])).await;
@@ -469,7 +465,7 @@ async fn flow_timeout_causes_failure() {
     let result = run_flow(&test.app, options(run_id)).await.unwrap();
     assert_eq!(
         result,
-        RunFlowResult::Failed {
+        RunOutcome::Failed {
             error: "Flow \"test-flow\" timed out after 100ms".to_string(),
             will_retry: false
         }
@@ -498,7 +494,7 @@ async fn a_step_interrupted_by_the_flow_timeout_is_marked_failed() {
     let run_id = dispatch_without_retry(&test).await;
 
     let result = run_flow(&test.app, options(run_id)).await.unwrap();
-    assert!(matches!(result, RunFlowResult::Failed { .. }));
+    assert!(matches!(result, RunOutcome::Failed { .. }));
 
     // The step row is closed in the background once its future is dropped.
     let step = within(async {
@@ -535,14 +531,14 @@ async fn completing_after_a_failed_attempt_clears_the_stored_error() {
     let run_id = dispatch(&test).await;
 
     let first = run_flow(&test.app, options(run_id)).await.unwrap();
-    assert!(matches!(first, RunFlowResult::Failed { will_retry: true, .. }));
+    assert!(matches!(first, RunOutcome::Failed { will_retry: true, .. }));
     assert_eq!(
         find_run(&test, run_id).await.error.as_deref(),
         Some("first attempt fails")
     );
 
     let second = run_flow(&test.app, options(run_id)).await.unwrap();
-    assert_eq!(second, RunFlowResult::Completed);
+    assert_eq!(second, RunOutcome::Completed);
     let run = find_run(&test, run_id).await;
     assert_eq!(run.status, "completed");
     assert_eq!(run.error, None);
@@ -646,7 +642,7 @@ async fn sleeping_flow_resumes_once_the_resume_time_has_passed() {
     let before = Utc::now();
 
     let first = run_flow(&test.app, options(run_id)).await.unwrap();
-    let RunFlowResult::Sleeping { resume_at } = first else {
+    let RunOutcome::Sleeping { resume_at } = first else {
         panic!("expected the run to sleep, got {first:?}");
     };
     assert_eq!(first.status(), "sleeping");
@@ -677,7 +673,7 @@ async fn sleeping_flow_resumes_once_the_resume_time_has_passed() {
 
     // Too early: the run goes back to sleep until the stored time, without repeating anything.
     let early = run_flow(&test.app, options(run_id)).await.unwrap();
-    assert_eq!(early, RunFlowResult::Sleeping { resume_at: stored });
+    assert_eq!(early, RunOutcome::Sleeping { resume_at: stored });
     assert_eq!(before_runs.load(Ordering::SeqCst), 1);
     assert_eq!(after_runs.load(Ordering::SeqCst), 0);
 
@@ -691,7 +687,7 @@ async fn sleeping_flow_resumes_once_the_resume_time_has_passed() {
         .unwrap();
 
     let resumed = run_flow(&test.app, options(run_id)).await.unwrap();
-    assert_eq!(resumed, RunFlowResult::Completed);
+    assert_eq!(resumed, RunOutcome::Completed);
     assert_eq!(before_runs.load(Ordering::SeqCst), 1);
     assert_eq!(after_runs.load(Ordering::SeqCst), 1);
 
@@ -738,7 +734,7 @@ async fn retry_replays_completed_steps_instead_of_running_them_again() {
             }
         }
     })
-    .retry_policy(PartialRetryPolicy::new().max_attempts(3));
+    .retry_policy(RetryPolicy::new().max_attempts(3));
     let test = TestApp::new(create_config([flow])).await;
     let run_id = dispatch(&test).await;
 
@@ -746,7 +742,7 @@ async fn retry_replays_completed_steps_instead_of_running_them_again() {
     let first = run_flow(&test.app, options(run_id)).await.unwrap();
     assert_eq!(
         first,
-        RunFlowResult::Failed {
+        RunOutcome::Failed {
             error: "smtp down".to_string(),
             will_retry: true
         }
@@ -755,7 +751,7 @@ async fn retry_replays_completed_steps_instead_of_running_them_again() {
 
     claim(&test, run_id).await;
     let second = run_flow(&test.app, options(run_id)).await.unwrap();
-    assert_eq!(second, RunFlowResult::Completed);
+    assert_eq!(second, RunOutcome::Completed);
     assert_eq!(
         charges.load(Ordering::SeqCst),
         1,
@@ -792,15 +788,18 @@ async fn retry_replays_completed_steps_instead_of_running_them_again() {
 
 #[tokio::test]
 async fn retries_stop_once_max_attempts_is_reached() {
-    let flow = Flow::new(FLOW, |_ctx: FlowContext| async move { bail!("still broken") })
-        .retry_policy(PartialRetryPolicy::new().max_attempts(2).initial_interval_ms(1));
+    let flow = Flow::new(FLOW, |_ctx: FlowContext| async move { bail!("still broken") }).retry_policy(
+        RetryPolicy::new()
+            .max_attempts(2)
+            .initial_interval(Duration::from_millis(1)),
+    );
     let test = TestApp::new(create_config([flow])).await;
     let run_id = dispatch(&test).await;
 
     claim(&test, run_id).await;
     let first = run_flow(&test.app, options(run_id)).await.unwrap();
     assert!(
-        matches!(first, RunFlowResult::Failed { will_retry: true, .. }),
+        matches!(first, RunOutcome::Failed { will_retry: true, .. }),
         "{first:?}"
     );
     assert_eq!(find_run(&test, run_id).await.status, "pending");
@@ -808,7 +807,7 @@ async fn retries_stop_once_max_attempts_is_reached() {
     claim(&test, run_id).await;
     let second = run_flow(&test.app, options(run_id)).await.unwrap();
     assert!(
-        matches!(second, RunFlowResult::Failed { will_retry: false, .. }),
+        matches!(second, RunOutcome::Failed { will_retry: false, .. }),
         "{second:?}"
     );
     let run = find_run(&test, run_id).await;
@@ -822,7 +821,11 @@ async fn retries_stop_once_max_attempts_is_reached() {
 async fn retry_is_skipped_when_it_would_land_past_the_deadline() {
     let flow = Flow::new(FLOW, |_ctx: FlowContext| async move { bail!("boom") })
         .timeout(Duration::from_secs(5))
-        .retry_policy(PartialRetryPolicy::new().max_attempts(5).initial_interval_ms(20_000));
+        .retry_policy(
+            RetryPolicy::new()
+                .max_attempts(5)
+                .initial_interval(Duration::from_millis(20_000)),
+        );
     let test = TestApp::new(create_config([flow])).await;
     let run_id = dispatch(&test).await;
 
@@ -830,7 +833,7 @@ async fn retry_is_skipped_when_it_would_land_past_the_deadline() {
     let result = run_flow(&test.app, options(run_id)).await.unwrap();
     assert_eq!(
         result,
-        RunFlowResult::Failed {
+        RunOutcome::Failed {
             error: "boom".to_string(),
             will_retry: false
         }
@@ -863,7 +866,7 @@ async fn flow_step_timeout_applies_to_every_step() {
     let result = run_flow(&test.app, options(run_id)).await.unwrap();
     assert_eq!(
         result,
-        RunFlowResult::Failed {
+        RunOutcome::Failed {
             error: "Step \"slow\" timed out after 40ms".to_string(),
             will_retry: false
         }
@@ -907,7 +910,11 @@ async fn on_error_hook_receives_the_error_and_the_flow_name() {
             _ => Ok(()),
         }
     })
-    .retry_policy(PartialRetryPolicy::new().max_attempts(3).initial_interval_ms(1))
+    .retry_policy(
+        RetryPolicy::new()
+            .max_attempts(3)
+            .initial_interval(Duration::from_millis(1)),
+    )
     .concurrency(Concurrency::Allow);
     let timed_flow = Flow::new("timed-flow", |_ctx: FlowContext| async move {
         tokio::time::sleep(Duration::from_secs(30)).await;
@@ -939,7 +946,7 @@ async fn on_error_hook_receives_the_error_and_the_flow_name() {
         async move {
             let run_id = test
                 .app
-                .dispatch_flow(DispatchFlowParams::new(flow, TEST_SHOP))
+                .dispatch_flow(DispatchOptions::new(flow, TEST_SHOP))
                 .await
                 .unwrap()
                 .run_id;
@@ -954,13 +961,13 @@ async fn on_error_hook_receives_the_error_and_the_flow_name() {
     };
 
     // Only failures are reported, including the ones that will be retried.
-    assert_eq!(run(FLOW, "ok").await, RunFlowResult::Completed);
-    assert!(matches!(run(FLOW, "sleep").await, RunFlowResult::Sleeping { .. }));
+    assert_eq!(run(FLOW, "ok").await, RunOutcome::Completed);
+    assert!(matches!(run(FLOW, "sleep").await, RunOutcome::Sleeping { .. }));
     assert!(reported.lock().unwrap().is_empty());
 
     let failed = run(FLOW, "fail").await;
     assert!(
-        matches!(failed, RunFlowResult::Failed { will_retry: true, .. }),
+        matches!(failed, RunOutcome::Failed { will_retry: true, .. }),
         "{failed:?}"
     );
     assert_eq!(
@@ -1026,7 +1033,7 @@ async fn panicking_on_error_hook_does_not_change_the_outcome() {
         let result = run_flow(&test.app, options(run_id)).await.unwrap();
         assert_eq!(
             result,
-            RunFlowResult::Failed {
+            RunOutcome::Failed {
                 error: "boom".to_string(),
                 will_retry: false
             }
@@ -1041,14 +1048,14 @@ async fn panicking_flow_is_recorded_as_failed() {
     let flow = Flow::new(FLOW, |ctx: FlowContext| async move {
         let items: Vec<u32> = ctx.step.run("load", || async { Ok(Vec::new()) }).await?;
         let first = items[0];
-        ctx.logger.info(json!({ "first": first }), "unreachable");
+        ctx.logger.info_with("unreachable", json!({ "first": first }));
         Ok(())
     });
     let test = TestApp::new(create_config([flow])).await;
     let run_id = dispatch_without_retry(&test).await;
 
     let result = run_flow(&test.app, options(run_id)).await.unwrap();
-    let RunFlowResult::Failed { error, will_retry } = result else {
+    let RunOutcome::Failed { error, will_retry } = result else {
         panic!("expected a failure, got {result:?}");
     };
     assert!(error.starts_with("Flow panicked: index out of bounds"), "{error}");
@@ -1080,7 +1087,7 @@ async fn flow_panicking_before_returning_its_future_is_recorded_as_failed() {
     let result = run_flow(&test.app, options(run_id)).await.unwrap();
     assert_eq!(
         result,
-        RunFlowResult::Failed {
+        RunOutcome::Failed {
             error: "Flow panicked: exploded before the first await".to_string(),
             will_retry: false
         }

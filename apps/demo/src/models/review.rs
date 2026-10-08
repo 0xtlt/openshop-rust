@@ -1,13 +1,13 @@
 use openshop::chrono::{DateTime, Utc};
-use openshop::{Model, Uuid};
+use openshop::prelude::*;
 
 /// A product review left by a customer.
 ///
 /// The struct is the table: `dev` creates it, `migrate generate` writes the
-/// migrations when it changes, and `Review::for_shop(&db, &shop)` reads and
-/// writes its rows.
+/// migrations when it changes, and `Review::of(&ctx)` reads and writes the
+/// rows of the shop a handler runs for.
 #[derive(Debug, Clone, PartialEq, Model)]
-#[model(table = "reviews")]
+#[model("reviews")]
 pub struct Review {
     pub id: Uuid,
     pub shop: String,
@@ -18,5 +18,5 @@ pub struct Review {
     pub rating: i32,
     pub text: String,
     #[model(default = "false")]
-    pub approved: Option<bool>,
+    pub approved: bool,
 }

@@ -5,7 +5,7 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 use common::{TEST_SHOP, TestApp, create_config, noop_flow};
 use openshop::db::schema::FlowRun;
-use openshop::{Concurrency, DispatchFlowParams, DispatchOptions, FlowConcurrencyError, PartialRetryPolicy, json};
+use openshop::{Concurrency, DispatchOptions, FlowConcurrencyError, RetryPolicy, json};
 use uuid::Uuid;
 
 async fn find_run(test: &TestApp, run_id: Uuid) -> FlowRun {
@@ -21,7 +21,7 @@ async fn creates_a_pending_flow_run() {
     let test = TestApp::new(create_config([noop_flow("test-flow")])).await;
     let dispatched = test
         .app
-        .dispatch_flow(DispatchFlowParams::new("test-flow", TEST_SHOP))
+        .dispatch_flow(DispatchOptions::new("test-flow", TEST_SHOP))
         .await
         .unwrap();
     assert_eq!(dispatched.status, "pending");
@@ -42,7 +42,7 @@ async fn stores_input_and_app_handle() {
     let dispatched = test
         .app
         .dispatch_flow(
-            DispatchFlowParams::new("test-flow", TEST_SHOP)
+            DispatchOptions::new("test-flow", TEST_SHOP)
                 .input(json!({ "source": "config", "z": 1, "a": 2 }))
                 .shopify_app("client-a")
                 .parent_run_id("parent-1"),
@@ -63,7 +63,7 @@ async fn fails_on_unknown_flow() {
     for flow_name in ["unknown", "constructor", "toString", "__proto__"] {
         let error = test
             .app
-            .dispatch_flow(DispatchFlowParams::new(flow_name, TEST_SHOP))
+            .dispatch_flow(DispatchOptions::new(flow_name, TEST_SHOP))
             .await
             .unwrap_err();
         assert_eq!(
@@ -79,13 +79,13 @@ async fn concurrency_reject_fails_when_flow_already_active() {
     let test = TestApp::new(create_config([noop_flow("test-flow")])).await;
     let first = test
         .app
-        .dispatch_flow(DispatchFlowParams::new("test-flow", TEST_SHOP))
+        .dispatch_flow(DispatchOptions::new("test-flow", TEST_SHOP))
         .await
         .unwrap();
 
     let error = test
         .app
-        .dispatch_flow(DispatchFlowParams::new("test-flow", TEST_SHOP))
+        .dispatch_flow(DispatchOptions::new("test-flow", TEST_SHOP))
         .await
         .unwrap_err();
     let conflict = error.downcast_ref::<FlowConcurrencyError>().expect("concurrency error");
@@ -95,11 +95,11 @@ async fn concurrency_reject_fails_when_flow_already_active() {
 
     // Other shops and other apps are independent.
     test.app
-        .dispatch_flow(DispatchFlowParams::new("test-flow", "other.myshopify.com"))
+        .dispatch_flow(DispatchOptions::new("test-flow", "other.myshopify.com"))
         .await
         .unwrap();
     test.app
-        .dispatch_flow(DispatchFlowParams::new("test-flow", TEST_SHOP).shopify_app("client-b"))
+        .dispatch_flow(DispatchOptions::new("test-flow", TEST_SHOP).shopify_app("client-b"))
         .await
         .unwrap();
     test.cleanup().await;
@@ -110,7 +110,7 @@ async fn concurrent_dispatches_cannot_both_pass() {
     let test = TestApp::new(create_config([noop_flow("test-flow")])).await;
     let attempts = (0..8).map(|_| {
         let app = test.app.clone();
-        tokio::spawn(async move { app.dispatch_flow(DispatchFlowParams::new("test-flow", TEST_SHOP)).await })
+        tokio::spawn(async move { app.dispatch_flow(DispatchOptions::new("test-flow", TEST_SHOP)).await })
     });
     let mut accepted = 0;
     for attempt in attempts {
@@ -128,12 +128,12 @@ async fn concurrency_allow_permits_multiple_runs() {
     let test = TestApp::new(create_config([flow])).await;
     let a = test
         .app
-        .dispatch_flow(DispatchFlowParams::new("concurrent-flow", TEST_SHOP))
+        .dispatch_flow(DispatchOptions::new("concurrent-flow", TEST_SHOP))
         .await
         .unwrap();
     let b = test
         .app
-        .dispatch_flow(DispatchFlowParams::new("concurrent-flow", TEST_SHOP))
+        .dispatch_flow(DispatchOptions::new("concurrent-flow", TEST_SHOP))
         .await
         .unwrap();
     assert_ne!(a.run_id, b.run_id);
@@ -147,7 +147,7 @@ async fn sets_deadline_from_flow_timeout() {
     let before = Utc::now();
     let dispatched = test
         .app
-        .dispatch_flow(DispatchFlowParams::new("timeout-flow", TEST_SHOP))
+        .dispatch_flow(DispatchOptions::new("timeout-flow", TEST_SHOP))
         .await
         .unwrap();
     let deadline: DateTime<Utc> = find_run(&test, dispatched.run_id).await.deadline_at.expect("deadline");
@@ -156,7 +156,7 @@ async fn sets_deadline_from_flow_timeout() {
 
     let dispatched = test
         .app
-        .dispatch_flow(DispatchFlowParams::new("no-timeout", TEST_SHOP))
+        .dispatch_flow(DispatchOptions::new("no-timeout", TEST_SHOP))
         .await
         .unwrap();
     assert!(find_run(&test, dispatched.run_id).await.deadline_at.is_none());
@@ -165,17 +165,21 @@ async fn sets_deadline_from_flow_timeout() {
 
 #[tokio::test]
 async fn stores_the_merged_retry_policy() {
-    let flow = noop_flow("test-flow").retry_policy(PartialRetryPolicy::new().max_attempts(5));
+    let flow = noop_flow("test-flow").retry_policy(RetryPolicy::new().max_attempts(5));
     let config = openshop::OpenShopConfig::builder()
         .flow(flow)
-        .retry_policy(PartialRetryPolicy::new().max_attempts(9).initial_interval_ms(250))
+        .retry_policy(
+            RetryPolicy::new()
+                .max_attempts(9)
+                .initial_interval(Duration::from_millis(250)),
+        )
         .build()
         .unwrap();
     let test = TestApp::new(config).await;
 
     let dispatched = test
         .app
-        .dispatch_flow(DispatchFlowParams::new("test-flow", TEST_SHOP))
+        .dispatch_flow(DispatchOptions::new("test-flow", TEST_SHOP))
         .await
         .unwrap();
     assert_eq!(
@@ -186,10 +190,7 @@ async fn stores_the_merged_retry_policy() {
     let dispatched = test
         .app
         .dispatch_flow(
-            DispatchFlowParams::new("test-flow", "other.myshopify.com").options(DispatchOptions {
-                retry_policy: Some(PartialRetryPolicy::new().max_attempts(0)),
-                ..Default::default()
-            }),
+            DispatchOptions::new("test-flow", "other.myshopify.com").retry_policy(RetryPolicy::new().max_attempts(0)),
         )
         .await
         .unwrap();
@@ -204,12 +205,7 @@ async fn delayed_dispatch_sets_future_available_at() {
     let before = Utc::now();
     let dispatched = test
         .app
-        .dispatch_flow(
-            DispatchFlowParams::new("test-flow", TEST_SHOP).options(DispatchOptions {
-                delay_ms: Some(10_000),
-                ..Default::default()
-            }),
-        )
+        .dispatch_flow(DispatchOptions::new("test-flow", TEST_SHOP).delay(Duration::from_millis(10_000)))
         .await
         .unwrap();
 

@@ -19,9 +19,10 @@ use super::runner::{HEARTBEAT_INTERVAL, HeartbeatFn, RunFlowOptions, panic_messa
 use super::step::error_message;
 use crate::app::OpenShop;
 use crate::runtime::logger;
-use crate::types::{JsonMap, PartialWorkerConfig, WorkerConfig};
+use crate::runtime::time::millis;
+use crate::types::{JsonMap, ResolvedWorkerConfig, WorkerConfig};
 
-pub const DEFAULT_WORKER_CONFIG: WorkerConfig = WorkerConfig {
+pub const DEFAULT_WORKER_CONFIG: ResolvedWorkerConfig = ResolvedWorkerConfig {
     concurrency: 5,
     poll_interval_ms: 1_000,
     poll_max_interval_ms: 5_000,
@@ -29,21 +30,21 @@ pub const DEFAULT_WORKER_CONFIG: WorkerConfig = WorkerConfig {
     lease_duration_ms: 30_000,
 };
 
-fn merge(mut config: WorkerConfig, partial: &PartialWorkerConfig) -> WorkerConfig {
+fn merge(mut config: ResolvedWorkerConfig, partial: &WorkerConfig) -> ResolvedWorkerConfig {
     if let Some(value) = partial.concurrency {
         config.concurrency = value;
     }
-    if let Some(value) = partial.poll_interval_ms {
-        config.poll_interval_ms = value;
+    if let Some(value) = partial.poll_interval {
+        config.poll_interval_ms = millis(value);
     }
-    if let Some(value) = partial.poll_max_interval_ms {
-        config.poll_max_interval_ms = value;
+    if let Some(value) = partial.poll_max_interval {
+        config.poll_max_interval_ms = millis(value);
     }
     if let Some(value) = partial.poll_backoff_coefficient {
         config.poll_backoff_coefficient = value;
     }
-    if let Some(value) = partial.lease_duration_ms {
-        config.lease_duration_ms = value;
+    if let Some(value) = partial.lease_duration {
+        config.lease_duration_ms = millis(value);
     }
     config
 }
@@ -100,7 +101,7 @@ struct ClaimedRun {
 
 struct Inner {
     app: OpenShop,
-    config: WorkerConfig,
+    config: ResolvedWorkerConfig,
     worker_id: String,
     running: AtomicBool,
     active: AtomicUsize,
@@ -118,7 +119,7 @@ pub struct Worker {
 }
 
 impl Worker {
-    pub fn new(app: OpenShop, overrides: PartialWorkerConfig) -> Self {
+    pub fn new(app: OpenShop, overrides: WorkerConfig) -> Self {
         let config = merge(merge(DEFAULT_WORKER_CONFIG, &app.config().worker), &overrides);
         Self {
             inner: Arc::new(Inner {

@@ -1,9 +1,7 @@
-use openshop::{FlowContext, Result, Value, bail, flow, graphql, json};
-use schemars::JsonSchema;
-use serde::Deserialize;
+use openshop::prelude::*;
 
-#[derive(Debug, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
+#[input]
+#[derive(Debug)]
 pub struct CountVariantsInput {
     pub product_id: String,
 }
@@ -12,15 +10,15 @@ pub struct CountVariantsInput {
 pub async fn count_variants(ctx: FlowContext, input: CountVariantsInput) -> Result<()> {
     let product = ctx
         .step
-        .run("fetch-product", || async {
-            ctx.logger.info(
-                json!({ "productId": input.product_id }),
+        .run("fetch-product", async || {
+            ctx.logger.info_with(
                 "Fetching full product details...",
+                json!({ "productId": input.product_id }),
             );
             let data = ctx
                 .shopify
                 .execute(graphql!(
-                    "#graphql
+                    "
                       query GetProductFull($id: ID!) {
                         product(id: $id) {
                           id
@@ -92,18 +90,18 @@ pub async fn count_variants(ctx: FlowContext, input: CountVariantsInput) -> Resu
     };
     let total_variants = product.variants_count.as_ref().map(|variants| variants.count);
 
-    ctx.logger.info(
+    ctx.logger.info_with(
+        "Product fetched",
         json!({
             "title": product.title,
             "variants": total_variants,
             "inventory": product.total_inventory,
         }),
-        "Product fetched",
     );
 
     let summary: Value = ctx
         .step
-        .run("build-summary", || async {
+        .run("build-summary", async || {
             let variant_skus: Vec<Value> = product
                 .variants
                 .edges
@@ -138,13 +136,13 @@ pub async fn count_variants(ctx: FlowContext, input: CountVariantsInput) -> Resu
         })
         .await?;
 
-    ctx.logger.info(
-        json!({ "variantCount": summary["totalVariants"], "imageCount": summary["imageCount"] }),
+    ctx.logger.info_with(
         format!(
             "Product \"{}\" has {} variant(s)",
             summary["title"].as_str().unwrap_or_default(),
             summary["totalVariants"]
         ),
+        json!({ "variantCount": summary["totalVariants"], "imageCount": summary["imageCount"] }),
     );
     Ok(())
 }

@@ -7,7 +7,7 @@ the GraphQL mutations used to manage Shopify Function owners. It does not
 build, deploy, or execute the WASM extension.
 
 ```rust,ignore
-use openshop::{FunctionConfig, validators};
+use openshop::prelude::*;
 
 #[derive(FunctionConfig)]
 #[function(
@@ -23,7 +23,7 @@ use openshop::{FunctionConfig, validators};
 pub struct VolumeDiscount {
     #[field(label = "Minimum quantity", validate = validators::integer_min(1))]
     pub threshold: u32,
-    #[field(label = "Percentage off")]
+    #[field(label = "Percentage off", range(min = 0, max = 100))]
     pub percentage: f64,
 }
 
@@ -38,7 +38,7 @@ List the struct in the `functions` of `app!`: `functions: [VolumeDiscount]`.
 
 | `#[function(…)]` option | |
 | --- | --- |
-| `"volumeDiscount"` | The key the function is registered under, also the constant `VolumeDiscount::KEY`. Left out, it is the name of the struct with a lowercase initial. |
+| `"volumeDiscount"` | The key the function is registered under, also the constant `VolumeDiscount::NAME`. Left out, it is the name of the struct with a lowercase initial. |
 | `discount = "volume-discount"` | The type of the function and the handle of its extension. Required. The types are listed under [Supported lifecycle](#supported-lifecycle). |
 | `label = "Volume discount"` | The merchant-facing label. |
 | `modes(automatic, code)` | The modes of a discount. |
@@ -51,7 +51,7 @@ humanized key (`volumeDiscount` becomes `Volume Discount`).
 
 ## Supported lifecycle
 
-| Type option | `ShopifyFunctionType` | Serialized as | List | Create | Update | Delete |
+| Type option | `FunctionType` | Serialized as | List | Create | Update | Delete |
 | --- | --- | --- | --- | --- | --- | --- |
 | `discount` | `Discount` | `discount` | `discountNodes` | Automatic or code | Yes | Yes |
 | `cart_transform` | `CartTransform` | `cart-transform` | `cartTransforms` | Yes | No | Yes |
@@ -84,10 +84,16 @@ password, or a select, a number type for a number, and `bool` for a checkbox.
 Fields are required unless their type is an `Option`. Numbers and checkboxes
 are coerced before validation.
 
-The derive implements the `FunctionConfig` trait:
-`VolumeDiscount::definition()` is the `FunctionDefinition` the struct
-describes, and `VolumeDiscount::from_config(map)` reads the config of an
-instance into the struct.
+As on a provider struct, `label` is optional: a `min_quantity` field without
+one is labeled `Min quantity`. The constraints `url`, `non_empty`,
+`range(min = …, max = …)` and `length(min = …, max = …)` are options of
+`#[field(…)]`, and `validate = <validator>` remains for anything else, such as
+`validators::integer_min(1)` on an integer field.
+
+The derive implements the `FunctionConfig` trait: `VolumeDiscount::NAME` is
+the key of the function, `VolumeDiscount::definition()` is the `Function` the
+struct describes, and `VolumeDiscount::from_config(map)` reads the config of
+an instance into the struct.
 
 Only declared fields are retained. Missing required fields and validator
 failures return HTTP 400 with `Field "<name>" is required` or
@@ -169,16 +175,16 @@ not remove the deployed extension.
 
 ## Without the attribute
 
-The derive is built on `FunctionDefinition`, which can be used directly when
+The derive is built on `Function`, which can be used directly when
 the fields of a function are only known at run time:
 
 ```rust,ignore
 use openshop::{
-    CombinesWith, DiscountMode, FieldDef, FunctionDefinition, FunctionOwner, ShopifyFunctionType,
+    CombinesWith, DiscountMode, Field, Function, FunctionOwner, FunctionType,
 };
 
-pub fn volume_discount() -> FunctionDefinition {
-    FunctionDefinition::new(ShopifyFunctionType::Discount, "volume-discount")
+pub fn volume_discount() -> Function {
+    Function::new(FunctionType::Discount, "volume-discount")
         .label("Volume discount")
         .modes([DiscountMode::Automatic, DiscountMode::Code])
         .owner(
@@ -190,8 +196,8 @@ pub fn volume_discount() -> FunctionDefinition {
                 .starts_at(true)
                 .ends_at(true),
         )
-        .field("threshold", FieldDef::number("Minimum quantity"))
-        .field("percentage", FieldDef::number("Percentage off"))
+        .field("threshold", Field::number("Minimum quantity"))
+        .field("percentage", Field::number("Percentage off"))
 }
 ```
 

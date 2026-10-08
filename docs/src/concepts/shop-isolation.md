@@ -14,7 +14,10 @@ and two provider configurations.
 
 This scope applies to framework installations, provider configurations, flow
 runs, cron overrides, Function configuration, and MCP tokens. Runtime contexts
-expose the handle as `shopify_app` (`app_handle` in MCP tools and resources).
+expose the handle as `shopify_app`. Every context that belongs to a shop
+carries `ctx.shopify` and `ctx.connectors` for that pair: the access token and
+the provider configuration they read are those of the app and the shop the
+handler runs for.
 
 Shopify credentials establish the identity at the HTTP boundary. For example,
 a session token's audience selects the app, while its verified destination
@@ -24,8 +27,9 @@ See [Authentication](../reference/authentication.md) for each surface's contract
 ## App-owned tables require app-owned filters
 
 A model with a `shop` field gets rows that are limited to one shop:
-`Review::for_shop(&ctx.db, &ctx.shop)` only finds, updates and deletes the
-rows of that shop, and inserts into it. Pass the trusted identity from the
+`Review::of(&ctx)` only finds, updates and deletes the rows of the shop of the
+context, and inserts into it. `Review::for_shop(&ctx.db, &ctx.shop)` is the
+same with the database and the shop given: pass the trusted identity from the
 runtime context, never a value sent by the client.
 
 That limit is the only one. `ctx.db` itself is a plain `sqlx` connection pool:
@@ -37,10 +41,10 @@ app-handle column and include it in writes, reads, and uniqueness constraints.
 A `shop` filter alone cannot distinguish those installations.
 
 ```rust
-use openshop::{Model, Uuid};
+use openshop::prelude::*;
 
 #[derive(Debug, Clone, Model)]
-#[model(table = "reviews", unique(app_handle, shop, product_id))]
+#[model("reviews", unique(app_handle, shop, product_id))]
 pub struct Review {
     pub id: Uuid,
     pub shop: String,
@@ -53,14 +57,15 @@ A query on that table then filters on both values from the context, here
 inside a flow:
 
 ```rust
-let count = Review::for_shop(&ctx.db, &ctx.shop)
+let count = Review::of(&ctx)
     .filter(Review::APP_HANDLE.eq(&ctx.shopify_app))
     .count()
     .await?;
 ```
 
-The same rule applies to custom admin loaders and actions: their `ctx.db` is
-the same unrestricted pool.
+The same rule applies in every handler: `ctx.db` is the same unrestricted pool
+in a webhook, a proxy handler, a server route, a loader or an action of an
+admin page, and an MCP tool.
 
 ## Shared hosting does not mean independent configuration
 

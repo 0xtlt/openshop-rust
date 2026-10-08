@@ -7,12 +7,12 @@ use chrono::Utc;
 use hmac::{Hmac, Mac};
 use openshop::db::schema::FlowRun;
 use openshop::testing::{
-    TestContext, TestOptions, create_session_token, proxy_signature, sign_query, sign_session_token, sign_webhook_body,
+    TestContext, TestOptions, proxy_signature, session_token, sign_query, sign_session_token, sign_webhook_body,
     to_query_string,
 };
 use openshop::{
-    Concurrency, CronEntry, DispatchFlowParams, FieldDef, Flow, FlowContext, JsonMap, OpenShopBuilder, OpenShopConfig,
-    Provider, RunFlowOptions, ShopifyAppConfig, ShopifyConfig, Value, json, run_flow,
+    Concurrency, Cron, DispatchOptions, Field, Flow, FlowContext, JsonMap, OpenShopBuilder, OpenShopConfig, Provider,
+    RunFlowOptions, ShopifyAppConfig, ShopifyConfig, Value, json, run_flow,
 };
 use reqwest::{Method, RequestBuilder, Response};
 use sha2::Sha256;
@@ -28,7 +28,7 @@ const ENCRYPTION_KEY: &str = "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1
 
 fn simple_flow() -> Flow {
     Flow::new("test-flow", |ctx: FlowContext| async move {
-        ctx.logger.info(json!({}), "executed");
+        ctx.logger.info("executed");
         Ok(())
     })
     .concurrency(Concurrency::Allow)
@@ -36,8 +36,8 @@ fn simple_flow() -> Flow {
 
 fn warehouse() -> Provider {
     Provider::new("warehouse")
-        .field("endpoint", FieldDef::text("Endpoint"))
-        .field("apiKey", FieldDef::password("API key"))
+        .field("endpoint", Field::text("Endpoint"))
+        .field("apiKey", Field::password("API key"))
 }
 
 fn builder() -> OpenShopBuilder {
@@ -51,7 +51,7 @@ fn config() -> OpenShopConfig {
             && config.get("apiKey") == Some(&json!("secret-a")))
     });
     builder()
-        .cron(CronEntry::new("*/5 * * * *", "test-flow"))
+        .cron(Cron::new("*/5 * * * *", "test-flow"))
         .provider(provider)
         .build()
         .unwrap()
@@ -100,7 +100,7 @@ async fn post_as(ctx: &TestContext, shop: &str, path: &str) -> Response {
 
 /// A request authenticated for one of the apps of [`multi_config`], `client-a` or `client-b`.
 fn request_as_app(ctx: &TestContext, slug: &str, method: Method, path: &str) -> RequestBuilder {
-    let token = create_session_token(MULTI_APP_SHOP, &format!("{slug}-secret"), &format!("{slug}-key"), "123");
+    let token = session_token(MULTI_APP_SHOP, &format!("{slug}-secret"), &format!("{slug}-key"), "123");
     ctx.http
         .request(method, format!("{}{path}", ctx.url))
         .bearer_auth(token)
@@ -125,7 +125,7 @@ fn ids(runs: &Value) -> Vec<String> {
 
 async fn dispatch(ctx: &TestContext, shop: &str) -> Uuid {
     ctx.app
-        .dispatch_flow(DispatchFlowParams::new("test-flow", shop))
+        .dispatch_flow(DispatchOptions::new("test-flow", shop))
         .await
         .unwrap()
         .run_id
@@ -133,7 +133,7 @@ async fn dispatch(ctx: &TestContext, shop: &str) -> Uuid {
 
 async fn dispatch_for_app(ctx: &TestContext, handle: &str) -> Uuid {
     ctx.app
-        .dispatch_flow(DispatchFlowParams::new("test-flow", MULTI_APP_SHOP).shopify_app(handle))
+        .dispatch_flow(DispatchOptions::new("test-flow", MULTI_APP_SHOP).shopify_app(handle))
         .await
         .unwrap()
         .run_id

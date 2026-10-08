@@ -69,6 +69,19 @@ fn declare(item: &ItemFn, kind: &str, doc: String, constants: TokenStream, regis
 
 const FLOW_OPTIONS: [&str; 4] = ["timeout", "step_timeout", "concurrency", "retry_policy"];
 
+/// `concurrency = allow` or `reject`, as words; any other value is an expression.
+fn concurrency(value: &Expr) -> TokenStream {
+    let word = match value {
+        Expr::Path(path) => path.path.get_ident().map(plain_name),
+        _ => None,
+    };
+    match word.as_deref() {
+        Some("allow") => quote!(.concurrency(::openshop::Concurrency::Allow)),
+        Some("reject") => quote!(.concurrency(::openshop::Concurrency::Reject)),
+        _ => quote!(.concurrency(#value)),
+    }
+}
+
 pub fn flow(arguments: Arguments, item: ItemFn) -> syn::Result<TokenStream> {
     let krate = quote!(::openshop);
     let extra = extra_arguments(
@@ -84,6 +97,9 @@ pub fn flow(arguments: Arguments, item: ItemFn) -> syn::Result<TokenStream> {
     for argument in &arguments.0 {
         match argument {
             Argument::Text(text) => set_once(&mut name, argument, text.clone())?,
+            Argument::Value(option, value) if option == "concurrency" => {
+                options.push(concurrency(value));
+            }
             Argument::Value(option, value) if FLOW_OPTIONS.contains(&plain_name(option).as_str()) => {
                 options.push(quote!(.#option(#value)));
             }
@@ -114,6 +130,31 @@ pub fn flow(arguments: Arguments, item: ItemFn) -> syn::Result<TokenStream> {
             })
         },
     };
+    // The input is serialized only where a run is dispatched: a flow that is
+    // never dispatched from code does not need `Serialize` on its input.
+    let dispatch = match extra.first() {
+        Some(input) => quote! {
+            /// Queues a run of the flow for the shop of `scope`: the context
+            /// of a webhook, of a proxy request, of another flow…
+            pub async fn dispatch<OpenshopFlowInput>(
+                scope: &impl #krate::ShopScope,
+                input: OpenshopFlowInput,
+            ) -> #krate::Result<#krate::QueuedRun>
+            where
+                OpenshopFlowInput: #krate::serde::Serialize + #krate::declare::Is<#input>,
+            {
+                let input = #krate::serde_json::to_value(&input)?;
+                #krate::declare::dispatch(scope, Self::NAME, ::core::option::Option::Some(input)).await
+            }
+        },
+        None => quote! {
+            /// Queues a run of the flow for the shop of `scope`: the context
+            /// of a webhook, of a proxy request, of another flow…
+            pub async fn dispatch(scope: &impl #krate::ShopScope) -> #krate::Result<#krate::QueuedRun> {
+                #krate::declare::dispatch(scope, Self::NAME, ::core::option::Option::None).await
+            }
+        },
+    };
 
     Ok(declare(
         &item,
@@ -122,6 +163,8 @@ pub fn flow(arguments: Arguments, item: ItemFn) -> syn::Result<TokenStream> {
         quote! {
             /// The name of the flow, as crons and dispatches refer to it.
             pub const NAME: &'static str = #name;
+
+            #dispatch
         },
         quote!(app.flow(#flow #(#options)*)),
     ))
@@ -228,6 +271,13 @@ fn endpoint<'a>(arguments: &'a [Argument], attribute: &str, methods: &[&str]) ->
     })
 }
 
+impl Endpoint<'_> {
+    /// Whether a typed input is read from the query string rather than from the body.
+    fn reads_query(&self) -> bool {
+        !matches!(self.method.as_str(), "POST" | "PUT" | "PATCH")
+    }
+}
+
 fn endpoint_constants(endpoint: &Endpoint) -> TokenStream {
     let (method, path) = (&endpoint.method, endpoint.path);
     quote! {
@@ -240,7 +290,12 @@ fn endpoint_constants(endpoint: &Endpoint) -> TokenStream {
 
 pub fn proxy(arguments: Arguments, item: ItemFn) -> syn::Result<TokenStream> {
     let krate = quote!(::openshop);
-    extra_arguments(&item, "proxy", "async fn(ctx: ProxyContext) -> Result<…>", 0)?;
+    let extra = extra_arguments(
+        &item,
+        "proxy",
+        "async fn(ctx: ProxyContext) -> Result<…>` or `async fn(ctx: ProxyContext, input: Input) -> Result<…>",
+        1,
+    )?;
     let ident = &item.sig.ident;
     let endpoint = endpoint(&arguments.0, "proxy", &PROXY_METHODS)?;
 
@@ -262,6 +317,16 @@ pub fn proxy(arguments: Arguments, item: ItemFn) -> syn::Result<TokenStream> {
     }
     let response = response.unwrap_or_else(|| format_ident!("Json"));
     let setter = &endpoint.setter;
+    let call = match extra.first() {
+        Some(input) => {
+            let from_query = endpoint.reads_query();
+            quote! {
+                let input: #input = #krate::declare::proxy_input(&ctx, #from_query)?;
+                #ident(ctx, input).await?
+            }
+        }
+        None => quote!(#ident(ctx).await?),
+    };
 
     Ok(declare(
         &item,
@@ -275,9 +340,9 @@ pub fn proxy(arguments: Arguments, item: ItemFn) -> syn::Result<TokenStream> {
         quote! {
             app.proxy(
                 Self::PATH,
-                #krate::ProxyDefinition::new(#krate::ProxyResponseType::#response).#setter(
+                #krate::Proxy::new(#krate::ProxyResponseType::#response).#setter(
                     |ctx: #krate::ProxyContext| async move {
-                        #krate::Result::<#krate::Value>::Ok(#krate::serde_json::to_value(#ident(ctx).await?)?)
+                        #krate::Result::<#krate::Value>::Ok(#krate::serde_json::to_value({ #call })?)
                     },
                 ),
             )
@@ -287,25 +352,51 @@ pub fn proxy(arguments: Arguments, item: ItemFn) -> syn::Result<TokenStream> {
 
 pub fn route(arguments: Arguments, item: ItemFn) -> syn::Result<TokenStream> {
     let krate = quote!(::openshop);
-    extra_arguments(&item, "route", "async fn(ctx: ServerRouteContext) -> Result<…>", 0)?;
+    let extra = extra_arguments(
+        &item,
+        "route",
+        "async fn(ctx: RouteContext) -> Result<…>` or `async fn(ctx: RouteContext, input: Input) -> Result<…>",
+        1,
+    )?;
     let ident = &item.sig.ident;
     let endpoint = endpoint(&arguments.0, "route", &ROUTE_METHODS)?;
 
     let mut auth: Option<&Expr> = None;
+    let mut json = false;
     for option in endpoint.options {
         match option {
             Argument::Value(name, value) if name == "auth" => set_once(&mut auth, option, value)?,
+            Argument::Word(word) if word == "json" && !json => json = true,
             _ => {
                 return Err(syn::Error::new(
                     option.span(),
-                    "unknown route option; expected `auth = <function>`",
+                    "unknown route option; expected `json` or `auth = <function>`",
                 ));
             }
         }
     }
+    let input = extra.first().map(|input| {
+        let from_query = endpoint.reads_query();
+        quote! {
+            let input: #input = match #krate::declare::route_input(&ctx, #from_query) {
+                ::core::result::Result::Ok(input) => input,
+                ::core::result::Result::Err(refusal) => return #krate::Result::Ok(*refusal),
+            };
+        }
+    });
+    let call = match extra.first() {
+        Some(_) => quote!(#ident(ctx, input).await?),
+        None => quote!(#ident(ctx).await?),
+    };
+    // With `json`, the function returns anything that serializes, like a proxy.
+    let answer = if json {
+        quote!(#krate::response::json(#call))
+    } else {
+        quote!(#krate::response::IntoResponse::into_response(#call))
+    };
     let definition = match auth {
-        Some(auth) => quote!(#krate::ServerRoute::authenticated(#auth)),
-        None => quote!(#krate::ServerRoute::public()),
+        Some(auth) => quote!(#krate::Route::authenticated(#auth)),
+        None => quote!(#krate::Route::public()),
     };
     let setter = &endpoint.setter;
 
@@ -321,10 +412,9 @@ pub fn route(arguments: Arguments, item: ItemFn) -> syn::Result<TokenStream> {
         quote! {
             app.route(
                 Self::PATH,
-                #definition.#setter(|ctx: #krate::ServerRouteContext| async move {
-                    #krate::Result::<#krate::response::Response>::Ok(
-                        #krate::response::IntoResponse::into_response(#ident(ctx).await?),
-                    )
+                #definition.#setter(|ctx: #krate::RouteContext| async move {
+                    #input
+                    #krate::Result::<#krate::response::Response>::Ok(#answer)
                 }),
             )
         },
@@ -346,7 +436,7 @@ fn risk_level(value: &Expr) -> syn::Result<TokenStream> {
         _ => return Err(syn::Error::new(value.span(), "expected `low`, `medium` or `high`")),
     };
     let variant = Ident::new(variant, value.span());
-    Ok(quote!(.risk_level(::openshop::McpRiskLevel::#variant)))
+    Ok(quote!(.risk(::openshop::McpRiskLevel::#variant)))
 }
 
 /// The options MCP tools and resources share. `None` when the option is not one of them.
@@ -359,7 +449,10 @@ fn capability_option(argument: &Argument, description: &mut Option<LitStr>) -> s
         Argument::Value(name, value) if name == "risk" => risk_level(value).map(Some),
         Argument::List(name, permissions) if name == "permissions" => {
             let permissions = values(permissions.clone())?;
-            Ok(Some(quote!(.required_permissions([#(#permissions),*]))))
+            // A key or a `McpPermission`, in any mix.
+            Ok(Some(quote! {
+                .permissions([#(::core::convert::Into::<::openshop::RequiredPermission>::into(#permissions)),*])
+            }))
         }
         _ => Ok(None),
     }
@@ -378,7 +471,7 @@ pub fn mcp_tool(arguments: Arguments, item: ItemFn) -> syn::Result<TokenStream> 
     let extra = extra_arguments(
         &item,
         "mcp_tool",
-        "async fn(ctx: McpExecutionContext) -> Result<…>` or `async fn(ctx: McpExecutionContext, input: Input) -> Result<…>",
+        "async fn(ctx: McpContext) -> Result<…>` or `async fn(ctx: McpContext, input: Input) -> Result<…>",
         1,
     )?;
     let ident = &item.sig.ident;
@@ -418,9 +511,9 @@ pub fn mcp_tool(arguments: Arguments, item: ItemFn) -> syn::Result<TokenStream> 
 
     let tool = match extra.first() {
         Some(input) => quote! {
-            #krate::McpToolDefinition::new(
+            #krate::McpTool::new(
                 #description,
-                |ctx: #krate::McpExecutionContext, input: #krate::JsonMap| async move {
+                |ctx: #krate::McpContext, input: #krate::JsonMap| async move {
                     let input: #input = #krate::serde_json::from_value(#krate::Value::Object(input))?;
                     #krate::Result::<#krate::Value>::Ok(#krate::serde_json::to_value(#ident(ctx, input).await?)?)
                 },
@@ -428,9 +521,9 @@ pub fn mcp_tool(arguments: Arguments, item: ItemFn) -> syn::Result<TokenStream> 
             .input_schema(#krate::InputSchema::of::<#input>().json_schema)
         },
         None => quote! {
-            #krate::McpToolDefinition::new(
+            #krate::McpTool::new(
                 #description,
-                |ctx: #krate::McpExecutionContext, _input: #krate::JsonMap| async move {
+                |ctx: #krate::McpContext, _input: #krate::JsonMap| async move {
                     #krate::Result::<#krate::Value>::Ok(#krate::serde_json::to_value(#ident(ctx).await?)?)
                 },
             )
@@ -452,12 +545,7 @@ pub fn mcp_tool(arguments: Arguments, item: ItemFn) -> syn::Result<TokenStream> 
 
 pub fn mcp_resource(arguments: Arguments, item: ItemFn) -> syn::Result<TokenStream> {
     let krate = quote!(::openshop);
-    extra_arguments(
-        &item,
-        "mcp_resource",
-        "async fn(ctx: McpExecutionContext) -> Result<…>",
-        0,
-    )?;
+    extra_arguments(&item, "mcp_resource", "async fn(ctx: McpContext) -> Result<…>", 0)?;
     let ident = &item.sig.ident;
 
     let mut uri: Option<LitStr> = None;
@@ -507,7 +595,7 @@ pub fn mcp_resource(arguments: Arguments, item: ItemFn) -> syn::Result<TokenStre
         quote! {
             app.mcp_resource(
                 Self::URI,
-                #krate::McpResourceDefinition::new(#name, |ctx: #krate::McpExecutionContext| async move {
+                #krate::McpResource::new(#name, |ctx: #krate::McpContext| async move {
                     #krate::Result::<#krate::McpResourceContent>::Ok(::core::convert::Into::into(#ident(ctx).await?))
                 })
                 #description
@@ -565,6 +653,8 @@ mod tests {
                 "let input = ctx . input :: < SyncOrdersInput > () ? ;",
                 "sync_orders (ctx , input) . await",
                 ". input :: < SyncOrdersInput > () . timeout (Duration :: from_secs (60)) . concurrency (Concurrency :: Allow)",
+                "pub async fn dispatch < OpenshopFlowInput > (scope : & impl :: openshop :: ShopScope , input : OpenshopFlowInput ,)",
+                "OpenshopFlowInput : :: openshop :: serde :: Serialize + :: openshop :: declare :: Is < SyncOrdersInput >",
             ],
         );
 
@@ -580,8 +670,16 @@ mod tests {
                 "enum nightly_cleanup { }",
                 "= \"nightlyCleanup\" ;",
                 "nightly_cleanup (ctx) . await",
+                "pub async fn dispatch (scope : & impl :: openshop :: ShopScope)",
             ],
         );
+        // A concurrency is a word, or any expression.
+        let allowed = generated(
+            flow,
+            quote!(concurrency = allow),
+            parse_quote! { async fn nightly_cleanup(ctx: FlowContext) -> Result<()> { Ok(()) } },
+        );
+        assert_contains(&allowed, &[". concurrency (:: openshop :: Concurrency :: Allow)"]);
         assert!(!plain.contains(". input ::"), "{plain}");
     }
 
@@ -646,8 +744,8 @@ mod tests {
                 "pub const METHOD : & 'static str = \"GET\" ;",
                 "pub const PATH : & 'static str = \"/reviews\" ;",
                 "type Kind = :: openshop :: declare :: kind :: Proxy ;",
-                "app . proxy (Self :: PATH , :: openshop :: ProxyDefinition :: new (:: openshop :: ProxyResponseType :: Liquid) . get (",
-                ":: openshop :: serde_json :: to_value (reviews (ctx) . await ?) ?",
+                "app . proxy (Self :: PATH , :: openshop :: Proxy :: new (:: openshop :: ProxyResponseType :: Liquid) . get (",
+                ":: openshop :: serde_json :: to_value ({ reviews (ctx) . await ? }) ?",
             ],
         );
         // JSON unless stated, and the method in any case.
@@ -671,31 +769,57 @@ mod tests {
             refusal(proxy, quote!(GET, "/reviews", xml), handler.clone()),
             "unknown proxy option; expected the response type: `json`, `liquid` or `html`"
         );
+        // A second argument is the typed input: the query of a GET, the body of a POST.
+        let typed: ItemFn =
+            parse_quote! { async fn reviews(ctx: ProxyContext, input: Search) -> Result<String> { todo!() } };
+        assert_contains(
+            &generated(proxy, quote!(GET, "/reviews"), typed.clone()),
+            &[
+                "let input : Search = :: openshop :: declare :: proxy_input (& ctx , true) ? ;",
+                "reviews (ctx , input) . await ?",
+            ],
+        );
+        assert_contains(
+            &generated(proxy, quote!(POST, "/reviews"), typed),
+            &[":: openshop :: declare :: proxy_input (& ctx , false) ? ;"],
+        );
         assert_eq!(
             refusal(
                 proxy,
                 quote!(GET, "/reviews"),
-                parse_quote! { async fn reviews(ctx: ProxyContext, body: Body) -> Result<String> { todo!() } }
+                parse_quote! { async fn reviews(ctx: ProxyContext, a: A, b: B) -> Result<String> { todo!() } }
             ),
-            "`#[proxy]` goes on `async fn(ctx: ProxyContext) -> Result<…>`"
+            "`#[proxy]` goes on `async fn(ctx: ProxyContext) -> Result<…>` or `async fn(ctx: ProxyContext, input: Input) -> Result<…>`"
         );
 
-        let handler: ItemFn = parse_quote! { async fn ping(ctx: ServerRouteContext) -> Result<Response> { todo!() } };
+        let handler: ItemFn = parse_quote! { async fn ping(ctx: RouteContext) -> Result<Response> { todo!() } };
         assert_contains(
             &generated(route, quote!(GET, "/ping"), handler.clone()),
             &[
                 "type Kind = :: openshop :: declare :: kind :: Route ;",
-                "app . route (Self :: PATH , :: openshop :: ServerRoute :: public () . get (",
+                "app . route (Self :: PATH , :: openshop :: Route :: public () . get (",
                 ":: openshop :: response :: IntoResponse :: into_response (ping (ctx) . await ?)",
             ],
         );
         assert_contains(
             &generated(route, quote!(OPTIONS, "/ping", auth = partner::verify), handler.clone()),
-            &[":: openshop :: ServerRoute :: authenticated (partner :: verify) . options ("],
+            &[":: openshop :: Route :: authenticated (partner :: verify) . options ("],
+        );
+        // `json` serializes the result; a second argument is the typed input.
+        assert_contains(
+            &generated(
+                route,
+                quote!(POST, "/orders", json),
+                parse_quote! { async fn create(ctx: RouteContext, order: NewOrder) -> Result<Value> { todo!() } },
+            ),
+            &[
+                "let input : NewOrder = match :: openshop :: declare :: route_input (& ctx , false)",
+                ":: openshop :: response :: json (create (ctx , input) . await ?)",
+            ],
         );
         assert_eq!(
             refusal(route, quote!(GET, "/ping", public), handler.clone()),
-            "unknown route option; expected `auth = <function>`"
+            "unknown route option; expected `json` or `auth = <function>`"
         );
         assert_eq!(
             refusal(route, quote!(TRACE, "/ping"), handler),
@@ -709,7 +833,7 @@ mod tests {
             /// Counts reviews.
             ///
             /// Reads only.
-            pub async fn count(ctx: McpExecutionContext, input: CountInput) -> Result<Value> { todo!() }
+            pub async fn count(ctx: McpContext, input: CountInput) -> Result<Value> { todo!() }
         };
         assert_contains(
             &generated(
@@ -725,16 +849,15 @@ mod tests {
             &[
                 "pub const NAME : & 'static str = \"reviews.count\" ;",
                 "type Kind = :: openshop :: declare :: kind :: McpTool ;",
-                ":: openshop :: McpToolDefinition :: new (\"Counts reviews.\\n\\nReads only.\" ,",
+                ":: openshop :: McpTool :: new (\"Counts reviews.\\n\\nReads only.\" ,",
                 "let input : CountInput = :: openshop :: serde_json :: from_value (:: openshop :: Value :: Object (input)) ? ;",
                 ". input_schema (:: openshop :: InputSchema :: of :: < CountInput > () . json_schema)",
-                ". required_permissions ([\"reviews:read\" , OTHER])",
-                ". risk_level (:: openshop :: McpRiskLevel :: High)",
+                ". permissions ([:: core :: convert :: Into :: < :: openshop :: RequiredPermission > :: into (\"reviews:read\") , :: core :: convert :: Into :: < :: openshop :: RequiredPermission > :: into (OTHER)])",
+                ". risk (:: openshop :: McpRiskLevel :: High)",
                 ". confirmation_hint (\"Sure?\")",
             ],
         );
-        let undocumented: ItemFn =
-            parse_quote! { async fn count(ctx: McpExecutionContext) -> Result<Value> { todo!() } };
+        let undocumented: ItemFn = parse_quote! { async fn count(ctx: McpContext) -> Result<Value> { todo!() } };
         assert_contains(
             &generated(
                 mcp_tool,
@@ -742,7 +865,7 @@ mod tests {
                 undocumented.clone(),
             ),
             &[
-                ":: openshop :: McpToolDefinition :: new (\"Stated.\" ,",
+                ":: openshop :: McpTool :: new (\"Stated.\" ,",
                 "\"additionalProperties\" : false",
             ],
         );
@@ -765,7 +888,7 @@ mod tests {
 
         let resource: ItemFn = parse_quote! {
             /// The guide.
-            async fn guide(ctx: McpExecutionContext) -> Result<String> { todo!() }
+            async fn guide(ctx: McpContext) -> Result<String> { todo!() }
         };
         assert_contains(
             &generated(
@@ -776,7 +899,7 @@ mod tests {
             &[
                 "pub const URI : & 'static str = \"app://guide\" ;",
                 "type Kind = :: openshop :: declare :: kind :: McpResource ;",
-                ":: openshop :: McpResourceDefinition :: new (\"Guide\" ,",
+                ":: openshop :: McpResource :: new (\"Guide\" ,",
                 ":: core :: convert :: Into :: into (guide (ctx) . await ?)",
                 ". description (\"The guide.\") . mime_type (\"text/markdown\")",
             ],

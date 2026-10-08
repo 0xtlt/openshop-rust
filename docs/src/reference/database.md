@@ -67,10 +67,10 @@ read and write.
 
 ```rust,ignore
 use openshop::chrono::{DateTime, Utc};
-use openshop::{Model, Uuid};
+use openshop::prelude::*;
 
 #[derive(Debug, Clone, Model)]
-#[model(table = "reviews", index(shop, product_id))]
+#[model("reviews", index(shop, product_id))]
 pub struct Review {
     pub id: Uuid,
     pub shop: String,
@@ -85,6 +85,10 @@ pub struct Review {
 ```
 
 List it in the `models` of `app!`: `models: [Review]`.
+
+The derive implements the trait `Model`: `use openshop::Model;` imports the
+derive and the trait, and so does the prelude. `Review::table()` returns the
+`Table` the struct describes, and `Review::TABLE` is its name.
 
 Four fields are conventional. They are recognized by name and their
 definition is fixed:
@@ -114,11 +118,12 @@ Every other field is a column named after it, `NOT NULL` unless its type is an
 Another type is a compile error, unless you implement
 `openshop::db::ColumnType` for it; `sqlx` must be able to encode and decode it.
 
-Options are written in `#[model(…)]`:
+Options are written in `#[model(…)]`. On the struct, the table comes first:
+`#[model("reviews", index(shop, product_id))]`.
 
 | On the struct | |
 | --- | --- |
-| `table = "reviews"` | The table. Required. |
+| `"reviews"` | The table. Required, and the first argument. |
 | `index(shop, product_id)` | An index on those fields, named `<table>_<columns>_idx`. |
 | `unique(shop, title)` | A unique index, named `<table>_<columns>_unique`. |
 | `index(…, name = "…")`, `unique(…, name = "…")` | The same with a name of your choice. Required when the generated name exceeds 63 characters. |
@@ -141,15 +146,22 @@ The derive gives the struct an entry point that returns its rows:
 
 | Struct | Entry point | Rows |
 | --- | --- | --- |
-| With a `shop` field | `Review::for_shop(&db, &shop)` | Those of one shop. |
+| With a `shop` field | `Review::of(&ctx)` | Those of the shop of a context. |
+| | `Review::for_shop(&db, &shop)` | Those of one shop, with the database and the shop given. |
 | | `Review::all_shops(&db)` | Those of every shop, for maintenance work. |
 | Without | `Setting::rows(&db)` | All of them. |
 
+`of` takes any context that belongs to a shop: `FlowContext`,
+`WebhookContext`, `ProxyContext`, `AdminContext`, `McpContext`, and the
+`RouteShopContext` that `ctx.for_shop(…)` returns in a server route. These
+implement the trait `ShopScope`. `Review::of(&ctx)` is
+`Review::for_shop(&ctx.db, &ctx.shop)`.
+
 ```rust,ignore
-use openshop::{FlowContext, Result};
+use openshop::prelude::*;
 
 async fn moderate(ctx: &FlowContext) -> Result<()> {
-    let reviews = Review::for_shop(&ctx.db, &ctx.shop);
+    let reviews = Review::of(ctx);
 
     let review = reviews
         .insert(NewReview {
@@ -216,10 +228,10 @@ struct.
 A field can hold the key of a row of another model:
 
 ```rust,ignore
-use openshop::{Model, Uuid};
+use openshop::prelude::*;
 
 #[derive(Debug, Clone, Model)]
-#[model(table = "review_votes", index(review_id))]
+#[model("review_votes", index(review_id))]
 pub struct ReviewVote {
     pub id: Uuid,
     pub shop: String,
@@ -251,7 +263,7 @@ A reference is a fact of the schema, enforced by the database. The typed rows
 do not follow it: read the other side with a filter,
 
 ```rust,ignore
-let votes = ReviewVote::for_shop(&ctx.db, &ctx.shop)
+let votes = ReviewVote::of(&ctx)
     .filter(ReviewVote::REVIEW_ID.eq(review.id))
     .all()
     .await?;
@@ -261,13 +273,15 @@ and write joins in SQL, [checked at compile time](#checked-sql) if you want.
 
 ### Tables without a struct
 
-`define_model(table)` describes a table without typed rows:
+A `Table` describes a table without typed rows. It is what
+`#[derive(Model)]` builds from a struct, and can be built directly for a table
+that is only known at run time:
 
 ```rust,ignore
-use openshop::{Model, define_model};
+use openshop::Table;
 
-pub fn reviews() -> Model {
-    define_model("reviews")
+pub fn reviews() -> Table {
+    Table::conventional("reviews")
         .column("title", "text NOT NULL")
         .column("rating", "integer NOT NULL")
         .index("reviews_shop_rating_idx", &["shop", "rating"])
@@ -275,10 +289,12 @@ pub fn reviews() -> Model {
 }
 ```
 
-It adds the conventional columns; `.without_shop()`, `.without_created_at()`
-and `.without_updated_at()` omit them. `.column(name, definition)` takes the
-SQL definition of the column, and `.create_sql()` returns the idempotent
-`CREATE TABLE IF NOT EXISTS` and index statements. Register it with
+`Table::conventional(table)` starts with the conventional columns: `id`,
+`shop`, `created_at` and `updated_at`. `.without_shop()`,
+`.without_created_at()` and `.without_updated_at()` omit them.
+`Table::new(table)` starts without any column. `.column(name, definition)`
+takes the SQL definition of the column, and `.create_sql()` returns the
+idempotent `CREATE TABLE IF NOT EXISTS` and index statements. Register it with
 `.model(…)` on the builder, for example `APP.builder()?.model(reviews())`; a
 table registered twice is refused when the configuration is built.
 Migrations are generated for it like for a struct: the type,
@@ -301,11 +317,13 @@ fresh development database.
 
 ## Queries and transactions
 
-Flows, admin functions, and MCP tools receive `ctx.db`; other handlers use
-`ctx.app.db()`. Both are the shared `sqlx::PgPool`.
+Every context has `ctx.db`, the shared `sqlx::PgPool`: the contexts of flows,
+webhooks, proxy routes, server routes, admin functions, and MCP tools. Code
+without a context reads the same pool with `app.db()`.
 
 ```rust,ignore
-use openshop::{PgPool, Result, sqlx};
+use openshop::prelude::*;
+use openshop::{PgPool, sqlx};
 
 async fn list_and_add(db: &PgPool, shop: &str) -> Result<Vec<(String, i32)>> {
     let rows: Vec<(String, i32)> = sqlx::query_as("SELECT title, rating FROM reviews WHERE shop = $1")
@@ -514,7 +532,7 @@ added. Say it with `renamed_from`, on the field or on the struct:
 
 ```rust,ignore
 #[derive(Model)]
-#[model(table = "product_reviews", renamed_from = "reviews")]
+#[model("product_reviews", renamed_from = "reviews")]
 pub struct Review {
     pub id: Uuid,
     #[model(renamed_from = "stars")]

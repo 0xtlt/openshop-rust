@@ -114,12 +114,12 @@ impl StepExecutor {
 
         if let Some((output,)) = existing {
             self.logger
-                .info(json!({ "step": name }), format!("Step \"{name}\" skipped (cached)"));
+                .info_with(format!("Step \"{name}\" skipped (cached)"), json!({ "step": name }));
             return Ok(serde_json::from_value(output.unwrap_or(Value::Null))?);
         }
 
         self.logger
-            .info(json!({ "step": name }), format!("Step \"{name}\" started"));
+            .info_with(format!("Step \"{name}\" started"), json!({ "step": name }));
 
         let inserted: Result<(Uuid,), sqlx::Error> = sqlx::query_as(
             "INSERT INTO step_results (flow_run_id, step_name, attempt, status) \
@@ -204,9 +204,9 @@ impl StepExecutor {
                 .execute(&self.db)
                 .await?;
 
-                self.logger.info(
-                    json!({ "step": name, "durationMs": duration_ms }),
+                self.logger.info_with(
                     format!("Step \"{name}\" completed ({duration_ms}ms)"),
+                    json!({ "step": name, "durationMs": duration_ms }),
                 );
                 Ok(result)
             }
@@ -229,9 +229,9 @@ impl StepExecutor {
                     .bind(step_id)
                     .execute(&self.db)
                     .await?;
-                self.logger.info(
-                    json!({ "step": name, "durationMs": duration_ms, "error": message }),
+                self.logger.info_with(
                     format!("Step \"{name}\" failed ({duration_ms}ms)"),
+                    json!({ "step": name, "durationMs": duration_ms, "error": message }),
                 );
                 Err(error)
             }

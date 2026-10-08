@@ -1,5 +1,6 @@
 //! Recording fakes for provider methods.
 
+use std::marker::PhantomData;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use anyhow::{Result, anyhow};
@@ -7,6 +8,7 @@ use chrono::{DateTime, Utc};
 use futures::future::BoxFuture;
 use indexmap::IndexMap;
 use serde::Serialize;
+use serde::de::DeserializeOwned;
 use serde_json::Value;
 
 use crate::server::connectors::{Connector, ConnectorMethod, Connectors};
@@ -131,6 +133,97 @@ impl FakeMethod {
     }
 }
 
+/// A call a [`TypedFake`] recorded, with the arguments as the method receives them.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TypedCall<A> {
+    pub args: A,
+    pub returned_value: Option<Value>,
+    pub thrown_error: Option<String>,
+    pub timestamp: DateTime<Utc>,
+}
+
+/// The fake of a typed call, such as `Warehouse::PUSH`: what it returns has
+/// the type the method returns, and its calls give the arguments the method
+/// would have received.
+pub struct TypedFake<'a, A, R> {
+    fake: &'a FakeMethod,
+    types: PhantomData<fn(A) -> R>,
+}
+
+impl<A, R> Clone for TypedFake<'_, A, R> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<A, R> Copy for TypedFake<'_, A, R> {}
+
+impl<'a, A, R> TypedFake<'a, A, R> {
+    /// The fake without the types, to answer with something the method could
+    /// not return or to replace its body.
+    pub fn untyped(&self) -> &'a FakeMethod {
+        self.fake
+    }
+
+    pub fn called(&self) -> bool {
+        self.fake.called()
+    }
+
+    pub fn call_count(&self) -> usize {
+        self.fake.call_count()
+    }
+
+    /// Makes every call without a more specific rule fail.
+    pub fn rejects(&self, error: impl Into<String>) {
+        self.fake.rejects(error);
+    }
+
+    /// Makes the `n`-th call (zero-based) fail.
+    pub fn on_call_rejects(&self, n: usize, error: impl Into<String>) {
+        self.fake.on_call_rejects(n, error);
+    }
+
+    /// Forgets recorded calls and every configured behavior.
+    pub fn reset(&self) {
+        self.fake.reset();
+    }
+}
+
+impl<A, R: Serialize> TypedFake<'_, A, R> {
+    /// Value returned by every call without a more specific rule.
+    pub fn returns(&self, value: R) {
+        self.fake.returns(value);
+    }
+
+    /// Value returned by the `n`-th call (zero-based).
+    pub fn on_call_returns(&self, n: usize, value: R) {
+        self.fake.on_call_returns(n, value);
+    }
+}
+
+impl<A: DeserializeOwned, R> TypedFake<'_, A, R> {
+    fn typed(call: FakeCall) -> TypedCall<A> {
+        let args = serde_json::from_value(call.args)
+            .unwrap_or_else(|error| panic!("the recorded arguments are not those of the method: {error}"));
+        TypedCall {
+            args,
+            returned_value: call.returned_value,
+            thrown_error: call.thrown_error,
+            timestamp: call.timestamp,
+        }
+    }
+
+    /// The recorded calls, oldest first. Panics when a call was made with
+    /// arguments the method does not take, which only an untyped call can do.
+    pub fn calls(&self) -> Vec<TypedCall<A>> {
+        self.fake.calls().into_iter().map(Self::typed).collect()
+    }
+
+    pub fn last_call(&self) -> Option<TypedCall<A>> {
+        self.fake.last_call().map(Self::typed)
+    }
+}
+
 /// One [`FakeMethod`] per method of every configured provider.
 #[derive(Clone, Default)]
 pub struct FakeProviders {
@@ -138,6 +231,23 @@ pub struct FakeProviders {
 }
 
 impl FakeProviders {
+    /// One fake per method of each provider.
+    pub fn new(providers: &IndexMap<String, Provider>) -> Self {
+        Self {
+            providers: providers
+                .iter()
+                .map(|(name, provider)| {
+                    let methods = provider
+                        .methods
+                        .keys()
+                        .map(|method| (method.clone(), FakeMethod::default()))
+                        .collect();
+                    (name.clone(), methods)
+                })
+                .collect(),
+        }
+    }
+
     /// The fake of `provider.method`. Panics when the provider or method is not configured.
     pub fn method(&self, provider: &str, method: &str) -> &FakeMethod {
         self.providers
@@ -150,9 +260,13 @@ impl FakeProviders {
         self.providers.get(provider)?.get(method)
     }
 
-    /// The fake of a typed call. Panics when the provider or method is not configured.
-    pub fn for_call<A, R>(&self, call: ProviderCall<A, R>) -> &FakeMethod {
-        self.method(call.provider(), call.method())
+    /// The fake of a typed call, `ctx.fakes.for_call(Warehouse::PUSH)`.
+    /// Panics when the provider or method is not configured.
+    pub fn for_call<A, R>(&self, call: ProviderCall<A, R>) -> TypedFake<'_, A, R> {
+        TypedFake {
+            fake: self.method(call.provider(), call.method()),
+            types: PhantomData,
+        }
     }
 
     /// Connectors whose methods are the fakes.
@@ -183,22 +297,6 @@ impl FakeProviders {
         for fake in self.providers.values().flat_map(IndexMap::values) {
             fake.reset();
         }
-    }
-}
-
-pub fn create_fake_providers(providers: &IndexMap<String, Provider>) -> FakeProviders {
-    FakeProviders {
-        providers: providers
-            .iter()
-            .map(|(name, provider)| {
-                let methods = provider
-                    .methods
-                    .keys()
-                    .map(|method| (method.clone(), FakeMethod::default()))
-                    .collect();
-                (name.clone(), methods)
-            })
-            .collect(),
     }
 }
 
@@ -249,7 +347,7 @@ mod tests {
                 .method("push", |_config, _args| async { Ok(json!(true)) })
                 .method("delete", |_config, _args| async { Ok(Value::Null) }),
         )]);
-        let fakes = create_fake_providers(&providers);
+        let fakes = FakeProviders::new(&providers);
         fakes.method("warehouse", "push").returns(42);
 
         let connectors = fakes.connectors();

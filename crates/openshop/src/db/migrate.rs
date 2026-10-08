@@ -20,7 +20,7 @@ use sha2::{Digest, Sha256};
 use sqlx::{Executor, PgPool};
 
 use super::diff::{self, SNAPSHOT_FILE, SchemaSnapshot};
-use super::model::Model;
+use super::model::Table;
 
 pub const MIGRATIONS_DIR: &str = "migrations";
 const MIGRATIONS_TABLE: &str = "__openshop_migrations";
@@ -267,12 +267,12 @@ fn created_tables(files: &[MigrationFile]) -> Vec<String> {
 /// recorded one. A project that has none yet starts from the tables its
 /// migrations already create, generated or written by hand, taken as the
 /// models describe them today.
-fn baseline(folder: &Path, files: &[MigrationFile], models: &[Model]) -> Result<(SchemaSnapshot, bool)> {
+fn baseline(folder: &Path, files: &[MigrationFile], models: &[Table]) -> Result<(SchemaSnapshot, bool)> {
     if let Some(recorded) = SchemaSnapshot::read(folder)? {
         return Ok((recorded, true));
     }
     let created = created_tables(files);
-    let existing: Vec<Model> = models
+    let existing: Vec<Table> = models
         .iter()
         .filter(|model| created.contains(&model.table.to_lowercase()))
         .cloned()
@@ -305,7 +305,7 @@ pub fn generate_migrations(
     cwd: &Path,
     args: &[String],
     production: bool,
-    models: &[Model],
+    models: &[Table],
 ) -> Result<GeneratedMigrations> {
     let allow_production = args.iter().any(|arg| arg == "--allow-generate-in-production");
     if production && !allow_production {
@@ -385,7 +385,7 @@ pub fn generate_migrations(
 
 /// Fails when the migration files do not cover the framework schema, or when
 /// `models` changed since the last generated migration.
-pub fn check_migrations(cwd: &Path, models: &[Model]) -> Result<()> {
+pub fn check_migrations(cwd: &Path, models: &[Table]) -> Result<()> {
     let folder = cwd.join(MIGRATIONS_DIR);
     let files = read_migration_files(&folder)?;
     if !missing_framework_migrations(&files).is_empty() {
@@ -421,7 +421,7 @@ pub fn check_migrations(cwd: &Path, models: &[Model]) -> Result<()> {
 
 /// Creates the framework tables and application models directly, without
 /// migration history. For development and tests only.
-pub async fn push_schema(pool: &PgPool, models: &[Model], production: bool) -> Result<()> {
+pub async fn push_schema(pool: &PgPool, models: &[Table], production: bool) -> Result<()> {
     if production {
         bail!("[openshop] Refusing to push the schema in production. Run `openshop migrate` before starting OpenShop.");
     }
@@ -492,7 +492,7 @@ impl PushStep {
         Self { sql, addition: None }
     }
 
-    fn addition(model: &Model, what: String, sql: String) -> Self {
+    fn addition(model: &Table, what: String, sql: String) -> Self {
         Self {
             sql,
             addition: Some((model.table.clone(), what)),
@@ -593,12 +593,12 @@ mod tests {
 
     #[test]
     fn generates_tables_for_models_without_a_migration() {
-        use crate::db::define_model;
+        use crate::db::Table;
 
         let dir = temp_dir("models");
         let models = [
-            define_model("reviews").column("rating", "integer NOT NULL"),
-            define_model("review_votes")
+            Table::conventional("reviews").column("rating", "integer NOT NULL"),
+            Table::conventional("review_votes")
                 .without_shop()
                 .column("value", "integer NOT NULL"),
         ];
@@ -623,7 +623,7 @@ mod tests {
         )
         .unwrap();
         let mut more = models.to_vec();
-        more.extend([define_model("orders"), define_model("order_lines")]);
+        more.extend([Table::conventional("orders"), Table::conventional("order_lines")]);
         let created = generate_migrations(&dir, &["--name=orders".to_string()], false, &more)
             .unwrap()
             .files;
@@ -635,7 +635,7 @@ mod tests {
         std::fs::remove_dir_all(dir).ok();
     }
 
-    fn generate(dir: &Path, models: &[Model]) -> GeneratedMigrations {
+    fn generate(dir: &Path, models: &[Table]) -> GeneratedMigrations {
         generate_migrations(dir, &[], false, models).unwrap()
     }
 
@@ -645,11 +645,11 @@ mod tests {
 
     #[test]
     fn records_the_models_and_generates_what_changed_since() {
-        use crate::db::{ColumnDef, define_model};
+        use crate::db::{ColumnDef, Table};
 
         let dir = temp_dir("diff");
         let folder = dir.join(MIGRATIONS_DIR);
-        let reviews = define_model("reviews").with_column(ColumnDef::new("rating", "integer"));
+        let reviews = Table::conventional("reviews").with_column(ColumnDef::new("rating", "integer"));
 
         // The first generation creates the table and records the models.
         let first = generate(&dir, std::slice::from_ref(&reviews));
@@ -669,7 +669,7 @@ mod tests {
         );
 
         // A changed model is refused by `check` until a migration covers it.
-        let changed = define_model("reviews")
+        let changed = Table::conventional("reviews")
             .with_column(ColumnDef::new("rating", "integer"))
             .with_column(ColumnDef::new("note", "text").nullable(true))
             .with_column(ColumnDef::new("author", "text"))
@@ -740,13 +740,13 @@ mod tests {
 
     #[test]
     fn a_project_without_a_snapshot_starts_from_its_existing_tables() {
-        use crate::db::{ColumnDef, define_model};
+        use crate::db::{ColumnDef, Table};
 
         // As generated before snapshots existed: a migration creates the table.
         let dir = temp_dir("adopt");
         let folder = dir.join(MIGRATIONS_DIR);
         generate_framework(&dir, &[], false).unwrap();
-        let reviews = define_model("reviews").with_column(ColumnDef::new("rating", "integer"));
+        let reviews = Table::conventional("reviews").with_column(ColumnDef::new("rating", "integer"));
         std::fs::write(
             folder.join("99990101000000_models.sql"),
             format!("{}\n", reviews.create_sql()),
@@ -758,7 +758,7 @@ mod tests {
             "create table Orders (id uuid);",
         )
         .unwrap();
-        let orders = define_model("orders");
+        let orders = Table::conventional("orders");
         let models = [reviews.clone(), orders.clone()];
         assert_eq!(SchemaSnapshot::read(&folder).unwrap(), None);
         check_migrations(&dir, &models).unwrap();
@@ -769,7 +769,7 @@ mod tests {
         assert_eq!(adopted.snapshot, Some(folder.join(SNAPSHOT_FILE)));
 
         // From then on, changes are found by comparison.
-        let changed = define_model("reviews")
+        let changed = Table::conventional("reviews")
             .with_column(ColumnDef::new("rating", "bigint").renamed_from("stars"))
             .with_column(ColumnDef::new("note", "text").nullable(true));
         let next = generate(&dir, &[changed, orders]);

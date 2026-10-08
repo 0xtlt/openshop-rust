@@ -10,11 +10,13 @@ use uuid::Uuid;
 use super::backoff::resolve_retry_policy;
 use super::errors::FlowConcurrencyError;
 use crate::app::OpenShopConfig;
+use crate::runtime::time::millis;
 use crate::server::shopify_apps::DEFAULT_SHOPIFY_APP_HANDLE;
-use crate::types::{Concurrency, DispatchOptions, JsonMap};
+use crate::types::{Concurrency, JsonMap, RetryPolicy, ShopScope};
 
+/// A flow run to queue: the flow, the shop it runs for, and how.
 #[derive(Debug, Clone, Default, PartialEq)]
-pub struct DispatchFlowParams {
+pub struct DispatchOptions {
     pub flow_name: String,
     /// Defaults to `{}`.
     pub input: Option<Value>,
@@ -22,16 +24,24 @@ pub struct DispatchFlowParams {
     /// Defaults to the single-app handle `default`.
     pub shopify_app: Option<String>,
     pub parent_run_id: Option<String>,
-    pub options: Option<DispatchOptions>,
+    /// Delay before the run becomes available to workers.
+    pub delay: Option<std::time::Duration>,
+    pub retry_policy: Option<RetryPolicy>,
 }
 
-impl DispatchFlowParams {
+impl DispatchOptions {
     pub fn new(flow_name: impl Into<String>, shop: impl Into<String>) -> Self {
         Self {
             flow_name: flow_name.into(),
             shop: shop.into(),
             ..Default::default()
         }
+    }
+
+    /// A run for the shop and the Shopify app of a context: a flow, a
+    /// webhook, a proxy request…
+    pub fn for_scope(flow_name: impl Into<String>, scope: &impl ShopScope) -> Self {
+        Self::new(flow_name, scope.shop()).shopify_app(scope.shopify_app())
     }
 
     pub fn input(mut self, input: Value) -> Self {
@@ -49,15 +59,22 @@ impl DispatchFlowParams {
         self
     }
 
-    pub fn options(mut self, options: DispatchOptions) -> Self {
-        self.options = Some(options);
+    /// Makes the run wait before workers can take it.
+    pub fn delay(mut self, delay: std::time::Duration) -> Self {
+        self.delay = Some(delay);
+        self
+    }
+
+    /// Overrides the retry policy of the flow for this run.
+    pub fn retry_policy(mut self, policy: RetryPolicy) -> Self {
+        self.retry_policy = Some(policy);
         self
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct DispatchFlowResult {
+pub struct QueuedRun {
     pub run_id: Uuid,
     pub status: &'static str,
 }
@@ -69,22 +86,18 @@ pub(crate) fn unknown_flow(config: &OpenShopConfig, flow_name: &str) -> anyhow::
 
 /// Inserts a `pending` run. Concurrency is decided under an advisory lock scoped
 /// to `(app, shop, flow)` so that simultaneous dispatches cannot both pass.
-pub async fn dispatch_flow(
-    db: &PgPool,
-    config: &OpenShopConfig,
-    params: DispatchFlowParams,
-) -> Result<DispatchFlowResult> {
-    let DispatchFlowParams {
+pub async fn dispatch_flow(db: &PgPool, config: &OpenShopConfig, options: DispatchOptions) -> Result<QueuedRun> {
+    let DispatchOptions {
         flow_name,
         input,
         shop,
         shopify_app,
         parent_run_id,
-        options,
-    } = params;
+        delay,
+        retry_policy: run_retry_policy,
+    } = options;
     let shopify_app = shopify_app.unwrap_or_else(|| DEFAULT_SHOPIFY_APP_HANDLE.to_string());
     let input = input.unwrap_or_else(|| Value::Object(JsonMap::new()));
-    let options = options.unwrap_or_default();
 
     let Some(flow) = config.flows.get(&flow_name) else {
         return Err(unknown_flow(config, &flow_name));
@@ -122,9 +135,8 @@ pub async fn dispatch_flow(
     let deadline_at = flow
         .timeout
         .map(|timeout| now + Duration::milliseconds(timeout.as_millis() as i64));
-    let retry_policy =
-        resolve_retry_policy(&[Some(config.retry_policy), Some(flow.retry_policy), options.retry_policy]);
-    let available_at = now + Duration::milliseconds(options.delay_ms.unwrap_or(0) as i64);
+    let retry_policy = resolve_retry_policy(&[Some(config.retry_policy), Some(flow.retry_policy), run_retry_policy]);
+    let available_at = now + Duration::milliseconds(delay.map(millis).unwrap_or(0) as i64);
 
     let (run_id,): (Uuid,) = sqlx::query_as(
         "INSERT INTO flow_runs \
@@ -144,7 +156,7 @@ pub async fn dispatch_flow(
     .await?;
     tx.commit().await?;
 
-    Ok(DispatchFlowResult {
+    Ok(QueuedRun {
         run_id,
         status: "pending",
     })

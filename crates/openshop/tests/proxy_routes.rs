@@ -2,11 +2,12 @@
 
 use openshop::server::proxy::create_proxy_routes;
 use openshop::testing::{
-    TestContext, TestOptions, create_session_token, proxy_signature, sign_session_token, to_query_string,
+    TestContext, TestOptions, proxy_signature, session_token as signed_session_token, sign_session_token,
+    to_query_string,
 };
 use openshop::{
-    IndexMap, OpenShopConfig, ProxyAuthKind, ProxyContext, ProxyDefinition, Result, ShopifyAppConfig, ShopifyConfig,
-    Value, anyhow, json,
+    IndexMap, OpenShopConfig, Proxy, ProxyAuthKind, ProxyContext, Result, ShopifyAppConfig, ShopifyConfig, Value,
+    anyhow, json,
 };
 use reqwest::{Method, RequestBuilder, Response};
 
@@ -41,7 +42,7 @@ async fn echo(ctx: ProxyContext) -> Result<Value> {
 
 fn ping_config() -> OpenShopConfig {
     OpenShopConfig::builder()
-        .proxy("/ping", ProxyDefinition::json().get(ping))
+        .proxy("/ping", Proxy::json().get(ping))
         .build()
         .expect("valid config")
 }
@@ -50,12 +51,7 @@ fn echo_config() -> OpenShopConfig {
     OpenShopConfig::builder()
         .proxy(
             "/echo",
-            ProxyDefinition::json()
-                .get(echo)
-                .post(echo)
-                .put(echo)
-                .patch(echo)
-                .delete(echo),
+            Proxy::json().get(echo).post(echo).put(echo).patch(echo).delete(echo),
         )
         .build()
         .expect("valid config")
@@ -79,7 +75,7 @@ fn multi_app_config(apps: &[(&str, ShopifyAppConfig)]) -> OpenShopConfig {
                     .collect(),
             ),
         })
-        .proxy("/ping", ProxyDefinition::json().get(ping))
+        .proxy("/ping", Proxy::json().get(ping))
         .build()
         .expect("valid config")
 }
@@ -290,7 +286,7 @@ async fn liquid_html_and_json_routes_set_their_content_type() {
     let config = OpenShopConfig::builder()
         .proxy(
             "/reviews",
-            ProxyDefinition::liquid().get(|ctx| async move {
+            Proxy::liquid().get(|ctx| async move {
                 Ok(Value::from(format!(
                     "<h2>Reviews for {{{{ shop.name }}}}</h2><p>{}</p>",
                     ctx.shop
@@ -299,19 +295,16 @@ async fn liquid_html_and_json_routes_set_their_content_type() {
         )
         .proxy(
             "/widget",
-            ProxyDefinition::html().get(|_ctx| async move { Ok(json!("<p>Widget</p>")) }),
+            Proxy::html().get(|_ctx| async move { Ok(json!("<p>Widget</p>")) }),
         )
         .proxy(
             "/liquid-data",
-            ProxyDefinition::liquid().get(|_ctx| async move { Ok(json!({ "liquid": false })) }),
+            Proxy::liquid().get(|_ctx| async move { Ok(json!({ "liquid": false })) }),
         )
-        .proxy(
-            "/text",
-            ProxyDefinition::json().get(|_ctx| async move { Ok(json!("plain")) }),
-        )
+        .proxy("/text", Proxy::json().get(|_ctx| async move { Ok(json!("plain")) }))
         .proxy(
             "/default",
-            ProxyDefinition::default().get(|_ctx| async move { Ok(json!([1, 2, 3])) }),
+            Proxy::default().get(|_ctx| async move { Ok(json!([1, 2, 3])) }),
         )
         .build()
         .unwrap();
@@ -348,11 +341,11 @@ async fn liquid_html_and_json_routes_set_their_content_type() {
 #[tokio::test]
 async fn dynamic_segments_are_exposed_as_params() {
     let config = OpenShopConfig::builder()
-        .proxy("/api/reviews/:id", ProxyDefinition::json().get(echo))
-        .proxy("/orders/[order]/items/[item]", ProxyDefinition::json().get(echo))
+        .proxy("/api/reviews/:id", Proxy::json().get(echo))
+        .proxy("/orders/[order]/items/[item]", Proxy::json().get(echo))
         .proxy(
             "/api/reviews/latest",
-            ProxyDefinition::json().get(|_ctx| async move { Ok(json!({ "route": "latest" })) }),
+            Proxy::json().get(|_ctx| async move { Ok(json!({ "route": "latest" })) }),
         )
         .build()
         .unwrap();
@@ -378,7 +371,7 @@ async fn dynamic_segments_are_exposed_as_params() {
 #[tokio::test]
 async fn index_route_is_served_at_the_prefix_root() {
     let config = OpenShopConfig::builder()
-        .proxy("/", ProxyDefinition::json().get(echo))
+        .proxy("/", Proxy::json().get(echo))
         .build()
         .unwrap();
     let ctx = TestContext::new(config).await.unwrap();
@@ -444,7 +437,7 @@ async fn handler_errors_return_500_without_details() {
     let config = OpenShopConfig::builder()
         .proxy(
             "/fails",
-            ProxyDefinition::json()
+            Proxy::json()
                 .get(|_ctx| async move { Err(anyhow!("database password is hunter2")) })
                 .post(|ctx| async move {
                     if ctx.body.is_none() {
@@ -602,7 +595,7 @@ async fn extension_mode_uses_jwt_identity_and_ignores_query_identity() {
 #[tokio::test]
 async fn extension_mode_resolves_shopify_app_from_jwt_audience() {
     let ctx = TestContext::new(client_apps()).await.unwrap();
-    let token = create_session_token(
+    let token = signed_session_token(
         "jwt-client-b.myshopify.com",
         "client-b-secret",
         "client-b-key",
@@ -622,7 +615,7 @@ async fn extension_mode_resolves_shopify_app_from_jwt_audience() {
     assert_eq!(body["queryShop"], "jwt-client-b.myshopify.com");
 
     // A token for one app signed with another app's secret is not accepted.
-    let mismatched = create_session_token(
+    let mismatched = signed_session_token(
         "jwt-client-b.myshopify.com",
         "client-a-secret",
         "client-b-key",
@@ -636,7 +629,7 @@ async fn extension_mode_resolves_shopify_app_from_jwt_audience() {
 #[tokio::test]
 async fn extension_mode_rejects_jwt_with_wrong_audience() {
     let ctx = TestContext::new(ping_config()).await.unwrap();
-    let token = create_session_token("jwt-shop.myshopify.com", &ctx.secret, "wrong-app", CUSTOMER_GID);
+    let token = signed_session_token("jwt-shop.myshopify.com", &ctx.secret, "wrong-app", CUSTOMER_GID);
 
     let response = get(&ctx, "/ext/ping").bearer_auth(token).send().await.unwrap();
     assert_error(response, 401, "Unauthorized: invalid or expired session token").await;
@@ -654,7 +647,7 @@ async fn extension_mode_rejects_invalid_bearer_token() {
         .unwrap();
     assert_error(response, 401, "Unauthorized: missing token audience").await;
 
-    let forged = create_session_token("jwt-shop.myshopify.com", "not-the-secret", &ctx.api_key, CUSTOMER_GID);
+    let forged = signed_session_token("jwt-shop.myshopify.com", "not-the-secret", &ctx.api_key, CUSTOMER_GID);
     let response = get(&ctx, "/ext/ping").bearer_auth(forged).send().await.unwrap();
     assert_error(response, 401, "Unauthorized: invalid or expired session token").await;
     ctx.shutdown().await.unwrap();
@@ -855,7 +848,7 @@ async fn missing_shopify_api_secret_fails_closed() {
     let response = get(&ctx, &format!("/proxy/ping?{query}")).send().await.unwrap();
     assert_error(response, 500, "SHOPIFY_API_SECRET is not configured").await;
 
-    let token = create_session_token("test.myshopify.com", "", &ctx.api_key, CUSTOMER_GID);
+    let token = signed_session_token("test.myshopify.com", "", &ctx.api_key, CUSTOMER_GID);
     let response = get(&ctx, "/ext/ping").bearer_auth(token).send().await.unwrap();
     assert_error(response, 500, "SHOPIFY_API_SECRET is not configured").await;
     ctx.shutdown().await.unwrap();
@@ -864,8 +857,8 @@ async fn missing_shopify_api_secret_fails_closed() {
 #[test]
 fn ambiguous_proxy_routes_are_rejected_when_the_config_is_built() {
     let error = OpenShopConfig::builder()
-        .proxy("/reviews/:id", ProxyDefinition::json().get(ping))
-        .proxy("/reviews/[slug]", ProxyDefinition::json().get(ping))
+        .proxy("/reviews/:id", Proxy::json().get(ping))
+        .proxy("/reviews/[slug]", Proxy::json().get(ping))
         .build()
         .err()
         .expect("ambiguous routes")

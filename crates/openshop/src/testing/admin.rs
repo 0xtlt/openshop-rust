@@ -3,11 +3,11 @@
 use anyhow::Result;
 use indexmap::IndexMap;
 
-use crate::admin::{AdminActor, AdminServerContext};
+use crate::admin::{AdminActor, AdminContext};
 use crate::app::OpenShop;
 
 #[derive(Debug, Clone)]
-pub struct AdminFunctionTestOptions {
+pub struct AdminTestOptions {
     pub shop: String,
     pub shopify_app: String,
     pub actor_id: String,
@@ -15,7 +15,7 @@ pub struct AdminFunctionTestOptions {
     pub request_id: String,
 }
 
-impl Default for AdminFunctionTestOptions {
+impl Default for AdminTestOptions {
     fn default() -> Self {
         Self {
             shop: "test.myshopify.com".to_string(),
@@ -27,19 +27,16 @@ impl Default for AdminFunctionTestOptions {
     }
 }
 
-pub async fn create_admin_function_test_context(
-    app: &OpenShop,
-    options: AdminFunctionTestOptions,
-) -> Result<AdminServerContext> {
-    Ok(AdminServerContext {
+pub async fn admin_context(app: &OpenShop, options: AdminTestOptions) -> Result<AdminContext> {
+    Ok(AdminContext {
         actor: AdminActor {
             id: options.actor_id,
             session_id: "test-session".to_string(),
         },
         params: options.params,
         db: app.db().clone(),
-        shopify: app.shopify_client(&options.shop, &options.shopify_app).await?,
-        connectors: app.connectors(&options.shop, &options.shopify_app).await?,
+        shopify: app.shopify_client(&options.shop, &options.shopify_app),
+        connectors: app.connectors(&options.shop, &options.shopify_app),
         request_id: options.request_id,
         idempotency_key: None,
         shop: options.shop,

@@ -137,20 +137,38 @@ fn struct_options(input: &DeriveInput) -> syn::Result<StructOptions> {
         .iter()
         .filter(|attribute| attribute.path().is_ident("model"))
     {
-        attribute.parse_nested_meta(|meta| {
-            if meta.path.is_ident("table") {
-                set_value(&mut options.table, &meta)
-            } else if meta.path.is_ident("renamed_from") {
-                set_value(&mut options.renamed_from, &meta)
-            } else if meta.path.is_ident("index") {
-                options.indexes.push(parse_index(&meta, false)?);
-                Ok(())
-            } else if meta.path.is_ident("unique") {
-                options.indexes.push(parse_index(&meta, true)?);
-                Ok(())
-            } else {
-                Err(meta.error("unknown model option; expected `table`, `renamed_from`, `index(…)` or `unique(…)`"))
+        // The table comes first, as the name of a flow or of a provider does:
+        // `#[model("reviews", index(shop, product_id))]`.
+        attribute.parse_args_with(|input: syn::parse::ParseStream| {
+            if input.peek(LitStr) {
+                let table: LitStr = input.parse()?;
+                if options.table.is_some() {
+                    return Err(syn::Error::new(table.span(), "given twice"));
+                }
+                options.table = Some(table);
+                if input.is_empty() {
+                    return Ok(());
+                }
+                input.parse::<syn::Token![,]>()?;
             }
+            let rest: TokenStream = input.parse()?;
+            let parser = syn::meta::parser(|meta| {
+                if meta.path.is_ident("table") {
+                    Err(meta.error("the table is the first argument: `#[model(\"reviews\")]`"))
+                } else if meta.path.is_ident("renamed_from") {
+                    set_value(&mut options.renamed_from, &meta)
+                } else if meta.path.is_ident("index") {
+                    options.indexes.push(parse_index(&meta, false)?);
+                    Ok(())
+                } else if meta.path.is_ident("unique") {
+                    options.indexes.push(parse_index(&meta, true)?);
+                    Ok(())
+                } else {
+                    Err(meta
+                        .error("unknown model option; expected the table, `renamed_from`, `index(…)` or `unique(…)`"))
+                }
+            });
+            syn::parse::Parser::parse2(parser, rest)
         })?;
     }
     Ok(options)
@@ -258,7 +276,7 @@ pub fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
     let Some(table) = &options.table else {
         return Err(syn::Error::new(
             name.span(),
-            "a model names its table: add `#[model(table = \"…\")]`",
+            "a model names its table: add `#[model(\"…\")]`",
         ));
     };
     let table_name = table.value();
@@ -381,7 +399,7 @@ pub fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
         let reference = field.options.references.as_ref()?;
         let column = &field.column;
         let table = match &reference.target {
-            Target::Model(model) => quote!(<#model as #krate::db::Record>::TABLE),
+            Target::Model(model) => quote!(<#model as #krate::db::Model>::TABLE),
             Target::Table(table) => quote!(#table),
         };
         let referenced = reference.column.as_ref().map(|column| quote!(.references(#column)));
@@ -509,6 +527,16 @@ pub fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
                 #krate::db::Rows::new(db, ::core::option::Option::Some(::std::string::ToString::to_string(shop)))
             }
 
+            /// The rows of the shop of a context: a flow, a webhook, an admin
+            /// function… Like `for_shop`, with the database and the shop the
+            /// context runs for.
+            #visibility fn of(scope: &impl #krate::ShopScope) -> #krate::db::Rows<'_, Self> {
+                #krate::db::Rows::new(
+                    #krate::ShopScope::app(scope).db(),
+                    ::core::option::Option::Some(::std::string::ToString::to_string(#krate::ShopScope::shop(scope))),
+                )
+            }
+
             /// The rows of every shop, for maintenance work. Prefer `for_shop`
             /// wherever a shop is known.
             #visibility fn all_shops(db: &#krate::PgPool) -> #krate::db::Rows<'_, Self> {
@@ -538,19 +566,19 @@ pub fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
             type Kind = #krate::declare::kind::Model;
 
             fn register(app: #krate::OpenShopBuilder) -> #krate::OpenShopBuilder {
-                app.model(<Self as #krate::db::Record>::model())
+                app.model(<Self as #krate::db::Model>::table())
             }
         }
 
-        impl #krate::db::Record for #name {
+        impl #krate::db::Model for #name {
             type New = #new_name;
 
             const TABLE: &'static str = #table;
             const COLUMNS: &'static [&'static str] = &[#(#column_names),*];
             const HAS_SHOP: bool = #has_shop;
 
-            fn model() -> #krate::db::Model {
-                #krate::db::Model::new(#table)
+            fn table() -> #krate::db::Table {
+                #krate::db::Table::new(#table)
                     #(.with_column(#columns))*
                     #(#indexes)*
                     #(#foreign_keys)*
@@ -606,7 +634,7 @@ mod tests {
     #[test]
     fn accepts_a_struct_with_every_option() {
         let generated = expand(parse_quote! {
-            #[model(table = "reviews", renamed_from = "ratings", index(shop, product_id), unique(shop, title, name = "one_title"))]
+            #[model("reviews", renamed_from = "ratings", index(shop, product_id), unique(shop, title, name = "one_title"))]
             pub struct Review {
                 pub id: Uuid,
                 pub shop: String,
@@ -647,7 +675,7 @@ mod tests {
     #[test]
     fn references_become_foreign_keys() {
         let generated = expand(parse_quote! {
-            #[model(table = "review_votes")]
+            #[model("review_votes")]
             struct ReviewVote {
                 id: Uuid,
                 #[model(references(Review), on_delete = "cascade")]
@@ -662,8 +690,8 @@ mod tests {
         .to_string();
 
         for expected in [
-            "ForeignKeyDef :: new (\"review_id\" , < Review as :: openshop :: db :: Record > :: TABLE) . on_delete (\"cascade\")",
-            "ForeignKeyDef :: new (\"author_code\" , < crate :: models :: Author as :: openshop :: db :: Record > :: TABLE) . references (\"code\") . on_delete (\"Set  Null\")",
+            "ForeignKeyDef :: new (\"review_id\" , < Review as :: openshop :: db :: Model > :: TABLE) . on_delete (\"cascade\")",
+            "ForeignKeyDef :: new (\"author_code\" , < crate :: models :: Author as :: openshop :: db :: Model > :: TABLE) . references (\"code\") . on_delete (\"Set  Null\")",
             "ForeignKeyDef :: new (\"order_id\" , \"legacy_orders\")",
         ] {
             assert!(generated.contains(expected), "missing `{expected}` in:\n{generated}");
@@ -671,26 +699,24 @@ mod tests {
 
         assert_eq!(
             refusal(
-                parse_quote! { #[model(table = "t")] struct T { id: Uuid, #[model(references(Review), on_delete = "delete")] review_id: Uuid } }
+                parse_quote! { #[model("t")] struct T { id: Uuid, #[model(references(Review), on_delete = "delete")] review_id: Uuid } }
             ),
             "`on_delete` is \"cascade\", \"restrict\", \"set null\", \"set default\" or \"no action\""
         );
         assert_eq!(
             refusal(
-                parse_quote! { #[model(table = "t")] struct T { id: Uuid, #[model(on_delete = "cascade")] review_id: Uuid } }
+                parse_quote! { #[model("t")] struct T { id: Uuid, #[model(on_delete = "cascade")] review_id: Uuid } }
             ),
             "`on_delete` goes with `references(…)`"
         );
         assert_eq!(
             refusal(
-                parse_quote! { #[model(table = "t")] struct T { id: Uuid, #[model(references(Review, on = "id"))] review_id: Uuid } }
+                parse_quote! { #[model("t")] struct T { id: Uuid, #[model(references(Review, on = "id"))] review_id: Uuid } }
             ),
             "expected `column = \"…\"`"
         );
         assert_eq!(
-            refusal(
-                parse_quote! { #[model(table = "t")] struct T { id: Uuid, #[model(references(Review))] shop: String } }
-            ),
+            refusal(parse_quote! { #[model("t")] struct T { id: Uuid, #[model(references(Review))] shop: String } }),
             "`shop` is a conventional column: its type and default are fixed"
         );
     }
@@ -698,7 +724,7 @@ mod tests {
     #[test]
     fn a_struct_without_shop_gets_plain_rows() {
         let generated = expand(parse_quote! {
-            #[model(table = "settings")]
+            #[model("settings")]
             struct Setting {
                 id: Uuid,
             }
@@ -717,22 +743,22 @@ mod tests {
     fn refuses_what_cannot_be_a_table() {
         assert_eq!(
             refusal(parse_quote! { struct Review { id: Uuid } }),
-            "a model names its table: add `#[model(table = \"…\")]`"
+            "a model names its table: add `#[model(\"…\")]`"
         );
         assert_eq!(
-            refusal(parse_quote! { #[model(table = "reviews")] struct Review { rating: i32 } }),
+            refusal(parse_quote! { #[model("reviews")] struct Review { rating: i32 } }),
             "a model needs its primary key: add `pub id: Uuid`"
         );
         assert_eq!(
-            refusal(parse_quote! { #[model(table = "reviews")] struct Review(Uuid); }),
+            refusal(parse_quote! { #[model("reviews")] struct Review(Uuid); }),
             "`Model` is derived on a struct with named fields"
         );
         assert_eq!(
-            refusal(parse_quote! { #[model(table = "reviews")] enum Review { A } }),
+            refusal(parse_quote! { #[model("reviews")] enum Review { A } }),
             "`Model` is derived on a struct with named fields"
         );
         assert_eq!(
-            refusal(parse_quote! { #[model(table = "reviews")] struct Review<T> { id: Uuid, value: T } }),
+            refusal(parse_quote! { #[model("reviews")] struct Review<T> { id: Uuid, value: T } }),
             "a model cannot be generic"
         );
     }
@@ -740,39 +766,43 @@ mod tests {
     #[test]
     fn refuses_invalid_options() {
         assert_eq!(
-            refusal(parse_quote! { #[model(table = "reviews", tabel = "x")] struct Review { id: Uuid } }),
-            "unknown model option; expected `table`, `renamed_from`, `index(…)` or `unique(…)`"
+            refusal(parse_quote! { #[model("reviews", tabel = "x")] struct Review { id: Uuid } }),
+            "unknown model option; expected the table, `renamed_from`, `index(…)` or `unique(…)`"
         );
         assert_eq!(
             refusal(
-                parse_quote! { #[model(table = "reviews")] struct Review { id: Uuid, #[model(defualt = "0")] rating: i32 } }
+                parse_quote! { #[model("reviews")] struct Review { id: Uuid, #[model(defualt = "0")] rating: i32 } }
             ),
             "unknown field option; expected `column`, `default`, `sql_type`, `renamed_from`, `references(…)`, `on_delete`, `index` or `unique`"
         );
         assert_eq!(
-            refusal(parse_quote! { #[model(table = "reviews", table = "other")] struct Review { id: Uuid } }),
+            refusal(parse_quote! { #[model("reviews", table = "other")] struct Review { id: Uuid } }),
+            "the table is the first argument: `#[model(\"reviews\")]`"
+        );
+        assert_eq!(
+            refusal(parse_quote! { #[model("reviews")] #[model("other")] struct Review { id: Uuid } }),
             "given twice"
         );
         assert_eq!(
             refusal(
-                parse_quote! { #[model(table = "reviews", index(shop, product))] struct Review { id: Uuid, shop: String } }
+                parse_quote! { #[model("reviews", index(shop, product))] struct Review { id: Uuid, shop: String } }
             ),
             "`Review` has no field `product`"
         );
         assert_eq!(
             refusal(
-                parse_quote! { #[model(table = "reviews")] struct Review { id: Uuid, #[model(default = "now()")] created_at: DateTime<Utc> } }
+                parse_quote! { #[model("reviews")] struct Review { id: Uuid, #[model(default = "now()")] created_at: DateTime<Utc> } }
             ),
             "`created_at` is a conventional column: its type and default are fixed"
         );
         assert_eq!(
             refusal(
-                parse_quote! { #[model(table = "reviews")] struct Review { id: Uuid, a: i32, #[model(column = "a")] b: i32 } }
+                parse_quote! { #[model("reviews")] struct Review { id: Uuid, a: i32, #[model(column = "a")] b: i32 } }
             ),
             "two fields are stored in the column `a`"
         );
         let long = refusal(parse_quote! {
-            #[model(table = "a_table_with_a_rather_long_name", index(a_first_long_column_name, a_second_long_column_name))]
+            #[model("a_table_with_a_rather_long_name", index(a_first_long_column_name, a_second_long_column_name))]
             struct Review { id: Uuid, a_first_long_column_name: i32, a_second_long_column_name: i32 }
         });
         assert!(

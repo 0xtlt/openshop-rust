@@ -11,16 +11,20 @@ mod factory;
 mod fake;
 mod transport;
 
-pub use admin::{AdminFunctionTestOptions, create_admin_function_test_context};
+pub use admin::{AdminTestOptions, admin_context};
 pub use context::{ProxyClient, ProxyRequestBuilder, ProxyResponse, TestContext, TestOptions};
 pub use db::TestDb;
-pub use factory::{Factory, FactoryScope, define_factory};
-pub use fake::{FakeCall, FakeMethod, FakeProviders, create_fake_providers};
+pub use factory::{Factory, FactoryScope};
+pub use fake::{FakeCall, FakeMethod, FakeProviders, TypedCall, TypedFake};
 pub use transport::MockTransport;
 
 pub use crate::admin::invoke_admin_function;
 pub use crate::server::hmac::proxy_signature;
 pub use crate::server::jwt::sign_session_token;
+
+/// The runtime `#[openshop::test]` runs a test on.
+#[doc(hidden)]
+pub use tokio;
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
@@ -29,8 +33,27 @@ use serde_json::json;
 
 use crate::server::hmac::hmac_sha256;
 
+/// What a `#[openshop::test]` function can return: nothing, or a `Result`
+/// whose error fails the test.
+pub trait TestOutcome {
+    /// Panics when the outcome is a failure.
+    fn check(self);
+}
+
+impl TestOutcome for () {
+    fn check(self) {}
+}
+
+impl<E: std::fmt::Debug> TestOutcome for Result<(), E> {
+    fn check(self) {
+        if let Err(error) = self {
+            panic!("the test returned an error: {error:?}");
+        }
+    }
+}
+
 /// A session token as issued by Shopify App Bridge, valid for one minute.
-pub fn create_session_token(shop: &str, secret: &str, api_key: &str, sub: &str) -> String {
+pub fn session_token(shop: &str, secret: &str, api_key: &str, sub: &str) -> String {
     let now = chrono::Utc::now().timestamp();
     sign_session_token(
         &json!({

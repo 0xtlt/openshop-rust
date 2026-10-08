@@ -142,5 +142,5 @@ pub async fn check_provider(ctx: &openshop::testing::TestContext, provider: &str
 
 /// The connectors of the shop of the context, with its saved configurations.
 pub async fn shop_connectors(ctx: &openshop::testing::TestContext) -> openshop::Connectors {
-    ctx.app.connectors(&ctx.shop, "default").await.unwrap()
+    ctx.app.connectors(&ctx.shop, "default")
 }

@@ -8,17 +8,14 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use openshop::response::{Response, StatusCode};
-use openshop::testing::{
-    AdminFunctionTestOptions, TestContext, create_admin_function_test_context, invoke_admin_function,
-};
+use openshop::testing::{AdminTestOptions, TestContext, admin_context, invoke_admin_function};
 use openshop::{
-    AdminServerContext, App, CancellationToken, Concurrency, CronEntry, CustomAdminNavigationItem, DiscountMode,
-    ErrorContext, Flow, FlowContext, FunctionConfig, FunctionTitle, JsonMap, McpConfig, McpExecutionContext,
-    McpPermissionDefinition, McpResourceContent, McpRiskLevel, Model, OpenShopConfig, PartialRetryPolicy,
-    PartialWorkerConfig, ProviderConfig, ProxyContext, ProxyDefinition, ProxyResponseType, Result, RouteAuthOutcome,
-    RunFlowResult, ServerRoute, ServerRouteContext, ServerRouteRequestContext, ShopifyFunctionType, Uuid, Value,
-    WebhookContext, admin_page, app, flow, json, mcp_resource, mcp_tool, provider, proxy, response, route, validators,
-    webhook,
+    AdminContext, App, CancellationToken, Concurrency, Cron, CustomAdminNavigationItem, DiscountMode, ErrorContext,
+    Flow, FlowContext, FunctionConfig, FunctionTitle, FunctionType, JsonMap, McpContext, McpPermission,
+    McpResourceContent, McpRiskLevel, Model, OpenShopConfig, ProviderConfig, Proxy, ProxyContext, ProxyResponseType,
+    Result, RetryPolicy, Route, RouteAuthContext, RouteAuthOutcome, RouteContext, RunOutcome, Uuid, Value,
+    WebhookContext, WorkerConfig, admin_page, app, flow, json, mcp_resource, mcp_tool, provider, proxy, response,
+    route, validators, webhook,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -56,7 +53,7 @@ impl Warehouse {
 
 #[allow(dead_code)]
 #[derive(Debug, Clone, Model)]
-#[model(table = "widgets")]
+#[model("widgets")]
 struct Widget {
     id: Uuid,
     shop: String,
@@ -74,7 +71,7 @@ struct GreetInput {
     timeout = Duration::from_secs(30),
     step_timeout = Duration::from_secs(5),
     concurrency = Concurrency::Allow,
-    retry_policy = PartialRetryPolicy::new().max_attempts(2)
+    retry_policy = RetryPolicy::new().max_attempts(2)
 )]
 async fn greet(ctx: FlowContext, input: GreetInput) -> Result<()> {
     let greeting: String = ctx
@@ -157,7 +154,7 @@ async fn banner_as_json(_ctx: ProxyContext) -> Result<Value> {
     Ok(Value::Null)
 }
 
-async fn bearer(ctx: ServerRouteRequestContext) -> Result<RouteAuthOutcome> {
+async fn bearer(ctx: RouteAuthContext) -> Result<RouteAuthOutcome> {
     Ok(match ctx.request.header("authorization") {
         Some("Bearer let-me-in") => RouteAuthOutcome::Authenticated(json!({ "caller": "partner" })),
         _ => RouteAuthOutcome::Unauthorized,
@@ -165,13 +162,13 @@ async fn bearer(ctx: ServerRouteRequestContext) -> Result<RouteAuthOutcome> {
 }
 
 #[route(GET, "/status")]
-async fn status(_ctx: ServerRouteContext) -> Result<Response> {
+async fn status(_ctx: RouteContext) -> Result<Response> {
     Ok(response::json(json!({ "status": "up" })))
 }
 
 /// The same path as [`status`], behind an authentication of its own.
 #[route(POST, "/status", auth = bearer)]
-async fn set_status(ctx: ServerRouteContext) -> Result<(StatusCode, String)> {
+async fn set_status(ctx: RouteContext) -> Result<(StatusCode, String)> {
     Ok((
         StatusCode::CREATED,
         format!(
@@ -183,11 +180,12 @@ async fn set_status(ctx: ServerRouteContext) -> Result<(StatusCode, String)> {
 }
 
 #[route(GET, "/status")]
-async fn status_again(_ctx: ServerRouteContext) -> Result<Response> {
+async fn status_again(_ctx: RouteContext) -> Result<Response> {
     Ok(response::text("again"))
 }
 
-const READ_WIDGETS: &str = "widgets:read";
+/// Declared once: the tool and the resource that list it register it.
+const READ_WIDGETS: McpPermission = McpPermission::new("widgets:read", "Read widgets").risk(McpRiskLevel::Low);
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct CountInput {
@@ -198,23 +196,23 @@ struct CountInput {
 ///
 /// Costs nothing.
 #[mcp_tool("widgets.count", permissions(READ_WIDGETS), risk = medium, confirmation_hint = "Counting is safe")]
-async fn count_widgets(ctx: McpExecutionContext, input: CountInput) -> Result<Value> {
+async fn count_widgets(ctx: McpContext, input: CountInput) -> Result<Value> {
     Ok(json!({ "shop": ctx.shop, "color": input.color, "count": 3 }))
 }
 
 #[mcp_tool("widgets.ping", description = "Says pong.")]
-async fn ping_widgets(_ctx: McpExecutionContext) -> Result<&'static str> {
+async fn ping_widgets(_ctx: McpContext) -> Result<&'static str> {
     Ok("pong")
 }
 
 /// How widgets work.
 #[mcp_resource("app://widgets/guide", name = "Widget guide", mime_type = "text/markdown", permissions(READ_WIDGETS), risk = low)]
-async fn widget_guide(ctx: McpExecutionContext) -> Result<String> {
+async fn widget_guide(ctx: McpContext) -> Result<String> {
     Ok(format!("# Widgets of {}", ctx.shop))
 }
 
 #[mcp_resource("app://widgets/raw", name = "Raw", description = "Stated in the attribute.")]
-async fn raw_widgets(_ctx: McpExecutionContext) -> Result<McpResourceContent> {
+async fn raw_widgets(_ctx: McpContext) -> Result<McpResourceContent> {
     Ok(McpResourceContent {
         text: "raw".to_string(),
         mime_type: Some("text/plain".to_string()),
@@ -232,31 +230,31 @@ struct WidgetsPage;
 #[admin_page("/widgets")]
 impl WidgetsPage {
     #[access]
-    async fn staff(ctx: AdminServerContext) -> Result<bool> {
+    async fn staff(ctx: AdminContext) -> Result<bool> {
         Ok(ctx.actor.id != "stranger")
     }
 
-    async fn manager(ctx: AdminServerContext) -> Result<bool> {
+    async fn manager(ctx: AdminContext) -> Result<bool> {
         Ok(ctx.actor.id == "manager")
     }
 
     #[loader]
-    async fn list_widgets(ctx: AdminServerContext) -> Result<Value> {
+    async fn list_widgets(ctx: AdminContext) -> Result<Value> {
         Ok(json!({ "widgets": [Self::label(&ctx.shop)] }))
     }
 
     #[loader("find")]
-    async fn find_widget(_ctx: AdminServerContext, input: RenameInput) -> Result<Value> {
+    async fn find_widget(_ctx: AdminContext, input: RenameInput) -> Result<Value> {
         Ok(json!({ "found": input.name }))
     }
 
     #[action(authorize = Self::manager)]
-    async fn rename_widget(ctx: AdminServerContext, input: RenameInput) -> Result<Value> {
+    async fn rename_widget(ctx: AdminContext, input: RenameInput) -> Result<Value> {
         Ok(json!({ "renamed": input.name, "by": ctx.actor.id }))
     }
 
     #[action]
-    async fn refresh(_ctx: AdminServerContext) -> Result<bool> {
+    async fn refresh(_ctx: AdminContext) -> Result<bool> {
         Ok(true)
     }
 
@@ -323,19 +321,15 @@ static APP: App = app! {
     routes: [status, set_status],
     mcp_tools: [count_widgets, ping_widgets],
     mcp_resources: [widget_guide, raw_widgets],
-    mcp: McpConfig::new().permission(
-        READ_WIDGETS,
-        McpPermissionDefinition::new("Read widgets").risk_level(McpRiskLevel::Low),
-    ),
-    crons: [CronEntry::new("0 2 * * *", nightly_cleanup::NAME).shops("all")],
-    worker: PartialWorkerConfig::new().concurrency(2),
+    crons: [Cron::new("0 2 * * *", nightly_cleanup::NAME).all_shops()],
+    worker: WorkerConfig::new().concurrency(2),
     on_error: report,
 };
 
 /// A setting read from the environment, which can be missing.
-fn concurrency(variable: &str) -> Result<PartialWorkerConfig> {
+fn concurrency(variable: &str) -> Result<WorkerConfig> {
     let value = std::env::var(variable).map_err(|_| openshop::anyhow!("{variable} is not set"))?;
-    Ok(PartialWorkerConfig::new().concurrency(value.parse()?))
+    Ok(WorkerConfig::new().concurrency(value.parse()?))
 }
 
 static UNSET: App = app! {
@@ -387,11 +381,16 @@ fn an_application_lists_what_it_is_made_of() {
         mcp.resources.keys().collect::<Vec<_>>(),
         ["app://widgets/guide", "app://widgets/raw"]
     );
-    assert_eq!(mcp.custom_permissions.keys().collect::<Vec<_>>(), [READ_WIDGETS]);
-    assert_eq!(
-        config.crons,
-        [CronEntry::new("0 2 * * *", "nightlyCleanup").shops("all")]
-    );
+    // The permission came with the capabilities that require it.
+    assert!(mcp.custom_permissions.is_empty());
+    assert_eq!(mcp.tools["widgets.count"].declared_permissions, [READ_WIDGETS]);
+    let registry = openshop::server::mcp::registry::build_mcp_registry(
+        Some(mcp),
+        &openshop::server::mcp::core::create_core_mcp_capabilities(),
+    )
+    .unwrap();
+    assert_eq!(registry.permissions[READ_WIDGETS.key].label, "Read widgets");
+    assert_eq!(config.crons, [Cron::new("0 2 * * *", "nightlyCleanup").all_shops()]);
     assert_eq!(config.worker.concurrency, Some(2));
     assert!(config.on_error.is_some());
 
@@ -488,21 +487,15 @@ fn a_block_is_registered_once() {
     );
     // While the methods of a path can come one at a time.
     let config = builder()
-        .proxy(
-            "/widgets",
-            ProxyDefinition::json().get(|_ctx| async { Ok(Value::Null) }),
-        )
-        .proxy(
-            "/widgets",
-            ProxyDefinition::json().post(|_ctx| async { Ok(Value::Null) }),
+        .proxy("/widgets", Proxy::json().get(|_ctx| async { Ok(Value::Null) }))
+        .proxy("/widgets", Proxy::json().post(|_ctx| async { Ok(Value::Null) }))
+        .route(
+            "/status",
+            Route::public().get(|_ctx| async { Ok(response::text("up")) }),
         )
         .route(
             "/status",
-            ServerRoute::public().get(|_ctx| async { Ok(response::text("up")) }),
-        )
-        .route(
-            "/status",
-            ServerRoute::authenticated(bearer).post(|_ctx| async { Ok(response::text("set")) }),
+            Route::authenticated(bearer).post(|_ctx| async { Ok(response::text("set")) }),
         )
         .build()
         .unwrap();
@@ -540,31 +533,31 @@ async fn a_flow_runs_with_its_typed_input() {
     let ctx = TestContext::new(APP.config().unwrap()).await.unwrap();
 
     let result = ctx.run_flow(greet::NAME, json!({ "name": "Ada" })).await.unwrap();
-    assert_eq!(result, RunFlowResult::Completed);
+    assert_eq!(result, RunOutcome::Completed);
     assert_eq!(seen("greet:"), ["greet:hello Ada"]);
 
     for input in [json!({}), json!({ "name": "" }), json!({ "name": 3 })] {
         let result = ctx.run_flow(greet::NAME, input).await.unwrap();
         assert!(matches!(
             result,
-            RunFlowResult::Failed { ref error, .. } if error.starts_with("Invalid input for flow \"greet\"")
+            RunOutcome::Failed { ref error, .. } if error.starts_with("Invalid input for flow \"greet\"")
         ));
     }
     assert_eq!(seen("greet:").len(), 1);
 
     let result = ctx.run_flow(nightly_cleanup::NAME, Value::Null).await.unwrap();
-    assert_eq!(result, RunFlowResult::Completed);
+    assert_eq!(result, RunOutcome::Completed);
     assert_eq!(seen("cleanup:"), [format!("cleanup:{}", ctx.shop)]);
 
     // An error of the function's own type fails the run.
     assert_eq!(
         ctx.run_flow(parse::NAME, json!("12")).await.unwrap(),
-        RunFlowResult::Completed
+        RunOutcome::Completed
     );
     let result = ctx.run_flow(parse::NAME, json!("twelve")).await.unwrap();
     assert!(matches!(
         result,
-        RunFlowResult::Failed { ref error, .. } if error.contains("invalid digit")
+        RunOutcome::Failed { ref error, .. } if error.contains("invalid digit")
     ));
     ctx.shutdown().await.unwrap();
 }
@@ -582,6 +575,9 @@ async fn a_webhook_handles_its_topics_with_a_typed_payload() {
         shopify_app: "default".to_string(),
         payload,
         api_version: "2026-04".to_string(),
+        db: ctx.db.clone(),
+        shopify: ctx.app.shopify_client("webhooks.myshopify.com", "default"),
+        connectors: ctx.app.connectors("webhooks.myshopify.com", "default"),
         app: ctx.app.clone(),
     };
 
@@ -686,20 +682,22 @@ async fn mcp_functions_carry_their_description_and_their_schema() {
     assert_eq!(widget_guide::URI, "app://widgets/guide");
     let ctx = TestContext::new(APP.config().unwrap()).await.unwrap();
     let mcp = ctx.app.config().mcp.clone().unwrap();
-    let execution = || McpExecutionContext {
-        app_handle: "default".to_string(),
+    let execution = || McpContext {
         shop: "mcp.myshopify.com".to_string(),
+        shopify_app: "default".to_string(),
         token_id: "token".to_string(),
-        permissions: vec![READ_WIDGETS.to_string()],
+        permissions: vec![READ_WIDGETS.key.to_string()],
         signal: CancellationToken::new(),
         db: ctx.db.clone(),
+        shopify: ctx.app.shopify_client("mcp.myshopify.com", "default"),
+        connectors: ctx.app.connectors("mcp.myshopify.com", "default"),
         app: ctx.app.clone(),
     };
     let arguments = |value: Value| -> JsonMap { value.as_object().cloned().unwrap_or_default() };
 
     let count = &mcp.tools["widgets.count"];
     assert_eq!(count.description, "Counts the widgets of a color.\n\nCosts nothing.");
-    assert_eq!(count.required_permissions, [READ_WIDGETS]);
+    assert_eq!(count.required_permissions, [READ_WIDGETS.key]);
     assert_eq!(count.risk_level, Some(McpRiskLevel::Medium));
     assert_eq!(count.confirmation_hint.as_deref(), Some("Counting is safe"));
     let schema = count.input_schema.as_ref().unwrap();
@@ -726,7 +724,7 @@ async fn mcp_functions_carry_their_description_and_their_schema() {
     assert_eq!(guide.name, "Widget guide");
     assert_eq!(guide.description.as_deref(), Some("How widgets work."));
     assert_eq!(guide.mime_type.as_deref(), Some("text/markdown"));
-    assert_eq!(guide.required_permissions, [READ_WIDGETS]);
+    assert_eq!(guide.required_permissions, [READ_WIDGETS.key]);
     assert_eq!(guide.risk_level, Some(McpRiskLevel::Low));
     assert_eq!(
         (guide.read)(execution()).await.unwrap(),
@@ -755,9 +753,9 @@ async fn an_admin_page_is_an_impl_block() {
         ["listWidgets", "find", "renameWidget", "refresh"]
     );
     let context = |actor: &str| {
-        create_admin_function_test_context(
+        admin_context(
             &ctx.app,
-            AdminFunctionTestOptions {
+            AdminTestOptions {
                 shop: ctx.shop.clone(),
                 actor_id: actor.to_string(),
                 ..Default::default()
@@ -813,11 +811,11 @@ async fn an_admin_page_is_an_impl_block() {
 
 #[test]
 fn a_function_is_its_configuration_struct() {
-    assert_eq!(VolumeDiscount::KEY, "volumeDiscount");
-    assert_eq!(HideExpress::KEY, "hideExpress");
+    assert_eq!(VolumeDiscount::NAME, "volumeDiscount");
+    assert_eq!(HideExpress::NAME, "hideExpress");
 
     let function = VolumeDiscount::definition();
-    assert_eq!(function.function_type, ShopifyFunctionType::Discount);
+    assert_eq!(function.function_type, FunctionType::Discount);
     assert_eq!(function.handle, "volume-discount");
     assert_eq!(function.label.as_deref(), Some("Volume discount"));
     assert_eq!(function.modes, Some(vec![DiscountMode::Automatic, DiscountMode::Code]));
@@ -867,7 +865,7 @@ fn a_function_is_its_configuration_struct() {
     );
 
     let hidden = HideExpress::definition();
-    assert_eq!(hidden.function_type, ShopifyFunctionType::DeliveryCustomization);
+    assert_eq!(hidden.function_type, FunctionType::DeliveryCustomization);
     assert!(hidden.config.is_empty() && hidden.modes.is_none());
     let owner = hidden.owner.as_ref().unwrap();
     assert!(matches!(&owner.title, FunctionTitle::Static(title) if title == "Hide express"));

@@ -62,9 +62,10 @@ declared in `ShopifyConfig::apps`. This boundary applies to installations, flow
 runs, provider configuration, cron overrides, Functions, and MCP tokens.
 
 An application table described by a `#[derive(Model)]` struct with a `shop`
-field is read and written through `Model::for_shop(db, shop)`, which limits
-every operation to that shop. Queries written with `sqlx` are not limited:
-application code is responsible for their shop filter.
+field is read and written through the rows of a shop, `Review::of(&ctx)` in a
+handler or `Review::for_shop(db, shop)`, which limit every operation to that
+shop. Queries written with `sqlx` are not limited: application code is
+responsible for their shop filter.
 
 ## Scaling boundaries
 

@@ -75,7 +75,8 @@ In multi-app mode, API keys and secrets come from the `shopify` setting of
 `app!`, usually with secrets read from your own environment variable names:
 
 ```rust,ignore
-use openshop::{App, Context, IndexMap, Result, ShopifyAppConfig, ShopifyConfig, app};
+use openshop::prelude::*;
+use openshop::{IndexMap, ShopifyAppConfig, ShopifyConfig};
 
 fn env(name: &str) -> Result<String> {
     std::env::var(name).with_context(|| format!("{name} is not set"))
@@ -117,17 +118,16 @@ variables read by this example. A setting of `app!` can fail with `?`: when a
 variable is not set, the command stops at startup with the error of the
 setting, here `RETAIL_SHOPIFY_API_SECRET is not set`.
 
-These variables are read while the configuration is built. `APP.run()` builds
+These variables are read while the configuration is built. `APP.main()` builds
 it when the command starts, after `dev` loaded `.env`:
 
 ```rust,ignore
-#[tokio::main]
-async fn main() -> openshop::Result<()> {
-    APP.run().await
+fn main() -> Result<()> {
+    APP.main()
 }
 ```
 
-A variable read before `APP.run()` is called, for example at the top of
+A variable read before `APP.main()` is called, for example at the top of
 `main`, does not see values that only exist in `.env`.
 
 ## Resolution priority

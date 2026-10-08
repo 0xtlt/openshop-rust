@@ -7,14 +7,14 @@ use openshop::response::{self, IntoResponse, Response, StatusCode};
 use openshop::server::http::parse_query;
 use openshop::testing::{TestContext, TestOptions};
 use openshop::{
-    FieldDef, IndexMap, OpenShopBuilder, OpenShopConfig, Provider, Result, RouteAuthOutcome, RouteShopInput,
-    ServerRoute, ServerRouteContext, ShopifyAppConfig, ShopifyConfig, Value, anyhow, json,
+    Field, IndexMap, OpenShopBuilder, OpenShopConfig, Provider, Result, Route, RouteAuthOutcome, RouteContext,
+    RouteShopInput, ShopifyAppConfig, ShopifyConfig, Value, anyhow, json,
 };
 use reqwest::{Method, RequestBuilder};
 
 const ENCRYPTION_KEY: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
-async fn open(ctx: ServerRouteContext) -> Result<Response> {
+async fn open(ctx: RouteContext) -> Result<Response> {
     Ok((
         StatusCode::CREATED,
         [("x-server-route", "open")],
@@ -23,12 +23,12 @@ async fn open(ctx: ServerRouteContext) -> Result<Response> {
         .into_response())
 }
 
-fn open_route() -> ServerRoute {
-    ServerRoute::public().get(open)
+fn open_route() -> Route {
+    Route::public().get(open)
 }
 
-fn authenticated_route() -> ServerRoute {
-    ServerRoute::authenticated(|ctx| async move {
+fn authenticated_route() -> Route {
+    Route::authenticated(|ctx| async move {
         let body: Value = ctx.request.json()?;
         Ok(match body["token"].as_str() {
             Some("valid") => RouteAuthOutcome::Authenticated(json!({ "subject": "provider-webhook" })),
@@ -51,8 +51,8 @@ fn shop_input(query: &IndexMap<String, String>) -> RouteShopInput {
 }
 
 /// Authenticates a shop, then reads a secret through its provider connector.
-fn provider_route() -> ServerRoute {
-    ServerRoute::authenticated(|ctx| async move {
+fn provider_route() -> Route {
+    Route::authenticated(|ctx| async move {
         let query = parse_query(ctx.request.uri.query());
         let Ok(shop_context) = ctx.for_shop(shop_input(&query)).await else {
             return Ok(RouteAuthOutcome::Unauthorized);
@@ -71,8 +71,8 @@ fn provider_route() -> ServerRoute {
 }
 
 /// Reports what `for_shop` resolves, or why it refuses.
-fn shop_context_route() -> ServerRoute {
-    ServerRoute::public().get(|ctx| async move {
+fn shop_context_route() -> Route {
+    Route::public().get(|ctx| async move {
         let query = parse_query(ctx.request.uri.query());
         Ok(match ctx.for_shop(shop_input(&query)).await {
             Ok(shop_context) => response::json(json!({
@@ -87,7 +87,7 @@ fn shop_context_route() -> ServerRoute {
 
 fn vault_provider() -> Provider {
     Provider::new("Vault")
-        .field("secret", FieldDef::password("Secret"))
+        .field("secret", Field::password("Secret"))
         .typed_method("reveal", |config, prefix: String| async move {
             let secret = config.get("secret").and_then(Value::as_str).unwrap_or_default();
             Ok(format!("{prefix}:{secret}"))
@@ -129,11 +129,11 @@ fn config() -> OpenShopConfig {
         .route("/orders/[id]", open_route())
         .route(
             "/orders/new",
-            ServerRoute::public().get(|_ctx| async move { Ok(response::json(json!({ "route": "new" }))) }),
+            Route::public().get(|_ctx| async move { Ok(response::json(json!({ "route": "new" }))) }),
         )
         .route(
             "/throws",
-            ServerRoute::public()
+            Route::public()
                 .get(|_ctx| async move { Err(anyhow!("route failure")) })
                 .post(|ctx| async move {
                     if ctx.request.body.is_empty() {
@@ -144,7 +144,7 @@ fn config() -> OpenShopConfig {
         )
         .route(
             "/auth-throws",
-            ServerRoute::authenticated(|ctx| async move {
+            Route::authenticated(|ctx| async move {
                 if ctx.request.header("x-panic").is_some() {
                     panic!("route authentication panic");
                 }
@@ -266,7 +266,7 @@ async fn returns_405_and_allow_for_a_method_without_a_handler() {
 
 #[tokio::test]
 async fn every_http_method_can_be_handled() {
-    let describe = |ctx: ServerRouteContext| async move {
+    let describe = |ctx: RouteContext| async move {
         let method = ctx.request.method.to_string();
         Ok((
             [("x-method", method.clone())],
@@ -277,7 +277,7 @@ async fn every_http_method_can_be_handled() {
     let config = OpenShopConfig::builder()
         .route(
             "/any",
-            ServerRoute::public()
+            Route::public()
                 .options(describe)
                 .delete(describe)
                 .patch(describe)
@@ -324,7 +324,7 @@ async fn handlers_receive_the_full_request() {
     let config = OpenShopConfig::builder()
         .route(
             "/inspect/:section",
-            ServerRoute::public().put(|ctx| async move {
+            Route::public().put(|ctx| async move {
                 let query = parse_query(ctx.request.uri.query());
                 Ok(response::json(json!({
                     "method": ctx.request.method.as_str(),
@@ -393,7 +393,7 @@ async fn auth_unauthorized_returns_401_and_an_auth_response_short_circuits() {
         .route("/authenticated", authenticated_route())
         .route(
             "/forbidden",
-            ServerRoute::authenticated(|ctx| async move {
+            Route::authenticated(|ctx| async move {
                 Ok(match ctx.request.header("x-api-key") {
                     Some("letmein") => RouteAuthOutcome::Authenticated(Value::Null),
                     Some(_) => RouteAuthOutcome::Response((StatusCode::FORBIDDEN, "Forbidden").into_response()),
@@ -617,7 +617,7 @@ async fn for_shop_defaults_to_the_only_configured_app() {
 fn rejects_routes_without_handlers_and_ambiguous_routes_when_the_config_is_built() {
     let error_of = |builder: OpenShopBuilder| builder.build().err().expect("invalid config").to_string();
 
-    let error = error_of(OpenShopConfig::builder().route("/missing-handler", ServerRoute::public()));
+    let error = error_of(OpenShopConfig::builder().route("/missing-handler", Route::public()));
     assert_eq!(
         error,
         "[openshop] Invalid server route /missing-handler: define at least one HTTP method"
@@ -625,7 +625,7 @@ fn rejects_routes_without_handlers_and_ambiguous_routes_when_the_config_is_built
 
     let error = error_of(OpenShopConfig::builder().route(
         "/missing-handler",
-        ServerRoute::authenticated(|_ctx| async move { Ok(RouteAuthOutcome::Unauthorized) }),
+        Route::authenticated(|_ctx| async move { Ok(RouteAuthOutcome::Unauthorized) }),
     ));
     assert!(error.contains("define at least one HTTP method"), "{error}");
 

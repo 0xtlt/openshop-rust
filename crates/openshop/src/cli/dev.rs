@@ -9,8 +9,8 @@ use crate::app::{OpenShop, OpenShopConfig};
 use crate::db::migrate::push_schema;
 use crate::engine::{Scheduler, Worker};
 use crate::runtime::RuntimeEnv;
-use crate::server::{ServerOptions, start_api_server};
-use crate::types::PartialWorkerConfig;
+use crate::server::{ServerOptions, listen};
+use crate::types::WorkerConfig;
 
 /// Starts the API, the admin UI, a worker and the scheduler together.
 ///
@@ -33,10 +33,10 @@ pub async fn start_dev(config: OpenShopConfig) -> Result<()> {
     // 2. API server + admin UI
     let ui = ui_source(&config);
     let app = OpenShop::new(config, pool, env)?;
-    let server = start_api_server(&app, port, ServerOptions::development().ui(ui)).await?;
+    let server = listen(&app, port, ServerOptions::development().ui(ui)).await?;
 
     // 3. Worker and scheduler run in-process
-    let worker = Worker::new(app.clone(), PartialWorkerConfig::default());
+    let worker = Worker::new(app.clone(), WorkerConfig::default());
     worker.start().await;
     let mut scheduler = Scheduler::start(&app)?;
 

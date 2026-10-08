@@ -15,6 +15,8 @@ use super::http::{header, json_error, json_response};
 use crate::app::OpenShop;
 use crate::engine::step::error_message;
 use crate::runtime::logger;
+use crate::server::connectors::Connectors;
+use crate::shopify::client::ShopifyClient;
 use crate::types::WebhookContext;
 
 /// Shopify sends `orders/create`; handlers may also be registered as `ORDERS_CREATE`.
@@ -58,10 +60,13 @@ async fn handle(State(app): State<OpenShop>, headers: HeaderMap, body: Bytes) ->
 
     let context = WebhookContext {
         topic: topic.clone(),
-        shop,
+        shop: shop.clone(),
         shopify_app: shopify_app.handle.clone(),
         payload,
         api_version,
+        db: app.db().clone(),
+        shopify: ShopifyClient::new(&app, &shop, &shopify_app.handle),
+        connectors: Connectors::for_shop(&app, &shop, &shopify_app.handle),
         app: app.clone(),
     };
     // Still return 200 on handler errors — don't let Shopify retry them.

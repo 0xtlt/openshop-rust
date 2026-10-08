@@ -11,7 +11,8 @@ follow the rules of the later sections for those.
 ## Typed Operations
 
 ```rust
-use openshop::{Result, ShopifyClient, graphql};
+use openshop::ShopifyClient;
+use openshop::prelude::*;
 
 pub async fn product_title(shopify: &ShopifyClient, id: &str) -> Result<String> {
     let data = shopify
@@ -28,7 +29,7 @@ pub async fn product_title(shopify: &ShopifyClient, id: &str) -> Result<String> 
             id = id
         ))
         .await?;
-    let product = data.product.ok_or_else(|| openshop::anyhow!("Product {id} not found"))?;
+    let product = data.product.ok_or_else(|| anyhow!("Product {id} not found"))?;
     Ok(product.title)
 }
 ```
@@ -53,7 +54,8 @@ Keep each operation in a `const` and name the operation. Call it through the
 shop's `ShopifyClient`:
 
 ```rust
-use openshop::{Result, ShopifyClient, Value, json};
+use openshop::ShopifyClient;
+use openshop::prelude::*;
 
 const GET_PRODUCT: &str = "#graphql
   query GetProduct($id: ID!) {
@@ -70,15 +72,16 @@ pub async fn product_title(shopify: &ShopifyClient, id: &str) -> Result<String> 
     let title = data
         .pointer("/product/title")
         .and_then(Value::as_str)
-        .ok_or_else(|| openshop::anyhow!("Product {id} not found"))?;
+        .ok_or_else(|| anyhow!("Product {id} not found"))?;
     Ok(title.to_string())
 }
 ```
 
 - `graphql(query, variables)` returns the `data` object of the response as a `serde_json::Value`. Pass `None` when the operation has no variables.
-- The demo app and the template start every query with a `#graphql` comment line. Keep it for consistency.
+- Start a query kept in a `const` with a `#graphql` comment line. Keep it for consistency.
 - A named operation (`query GetProduct`) lets a test recognize the request by its name.
-- In a flow, the client is `ctx.shopify`. In custom admin loaders and actions it is also `ctx.shopify`. In webhooks, proxy handlers, and server routes, create it with `ctx.app.shopify_client(&ctx.shop, &ctx.shopify_app).await?`.
+- The client is `ctx.shopify` in every context that belongs to a shop: a flow, a webhook, a proxy handler, an admin loader or action, an MCP tool or resource. In a server route, it is the `shopify` of what `ctx.for_shop("…").await?` returns. Creating a client reads nothing: the access token is read at the first request.
+- Keep `app.shopify_client(shop, shopify_app)` for code without a context of that shop. It is not `async` and returns no `Result`.
 
 ## Prefer Typed Responses
 
@@ -86,7 +89,8 @@ When more than one or two fields are read, describe the response with serde
 types and call `graphql_as::<T>()`. It deserializes the `data` object:
 
 ```rust
-use openshop::{Result, ShopifyClient, json};
+use openshop::ShopifyClient;
+use openshop::prelude::*;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Deserialize)]
@@ -106,8 +110,7 @@ pub async fn get_product(shopify: &ShopifyClient, id: &str) -> Result<Product> {
     let data: GetProductData = shopify
         .graphql_as(GET_PRODUCT, Some(json!({ "id": id })))
         .await?;
-    data.product
-        .ok_or_else(|| openshop::anyhow!("Product {id} not found"))
+    data.product.ok_or_else(|| anyhow!("Product {id} not found"))
 }
 ```
 
@@ -139,11 +142,11 @@ If a response does not have the expected shape:
 Handle absence explicitly after the response is typed:
 
 ```rust
-let product = data.product.ok_or_else(|| openshop::anyhow!("Product not found"))?;
+let product = data.product.ok_or_else(|| anyhow!("Product not found"))?;
 ```
 
 For a small read through `Value`, use `pointer()` with an explicit default or
-error, as the template does, rather than chained indexing.
+error rather than chained indexing.
 
 Use explicit domain types for transformed outputs, not for forcing raw GraphQL data:
 
@@ -164,20 +167,13 @@ against a scripted response. `TestContext` routes Shopify calls to a
 `MockTransport`:
 
 ```rust
-use openshop::testing::{MockTransport, TestContext, TestOptions};
-use openshop::{OpenShopConfig, json};
+use openshop::json;
+use openshop::testing::{MockTransport, TestContext};
 
-#[tokio::test]
-async fn reads_a_product() {
-    let ctx = TestContext::with_options(
-        OpenShopConfig::builder().build().unwrap(),
-        TestOptions {
-            access_token: Some("test-access-token".to_string()),
-            ..Default::default()
-        },
-    )
-    .await
-    .unwrap();
+use my_app::APP;
+
+#[openshop::test(APP)]
+async fn reads_a_product(ctx: &TestContext) {
     ctx.transport.respond_with(|request| {
         assert!(request.body["query"].as_str().unwrap_or_default().contains("GetProduct"));
         assert_eq!(request.body["variables"]["id"], "gid://shopify/Product/1");
@@ -191,17 +187,16 @@ async fn reads_a_product() {
         ))
     });
 
-    let shopify = ctx.app.shopify_client(&ctx.shop, "default").await.unwrap();
+    let shopify = ctx.app.shopify_client(&ctx.shop, "default");
     let product = get_product(&shopify, "gid://shopify/Product/1").await.unwrap();
 
     assert_eq!(product.title, "Test product");
     assert_eq!(product.total_inventory, Some(12));
     assert_eq!(ctx.transport.requests().len(), 1);
-    ctx.shutdown().await.unwrap();
 }
 ```
 
-- Set `access_token` in `TestOptions`; without it the shop is not installed and `graphql()` fails before sending anything.
+- `#[openshop::test(APP)]` installs the shop of the test. A context started by hand needs `TestOptions::installed()`: without an access token the shop is not installed and `graphql()` fails before sending anything.
 - The responder receives the outbound request. `request.body["query"]` and `request.body["variables"]` are what the client sent.
 - The response body must have the Shopify envelope: `{ "data": … }` or `{ "errors": [{ "message": … }] }`.
 - A transport without a responder answers `404 not mocked`. `respond_json(body)` answers every request with the same body.
@@ -213,7 +208,7 @@ async fn reads_a_product() {
 
 When changing GraphQL support in `crates/openshop`:
 - `graphql!` is `crates/openshop-macros`; the schema format, the checks and the generated types are `crates/openshop-graphql`, tested against the bundled schema in `crates/openshop-graphql/tests/analyze.rs` and end to end in `crates/openshop/tests/graphql_typed.rs`. When `SHOPIFY_API_VERSION` changes, download the bundled schema again with `openshop codegen --api-version=<version> --out=crates/openshop-graphql/schema/admin-<version>.schema.json` and update the path in `schema.rs`.
-- The client lives in `crates/openshop/src/shopify/client.rs`. `SHOPIFY_API_VERSION` is the default Admin API version; `create_shopify_client(app, shop, shopify_app, Some(version))` selects another one.
+- The client lives in `crates/openshop/src/shopify/client.rs`. `SHOPIFY_API_VERSION` is the default Admin API version; `ShopifyClient::new(app, shop, shopify_app).with_api_version(version)` selects another one.
 - Send every Shopify request through the `HttpTransport` trait (`crates/openshop/src/runtime/transport.rs`) so tests can replace it with `MockTransport`.
 - The error messages of `graphql()` are the same as in the TypeScript implementation. Keep them, or document the change in `docs/src/reference/differences.md`.
 - Update `docs/src`, `apps/demo`, and `crates/openshop-cli/templates/minimal` when user-facing usage changes.

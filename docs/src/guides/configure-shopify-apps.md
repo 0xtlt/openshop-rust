@@ -27,11 +27,12 @@ credentials and tunnel URL when you run `shopify app dev`.
 ### Several Shopify apps
 
 Link a TOML file for each Shopify app with Shopify CLI, then register the files
-under stable handles where the application is declared. Add the `use` line and
-the `shopify` function, and set the `shopify` setting of `app!`:
+under stable handles where the application is declared. Add the second `use`
+line and the `shopify` function, and set the `shopify` setting of `app!`:
 
 ```rust,ignore
-use openshop::{Context, IndexMap, Result, ShopifyAppConfig, ShopifyConfig};
+use openshop::prelude::*;
+use openshop::{IndexMap, ShopifyAppConfig, ShopifyConfig};
 
 fn shopify() -> Result<ShopifyConfig> {
     let secret = |name: &str| std::env::var(name).with_context(|| format!("{name} is not set"));
@@ -70,7 +71,7 @@ fail with `?`: when a secret is missing, the command stops at startup with
 `SHOPIFY_RETAIL_API_SECRET is not set`.
 
 During development the secrets can live in `.env`: the settings of `app!` are
-evaluated when `APP.run()` builds the configuration, and `dev` loads `.env`
+evaluated when `APP.main()` builds the configuration, and `dev` loads `.env`
 before that. The other commands never load `.env`: export the secrets in the
 environment of `start`, `worker`, and `migrate`.
 

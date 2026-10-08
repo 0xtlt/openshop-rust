@@ -1,24 +1,25 @@
-mod common;
-
+use openshop::testing::TestContext;
 use openshop::{Value, json};
+use openshop_demo::APP;
+use openshop_demo::admin::reviews::ReviewsPage;
 
-#[tokio::test]
-async fn lists_the_reviews_page_in_navigation() {
-    let ctx = common::context().await;
+#[openshop::test(APP)]
+async fn lists_the_reviews_page_in_navigation(ctx: &TestContext) {
     let body: Value = ctx.get("/api/pages/custom").send().await.unwrap().json().await.unwrap();
 
-    assert_eq!(body["navigation"], json!([{ "label": "Reviews", "path": "/reviews" }]));
+    // The page declares its own entry: `#[admin_page("/reviews", nav = "Reviews")]`.
+    assert_eq!(
+        body["navigation"],
+        json!([{ "label": "Reviews", "path": ReviewsPage::PATH }])
+    );
     assert_eq!(
         body["pages"],
         json!([{ "id": "reviews", "path": "/reviews", "allowed": true }])
     );
-    ctx.shutdown().await.unwrap();
 }
 
-#[tokio::test]
-async fn calls_the_reviews_loader_and_action() {
-    let ctx = common::context().await;
-
+#[openshop::test(APP)]
+async fn calls_the_reviews_loader_and_action(ctx: &TestContext) {
     let listed: Value = ctx
         .post("/api/pages/custom/reviews/_rpc/loader/listReviews")
         .json(&json!({ "input": null }))
@@ -50,5 +51,4 @@ async fn calls_the_reviews_loader_and_action() {
         .unwrap();
     assert_eq!(rejected.status(), 422);
     assert_eq!(rejected.json::<Value>().await.unwrap()["code"], "INVALID_INPUT");
-    ctx.shutdown().await.unwrap();
 }

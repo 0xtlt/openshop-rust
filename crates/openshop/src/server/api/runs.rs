@@ -13,7 +13,7 @@ use super::run_logs::{RunLogOptions, create_log_export_response, get_filtered_ru
 use crate::app::OpenShop;
 use crate::db::schema::{FlowRun, StepResult};
 use crate::engine::abort::cancel_run;
-use crate::engine::dispatch::DispatchFlowParams;
+use crate::engine::dispatch::DispatchOptions;
 use crate::engine::errors::FlowConcurrencyError;
 use crate::runtime::time::parse_date;
 use crate::server::http::{ApiResult, json_error, json_object_body, json_response, parse_query};
@@ -183,7 +183,7 @@ async fn run_flow(
 
     let dispatched = app
         .dispatch_flow(
-            DispatchFlowParams::new(name, session.shop.clone())
+            DispatchOptions::new(name, session.shop.clone())
                 .input(input)
                 .shopify_app(session.shopify_app.clone()),
         )

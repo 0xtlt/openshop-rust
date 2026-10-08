@@ -8,7 +8,7 @@ and are recovered with `downcast_ref`.
 
 | Error | Fields | Message | Meaning | Recovery |
 | --- | --- | --- | --- | --- |
-| `FlowConcurrencyError` | `flow_name`, `shop`, `existing_run_id` | `Flow "<flow>" is already running for shop "<shop>" (run #<id>)` | A `pending`, `running`, or `sleeping` run already exists for the same app, shop, and flow while concurrency is `Reject`. | Reuse or wait for the existing run, or opt into `Concurrency::Allow` when parallel execution is safe. |
+| `FlowConcurrencyError` | `flow_name`, `shop`, `existing_run_id` | `Flow "<flow>" is already running for shop "<shop>" (run #<id>)` | A `pending`, `running`, or `sleeping` run already exists for the same app, shop, and flow while concurrency is `reject`, the default. | Reuse or wait for the existing run, or opt into `#[flow(concurrency = allow)]` when parallel execution is safe. |
 | `StepTimeoutError` | `step_name`, `timeout_ms` | `Step "<step>" timed out after <n>ms` | A step exceeded its effective timeout. | Shorten the operation or increase the step timeout. |
 | `FlowTimeoutError` | `flow_name`, `timeout_ms` | `Flow "<flow>" timed out after <n>ms` | An attempt exceeded the flow's `timeout`. | Increase `timeout` or split the job. |
 | `FlowCanceledError` | — | `Flow was canceled` | The run was canceled and its signal fired. | Stop external work and propagate the error. |
@@ -17,11 +17,14 @@ and are recovered with `downcast_ref`.
 All five are exported from the crate root.
 
 ```rust,ignore
-use openshop::{DispatchFlowParams, FlowConcurrencyError, OpenShop, Result};
+use openshop::FlowConcurrencyError;
+use openshop::prelude::*;
+
+use crate::flows::sync_orders::{SyncOrdersInput, sync_orders};
 
 /// Queues a sync, or returns the ID of the run that is already active.
-async fn queue_sync(app: &OpenShop, shop: &str) -> Result<String> {
-    match app.dispatch_flow(DispatchFlowParams::new("syncOrders", shop)).await {
+async fn queue_sync(ctx: &impl ShopScope) -> Result<String> {
+    match sync_orders::dispatch(ctx, SyncOrdersInput { limit: 50 }).await {
         Ok(queued) => Ok(queued.run_id.to_string()),
         Err(error) => match error.downcast_ref::<FlowConcurrencyError>() {
             Some(conflict) => Ok(conflict.existing_run_id.clone()),
@@ -31,10 +34,17 @@ async fn queue_sync(app: &OpenShop, shop: &str) -> Result<String> {
 }
 ```
 
+A dispatch returns a `QueuedRun`: the `run_id` of the queued run and its
+`status`, `pending`. `app.dispatch_flow(DispatchOptions::new(…))` returns the
+same value and fails with the same error.
+
 Normal run states are `pending`, `running`, `sleeping`, `completed`, `failed`,
-and `canceled`. A worker lease loss (`RunFlowResult::LeaseLost`) is an
-execution result used to prevent an outdated worker from committing over a
-newer lease; it is not stored as a run state.
+and `canceled`. Executing a run, as a worker does and as `ctx.run_flow(…)`
+does in a test, gives a `RunOutcome`: `Completed`, `Sleeping { resume_at }`,
+`Failed { error, will_retry }`, `Canceled`, or `LeaseLost`. A flow that fails
+is the outcome `Failed`, not an `Err`. A worker lease loss
+(`RunOutcome::LeaseLost`) is an execution result used to prevent an outdated
+worker from committing over a newer lease; it is not stored as a run state.
 
 The `error` column of a failed run or step holds the error's full context
 chain, outermost first, such as `while syncing: connection refused`. Other
@@ -62,11 +72,27 @@ for a failure that is safe to show to the merchant.
 
 See [Custom admin pages](custom-admin-pages.md#authorization-and-errors).
 
+## Request input errors
+
+`InvalidInput` is the error of a request that does not fit the typed input of
+a `#[proxy]` or `#[route]` function: the second argument of the function, read
+from the query string or from the JSON body. It holds the reason as its only
+field, and its message is `Invalid input: <reason>`. The function does not
+run, and the request is answered `422` with
+`{ "error": "Invalid input: <reason>" }`. It is exported from the crate root.
+
+A proxy or route function answers the same status and body by returning the
+error itself: `bail!(InvalidInput("rating is 1 to 5".into()))`.
+See [Proxy routes](proxy-routes.md#typed-input) and
+[Public server routes](server-routes.md#typed-input).
+
 ## Configuration errors
 
-`APP.config()`, which `APP.run()` calls, and `OpenShop::new` return an error
-whose message starts with `[openshop]`, such as
-`[openshop] Invalid config: flows.syncOrders.timeout must be a positive number`.
+`APP.config()`, which `APP.main()` and `APP.run()` call, and `OpenShop::new`
+return an error whose message starts with `[openshop]`, such as
+`[openshop] Invalid config: flows.syncOrders.timeout must be a positive number`
+or
+`[openshop] Invalid config: crons[0].input is not an input of flow "syncOrders": …`.
 With the standard `main`, the process prints the error and exits with a
 non-zero status before serving anything. See
 [Runtime validation](configuration.md#runtime-validation).
@@ -82,7 +108,7 @@ non-zero status before serving anything. See
 | `405` | Server route called with a method it does not declare. |
 | `409` | State conflict such as a revoked MCP token mutation. |
 | `413` | Request body exceeds the accepted limit. |
-| `422` | Custom admin function input failed validation. |
+| `422` | Custom admin function input failed validation; a request does not fit the typed input of a proxy or server route function. |
 | `500` | Handler, provider, Shopify, database, or unexpected runtime failure. |
 
 Error bodies generally contain an `error` message. MCP protocol failures use a
@@ -97,7 +123,7 @@ Set the `on_error` setting of `app!` for centralized reporting:
 ```rust,ignore
 use std::sync::Arc;
 
-use openshop::{App, ErrorContext, app};
+use openshop::prelude::*;
 
 use flows::sync_orders::sync_orders;
 

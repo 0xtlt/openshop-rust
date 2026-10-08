@@ -8,15 +8,13 @@ use indexmap::IndexMap;
 use serde_json::{Value, json};
 
 use super::registry::core_mcp_permissions;
-use crate::engine::dispatch::DispatchFlowParams;
+use crate::engine::dispatch::DispatchOptions;
 use crate::runtime::OutboundRequest;
 use crate::runtime::time::to_iso;
 use crate::server::api::run_logs::{RunLogOptions, get_filtered_run_logs};
 use crate::server::shop_domain::normalize_shop_domain;
 use crate::shopify::is_api_version;
-use crate::types::{
-    JsonMap, McpExecutionContext, McpResourceContent, McpResourceDefinition, McpRiskLevel, McpToolDefinition,
-};
+use crate::types::{JsonMap, McpContext, McpResource, McpResourceContent, McpRiskLevel, McpTool};
 
 #[derive(sqlx::FromRow)]
 struct RecentRun {
@@ -28,8 +26,8 @@ struct RecentRun {
 }
 
 pub struct CoreCapabilities {
-    pub tools: IndexMap<String, McpToolDefinition>,
-    pub resources: IndexMap<String, McpResourceDefinition>,
+    pub tools: IndexMap<String, McpTool>,
+    pub resources: IndexMap<String, McpResource>,
 }
 
 fn string_input<'a>(input: &'a JsonMap, key: &str) -> Option<&'a str> {
@@ -57,13 +55,13 @@ fn number_input(input: &JsonMap, key: &str, fallback: usize, max: usize) -> usiz
     }
 }
 
-async fn assert_run_visible(ctx: &McpExecutionContext, run_id: &str) -> Result<()> {
+async fn assert_run_visible(ctx: &McpContext, run_id: &str) -> Result<()> {
     let visible = match uuid::Uuid::parse_str(run_id) {
         Ok(run_id) => sqlx::query_as::<_, (uuid::Uuid,)>(
             "SELECT id FROM flow_runs WHERE id = $1 AND app_handle = $2 AND shop = $3 LIMIT 1",
         )
         .bind(run_id)
-        .bind(&ctx.app_handle)
+        .bind(&ctx.shopify_app)
         .bind(&ctx.shop)
         .fetch_optional(&ctx.db)
         .await?
@@ -112,13 +110,13 @@ fn api_version_input(input: &JsonMap) -> Result<String> {
     Ok(value)
 }
 
-async fn list_installed_shops(ctx: &McpExecutionContext) -> Result<Value> {
+async fn list_installed_shops(ctx: &McpContext) -> Result<Value> {
     let rows: Vec<(String, Option<String>, DateTime<Utc>)> = sqlx::query_as(
         "SELECT shop, scopes, installed_at FROM installations \
          WHERE app_handle = $1 AND access_token IS NOT NULL AND uninstalled_at IS NULL \
          ORDER BY shop ASC",
     )
-    .bind(&ctx.app_handle)
+    .bind(&ctx.shopify_app)
     .fetch_all(&ctx.db)
     .await?;
 
@@ -129,7 +127,7 @@ async fn list_installed_shops(ctx: &McpExecutionContext) -> Result<Value> {
     Ok(json!({ "shops": shops }))
 }
 
-async fn run_admin_graphql(ctx: McpExecutionContext, input: JsonMap) -> Result<Value> {
+async fn run_admin_graphql(ctx: McpContext, input: JsonMap) -> Result<Value> {
     let Some(shop) = string_input(&input, "shop").and_then(normalize_shop_domain) else {
         bail!("shop must be a myshopify.com domain");
     };
@@ -144,14 +142,14 @@ async fn run_admin_graphql(ctx: McpExecutionContext, input: JsonMap) -> Result<V
          WHERE app_handle = $1 AND shop = $2 AND access_token IS NOT NULL AND uninstalled_at IS NULL \
          LIMIT 1",
     )
-    .bind(&ctx.app_handle)
+    .bind(&ctx.shopify_app)
     .bind(&shop)
     .fetch_optional(&ctx.db)
     .await?;
 
     let stored = installation.and_then(|(token,)| token);
     let Some(access_token) = ctx.app.crypto().decrypt_string(stored.as_deref())? else {
-        bail!("Shop \"{shop}\" is not installed for app \"{}\"", ctx.app_handle);
+        bail!("Shop \"{shop}\" is not installed for app \"{}\"", ctx.shopify_app);
     };
 
     let response = ctx
@@ -181,7 +179,7 @@ async fn run_admin_graphql(ctx: McpExecutionContext, input: JsonMap) -> Result<V
     Ok(structured_result(Value::Object(result)))
 }
 
-async fn search_logs(ctx: McpExecutionContext, input: JsonMap) -> Result<Value> {
+async fn search_logs(ctx: McpContext, input: JsonMap) -> Result<Value> {
     let Some(run_id) = string_input(&input, "runId") else {
         bail!("runId is required");
     };
@@ -206,7 +204,7 @@ async fn search_logs(ctx: McpExecutionContext, input: JsonMap) -> Result<Value> 
     Ok(structured_result(value))
 }
 
-fn list_flows(ctx: &McpExecutionContext) -> Value {
+fn list_flows(ctx: &McpContext) -> Value {
     let config = ctx.app.config();
     let flows: Vec<Value> = config
         .flows
@@ -228,7 +226,7 @@ fn list_flows(ctx: &McpExecutionContext) -> Value {
     json!({ "flows": flows })
 }
 
-async fn run_flow_tool(ctx: McpExecutionContext, input: JsonMap) -> Result<Value> {
+async fn run_flow_tool(ctx: McpContext, input: JsonMap) -> Result<Value> {
     let Some(flow) = string_input(&input, "flow") else {
         bail!("flow is required");
     };
@@ -238,9 +236,9 @@ async fn run_flow_tool(ctx: McpExecutionContext, input: JsonMap) -> Result<Value
     let result = ctx
         .app
         .dispatch_flow(
-            DispatchFlowParams::new(flow, ctx.shop.clone())
+            DispatchOptions::new(flow, ctx.shop.clone())
                 .input(object_input(&input, "input"))
-                .shopify_app(ctx.app_handle.clone()),
+                .shopify_app(ctx.shopify_app.clone()),
         )
         .await?;
     Ok(structured_result(serde_json::to_value(result)?))
@@ -309,14 +307,14 @@ pub(crate) async fn set_cron_enabled(
     Ok(())
 }
 
-async fn set_cron_enabled_tool(ctx: McpExecutionContext, input: JsonMap) -> Result<Value> {
+async fn set_cron_enabled_tool(ctx: McpContext, input: JsonMap) -> Result<Value> {
     let Some(key) = string_input(&input, "key") else {
         bail!("key is required");
     };
     let Some(enabled) = boolean_input(&input, "enabled") else {
         bail!("enabled is required");
     };
-    set_cron_enabled(&ctx.app, &ctx.app_handle, &ctx.shop, key, enabled).await?;
+    set_cron_enabled(&ctx.app, &ctx.shopify_app, &ctx.shop, key, enabled).await?;
     Ok(structured_result(json!({ "ok": true, "key": key, "enabled": enabled })))
 }
 
@@ -347,14 +345,14 @@ fn tool<F, Fut>(
     risk_level: McpRiskLevel,
     input_schema: Value,
     run: F,
-) -> McpToolDefinition
+) -> McpTool
 where
-    F: Fn(McpExecutionContext, JsonMap) -> Fut + Send + Sync + 'static,
+    F: Fn(McpContext, JsonMap) -> Fut + Send + Sync + 'static,
     Fut: Future<Output = Result<Value>> + Send + 'static,
 {
-    McpToolDefinition::new(description, run)
-        .required_permissions(permissions.iter().copied())
-        .risk_level(risk_level)
+    McpTool::new(description, run)
+        .permissions(permissions.iter().copied())
+        .risk(risk_level)
         .input_schema(input_schema)
 }
 
@@ -453,7 +451,7 @@ pub fn create_core_mcp_capabilities() -> CoreCapabilities {
             McpRiskLevel::Low,
             empty_schema(),
             |ctx, _input| async move {
-                let crons = cron_items(&ctx.app, &ctx.app_handle, &ctx.shop, true).await?;
+                let crons = cron_items(&ctx.app, &ctx.shopify_app, &ctx.shop, true).await?;
                 Ok(structured_result(json!({ "crons": crons })))
             },
         ),
@@ -483,7 +481,7 @@ pub fn create_core_mcp_capabilities() -> CoreCapabilities {
 
     resources.insert(
         "openshop://docs/log-search".to_string(),
-        McpResourceDefinition::new("Log search guide", |_ctx| async move {
+        McpResource::new("Log search guide", |_ctx| async move {
             Ok(McpResourceContent::from(
                 [
                     "# OpenShop log search",
@@ -502,12 +500,12 @@ pub fn create_core_mcp_capabilities() -> CoreCapabilities {
         })
         .description("How to search OpenShop logs through MCP.")
         .mime_type("text/markdown")
-        .required_permissions(["read_logs"]),
+        .permissions(["read_logs"]),
     );
 
     resources.insert(
         "openshop://permissions".to_string(),
-        McpResourceDefinition::new("MCP permission catalog", |ctx| async move {
+        McpResource::new("MCP permission catalog", |ctx| async move {
             let core: JsonMap = core_mcp_permissions()
                 .into_iter()
                 .map(|(key, permission)| {
@@ -527,7 +525,7 @@ pub fn create_core_mcp_capabilities() -> CoreCapabilities {
                 .config()
                 .mcp
                 .as_ref()
-                .map(|mcp| serde_json::to_value(&mcp.custom_permissions))
+                .map(|mcp| serde_json::to_value(mcp.permissions()))
                 .transpose()?
                 .unwrap_or_else(|| json!({}));
             Ok(json_resource(json!({ "core": core, "custom": custom })))
@@ -538,7 +536,7 @@ pub fn create_core_mcp_capabilities() -> CoreCapabilities {
 
     resources.insert(
         "openshop://tools/openshop.logs.search".to_string(),
-        McpResourceDefinition::new("openshop.logs.search reference", |_ctx| async move {
+        McpResource::new("openshop.logs.search reference", |_ctx| async move {
             Ok(json_resource(json!({
                 "name": "openshop.logs.search",
                 "description": LOGS_SEARCH_DESCRIPTION,
@@ -548,17 +546,17 @@ pub fn create_core_mcp_capabilities() -> CoreCapabilities {
         })
         .description("Tool reference for OpenShop log search.")
         .mime_type("application/json")
-        .required_permissions(["read_logs"]),
+        .permissions(["read_logs"]),
     );
 
     resources.insert(
         "openshop://runs/recent".to_string(),
-        McpResourceDefinition::new("Recent flow runs", |ctx| async move {
+        McpResource::new("Recent flow runs", |ctx| async move {
             let rows: Vec<RecentRun> = sqlx::query_as(
                 "SELECT id, flow_name, status, created_at, completed_at FROM flow_runs \
                  WHERE app_handle = $1 AND shop = $2 ORDER BY created_at DESC LIMIT 20",
             )
-            .bind(&ctx.app_handle)
+            .bind(&ctx.shopify_app)
             .bind(&ctx.shop)
             .fetch_all(&ctx.db)
             .await
@@ -580,7 +578,7 @@ pub fn create_core_mcp_capabilities() -> CoreCapabilities {
         })
         .description("Recent flow runs for the authenticated shop.")
         .mime_type("application/json")
-        .required_permissions(["read_flows"]),
+        .permissions(["read_flows"]),
     );
 
     CoreCapabilities { tools, resources }

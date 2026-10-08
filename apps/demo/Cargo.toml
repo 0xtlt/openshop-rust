@@ -9,9 +9,9 @@ publish = false
 
 [dependencies]
 openshop.workspace = true
-schemars.workspace = true
 serde.workspace = true
-tokio.workspace = true
 
 [dev-dependencies]
 openshop = { workspace = true, features = ["testing"] }
+# For `examples/preview.rs`, which starts the server, a worker and the scheduler by hand.
+tokio.workspace = true

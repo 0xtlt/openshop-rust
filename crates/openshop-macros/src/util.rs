@@ -52,6 +52,25 @@ pub fn camel_case(name: &str) -> String {
     camel
 }
 
+/// `VolumeDiscount` → `volumeDiscount`: the name a struct declares when none is stated.
+pub fn lower_initial(name: &str) -> String {
+    let mut characters = name.chars();
+    match characters.next() {
+        Some(first) => first.to_lowercase().chain(characters).collect(),
+        None => String::new(),
+    }
+}
+
+/// `batch_size` → `Batch size`: the label of a field that states none.
+pub fn humanize(name: &str) -> String {
+    let words = name.replace('_', " ");
+    let mut characters = words.trim().chars();
+    match characters.next() {
+        Some(first) => first.to_uppercase().chain(characters).collect(),
+        None => String::new(),
+    }
+}
+
 /// The text of the documentation comments, as one paragraph per blank line.
 pub fn doc_text(attributes: &[Attribute]) -> String {
     let lines: Vec<String> = attributes

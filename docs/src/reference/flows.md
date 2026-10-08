@@ -8,11 +8,11 @@ Flows are background jobs dispatched to an OpenShop worker. A flow is an
 ```rust,ignore
 use std::time::Duration;
 
-use openshop::{Concurrency, FlowContext, PartialRetryPolicy, Result, flow, json};
-use schemars::JsonSchema;
+use openshop::prelude::*;
 use serde::{Deserialize, Serialize};
 
-#[derive(Deserialize, JsonSchema)]
+#[input]
+#[derive(Debug)]
 pub struct SyncOrdersInput {
     #[schemars(range(min = 1))]
     pub limit: u32,
@@ -28,13 +28,13 @@ struct Batch {
     "syncOrders",
     timeout = Duration::from_secs(60),
     step_timeout = Duration::from_secs(15),
-    concurrency = Concurrency::Reject,
-    retry_policy = PartialRetryPolicy::new().max_attempts(3)
+    concurrency = reject,
+    retry_policy = RetryPolicy::new().max_attempts(3)
 )]
 pub async fn sync_orders(ctx: FlowContext, input: SyncOrdersInput) -> Result<()> {
     let batch: Batch = ctx
         .step
-        .run("prepare-batch", || async {
+        .run("prepare-batch", async || {
             Ok(Batch {
                 requested: input.limit,
                 prepared_at: openshop::chrono::Utc::now().to_rfc3339(),
@@ -42,9 +42,9 @@ pub async fn sync_orders(ctx: FlowContext, input: SyncOrdersInput) -> Result<()>
         })
         .await?;
 
-    ctx.logger.info(
-        json!({ "requested": batch.requested, "preparedAt": batch.prepared_at }),
+    ctx.logger.info_with(
         "Order batch prepared",
+        json!({ "requested": batch.requested, "preparedAt": batch.prepared_at }),
     );
     Ok(())
 }
@@ -62,29 +62,63 @@ cannot be generic.
 | Option | Type | Default | Behavior |
 | --- | --- | --- | --- |
 | `"syncOrders"`, before the other options | String literal | The name of the function in camel case: `sync_orders` is `syncOrders` | Name of the flow: the key used by dispatch, crons, runs, and logs. |
-| Second argument of the function | `T: Deserialize + JsonSchema` | None | The [input](#input) of a run, validated in the worker before the function is called. Invalid input fails the run. |
+| Second argument of the function | A type marked [`#[input]`](#input) | None | The [input](#input) of a run, validated in the worker before the function is called. Invalid input fails the run. |
 | `timeout = …` | Positive `Duration` | None | Per-attempt execution timeout; also anchors the retry deadline at dispatch time. |
 | `step_timeout = …` | Positive `Duration` | None | Default timeout for every step. |
-| `concurrency = …` | `Concurrency::Reject` or `Concurrency::Allow` | `Reject` | Controls overlapping active runs for the same app, shop, and flow. |
-| `retry_policy = …` | `PartialRetryPolicy` | App policy | Overrides the app-level policy. |
+| `concurrency = …` | `reject` or `allow`, as a word. An expression such as `Concurrency::Allow` works as well. | `reject` | Controls overlapping active runs for the same app, shop, and flow. |
+| `retry_policy = …` | `RetryPolicy` | App policy | Overrides the app-level policy. |
 
 The function stays an ordinary function. The attribute adds a type of the same
 name, which is what `flows` lists, with the name of the flow as the constant
-`sync_orders::NAME`. Because of that type, do not re-export the function next
+`sync_orders::NAME` and with [`sync_orders::dispatch`](#dispatch), which
+queues a run. Because of that type, do not re-export the function next
 to a module of the same name (`pub use sync_orders::sync_orders;` beside
 `mod sync_orders;` does not compile): import it where the application is
 declared.
 
-`app.dispatch_flow(…)` returns `DispatchFlowResult { run_id, status: "pending" }`.
-Its `delay_ms` and `retry_policy` options override the flow and app values for
-that run. See [`app.dispatch_flow`](sdk.md#appdispatch_flowparams).
-
 ## Input
 
-The type of the second argument, `T`, gives the flow a JSON Schema, derived
-with `schemars`. In the worker, the dispatched value must satisfy that schema
-and deserialize into `T`; otherwise the run fails with
-`Invalid input for flow "<key>": <summary>`, for example
+The second argument of the function is the input of a run. Its type is marked
+`#[input]`:
+
+```rust,ignore
+use openshop::prelude::*;
+
+#[input]
+#[derive(Debug)]
+pub struct CountVariantsInput {
+    #[schemars(length(min = 1))]
+    pub product_id: String,
+}
+
+#[flow]
+pub async fn count_variants(ctx: FlowContext, input: CountVariantsInput) -> Result<()> {
+    ctx.logger.info(format!("Counting the variants of {}", input.product_id));
+    Ok(())
+}
+```
+
+`#[input]` derives `Deserialize`, `Serialize` and `JsonSchema` for the type,
+without `serde` or `schemars` among the dependencies of the application.
+
+- Fields are named in camel case outside Rust: `product_id` is `productId` in
+  the dispatched JSON and in the schema. A `#[serde(rename_all = "…")]` on the
+  type states another rule.
+- `#[serde(…)]` and `#[schemars(…)]` attributes work on the type and on its
+  fields.
+- `#[input]` goes above the other attributes of the type, `#[derive(…)]`
+  included.
+- The same attribute marks the input of an [MCP tool](mcp.md) and of a loader
+  or an action of a [custom admin page](custom-admin-pages.md).
+- The payload of a [webhook](webhooks.md) is not an input: Shopify names its
+  fields in snake case, and a plain `#[derive(Deserialize)]` reads it.
+
+`#[input]` is the short form. The function accepts any type that implements
+`Deserialize` and `JsonSchema`; `dispatch` needs `Serialize` as well.
+
+The type gives the flow a JSON Schema. In the worker, the dispatched value
+must satisfy that schema and deserialize into the type; otherwise the run
+fails with `Invalid input for flow "<key>": <summary>`, for example
 `Invalid input for flow "syncOrders": input.limit must be >= 1`. The schema is
 also what `GET /api/flows` and the MCP tool `openshop.flows.list` return as
 `inputSchema`. A function without a second argument declares a flow without a
@@ -92,11 +126,41 @@ schema.
 
 The schema check understands the keywords listed under
 [Input schema validation](mcp.md#input-schema-validation). Constraints
-expressed with other keywords are enforced only if deserialization into `T`
-enforces them.
+expressed with other keywords are enforced only if deserialization into the
+type enforces them.
 
 Input is validated when a worker starts the run, not at dispatch. A dispatched
-input that is not a JSON object is replaced with `{}` before validation.
+input that is not a JSON object is replaced with `{}` before validation. The
+`input` of a [cron](configuration.md#crons) is also checked when the
+configuration is built.
+
+## Dispatch
+
+`sync_orders::dispatch(&ctx, input)` queues a run for the shop and the Shopify
+app of a context:
+
+```rust,ignore
+use openshop::prelude::*;
+
+use crate::flows::sync_orders::{SyncOrdersInput, sync_orders};
+
+#[webhook("orders/create")]
+pub async fn orders_create(ctx: WebhookContext) -> Result<()> {
+    sync_orders::dispatch(&ctx, SyncOrdersInput { limit: 10 }).await?;
+    Ok(())
+}
+```
+
+`ctx` is any context that belongs to a shop: the context of a flow, of a
+webhook, of an app proxy, of an admin function, of an MCP tool or resource, or
+what `ctx.for_shop(…)` returns in a server route. A flow without input is
+dispatched with the context alone: `nightly_cleanup::dispatch(&ctx)`. Both
+return `QueuedRun { run_id, status: "pending" }`.
+
+`app.dispatch_flow(DispatchOptions::new(name, shop)…)` queues a flow only
+known by its name, or a run with settings of its own: `.delay(…)` postpones the
+run, and `.retry_policy(…)` overrides the flow and app values for that run.
+See [`app.dispatch_flow`](sdk.md#appdispatch_flowoptions).
 
 ## Runtime context
 
@@ -104,17 +168,33 @@ input that is not a JSON object is replaced with `{}` before validation.
 | --- | --- |
 | `input` | The validated input as a `serde_json::Value`, or the dispatched object when no schema exists. A typed input is the same value, as the second argument of the function. |
 | `input::<T>()` | Method that deserializes `input` into `T`. |
-| `connectors` | `Connectors`: provider methods bound to the shop's stored configuration. |
-| `shopify` | `ShopifyClient` for the run's app and shop. |
+| `connectors` | `Connectors`: provider methods bound to the shop's stored configuration, read at the first call. |
+| `shopify` | `ShopifyClient` for the run's app and shop. The access token is read at the first request. |
 | `shop` | Shop domain associated with the run. |
 | `shopify_app` | Internal app handle (`default` in single-app mode). |
 | `step` | `StepExecutor`, the checkpointed step helper. |
-| `logger` | `FlowLogger` with `info`, `warn`, and `error` structured logging methods. |
+| `logger` | `FlowLogger`, the structured log of the run. See below. |
 | `signal` | `CancellationToken` cancelled when the run is canceled. |
 | `db` | `PgPool`, the shared `sqlx` pool. |
-| `app` | `OpenShop` handle, for example to dispatch another flow. |
+| `app` | `OpenShop` handle. |
 
-`FlowContext` is `Clone`.
+`FlowContext` is `Clone`. It implements `ShopScope`, like every context that
+belongs to a shop: `other_flow::dispatch(&ctx, …)` queues another flow for the
+same shop, and `Review::of(&ctx)` gives the rows of a
+[model](database.md#app-models) for it.
+
+The logger takes the message first, and a JSON payload with the `_with`
+methods:
+
+| Method | |
+| --- | --- |
+| `ctx.logger.info(message)` | A message. |
+| `ctx.logger.info_with(message, json!({ … }))` | A message and its payload. |
+| `warn(message)`, `warn_with(message, payload)` | The same, at the `warn` level. |
+| `error(message)`, `error_with(message, payload)` | The same, at the `error` level. |
+
+`message` is anything that reads as a string: a literal, or a `format!(…)`.
+See [Logging](logging.md).
 
 ## Retry precedence and defaults
 
@@ -123,18 +203,22 @@ Retry settings merge from least to most specific:
 1. OpenShop defaults
 2. the `retry_policy` setting of the application
 3. `retry_policy` on the flow
-4. `DispatchOptions::retry_policy` passed to `dispatch_flow`
+4. the `.retry_policy(…)` of the `DispatchOptions` passed to `dispatch_flow`
 
 | Field | Type | Default | Meaning |
 | --- | --- | --- | --- |
 | `max_attempts` | `u64` | `3` | Total attempts, including the first. |
-| `initial_interval_ms` | `u64` | `1_000` | Delay before the first retry. |
+| `initial_interval` | `Duration` | 1 second | Delay before the first retry. |
 | `backoff_coefficient` | `f64` | `2.0` | Exponential multiplier. |
-| `max_interval_ms` | `u64` | `30_000` | Delay cap. |
+| `max_interval` | `Duration` | 30 seconds | Delay cap. |
+
+Each field has a builder method of the same name on `RetryPolicy`:
+`RetryPolicy::new().max_attempts(3).initial_interval(Duration::from_secs(1))`.
+A field left unset keeps the value of the level before it.
 
 The merged policy is stored on the run at dispatch. The delay before retry
-`n` is `initial_interval_ms × backoff_coefficient^(n − 1)`, capped at
-`max_interval_ms`.
+`n` is `initial_interval × backoff_coefficient^(n − 1)`, capped at
+`max_interval`.
 
 A retry is not scheduled when `max_attempts` is reached or when its next start
 would be at or after the deadline stored at dispatch. Each attempt still uses
@@ -150,21 +234,22 @@ fails again it is marked `failed` without further attempts.
 With the default `Concurrency::Reject` policy, dispatch obtains a PostgreSQL
 advisory lock and rejects a second `pending`, `running`, or `sleeping` run for
 the same `(shopify_app, shop, flow)`. It fails with a `FlowConcurrencyError`,
-whose `existing_run_id` identifies the active run. `Concurrency::Allow` skips
-that check.
+whose `existing_run_id` identifies the active run. `Concurrency::Allow`,
+written `concurrency = allow` in `#[flow(…)]`, skips that check.
 
 ## Checkpointed steps
 
 ```rust,ignore
 use std::time::Duration;
 
-use openshop::{FlowContext, Result, StepOptions, Value};
+use openshop::prelude::*;
+use openshop::StepOptions;
 
 const ORDERS: &str = "query { orders(first: 10) { nodes { id name } } }";
 
 async fn fetch_orders(ctx: &FlowContext) -> Result<Value> {
     ctx.step
-        .run_with("fetch-orders", StepOptions::timeout(Duration::from_secs(10)), || async {
+        .run_with("fetch-orders", StepOptions::timeout(Duration::from_secs(10)), async || {
             ctx.shopify.graphql(ORDERS, None).await
         })
         .await
@@ -182,8 +267,8 @@ async fn fetch_orders(ctx: &FlowContext) -> Result<Value> {
 - return an error on replay when the stored output no longer deserializes into
   the requested type.
 
-`f` is a closure returning a future (`|| async { … }`) whose output is
-`Result<T>`. It may borrow from the flow, including `ctx`.
+`f` is an async closure, `async || { … }`, whose output is `Result<T>`. It may
+borrow from the flow, including `ctx`.
 
 Step names must be stable and unique within the logical run. A renamed step is
 a new checkpoint.
@@ -196,7 +281,7 @@ A step result has one of the statuses `running`, `completed`, `failed`,
 ```rust,ignore
 use std::time::Duration;
 
-use openshop::{FlowContext, Result};
+use openshop::prelude::*;
 
 async fn wait_for_rate_limit(ctx: &FlowContext) -> Result<()> {
     ctx.step.sleep("rate-limit-window", Duration::from_secs(30)).await
@@ -234,7 +319,7 @@ A flow with a `timeout` also gets a deadline at dispatch: the dispatch time
 plus the timeout. Workers never start a run past its deadline, and mark any
 `pending`, `running`, or `sleeping` run past it as `failed` with
 `Flow timed out — exceeded maximum allowed duration`. Each worker looks for
-such runs once per `poll_interval_ms`, one second by default.
+such runs once per `poll_interval`, one second by default.
 
 A panic inside the flow function is caught and handled like a returned error.
 The run fails with `Flow panicked: <message>` and is retried according to its
@@ -248,11 +333,12 @@ body of a flow is only known at run time, and in tests:
 ```rust,ignore
 use std::time::Duration;
 
-use openshop::{Flow, json};
+use openshop::prelude::*;
+use openshop::Flow;
 
 pub fn export(resource: &'static str) -> Flow {
     Flow::new(format!("export-{resource}"), move |ctx| async move {
-        ctx.logger.info(json!({ "resource": resource }), "Exporting");
+        ctx.logger.info_with("Exporting", json!({ "resource": resource }));
         Ok(())
     })
     .timeout(Duration::from_secs(60))
@@ -273,7 +359,7 @@ runtime identifier used by dispatch, crons, runs, and logs.
 | `.timeout(duration)` | Positive `Duration` | None | Same as `timeout` of the attribute. |
 | `.step_timeout(duration)` | Positive `Duration` | None | Same as `step_timeout` of the attribute. |
 | `.concurrency(mode)` | `Concurrency::Reject` or `Concurrency::Allow` | `Reject` | Same as `concurrency` of the attribute. |
-| `.retry_policy(policy)` | `PartialRetryPolicy` | App policy | Same as `retry_policy` of the attribute. |
+| `.retry_policy(policy)` | `RetryPolicy` | App policy | Same as `retry_policy` of the attribute. |
 
 `InputSchema::custom(json_schema, parse)` replaces both parts of the
 [input](#input) validation: `parse` receives the dispatched `Value` and returns

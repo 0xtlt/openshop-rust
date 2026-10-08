@@ -4,7 +4,7 @@ use chrono::Utc;
 use serde_json::{Value, json};
 
 use crate::runtime::time::to_iso;
-use crate::types::{DiscountMode, FunctionDefinition, FunctionOwner, FunctionTitle, JsonMap, ShopifyFunctionType};
+use crate::types::{DiscountMode, Function, FunctionOwner, FunctionTitle, FunctionType, JsonMap};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InputStyle {
@@ -41,38 +41,38 @@ pub fn discount_mutations(mode: DiscountMode) -> MutationSet {
     }
 }
 
-pub fn function_mutations(function_type: ShopifyFunctionType) -> Option<MutationSet> {
+pub fn function_mutations(function_type: FunctionType) -> Option<MutationSet> {
     Some(match function_type {
-        ShopifyFunctionType::Discount => return None,
-        ShopifyFunctionType::CartTransform => MutationSet {
+        FunctionType::Discount => return None,
+        FunctionType::CartTransform => MutationSet {
             list: "cartTransforms",
             create: "cartTransformCreate",
             update: None,
             delete: "cartTransformDelete",
             input_style: InputStyle::Flat,
         },
-        ShopifyFunctionType::DeliveryCustomization => MutationSet {
+        FunctionType::DeliveryCustomization => MutationSet {
             list: "deliveryCustomizations",
             create: "deliveryCustomizationCreate",
             update: Some("deliveryCustomizationUpdate"),
             delete: "deliveryCustomizationDelete",
             input_style: InputStyle::Wrapped,
         },
-        ShopifyFunctionType::PaymentCustomization => MutationSet {
+        FunctionType::PaymentCustomization => MutationSet {
             list: "paymentCustomizations",
             create: "paymentCustomizationCreate",
             update: Some("paymentCustomizationUpdate"),
             delete: "paymentCustomizationDelete",
             input_style: InputStyle::Wrapped,
         },
-        ShopifyFunctionType::CheckoutValidation => MutationSet {
+        FunctionType::CheckoutValidation => MutationSet {
             list: "validations",
             create: "validationCreate",
             update: Some("validationUpdate"),
             delete: "validationDelete",
             input_style: InputStyle::Wrapped,
         },
-        ShopifyFunctionType::FulfillmentConstraints => MutationSet {
+        FunctionType::FulfillmentConstraints => MutationSet {
             list: "fulfillmentConstraintRules",
             create: "fulfillmentConstraintRuleCreate",
             update: None,
@@ -91,8 +91,8 @@ pub struct MutationRequest {
 pub const METAFIELD_NAMESPACE: &str = "$app:openshop";
 
 /// For discounts the set depends on the mode (default: the function's first mode).
-pub fn get_mutations(definition: &FunctionDefinition, mode: Option<DiscountMode>) -> Option<MutationSet> {
-    if definition.function_type == ShopifyFunctionType::Discount {
+pub fn get_mutations(definition: &Function, mode: Option<DiscountMode>) -> Option<MutationSet> {
+    if definition.function_type == FunctionType::Discount {
         return Some(discount_mutations(mode.unwrap_or_else(|| definition.first_mode())));
     }
     function_mutations(definition.function_type)
@@ -169,7 +169,7 @@ fn insert_defined(target: &mut JsonMap, key: &str, value: Option<&Value>) {
 }
 
 pub fn build_create_mutation(
-    definition: &FunctionDefinition,
+    definition: &Function,
     handle: &str,
     mode: DiscountMode,
     title: &str,
@@ -180,7 +180,7 @@ pub fn build_create_mutation(
     let now = || Value::from(to_iso(&Utc::now()));
 
     match definition.function_type {
-        ShopifyFunctionType::Discount if mode == DiscountMode::Automatic => Some(MutationRequest {
+        FunctionType::Discount if mode == DiscountMode::Automatic => Some(MutationRequest {
             mutation: "#graphql
           mutation CreateAutoDiscount($input: DiscountAutomaticAppInput!) {
             discountAutomaticAppCreate(automaticAppDiscount: $input) {
@@ -201,7 +201,7 @@ pub fn build_create_mutation(
             }),
         }),
 
-        ShopifyFunctionType::Discount => {
+        FunctionType::Discount => {
             let mut input = JsonMap::new();
             input.insert("functionHandle".into(), Value::from(handle));
             input.insert("title".into(), Value::from(title));
@@ -224,7 +224,7 @@ pub fn build_create_mutation(
             })
         }
 
-        ShopifyFunctionType::CartTransform => Some(MutationRequest {
+        FunctionType::CartTransform => Some(MutationRequest {
             mutation: "#graphql
         mutation CreateCartTransform($functionHandle: String!, $blockOnFailure: Boolean, $metafields: [MetafieldInput!]) {
           cartTransformCreate(functionHandle: $functionHandle, blockOnFailure: $blockOnFailure, metafields: $metafields) {
@@ -240,7 +240,7 @@ pub fn build_create_mutation(
             }),
         }),
 
-        ShopifyFunctionType::FulfillmentConstraints => Some(MutationRequest {
+        FunctionType::FulfillmentConstraints => Some(MutationRequest {
             mutation: "#graphql
         mutation CreateFulfillmentConstraint($functionHandle: String!, $deliveryMethodTypes: [DeliveryMethodType!]!, $metafields: [MetafieldInput!]) {
           fulfillmentConstraintRuleCreate(functionHandle: $functionHandle, deliveryMethodTypes: $deliveryMethodTypes, metafields: $metafields) {
@@ -256,7 +256,7 @@ pub fn build_create_mutation(
             }),
         }),
 
-        ShopifyFunctionType::DeliveryCustomization => Some(MutationRequest {
+        FunctionType::DeliveryCustomization => Some(MutationRequest {
             mutation: "#graphql
         mutation CreateDeliveryCustomization($input: DeliveryCustomizationInput!) {
           deliveryCustomizationCreate(deliveryCustomization: $input) {
@@ -270,7 +270,7 @@ pub fn build_create_mutation(
             }),
         }),
 
-        ShopifyFunctionType::PaymentCustomization => Some(MutationRequest {
+        FunctionType::PaymentCustomization => Some(MutationRequest {
             mutation: "#graphql
         mutation CreatePaymentCustomization($input: PaymentCustomizationInput!) {
           paymentCustomizationCreate(paymentCustomization: $input) {
@@ -284,7 +284,7 @@ pub fn build_create_mutation(
             }),
         }),
 
-        ShopifyFunctionType::CheckoutValidation => Some(MutationRequest {
+        FunctionType::CheckoutValidation => Some(MutationRequest {
             mutation: "#graphql
         mutation CreateValidation($input: ValidationCreateInput!) {
           validationCreate(validation: $input) {
@@ -307,7 +307,7 @@ pub fn build_create_mutation(
 }
 
 pub fn build_update_mutation(
-    definition: &FunctionDefinition,
+    definition: &Function,
     handle: &str,
     mode: DiscountMode,
     id: &str,
@@ -326,7 +326,7 @@ pub fn build_update_mutation(
     input.insert("title".into(), Value::from(title));
 
     let (mutation, input) = match definition.function_type {
-        ShopifyFunctionType::Discount => {
+        FunctionType::Discount => {
             insert_defined(&mut input, "startsAt", body.get("startsAt"));
             insert_defined(&mut input, "endsAt", body.get("endsAt"));
             if mode == DiscountMode::Code {
@@ -350,7 +350,7 @@ pub fn build_update_mutation(
             };
             (mutation, input)
         }
-        ShopifyFunctionType::DeliveryCustomization => {
+        FunctionType::DeliveryCustomization => {
             insert_defined(&mut input, "enabled", body.get("enabled"));
             (
                 "#graphql
@@ -362,7 +362,7 @@ pub fn build_update_mutation(
                 input,
             )
         }
-        ShopifyFunctionType::PaymentCustomization => {
+        FunctionType::PaymentCustomization => {
             insert_defined(&mut input, "enabled", body.get("enabled"));
             (
                 "#graphql
@@ -374,7 +374,7 @@ pub fn build_update_mutation(
                 input,
             )
         }
-        ShopifyFunctionType::CheckoutValidation => {
+        FunctionType::CheckoutValidation => {
             insert_defined(&mut input, "enable", body.get("enabled"));
             insert_defined(&mut input, "blockOnFailure", body.get("blockOnFailure"));
             (
@@ -387,7 +387,7 @@ pub fn build_update_mutation(
                 input,
             )
         }
-        ShopifyFunctionType::CartTransform | ShopifyFunctionType::FulfillmentConstraints => return None,
+        FunctionType::CartTransform | FunctionType::FulfillmentConstraints => return None,
     };
 
     let mut input = input;
@@ -421,8 +421,8 @@ mod tests {
         value.as_object().cloned().unwrap()
     }
 
-    fn discount() -> FunctionDefinition {
-        FunctionDefinition::new(ShopifyFunctionType::Discount, "volume-discount")
+    fn discount() -> Function {
+        Function::new(FunctionType::Discount, "volume-discount")
             .modes([DiscountMode::Automatic, DiscountMode::Code])
             .owner(
                 FunctionOwner::dynamic_title(|config| format!("{}% off", config["percentage"])).combines_with(
@@ -445,7 +445,7 @@ mod tests {
             get_mutations(&discount(), Some(DiscountMode::Code)).unwrap().delete,
             "discountCodeDelete"
         );
-        let cart = FunctionDefinition::new(ShopifyFunctionType::CartTransform, "bundles");
+        let cart = Function::new(FunctionType::CartTransform, "bundles");
         let set = get_mutations(&cart, None).unwrap();
         assert_eq!(set.update, None);
         assert_eq!(set.input_style, InputStyle::Flat);
@@ -516,23 +516,23 @@ mod tests {
     #[test]
     fn builds_flat_and_wrapped_creations_for_other_types() {
         let empty = JsonMap::new();
-        let cart = FunctionDefinition::new(ShopifyFunctionType::CartTransform, "bundles");
+        let cart = Function::new(FunctionType::CartTransform, "bundles");
         let request = build_create_mutation(&cart, "bundles", DiscountMode::Automatic, "t", &empty, &empty).unwrap();
         assert_eq!(request.variables["functionHandle"], "bundles");
         assert_eq!(request.variables["blockOnFailure"], false);
 
-        let rules = FunctionDefinition::new(ShopifyFunctionType::FulfillmentConstraints, "rules");
+        let rules = Function::new(FunctionType::FulfillmentConstraints, "rules");
         let request = build_create_mutation(&rules, "rules", DiscountMode::Automatic, "t", &empty, &empty).unwrap();
         assert_eq!(request.variables["deliveryMethodTypes"], json!(["SHIPPING"]));
 
-        let validation = FunctionDefinition::new(ShopifyFunctionType::CheckoutValidation, "limits");
+        let validation = Function::new(FunctionType::CheckoutValidation, "limits");
         let body = object(json!({ "blockOnFailure": true }));
         let request =
             build_create_mutation(&validation, "limits", DiscountMode::Automatic, "Limits", &empty, &body).unwrap();
         assert_eq!(request.variables["input"]["enable"], true);
         assert_eq!(request.variables["input"]["blockOnFailure"], true);
 
-        let delivery = FunctionDefinition::new(ShopifyFunctionType::DeliveryCustomization, "hide");
+        let delivery = Function::new(FunctionType::DeliveryCustomization, "hide");
         let request =
             build_create_mutation(&delivery, "hide", DiscountMode::Automatic, "Hide", &empty, &empty).unwrap();
         assert_eq!(request.variables["input"]["enabled"], true);
@@ -560,7 +560,7 @@ mod tests {
 
     #[test]
     fn update_is_unsupported_for_flat_types() {
-        let cart = FunctionDefinition::new(ShopifyFunctionType::CartTransform, "bundles");
+        let cart = Function::new(FunctionType::CartTransform, "bundles");
         assert!(
             build_update_mutation(
                 &cart,

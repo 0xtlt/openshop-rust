@@ -1,25 +1,36 @@
-use openshop::{FieldDef, JsonMap, Provider, Value, validators};
+use openshop::prelude::*;
+use serde::{Deserialize, Serialize};
 
-fn is_set(config: &JsonMap, key: &str) -> bool {
-    config.get(key).and_then(Value::as_str).is_some_and(|value| !value.is_empty())
+/// One order as the warehouse receives it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Order {
+    pub id: String,
+    pub name: String,
 }
 
-pub fn warehouse() -> Provider {
-    Provider::new("warehouse")
-        .field(
-            "apiUrl",
-            FieldDef::text("API URL")
-                .placeholder("https://warehouse.example.com/api")
-                .validate(validators::url()),
-        )
-        .field(
-            "apiKey",
-            FieldDef::password("API Key").validate(validators::non_empty()),
-        )
-        .checker(|config| async move { Ok(is_set(&config, "apiUrl") && is_set(&config, "apiKey")) })
-        .typed_method("push", |config, data: Vec<JsonMap>| async move {
-            let api_url = config.get("apiUrl").and_then(Value::as_str).unwrap_or_default();
-            println!("[warehouse] Pushing {} records to {api_url}", data.len());
-            Ok(true)
-        })
+/// The warehouse of a shop: the fields are the form a merchant fills in the
+/// admin, the methods are what flows can do with it.
+#[derive(Debug, ProviderConfig)]
+pub struct Warehouse {
+    #[field(label = "API URL", placeholder = "https://warehouse.example.com/api", url)]
+    pub api_url: String,
+    #[field(label = "API Key", password, non_empty)]
+    pub api_key: String,
+}
+
+/// Named `warehouse`, after the struct.
+#[provider]
+impl Warehouse {
+    /// The connection check of the admin.
+    #[checker]
+    async fn check(&self) -> Result<bool> {
+        Ok(!self.api_url.is_empty() && !self.api_key.is_empty())
+    }
+
+    /// Sends orders to the warehouse and returns how many it accepted.
+    pub async fn push(&self, orders: Vec<Order>) -> Result<usize> {
+        // Call your service here, at `self.api_url` with `self.api_key`.
+        println!("[warehouse] Pushing {} orders to {}", orders.len(), self.api_url);
+        Ok(orders.len())
+    }
 }

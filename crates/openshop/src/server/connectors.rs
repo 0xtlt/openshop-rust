@@ -10,9 +10,11 @@ use indexmap::IndexMap;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
+use tokio::sync::OnceCell;
 
 use crate::app::OpenShop;
 use crate::server::shop_domain::normalize_shop_domain;
+use crate::shopify::client::ShopifyClient;
 use crate::types::{ProviderCall, RouteShopContext, RouteShopInput};
 
 pub type ConnectorMethod = Arc<dyn Fn(Value) -> BoxFuture<'static, Result<Value>> + Send + Sync>;
@@ -52,31 +54,89 @@ impl Connector {
     }
 }
 
-/// Connectors of every configured provider, keyed by provider name.
-#[derive(Clone, Default)]
+/// Where the connectors of a [`Connectors`] come from.
+enum Source {
+    /// Given as they are, such as the fakes of a test.
+    Ready(IndexMap<String, Connector>),
+    /// Built from the configuration a shop saved, at the first call.
+    Shop {
+        app: OpenShop,
+        shop: String,
+        shopify_app: String,
+        loaded: OnceCell<IndexMap<String, Connector>>,
+    },
+}
+
+/// The providers of an application for one shop, keyed by provider name.
+///
+/// The connectors of a context read nothing until a method is called: the
+/// configuration the shop saved is then loaded once and kept.
+#[derive(Clone)]
 pub struct Connectors {
-    connectors: Arc<IndexMap<String, Connector>>,
+    source: Arc<Source>,
+}
+
+impl Default for Connectors {
+    fn default() -> Self {
+        Self::new(IndexMap::new())
+    }
 }
 
 impl Connectors {
     pub fn new(connectors: IndexMap<String, Connector>) -> Self {
         Self {
-            connectors: Arc::new(connectors),
+            source: Arc::new(Source::Ready(connectors)),
         }
     }
 
-    pub fn get(&self, provider: &str) -> Result<&Connector> {
-        self.connectors
+    /// The providers of the application, with the configuration `shop` saved
+    /// for the Shopify app `shopify_app`.
+    pub fn for_shop(app: &OpenShop, shop: impl Into<String>, shopify_app: impl Into<String>) -> Self {
+        Self {
+            source: Arc::new(Source::Shop {
+                app: app.clone(),
+                shop: shop.into(),
+                shopify_app: shopify_app.into(),
+                loaded: OnceCell::new(),
+            }),
+        }
+    }
+
+    async fn loaded(&self) -> Result<&IndexMap<String, Connector>> {
+        match &*self.source {
+            Source::Ready(connectors) => Ok(connectors),
+            Source::Shop {
+                app,
+                shop,
+                shopify_app,
+                loaded,
+            } => loaded.get_or_try_init(|| load_connectors(app, shop, shopify_app)).await,
+        }
+    }
+
+    /// The connector of a provider.
+    pub async fn get(&self, provider: &str) -> Result<&Connector> {
+        self.loaded()
+            .await?
             .get(provider)
             .ok_or_else(|| anyhow!("Unknown provider \"{provider}\""))
     }
 
+    /// The names of the providers.
     pub fn names(&self) -> impl Iterator<Item = &str> {
-        self.connectors.keys().map(String::as_str)
+        let names: Vec<&str> = match &*self.source {
+            Source::Ready(connectors) => connectors.keys().map(String::as_str).collect(),
+            Source::Shop { app, .. } => app.config().providers.keys().map(String::as_str).collect(),
+        };
+        names.into_iter()
     }
 
+    /// Calls a method by the names of its provider and of the method, with
+    /// JSON-serializable arguments. Prefer the typed form a `#[provider]`
+    /// block generates, `Warehouse::on(&connectors).push(&orders)`, wherever
+    /// the provider is known when the code is written.
     pub async fn call(&self, provider: &str, method: &str, args: impl Serialize) -> Result<Value> {
-        self.get(provider)?.call(method, args).await
+        self.get(provider).await?.call(method, args).await
     }
 
     /// Calls a method and deserializes its result.
@@ -85,10 +145,9 @@ impl Connectors {
         serde_json::from_value(result).map_err(|error| anyhow!("Invalid result from \"{provider}.{method}\": {error}"))
     }
 
-    /// Calls the method behind a typed [`ProviderCall`].
-    ///
-    /// `args` is a reference to the argument type of the call, or to what it
-    /// borrows as: `&[T]` for a `Vec<T>`, `&str` for a `String`.
+    /// Calls the method behind a typed [`ProviderCall`]. What the connector
+    /// struct of a `#[provider]` block does for each method.
+    #[doc(hidden)]
     pub async fn invoke<A, R, B>(&self, call: ProviderCall<A, R>, args: &B) -> Result<R>
     where
         A: Borrow<B>,
@@ -108,10 +167,12 @@ where
     Arc::new(move |args| Box::pin(method(args)))
 }
 
-pub async fn build_connectors(app: &OpenShop, shop: &str, shopify_app: &str) -> Result<Connectors> {
+/// The connectors of every provider, each method bound to the configuration the shop saved.
+async fn load_connectors(app: &OpenShop, shop: &str, shopify_app: &str) -> Result<IndexMap<String, Connector>> {
     let providers = &app.config().providers;
+    let mut connectors = IndexMap::new();
     if providers.is_empty() {
-        return Ok(Connectors::default());
+        return Ok(connectors);
     }
 
     let stored: Vec<(String, Option<Value>)> =
@@ -121,7 +182,6 @@ pub async fn build_connectors(app: &OpenShop, shop: &str, shopify_app: &str) -> 
             .fetch_all(app.db())
             .await?;
 
-    let mut connectors = IndexMap::new();
     for (name, provider) in providers {
         let stored_config = stored
             .iter()
@@ -141,7 +201,7 @@ pub async fn build_connectors(app: &OpenShop, shop: &str, shopify_app: &str) -> 
         connectors.insert(name.clone(), Connector::new(methods));
     }
 
-    Ok(Connectors::new(connectors))
+    Ok(connectors)
 }
 
 pub(crate) async fn is_installed_shop(app: &OpenShop, shopify_app: &str, shop: &str) -> Result<bool> {
@@ -169,7 +229,10 @@ pub async fn resolve_shop_context(app: &OpenShop, input: RouteShopInput) -> Resu
     }
 
     Ok(RouteShopContext {
-        connectors: build_connectors(app, &shop, &shopify_app).await?,
+        db: app.db().clone(),
+        shopify: ShopifyClient::new(app, &shop, &shopify_app),
+        connectors: Connectors::for_shop(app, &shop, &shopify_app),
+        app: app.clone(),
         shop,
         shopify_app,
     })

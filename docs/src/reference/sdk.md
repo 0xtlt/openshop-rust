@@ -1,12 +1,16 @@
 # Public SDK
 
-Import the supported application API from the root of the `openshop` crate:
+The code of an application imports what it uses with the prelude:
 
 ```rust,ignore
-use openshop::{
-    App, CronEntry, FlowContext, Model, OpenShop, ProviderConfig, Result, app, flow,
-    get_runtime_logger, json, provider, set_runtime_logger, validators,
-};
+use openshop::prelude::*;
+```
+
+Everything else comes from the root of the `openshop` crate, next to it:
+
+```rust,ignore
+use openshop::prelude::*;
+use openshop::{DispatchOptions, OpenShop, logger, set_logger};
 ```
 
 The items documented in the reference pages are public. Other public modules
@@ -18,11 +22,13 @@ framework and its tests and can change without notice.
 | Path | Purpose | Detailed contract |
 | --- | --- | --- |
 | `openshop` | `app!` and the attributes that declare building blocks, the configuration builder, the `OpenShop` handle, dispatch, the Shopify client, and runtime logging | This page |
+| `openshop::prelude` | What the code of an application uses, in one import | [The prelude](#the-prelude) |
 | `openshop::cli` | `run`, `run_with_args`, `init_logging`, and `env::load_env_file` | [CLI commands](cli.md) |
 | `openshop::db` | `connect`, `connect_to`, `pool_options`, models, and the `migrate` functions | [Database](database.md) |
-| `openshop::engine` | `Worker`, `Scheduler`, `run_flow`, `RunFlowResult`, default policies, and typed errors | [Flows](flows.md), [Errors](errors.md) |
+| `openshop::engine` | `Worker`, `Scheduler`, `run_flow`, `RunOutcome`, default policies, and typed errors | [Flows](flows.md), [Errors](errors.md) |
 | `openshop::admin` | Server side of experimental custom admin pages | [Custom admin pages](custom-admin-pages.md) |
 | `openshop::response` | Helpers and re-exports for building HTTP responses | [Public server routes](server-routes.md) |
+| `openshop::server` | `router`, `listen`, and `serve`, to embed the HTTP server | [Server, worker, and scheduler](#server-worker-and-scheduler) |
 | `openshop::validators` | Ready-made field validators | [Providers](providers.md#validators) |
 | `openshop::runtime` | `RuntimeEnv`, the runtime logger, and the `HttpTransport` trait | [Logging](logging.md) |
 | `openshop::testing` | Contexts, provider fakes, factories, and signing helpers (cargo feature `testing`) | [Testing](testing.md) |
@@ -31,13 +37,34 @@ The client side of custom admin pages lives in a separate crate,
 `openshop-ui`, compiled to WebAssembly. See
 [Custom admin pages](custom-admin-pages.md).
 
+## The prelude
+
+`use openshop::prelude::*;` imports what the handlers and the declaration of
+an application use:
+
+| Kind | Items |
+| --- | --- |
+| The declaration | `app!`, `App`, `Cron`, `McpConfig`, `RetryPolicy`, `WorkerConfig`, `ErrorContext` |
+| Attributes | `flow`, `webhook`, `proxy`, `route`, `admin_page`, `mcp_tool`, `mcp_resource`, `provider`, `input` |
+| Derives, with the trait of the same name | `Model`, `ProviderConfig`, `FunctionConfig` |
+| Contexts | `FlowContext`, `WebhookContext`, `ProxyContext`, `RouteContext`, `RouteAuthContext`, `AdminContext`, `McpContext`, and `ShopScope`, the trait of the contexts that belong to a shop |
+| Errors | `Result`, `Context`, `anyhow!`, `bail!`, and `InvalidInput`, which a proxy or a route answers with `422` |
+| Types | `Value`, `Uuid`, `Liquid`, `RouteAuthOutcome`, `McpPermission`, `McpRiskLevel`, `RunOutcome`, `QueuedRun` |
+| Macros | `graphql!`, `liquid!`, `json!` |
+| Modules | `validators`, `response` |
+
+`input` is part of it with the `schema` feature. `#[openshop::test]` is not:
+its name would hide `#[test]`, so it is written with its path. The samples of
+this documentation import the prelude, then name what it lacks, such as
+`use openshop::testing::TestContext;` or `use serde::Deserialize;`.
+
 ## Cargo features
 
 | Feature | Default | Effect |
 | --- | --- | --- |
 | `embedded-ui` | Yes | Embeds the prebuilt admin UI bundle in the binary. Without it, `UiSource::Embedded` serves nothing. |
-| `schema` | Yes | Enables typed inputs, which derive validation from `schemars`: the input argument of a `#[flow]`, of an `#[mcp_tool]`, and of the loaders and actions of an `#[admin_page]`; underneath, `Flow::input::<T>()`, `InputSchema::of::<T>()`, and the typed admin function helpers. |
-| `testing` | No | Compiles `openshop::testing`. Enable it under `[dev-dependencies]`. |
+| `schema` | Yes | Enables `#[input]` and typed inputs, which derive validation from `schemars`: the input argument of a `#[flow]`, of an `#[mcp_tool]`, and of the loaders and actions of an `#[admin_page]`; underneath, `Flow::input::<T>()`, `InputSchema::of::<T>()`, `AdminFunction::typed_loader` and `AdminFunction::typed_action`. |
+| `testing` | No | Compiles `openshop::testing` and `#[openshop::test]`. Enable it under `[dev-dependencies]`. |
 
 ## Re-exports
 
@@ -51,14 +78,18 @@ app does not need to depend on them directly:
 | `JsonMap` | `serde_json::Map<String, Value>` |
 | `IndexMap` | `indexmap` |
 | `PgPool`, `sqlx` | `sqlx` |
+| `Uuid` | `uuid` |
 | `CancellationToken` | `tokio_util` |
 | `chrono` | `chrono` |
+| `serde` | `serde` |
 | `JsonSchema`, `schemars` | `schemars` (feature `schema`) |
 
-`#[derive(Deserialize)]` and `#[derive(JsonSchema)]` expand to paths that
-start with `serde` and `schemars`, so an app that derives typed flow inputs
-declares both crates in its own `Cargo.toml`. The same applies to `tokio` for
-`#[tokio::main]`.
+[`#[input]`](flows.md#input) derives `Deserialize`, `Serialize` and
+`JsonSchema` through these re-exports, and `APP.main()` starts the runtime: an
+application needs neither `schemars` nor `tokio` among its dependencies.
+`#[derive(Deserialize)]` and `#[derive(Serialize)]` written in the application
+expand to paths that start with `serde`, so an app that derives them, for
+example on the payload of a webhook, declares `serde` in its own `Cargo.toml`.
 
 ## `app!` and `App`
 
@@ -69,7 +100,7 @@ the binary runs and the tests read.
 ```rust,ignore
 use std::sync::Arc;
 
-use openshop::{App, ErrorContext, PartialRetryPolicy, PartialWorkerConfig, Result, app};
+use openshop::prelude::*;
 
 use flows::sync_orders::sync_orders;
 use providers::warehouse::Warehouse;
@@ -81,67 +112,69 @@ async fn report_failure(error: Arc<openshop::Error>, context: ErrorContext) {
 pub static APP: App = app! {
     providers: [Warehouse],
     flows: [sync_orders],
-    worker: PartialWorkerConfig::new().concurrency(5),
-    retry_policy: PartialRetryPolicy::new().max_attempts(3),
+    worker: WorkerConfig::new().concurrency(5),
+    retry_policy: RetryPolicy::new().max_attempts(3),
     on_error: report_failure,
 };
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    APP.run().await
+fn main() -> Result<()> {
+    APP.main()
 }
 ```
 
-`APP.run()` runs the command given on the command line, `APP.config()` returns
-the validated `OpenShopConfig`, and `APP.builder()` returns the
-`OpenShopBuilder` of the declaration, to add to it. Each returns a `Result`: a
-setting of the declaration can fail. [Configuration](configuration.md)
-describes every list and setting. The blocks are declared with:
+`APP.main()` starts the runtime and runs the command given on the command
+line. `APP.run().await` runs it in a binary that has its own runtime.
+`APP.config()` returns the validated `OpenShopConfig`, and `APP.builder()`
+returns the `OpenShopBuilder` of the declaration, to add to it. Each returns a
+`Result`: a setting of the declaration can fail.
+[Configuration](configuration.md) describes every list and setting. The blocks
+are declared with:
 
-- `#[flow]` on a function — see [Flows](flows.md);
+- `#[flow]` on a function, and `#[input]` on the type of its input — see [Flows](flows.md);
 - `#[derive(ProviderConfig)]` on a struct and `#[provider]` on its `impl` block — see [Providers](providers.md);
 - `#[derive(FunctionConfig)]` on a struct — see [Shopify Functions](shopify-functions.md);
 - `#[proxy]` on a function — see [Proxy routes](proxy-routes.md);
 - `#[route]` on a function — see [Public server routes](server-routes.md);
 - `#[webhook]` on a function — see [Webhooks](webhooks.md);
-- `#[mcp_tool]` and `#[mcp_resource]` on a function, with `McpConfig::new()` for custom permissions — see [MCP](mcp.md);
+- `#[mcp_tool]` and `#[mcp_resource]` on a function, with a `const McpPermission` for each permission they require — see [MCP](mcp.md);
 - `#[admin_page]` on an `impl` block — see [Custom admin pages](custom-admin-pages.md);
 - `#[derive(Model)]` on a struct — see [Database](database.md#app-models).
 
-Crons are data: `CronEntry::new(schedule, flow)` — see
+Crons are data: `Cron::new(schedule, flow)` — see
 [Crons](configuration.md#crons).
 
 ### `OpenShopConfig::builder()`
 
 The attributes are built on definitions that can be created by hand:
 `Flow::new(name, run)`, `Provider::new(name)`,
-`FunctionDefinition::new(function_type, handle)`, `ProxyDefinition::json()`,
-`::liquid()` and `::html()`, `ServerRoute::public()` and
-`ServerRoute::authenticated(auth)`, `Webhook::new(run)`,
-`McpToolDefinition::new(description, run)`,
-`McpResourceDefinition::new(name, read)`, `AdminPage::new(path)`, and
-`define_model(table)`. `OpenShopConfig::builder()` collects them, along with
-declared blocks, and `build()` validates the whole. Use it for tests and for
-blocks built at run time. See [Builder methods](configuration.md#builder-methods).
+`Function::new(function_type, handle)`, `Proxy::json()`,
+`::liquid()` and `::html()`, `Route::public()` and
+`Route::authenticated(auth)`, `Webhook::new(run)`,
+`McpTool::new(description, run)`,
+`McpResource::new(name, read)`, `AdminPage::new(path)`, and
+`Table::conventional(table)`. `OpenShopConfig::builder()` collects them, along
+with declared blocks, and `build()` validates the whole. Use it for tests and
+for blocks built at run time. See [Builder methods](configuration.md#builder-methods).
 
 ## `#[provider]` and `Provider::new(name)`
 
 A provider is a struct: `#[derive(ProviderConfig)]` makes its fields the
-configuration form, and `#[provider("name")]` makes the public `async` methods
-of its `impl` block the methods flows call.
+configuration form, and `#[provider]` makes the public `async` methods of its
+`impl` block the methods flows call. The provider is named after the struct,
+here `warehouse`; `#[provider("name")]` states another name.
 
 ```rust,ignore
-use openshop::{ProviderConfig, Result, provider, validators};
+use openshop::prelude::*;
 
 #[derive(ProviderConfig)]
 pub struct Warehouse {
-    #[field(label = "Endpoint", validate = validators::url())]
+    #[field(url)]
     endpoint: String,
-    #[field(label = "Token", password, validate = validators::non_empty())]
+    #[field(password, non_empty)]
     token: String,
 }
 
-#[provider("warehouse")]
+#[provider]
 impl Warehouse {
     #[checker]
     async fn check(&self) -> Result<bool> {
@@ -169,26 +202,33 @@ prefer to your `Cargo.toml`.
 
 ## Cron schedules
 
-`CronEntry::new(schedule, flow)` accepts a standard five-field cron expression,
+`Cron::new(schedule, flow)` accepts a standard five-field cron expression,
 a six-field expression with seconds, or a nickname. The expression is validated
-when the configuration is built.
+when the configuration is built, and so is the `input` of the cron, against
+the input of its flow.
 
 ```rust,ignore
-use openshop::{App, CronEntry, app, json};
+use openshop::prelude::*;
 
 use flows::sync_orders::sync_orders;
 
 pub static APP: App = app! {
     flows: [sync_orders],
     crons: [
-        CronEntry::new("0 3 * * *", sync_orders::NAME).name("Nightly sync").shops("all"),
-        CronEntry::new("@hourly", sync_orders::NAME).input(json!({ "limit": 10 })),
+        Cron::new("0 3 * * *", sync_orders::NAME)
+            .name("Nightly sync")
+            .input(json!({ "limit": 1000 }))
+            .all_shops(),
+        Cron::new("@hourly", sync_orders::NAME)
+            .input(json!({ "limit": 10 }))
+            .shop("example.myshopify.com"),
     ],
 };
 ```
 
 Supported nicknames are `@yearly`, `@annually`, `@monthly`, `@weekly`, `@daily`,
-and `@hourly`.
+and `@hourly`. `.all_shops()`, `.shop(…)` and `.shops([…])` choose the shops a
+cron runs for; see [Cron shop targeting](configuration.md#cron-shop-targeting).
 
 ## `OpenShop`
 
@@ -203,35 +243,71 @@ carries one as `ctx.app`.
 | `OpenShop::with_transport(config, db, env, transport)` | Same, with a custom `HttpTransport` for Shopify HTTP calls. |
 
 All three validate the configuration and resolve the Shopify apps, and fail
-when either is invalid. `APP.run()` creates the handle for you.
+when either is invalid. `APP.main()` and `APP.run()` create the handle for
+you.
 
 | Method | Returns |
 | --- | --- |
 | `config()` | `&OpenShopConfig` |
 | `db()` | `&PgPool` |
 | `env()` | `&RuntimeEnv` |
-| `dispatch_flow(params).await` | `Result<DispatchFlowResult>` |
-| `connectors(shop, shopify_app).await` | `Result<Connectors>` bound to the shop's stored provider configuration |
-| `shopify_client(shop, shopify_app).await` | `Result<ShopifyClient>` using the shop's stored access token |
+| `dispatch_flow(options).await` | `Result<QueuedRun>` |
+| `connectors(shop, shopify_app)` | `Connectors`: the providers of the shop, bound to the configuration it saved. The configuration is read at the first call. |
+| `shopify_client(shop, shopify_app)` | `ShopifyClient` of the shop. The access token is read at the first request. |
 | `mcp_registry()` | Core and application MCP permissions, tools, and resources |
 
-## `app.dispatch_flow(params)`
+In a handler, use `ctx.shopify` and `ctx.connectors`: every context that
+belongs to a shop has them. `connectors` and `shopify_client` are for code
+without a context.
 
-Adds a flow run to PostgreSQL. A worker must be running to execute it.
+## `sync_orders::dispatch(&ctx, input)`
+
+`#[flow]` adds `dispatch` to the type of the flow. It queues a run for the
+shop and the Shopify app of a context, and returns a `QueuedRun`.
 
 ```rust,ignore
-use openshop::{DispatchFlowParams, DispatchOptions, OpenShop, PartialRetryPolicy, Result, json};
+use openshop::prelude::*;
+
+use crate::flows::sync_orders::{SyncOrdersInput, sync_orders};
+
+#[webhook("orders/create")]
+pub async fn orders_create(ctx: WebhookContext) -> Result<()> {
+    let queued = sync_orders::dispatch(&ctx, SyncOrdersInput { limit: 50 }).await?;
+    println!("queued run {}", queued.run_id);
+    Ok(())
+}
+```
+
+`ctx` is any context that belongs to a shop: the context of a flow, of a
+webhook, of an app proxy, of an admin function, of an MCP tool or resource, or
+what `ctx.for_shop(…)` returns in a server route. These implement the
+`ShopScope` trait. The second argument is the input type of the flow, which
+implements `Serialize`; [`#[input]`](flows.md#input) derives it. A flow without
+input takes the context alone: `nightly_cleanup::dispatch(&ctx)`.
+
+The run is queued as by `app.dispatch_flow(…)` below, and fails in the same
+cases.
+
+## `app.dispatch_flow(options)`
+
+Adds a flow run to PostgreSQL. A worker must be running to execute it. Use it
+for a flow only known by name, for code without a context, or to set a delay
+or a retry policy for the run.
+
+```rust,ignore
+use std::time::Duration;
+
+use openshop::prelude::*;
+use openshop::{DispatchOptions, OpenShop};
 
 async fn queue_sync(app: &OpenShop) -> Result<()> {
     let queued = app
         .dispatch_flow(
-            DispatchFlowParams::new("syncOrders", "example.myshopify.com")
+            DispatchOptions::new("syncOrders", "example.myshopify.com")
                 .input(json!({ "limit": 50 }))
                 .shopify_app("default")
-                .options(DispatchOptions {
-                    delay_ms: Some(5_000),
-                    retry_policy: Some(PartialRetryPolicy::new().max_attempts(5)),
-                }),
+                .delay(Duration::from_secs(5))
+                .retry_policy(RetryPolicy::new().max_attempts(5)),
         )
         .await?;
     println!("queued run {}", queued.run_id);
@@ -239,17 +315,23 @@ async fn queue_sync(app: &OpenShop) -> Result<()> {
 }
 ```
 
+`params` is a `DispatchOptions`:
+
 | Field | Set with | Type | Notes |
 | --- | --- | --- | --- |
-| `flow_name` | `DispatchFlowParams::new` | `String` | Registered flow key, such as `sync_orders::NAME`. |
-| `shop` | `DispatchFlowParams::new` | `String` | Target `*.myshopify.com` domain, or the cron global sentinel when used internally. |
+| `flow_name` | `DispatchOptions::new` | `String` | Registered flow key, such as `sync_orders::NAME`. |
+| `shop` | `DispatchOptions::new` | `String` | Target `*.myshopify.com` domain, or the cron global sentinel when used internally. |
 | `input` | `.input(…)` | `serde_json::Value` | Defaults to `{}`. Validated by the worker, not at dispatch. |
 | `shopify_app` | `.shopify_app(…)` | `String` | Defaults to the `default` app handle. |
 | `parent_run_id` | `.parent_run_id(…)` | `String` | Optional parent run relationship. |
-| `options.delay_ms` | `.options(…)` | `Option<u64>` | Delays the initial `available_at`. |
-| `options.retry_policy` | `.options(…)` | `Option<PartialRetryPolicy>` | Highest-priority retry override for this run. |
+| `delay` | `.delay(…)` | `Duration` | Delays the initial `available_at`. |
+| `retry_policy` | `.retry_policy(…)` | `RetryPolicy` | Highest-priority retry override for this run. |
 
-Returns `DispatchFlowResult { run_id, status }`, where `run_id` is a `Uuid` and
+`DispatchOptions::for_scope(flow, &ctx)` starts from the shop and the Shopify
+app of a context instead, with the same methods:
+`DispatchOptions::for_scope(sync_orders::NAME, &ctx).delay(Duration::from_secs(5))`.
+
+Returns `QueuedRun { run_id, status }`, where `run_id` is a `Uuid` and
 `status` is `"pending"`. It fails when the flow is not registered
 (`Flow "<name>" not found. Available: …`) or, with a `FlowConcurrencyError`,
 when a flow with `Concurrency::Reject` already has an active run for the same
@@ -261,10 +343,11 @@ without an `OpenShop` handle.
 ## `ShopifyClient`
 
 A Shopify Admin GraphQL client for one installed shop. It reads the offline
-access token from the installations table and decrypts it.
+access token from the installations table and decrypts it, at the first
+request. Every context that belongs to a shop has one as `ctx.shopify`.
 
 ```rust,ignore
-use openshop::{OpenShop, Result, json};
+use openshop::prelude::*;
 use serde::Deserialize;
 
 #[derive(Deserialize)]
@@ -286,15 +369,14 @@ const PRODUCT_TITLE: &str = "#graphql
   }
 ";
 
-async fn product_title(app: &OpenShop, id: &str) -> Result<Option<String>> {
-    let shopify = app.shopify_client("example.myshopify.com", "default").await?;
-
+async fn product_title(ctx: &WebhookContext, id: &str) -> Result<Option<String>> {
     // Untyped: the `data` object as a `serde_json::Value`.
-    let data = shopify.graphql(PRODUCT_TITLE, Some(json!({ "id": id }))).await?;
+    let data = ctx.shopify.graphql(PRODUCT_TITLE, Some(json!({ "id": id }))).await?;
     let untyped = data["product"]["title"].as_str().map(str::to_string);
 
     // Typed: the `data` object deserialized into your own type.
-    let typed: ProductTitle = shopify
+    let typed: ProductTitle = ctx
+        .shopify
         .graphql_as(PRODUCT_TITLE, Some(json!({ "id": id })))
         .await?;
 
@@ -304,14 +386,14 @@ async fn product_title(app: &OpenShop, id: &str) -> Result<Option<String>> {
 
 | Item | Contract |
 | --- | --- |
-| `app.shopify_client(shop, shopify_app)` | Client for the default API version. |
-| `create_shopify_client(&app, shop, shopify_app, api_version)` | Same, with `api_version: Option<&str>`. `None` selects `SHOPIFY_API_VERSION`, currently `2026-04`. |
+| `ctx.shopify` | The client of the shop of a context: a flow, a webhook, an app proxy, an admin function, an MCP tool or resource, and what `ctx.for_shop(…)` returns in a server route. |
+| `app.shopify_client(shop, shopify_app)` | The client of a shop, for code without a context. Returns the `ShopifyClient` itself: nothing is read before the first request. |
+| `ShopifyClient::new(&app, shop, shopify_app)` | Same, from an `&OpenShop`. |
+| `client.with_api_version(version)` | The client for another version of the Admin API than `openshop::shopify::SHOPIFY_API_VERSION`, currently `2026-04`. |
 | `client.graphql(query, variables)` | `variables: Option<Value>`. Returns Shopify's `data` object as a `Value`. |
 | `client.graphql_as::<T>(query, variables)` | Same, deserialized into `T: DeserializeOwned`. |
 | `client.execute(graphql!(…))` | An operation checked against Shopify's schema at compile time, with typed variables and a typed result. See [Typed GraphQL](graphql.md). |
 | `client.shop`, `client.shopify_app`, `client.api_version` | Public fields. |
-
-In flows and admin functions the client is already available as `ctx.shopify`.
 
 `graphql()`:
 
@@ -339,12 +421,12 @@ Requests use a 10-second connect timeout and a 60-second total timeout.
 
 ## Database access
 
-`ctx.db` in flows, admin functions, and MCP tools, and `app.db()` everywhere
-else, give the shared `sqlx` PostgreSQL pool. `openshop::sqlx` re-exports the
-`sqlx` crate.
+`ctx.db` in every handler context, and `app.db()` everywhere else, give the
+shared `sqlx` PostgreSQL pool. `openshop::sqlx` re-exports the `sqlx` crate.
 
 ```rust,ignore
-use openshop::{PgPool, Result, sqlx};
+use openshop::prelude::*;
+use openshop::{PgPool, sqlx};
 
 async fn five_star_reviews(db: &PgPool, shop: &str) -> Result<Vec<(String, i32)>> {
     // `shop` must come from a verified runtime context.
@@ -360,18 +442,19 @@ async fn five_star_reviews(db: &PgPool, shop: &str) -> Result<Vec<(String, i32)>
 
 The pool is created once per process. See [Database](database.md).
 
-## `#[derive(Model)]` and `define_model(table)`
+## `#[derive(Model)]` and `Table`
 
 `#[derive(Model)]` maps a struct to an application-owned PostgreSQL table: its
 fields are the columns, it gets typed rows limited to a shop, and
-`migrate generate` writes the migrations when it changes.
+`migrate generate` writes the migrations when it changes. The table is the
+first argument of `#[model(…)]`.
 
 ```rust,ignore
 use openshop::chrono::{DateTime, Utc};
-use openshop::{Model, Uuid};
+use openshop::prelude::*;
 
 #[derive(Debug, Clone, Model)]
-#[model(table = "reviews")]
+#[model("reviews", index(shop, product_id))]
 pub struct Review {
     pub id: Uuid,
     pub shop: String,
@@ -382,19 +465,27 @@ pub struct Review {
 ```
 
 List it in the `models` of `app!`, then read and write through
-`Review::for_shop(&ctx.db, &ctx.shop)`. `define_model(table)` describes a table
-without a struct, with its columns as SQL definitions, and is registered with
+`Review::of(&ctx)`, the rows of the shop of a context. `ctx` is any context
+that belongs to a shop. `Review::for_shop(&ctx.db, &ctx.shop)` gives the same
+rows with the database and the shop given. The derive implements the `Model`
+trait, and `Review::table()` returns the `Table` the struct describes.
+
+`Table` describes a table without a struct, with its columns as SQL
+definitions: `Table::conventional(table)` starts with `id`, `shop`,
+`created_at` and `updated_at`, `Table::new(table)` without any column, and
+`.column("product_id", "text NOT NULL")` adds one. It is registered with
 `.model(…)` on the builder. See [App models](database.md#app-models).
 
 ## Runtime logging
 
-`set_runtime_logger(logger)` replaces OpenShop's process-wide runtime logger and
-returns the previous logger. `get_runtime_logger()` returns the current logger.
+`set_logger(logger)` replaces OpenShop's process-wide runtime logger and
+returns the previous logger. `logger()` returns the current logger.
 
 ```rust,ignore
 use std::sync::Arc;
 
-use openshop::{RuntimeLogger, Value, get_runtime_logger, json, set_runtime_logger};
+use openshop::prelude::*;
+use openshop::{RuntimeLogger, logger, set_logger};
 
 struct JsonLines;
 
@@ -413,11 +504,11 @@ impl RuntimeLogger for JsonLines {
 }
 
 fn install_logger() {
-    let previous = set_runtime_logger(Arc::new(JsonLines));
-    get_runtime_logger().info("OpenShop logger configured", None);
+    let previous = set_logger(Arc::new(JsonLines));
+    logger().info("OpenShop logger configured", None);
 
     // Restore in a test or during shutdown.
-    set_runtime_logger(previous);
+    set_logger(previous);
 }
 ```
 
@@ -427,23 +518,22 @@ use `ctx.logger`, which persists records in the run log. See
 
 ## Server, worker, and scheduler
 
-`APP.run()` covers the standard processes. To embed OpenShop in a process you
-manage yourself, the same pieces are exported, and `APP.config()?` gives them
-the configuration:
+`APP.main()` and `APP.run()` cover the standard processes. To embed OpenShop in
+a process you manage yourself, the same pieces are exported, and
+`APP.config()?` gives them the configuration:
 
 ```rust,ignore
 use std::future::Future;
 
-use openshop::{
-    OpenShop, OpenShopConfig, PartialWorkerConfig, Result, Scheduler, ServerOptions, Worker,
-    start_api_server,
-};
+use openshop::prelude::*;
+use openshop::server::listen;
+use openshop::{OpenShop, OpenShopConfig, Scheduler, ServerOptions, Worker};
 
 async fn serve(config: OpenShopConfig, shutdown: impl Future<Output = ()>) -> Result<()> {
     let app = OpenShop::connect(config).await?;
 
-    let server = start_api_server(&app, 3000, ServerOptions::production()).await?;
-    let worker = Worker::new(app.clone(), PartialWorkerConfig::default());
+    let server = listen(&app, 3000, ServerOptions::production()).await?;
+    let worker = Worker::new(app.clone(), WorkerConfig::new());
     worker.start().await;
     let mut scheduler = Scheduler::start(&app)?;
 
@@ -457,17 +547,17 @@ async fn serve(config: OpenShopConfig, shutdown: impl Future<Output = ()>) -> Re
 
 | Item | Contract |
 | --- | --- |
-| `create_server(&app, options)` | Builds the `axum::Router` without listening. |
-| `start_api_server(&app, port, options)` | Binds `0.0.0.0:<port>` (`0` picks a free port) and returns a handle with `addr` and `shutdown()`. `shutdown()` waits up to five seconds for requests in flight, then drops the remaining connections. |
+| `openshop::server::router(&app, options)` | Builds the `axum::Router` without listening. |
+| `openshop::server::listen(&app, port, options)` | Binds `0.0.0.0:<port>` (`0` picks a free port) and returns a handle with `addr` and `shutdown()`. `shutdown()` waits up to five seconds for requests in flight, then drops the remaining connections. |
 | `ServerOptions::production()` | Embedded UI behind the signed-launch check. |
 | `ServerOptions::development()` | Embedded UI without the signed-launch check, and CORS on `/api`. |
 | `ServerOptions::default()` | API only: no UI is served, and CORS is enabled on `/api`. |
 | `.ui(UiSource)` | `UiSource::Embedded`, `UiSource::Dir(path)`, `UiSource::assets(lookup)`, or `UiSource::None`. See [Serve the bundle](custom-admin-pages.md#serve-the-bundle). |
-| `openshop::server::serve(listener, router)` | Serves a router built with `create_server` on an existing `tokio::net::TcpListener`. |
-| `Worker::new(app, overrides)` | Worker with `start()`, `stop()`, `is_running()`, `active_count()`, and `worker_id()`. |
+| `openshop::server::serve(listener, router)` | Serves a router built with `router` on an existing `tokio::net::TcpListener`. |
+| `Worker::new(app, overrides)` | Worker with `start()`, `stop()`, `is_running()`, `active_count()`, and `worker_id()`. `overrides` is a `WorkerConfig`: what it sets replaces the `worker` setting of the application. |
 | `Scheduler::start(&app)` | Registers every configured cron; `stop()` or dropping the value stops them. |
 
-`start_api_server` and `serve` do not read `OPENSHOP_UI_DIR` or the
+`listen` and `serve` do not read `OPENSHOP_UI_DIR` or the
 configuration's `admin_ui`; pass the `UiSource` you want. None of these push
 or migrate the database schema.
 
@@ -476,4 +566,5 @@ or migrate the database schema.
 The crate root exports the types for configuration, flows, providers,
 webhooks, proxies, server routes, Shopify Functions, MCP, workers, retry and
 dispatch options, the Shopify client, and runtime logging. Prefer importing
-them from `openshop` instead of module paths.
+them from `openshop` instead of module paths. [The prelude](#the-prelude)
+holds the ones the code of an application uses.

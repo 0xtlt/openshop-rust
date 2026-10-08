@@ -1,71 +1,56 @@
-use openshop::{Flow, Value, json};
-use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
+use openshop::prelude::*;
 
-#[derive(Debug, Deserialize, JsonSchema)]
+use crate::providers::warehouse::{Order, Warehouse};
+
+/// What a run receives. The admin builds its form from it, and a run with
+/// another input is refused.
+#[input]
+#[derive(Debug)]
 pub struct SyncOrdersInput {
     #[schemars(range(min = 1))]
     pub limit: u32,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct Order {
-    id: String,
-    name: String,
-}
+#[flow("syncOrders")]
+pub async fn sync_orders(ctx: FlowContext, input: SyncOrdersInput) -> Result<()> {
+    // Each step is checkpointed: a retried run reuses its stored output.
+    let orders: Vec<Order> = ctx
+        .step
+        .run("fetch-orders", async || {
+            ctx.logger.info_with(
+                "Fetching latest orders from Shopify...",
+                json!({ "limit": input.limit }),
+            );
 
-const RECENT_ORDERS: &str = "#graphql
-  query GetRecentOrders($first: Int!) {
-    orders(first: $first, sortKey: CREATED_AT, reverse: true) {
-      edges {
-        node {
-          id
-          name
-        }
-      }
-    }
-  }
-";
+            // Checked against Shopify's schema when the crate compiles; `data` is typed.
+            let data = ctx
+                .shopify
+                .execute(graphql!(
+                    "query GetRecentOrders($first: Int!) {
+                       orders(first: $first, sortKey: CREATED_AT, reverse: true) {
+                         nodes { id name }
+                       }
+                     }",
+                    first = input.limit
+                ))
+                .await?;
 
-pub fn sync_orders() -> Flow {
-    Flow::new("syncOrders", |ctx| async move {
-        let input: SyncOrdersInput = ctx.input()?;
+            let orders = data.orders.nodes.into_iter();
+            Ok(orders
+                .map(|order| Order {
+                    id: order.id,
+                    name: order.name,
+                })
+                .collect())
+        })
+        .await?;
 
-        let orders: Vec<Order> = ctx
-            .step
-            .run("fetch-orders", || async {
-                ctx.logger.info(
-                    json!({ "limit": input.limit }),
-                    "Fetching latest orders from Shopify...",
-                );
-
-                let data = ctx
-                    .shopify
-                    .graphql(RECENT_ORDERS, Some(json!({ "first": input.limit })))
-                    .await?;
-
-                let edges = data.pointer("/orders/edges").and_then(Value::as_array);
-                let text = |edge: &Value, pointer: &str| {
-                    edge.pointer(pointer).and_then(Value::as_str).unwrap_or_default().to_string()
-                };
-                Ok(edges
-                    .into_iter()
-                    .flatten()
-                    .map(|edge| Order {
-                        id: text(edge, "/node/id"),
-                        name: text(edge, "/node/name"),
-                    })
-                    .collect())
-            })
-            .await?;
-
-        ctx.step
-            .run("send-to-warehouse", || async {
-                ctx.connectors.call("warehouse", "push", &orders).await?;
-                ctx.logger.info(json!({ "count": orders.len() }), "Orders synced");
-                Ok(())
-            })
-            .await
-    })
-    .input::<SyncOrdersInput>()
+    ctx.step
+        .run("send-to-warehouse", async || {
+            // Checked by the compiler: a `Vec<Order>` in, a `usize` out.
+            let accepted = Warehouse::on(&ctx.connectors).push(&orders).await?;
+            ctx.logger.info_with("Orders synced", json!({ "count": accepted }));
+            Ok(())
+        })
+        .await
 }

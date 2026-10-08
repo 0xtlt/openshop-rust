@@ -568,9 +568,9 @@ async fn writes_the_lines_logged_together_in_one_statement() {
     let run_id = create_run(&test).await;
     let logger = FlowLogger::new(test.db.clone(), run_id.to_string());
 
-    logger.info(json!({ "position": 1 }), "first");
-    logger.warn(json!({ "position": 2 }), "second");
-    logger.error(json!({ "position": 3 }), "third");
+    logger.info_with("first", json!({ "position": 1 }));
+    logger.warn_with("second", json!({ "position": 2 }));
+    logger.error_with("third", json!({ "position": 3 }));
     logger.flush().await;
 
     let writes = find_log_writes(&test, run_id).await;
@@ -602,14 +602,14 @@ async fn writes_a_line_without_waiting_for_the_end_of_the_run() {
     let logger = FlowLogger::new(test.db.clone(), run_id.to_string());
 
     // Nothing flushes: the line is written on its own, after a short delay.
-    logger.info(json!({}), "still running");
+    logger.info("still running");
     let deadline = Instant::now() + Duration::from_secs(10);
     while find_log_writes(&test, run_id).await.is_empty() {
         assert!(Instant::now() < deadline, "the line was not written");
         tokio::time::sleep(Duration::from_millis(15)).await;
     }
 
-    logger.info(json!({}), "done");
+    logger.info("done");
     logger.flush().await;
 
     let writes = find_log_writes(&test, run_id).await;

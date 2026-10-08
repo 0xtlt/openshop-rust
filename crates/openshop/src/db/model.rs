@@ -29,7 +29,7 @@ pub struct ColumnDef {
     /// instead of dropping and adding it.
     #[serde(skip)]
     pub renamed_from: Option<String>,
-    /// The definition as written with [`Model::column`], rendered verbatim.
+    /// The definition as written with [`Table::column`], rendered verbatim.
     #[serde(skip)]
     written: Option<String>,
 }
@@ -244,13 +244,14 @@ impl ForeignKeyDef {
 
 /// A table definition that renders to `CREATE TABLE` SQL.
 ///
-/// Every model gets `id` (uuid primary key) and, unless disabled, `shop`,
-/// `created_at` and `updated_at`. Application code is responsible for filtering
-/// its own queries by shop; the typed rows of a `#[derive(Model)]` struct do it.
+/// [`Table::conventional`] starts with `id` (uuid primary key), `shop`,
+/// `created_at` and `updated_at`; [`Table::new`] with no column, which is
+/// what `#[derive(Model)]` builds on. Queries written by hand filter by shop
+/// themselves; the typed rows of a `#[derive(Model)]` struct do it.
 ///
 /// The serialized form is what the schema snapshot records for the table.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Model {
+pub struct Table {
     #[serde(rename = "name")]
     pub table: String,
     columns: Vec<ColumnDef>,
@@ -262,32 +263,13 @@ pub struct Model {
     renamed_from: Option<String>,
 }
 
-/// Define a model with auto-generated columns:
-/// - `id` (uuid, primary key)
-/// - `shop` (text) — unless [`Model::without_shop`]
-/// - `created_at` / `updated_at` (timestamptz, default now)
-pub fn define_model(table: impl Into<String>) -> Model {
-    Model {
-        table: table.into(),
-        columns: vec![
-            ColumnDef::id(),
-            ColumnDef::shop(),
-            ColumnDef::created_at(),
-            ColumnDef::updated_at(),
-        ],
-        indexes: Vec::new(),
-        foreign_keys: Vec::new(),
-        renamed_from: None,
-    }
-}
-
 pub(crate) fn quote(identifier: &str) -> String {
     format!("\"{}\"", identifier.replace('"', "\"\""))
 }
 
-impl Model {
+impl Table {
     /// A table without any column. `#[derive(Model)]` starts from it;
-    /// [`define_model`] adds the conventional columns.
+    /// [`Table::conventional`] adds the conventional columns.
     pub fn new(table: impl Into<String>) -> Self {
         Self {
             table: table.into(),
@@ -295,6 +277,22 @@ impl Model {
             indexes: Vec::new(),
             foreign_keys: Vec::new(),
             renamed_from: None,
+        }
+    }
+
+    /// A table with the conventional columns:
+    /// - `id` (uuid, primary key)
+    /// - `shop` (text), unless [`Table::without_shop`]
+    /// - `created_at` / `updated_at` (timestamptz, default now)
+    pub fn conventional(table: impl Into<String>) -> Self {
+        Self {
+            columns: vec![
+                ColumnDef::id(),
+                ColumnDef::shop(),
+                ColumnDef::created_at(),
+                ColumnDef::updated_at(),
+            ],
+            ..Self::new(table)
         }
     }
 
@@ -363,7 +361,7 @@ impl Model {
 
     /// Makes a column reference a row of another table.
     ///
-    /// The constraint is not part of [`Model::create_sql`]: it is added once
+    /// The constraint is not part of [`Table::create_sql`]: it is added once
     /// every table exists, so that models can be registered in any order.
     pub fn with_foreign_key(mut self, foreign_key: ForeignKeyDef) -> Self {
         self.foreign_keys.push(foreign_key);
@@ -556,7 +554,7 @@ mod tests {
 
     #[test]
     fn includes_the_conventional_columns_by_default() {
-        let sql = define_model("reviews")
+        let sql = Table::conventional("reviews")
             .column("product_id", "text NOT NULL")
             .column("approved", "boolean DEFAULT false")
             .create_sql();
@@ -575,7 +573,7 @@ mod tests {
 
     #[test]
     fn can_drop_conventional_columns_and_add_indexes() {
-        let sql = define_model("settings")
+        let sql = Table::conventional("settings")
             .without_shop()
             .without_created_at()
             .without_updated_at()
@@ -592,7 +590,7 @@ mod tests {
 
     #[test]
     fn renders_columns_described_field_by_field() {
-        let model = Model::new("reviews")
+        let model = Table::new("reviews")
             .with_column(ColumnDef::id())
             .with_column(ColumnDef::new("rating", "INT"))
             .with_column(ColumnDef::new("note", "text").nullable(true))
@@ -658,7 +656,7 @@ mod tests {
 
     #[test]
     fn foreign_keys_are_added_once_the_tables_exist() {
-        let votes = define_model("review_votes")
+        let votes = Table::conventional("review_votes")
             .with_column(ColumnDef::new("review_id", "uuid"))
             .with_column(ColumnDef::new("author_code", "text").nullable(true))
             .with_foreign_key(ForeignKeyDef::new("review_id", "reviews").on_delete("cascade"))

@@ -3,7 +3,7 @@
 An OpenShop app has two command lines:
 
 - the **application binary**, your own crate, whose `main` runs the
-  application it declares with `app!`: `APP.run().await`. It implements every
+  application it declares with `app!`: `APP.main()`. It implements every
   runtime command;
 - the **`openshop` CLI**, an optional tool that scaffolds projects, restarts
   the app when sources change, and forwards the other commands to `cargo`.
@@ -73,10 +73,9 @@ root: without a `Cargo.toml` in the current directory it fails with
 
 The command writes `Cargo.toml` (package `<app>-ui`, its own cargo workspace,
 `openshop-ui` pinned to the CLI's tag), `Trunk.toml`, `index.html`,
-`src/main.rs` with an example `/hello` page, and `.gitignore`, then prints the
-builder calls to add to your configuration. In an application declared with
-`app!`, they are the `custom_pages` and `admin_ui` settings and an
-`#[admin_page("/hello")]` block listed in `admin_pages`.
+`src/main.rs` with an example `/hello` page, and `.gitignore`, then prints what
+to add to your application: an `#[admin_page("/hello", nav = "Hello")]` block
+listed in the `admin_pages` of `app!`, and the `admin_ui` setting.
 
 ## Command behavior
 

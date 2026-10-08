@@ -8,12 +8,12 @@
 //! commands:
 //!
 //! ```no_run
-//! use openshop::{App, FlowContext, Result, app, flow, json};
+//! use openshop::prelude::*;
 //!
 //! #[flow]
 //! async fn hello(ctx: FlowContext) -> Result<()> {
-//!     let greeting: String = ctx.step.run("greet", || async { Ok("hello".to_string()) }).await?;
-//!     ctx.logger.info(json!({ "greeting": greeting }), "Greeted");
+//!     let greeting: String = ctx.step.run("greet", async || Ok("hello".to_string())).await?;
+//!     ctx.logger.info_with("Greeted", json!({ "greeting": greeting }));
 //!     Ok(())
 //! }
 //!
@@ -21,9 +21,8 @@
 //!     flows: [hello],
 //! };
 //!
-//! #[tokio::main]
-//! async fn main() -> Result<()> {
-//!     APP.run().await
+//! fn main() -> Result<()> {
+//!     APP.main()
 //! }
 //! ```
 //!
@@ -41,6 +40,7 @@ pub mod response;
 pub mod runtime;
 pub mod server;
 pub mod shopify;
+mod template;
 #[cfg(feature = "testing")]
 pub mod testing;
 pub mod types;
@@ -57,25 +57,55 @@ pub use sqlx::{self, PgPool};
 pub use tokio_util::sync::CancellationToken;
 pub use uuid::Uuid;
 
-pub use admin::{
-    AdminActor, AdminFunction, AdminPage, AdminPublicError, AdminServerContext, define_admin_action,
-    define_admin_loader, define_admin_page_access,
-};
-#[cfg(feature = "schema")]
-pub use admin::{define_typed_admin_action, define_typed_admin_loader};
+pub use admin::{AdminActor, AdminContext, AdminFunction, AdminPage, AdminPublicError};
 pub use app::{OpenShop, OpenShopBuilder, OpenShopConfig};
-pub use db::{Model, Record, define_model};
-pub use declare::{App, Declared};
+pub use db::{Model, Table};
+pub use declare::{App, Declared, InvalidInput};
 pub use engine::{
-    DispatchFlowParams, DispatchFlowResult, FlowCanceledError, FlowConcurrencyError, FlowTimeoutError, RunFlowOptions,
-    RunFlowResult, Scheduler, SleepSignal, StepExecutor, StepTimeoutError, Worker, cancel_run, dispatch_flow, run_flow,
+    DispatchOptions, FlowCanceledError, FlowConcurrencyError, FlowTimeoutError, QueuedRun, RunFlowOptions, RunOutcome,
+    Scheduler, SleepSignal, StepExecutor, StepTimeoutError, Worker, cancel_run, dispatch_flow, run_flow,
 };
-pub use runtime::{FlowLogger, RuntimeEnv, RuntimeLogger, get_runtime_logger, set_runtime_logger};
+pub use runtime::logger::{logger, set_logger};
+pub use runtime::{FlowLogger, RuntimeEnv, RuntimeLogger};
 pub use server::connectors::{Connector, Connectors};
 pub use server::static_ui::UiAssets;
-pub use server::{ServerOptions, ShopSession, UiSource, create_server, start_api_server};
-pub use shopify::{GraphqlOperation, IntoVariable, ShopifyClient, create_shopify_client};
+pub use server::{ServerOptions, ShopSession, UiSource};
+pub use shopify::{GraphqlOperation, IntoVariable, ShopifyClient};
+pub use template::Liquid;
 pub use types::*;
+
+/// What the code of an application uses, in one import.
+///
+/// ```
+/// use openshop::prelude::*;
+///
+/// #[flow]
+/// async fn hello(ctx: FlowContext) -> Result<()> {
+///     ctx.logger.info("Hello");
+///     Ok(())
+/// }
+///
+/// static APP: App = app! {
+///     flows: [hello],
+/// };
+/// # let _ = &APP;
+/// ```
+///
+/// The attributes and derives that declare building blocks, [`app!`], the
+/// contexts of the handlers, and what their bodies reach for: [`Result`],
+/// [`json!`], [`bail!`], [`graphql!`], [`liquid!`]… The attribute of tests,
+/// `#[openshop::test]`, is not part of it: it would hide `#[test]`.
+pub mod prelude {
+    #[cfg(feature = "schema")]
+    pub use crate::input;
+    pub use crate::{
+        AdminContext, App, Context, Cron, ErrorContext, FlowContext, FunctionConfig, InvalidInput, Liquid, McpConfig,
+        McpContext, McpPermission, McpRiskLevel, Model, ProviderConfig, ProxyContext, QueuedRun, Result, RetryPolicy,
+        RouteAuthContext, RouteAuthOutcome, RouteContext, RunOutcome, ShopScope, Uuid, Value, WebhookContext,
+        WorkerConfig, admin_page, anyhow, app, bail, flow, graphql, json, liquid, mcp_resource, mcp_tool, provider,
+        proxy, response, route, validators, webhook,
+    };
+}
 
 /// Maps a struct to an application table.
 ///
@@ -88,7 +118,7 @@ pub use types::*;
 /// use openshop::{Model, Uuid};
 ///
 /// #[derive(Debug, Clone, Model)]
-/// #[model(table = "reviews", index(shop, product_id))]
+/// #[model("reviews", index(shop, product_id))]
 /// pub struct Review {
 ///     pub id: Uuid,
 ///     pub shop: String,
@@ -101,8 +131,9 @@ pub use types::*;
 ///     pub approved: bool,
 /// }
 ///
-/// # async fn example(db: openshop::PgPool, shop: &str) -> openshop::Result<()> {
-/// let reviews = Review::for_shop(&db, shop);
+/// # async fn example(ctx: openshop::FlowContext) -> openshop::Result<()> {
+/// // The rows of the shop a handler runs for.
+/// let reviews = Review::of(&ctx);
 /// let review = reviews
 ///     .insert(NewReview {
 ///         product_id: "gid://shopify/Product/1".to_string(),
@@ -124,19 +155,20 @@ pub use types::*;
 /// ```
 ///
 /// `id` is required. `shop`, `created_at` and `updated_at` are optional and
-/// get the conventional definitions; with a `shop` field the struct gets
-/// `for_shop` and `all_shops`, without one it gets `rows`. List the model in
-/// the `models` of [`app!`].
+/// get the conventional definitions. With a `shop` field the struct gets
+/// `of(&ctx)`, the rows of the shop a context runs for, `for_shop(&db, shop)`
+/// for code without a context, and `all_shops(&db)`; without one it gets
+/// `rows(&db)`. List the model in the `models` of [`app!`].
 ///
-/// Struct options, in `#[model(…)]`: `table = "…"` (required),
+/// The table comes first in `#[model(…)]`, then the options of the struct:
 /// `index(field, …)`, `unique(field, …)`, each with an optional `name = "…"`,
 /// and `renamed_from = "…"`. Field options: `default = "<SQL>"`,
 /// `sql_type = "…"`, `column = "…"`, `renamed_from = "…"`, `index`, `unique`,
 /// and `references(OtherModel)` with an optional `on_delete = "cascade"` for a
 /// foreign key.
 ///
-/// The derive implements [`Record`] and `sqlx::FromRow`, and declares
-/// `New<Struct>`, the values an insertion takes.
+/// The derive implements the trait [`Model`](trait@Model) and `sqlx::FromRow`,
+/// and declares `New<Struct>`, the values an insertion takes.
 pub use openshop_macros::Model;
 
 /// Makes a struct the configuration of a provider: its fields are the fields
@@ -144,19 +176,19 @@ pub use openshop_macros::Model;
 /// provider receive.
 ///
 /// ```
-/// use openshop::{ProviderConfig, Result, provider, validators};
+/// use openshop::{ProviderConfig, Result, provider};
 ///
 /// #[derive(ProviderConfig)]
 /// pub struct Warehouse {
-///     #[field(label = "API URL", validate = validators::url())]
+///     #[field(label = "API URL", url)]
 ///     api_url: String,
-///     #[field(label = "API key", password)]
+///     #[field(label = "API key", password, non_empty)]
 ///     api_key: String,
-///     #[field(label = "Batch size")]
+///     #[field(range(min = 1, max = 1000))]
 ///     batch_size: Option<u32>,
 /// }
 ///
-/// #[provider("warehouse")]
+/// #[provider]
 /// impl Warehouse {
 ///     /// Sends orders and returns how many were accepted.
 ///     pub async fn push(&self, orders: Vec<String>) -> Result<usize> {
@@ -176,16 +208,28 @@ pub use openshop_macros::Model;
 /// A field is saved under its name in camel case (`api_url` as `apiUrl`). Its
 /// type picks the input: `String` for text, `bool` for a checkbox, a number
 /// type for a number, and an `Option` makes it optional. Options go in
-/// `#[field(…)]`: `label = "…"` (required), `placeholder = "…"`, `password`,
-/// `select("Label" = "value", …)`, `validate = <validator>` and `name = "…"`
-/// for another key.
+/// `#[field(…)]`:
+///
+/// - `label = "…"`. Without it the field is labeled after its name:
+///   `batch_size` is "Batch size";
+/// - `placeholder = "…"`, `password`, `select("Label" = "value", …)`, and
+///   `name = "…"` for another key;
+/// - what a value must satisfy: `url`, `non_empty`, `range(min = …, max = …)`
+///   for a number, `length(min = …, max = …)` for a text, a bound being
+///   optional, and `validate = <validator>` for any other rule: one of
+///   [`validators`], or a function of your own. The named ones run in the
+///   order they are written, then `validate`. A field of an integer type
+///   refuses a fraction, and an unsigned one a negative number.
 ///
 /// The derive also implements `Deserialize` from the saved configuration: do
 /// not derive it yourself.
 pub use openshop_macros::ProviderConfig;
 
 /// Makes the `impl` block of a [`ProviderConfig`](macro@ProviderConfig) struct
-/// a provider: `#[provider("warehouse")]`.
+/// a provider: `#[provider]`.
+///
+/// The provider is named after the struct, with a lowercase initial:
+/// `Warehouse` is `warehouse`. `#[provider("wms")]` states another name.
 ///
 /// Every public `async fn(&self, …) -> Result<…>` becomes a method of the
 /// provider. `&self` is the configuration the shop saved; the arguments and
@@ -196,13 +240,14 @@ pub use openshop_macros::ProviderConfig;
 ///
 /// The block gains:
 ///
+/// - `Struct::NAME`, the name of the provider;
 /// - `Struct::provider()`, the [`Provider`] the struct describes; the struct
 ///   itself is what the `providers` of [`app!`] list;
 /// - `Struct::on(&connectors)`, whose methods mirror the public ones and run
 ///   them with the configuration of the shop: `Warehouse::on(&ctx.connectors)
 ///   .push(&orders)`. An argument is taken by value or by reference;
-/// - one constant per method, `Warehouse::PUSH`, a [`ProviderCall`] for
-///   [`Connectors::invoke`] and for the fakes of a test.
+/// - one constant per method, `Warehouse::PUSH`, a [`ProviderCall`] that names
+///   the fake of the method in a test: `ctx.fakes.for_call(Warehouse::PUSH)`.
 ///
 /// See [`ProviderConfig`](macro@ProviderConfig) for an example.
 pub use openshop_macros::provider;
@@ -260,24 +305,25 @@ pub use openshop_macros::graphql;
 /// Declares an application: the building blocks it is made of, and its settings.
 ///
 /// ```
-/// use openshop::{App, CronEntry, FlowContext, Result, WebhookContext, app, flow, json, webhook};
+/// use openshop::{App, Cron, FlowContext, Result, WebhookContext, app, flow, webhook};
 ///
 /// #[flow("syncOrders")]
 /// async fn sync_orders(ctx: FlowContext) -> Result<()> {
-///     ctx.logger.info(json!({}), "Syncing");
+///     ctx.logger.info("Syncing");
 ///     Ok(())
 /// }
 ///
 /// #[webhook("orders/create")]
 /// async fn orders_create(ctx: WebhookContext) -> Result<()> {
-///     println!("New order on {}", ctx.shop);
+///     // A run of the flow for the shop that sent the event.
+///     sync_orders::dispatch(&ctx).await?;
 ///     Ok(())
 /// }
 ///
 /// pub static APP: App = app! {
 ///     flows: [sync_orders],
 ///     webhooks: [orders_create],
-///     crons: [CronEntry::new("0 2 * * *", sync_orders::NAME).shops("all")],
+///     crons: [Cron::new("0 2 * * *", sync_orders::NAME).all_shops()],
 /// };
 ///
 /// # fn main() -> Result<()> {
@@ -300,51 +346,62 @@ pub use openshop_macros::graphql;
 ///
 /// Every other entry is a setting, written `name: value` and passed to the
 /// method of that name of [`OpenShopBuilder`]: `crons`, `on_error`, `mcp`,
-/// `custom_pages`, `shopify`, `worker`, `retry_policy`, `pages`, `admin_ui`,
+/// `shopify`, `worker`, `retry_policy`, `pages`, `custom_pages`, `admin_ui`,
 /// `max_request_body_bytes`… A value can fail with `?`, such as one read from
 /// the environment (`shopify: shopify_apps()?`): the error is the one
-/// `APP.config()` and `APP.run()` return.
+/// `APP.config()` and `APP.main()` return.
 ///
 /// The macro is an expression of type [`App`], usually kept in a `static`
-/// that the binary runs (`APP.run().await`) and the tests read
-/// (`APP.config()`). Nothing is evaluated before that: in `dev`, the `.env`
-/// file is loaded first.
+/// that the binary runs (`fn main() -> Result<()> { APP.main() }`) and the
+/// tests start (`#[openshop::test(APP)]`). Nothing is evaluated before that:
+/// in `dev`, the `.env` file is loaded first.
 pub use openshop_macros::app;
 
 /// Makes an `async` function a flow: `#[flow("syncOrders")]`.
 ///
 /// ```
-/// use openshop::{FlowContext, JsonSchema, Result, flow, serde::Deserialize};
+/// use openshop::{FlowContext, Result, WebhookContext, flow, input, json};
 ///
-/// #[derive(Debug, Deserialize, JsonSchema)]
-/// # #[serde(crate = "openshop::serde")]
+/// #[input]
+/// #[derive(Debug)]
 /// pub struct SyncOrdersInput {
 ///     pub limit: u32,
 /// }
 ///
 /// #[flow("syncOrders")]
 /// pub async fn sync_orders(ctx: FlowContext, input: SyncOrdersInput) -> Result<()> {
-///     let fetched: u32 = ctx.step.run("fetch", || async { Ok(input.limit) }).await?;
-///     ctx.logger.info(openshop::json!({ "fetched": fetched }), "Done");
+///     let fetched: u32 = ctx.step.run("fetch", async || Ok(input.limit)).await?;
+///     ctx.logger.info_with("Done", json!({ "fetched": fetched }));
 ///     Ok(())
 /// }
 ///
 /// assert_eq!(sync_orders::NAME, "syncOrders");
+///
+/// # async fn example(ctx: WebhookContext) -> Result<()> {
+/// // From a webhook, a proxy, an admin action or another flow:
+/// // a run for the shop of the context.
+/// sync_orders::dispatch(&ctx, SyncOrdersInput { limit: 10 }).await?;
+/// # Ok(())
+/// # }
 /// ```
 ///
 /// The function takes the [`FlowContext`] and, optionally, the input of a
-/// run: a type that implements `Deserialize` and `JsonSchema`, whose schema
-/// validates the input and describes it to the admin and to MCP. Without a
-/// name, the flow is named after the function in camel case.
+/// run: an [`#[input]`](macro@input) type, or any type that implements
+/// `Deserialize` and `JsonSchema`. Its schema validates the input and
+/// describes it to the admin and to MCP. Without a name, the flow is named
+/// after the function in camel case.
 ///
 /// Options follow the name: `timeout = <Duration>`, `step_timeout =
-/// <Duration>`, `concurrency = <Concurrency>` and `retry_policy =
-/// <PartialRetryPolicy>`.
+/// <Duration>`, `concurrency = allow | reject` and `retry_policy =
+/// <RetryPolicy>`.
 ///
 /// The function stays an ordinary function. The attribute adds a type of the
-/// same name, which is what the `flows` of [`app!`] list, with the constant
-/// `NAME`. Because of that type, do not re-export the function next to a
-/// module of the same name: import it where the application is declared.
+/// same name, which is what the `flows` of [`app!`] list. It carries the
+/// constant `NAME`, and `dispatch`, which queues a run for the shop and the
+/// Shopify app of a context; dispatching needs the input to implement
+/// `Serialize`, which `#[input]` derives. Because of that type, do not
+/// re-export the function next to a module of the same name: import it where
+/// the application is declared.
 pub use openshop_macros::flow;
 
 /// Makes an `async` function the handler of webhook topics:
@@ -367,24 +424,42 @@ pub use openshop_macros::flow;
 /// ```
 ///
 /// The function takes the [`WebhookContext`] and, optionally, the payload
-/// read into a type that implements `Deserialize`. It is listed in the
-/// `webhooks` of [`app!`]; its topics are in the constant `TOPICS`.
+/// read into a type that implements `Deserialize`. Shopify names the fields
+/// of a payload in snake case: a plain `Deserialize` reads it, not
+/// [`#[input]`](macro@input).
+///
+/// The context gives `ctx.db`, `ctx.shopify` and `ctx.connectors` for the
+/// shop that sent the event. Nothing is read from the database before one of
+/// them is used.
+///
+/// The function is listed in the `webhooks` of [`app!`]; its topics are in
+/// the constant `TOPICS`.
 pub use openshop_macros::webhook;
 
 /// Makes an `async` function the handler of an app proxy path for one HTTP
 /// method: `#[proxy(GET, "/reviews")]`.
 ///
 /// ```
-/// use openshop::{ProxyContext, Result, Value, json, proxy};
+/// use openshop::serde::Deserialize;
+/// use openshop::{Liquid, ProxyContext, Result, Value, json, proxy};
+///
+/// #[derive(Deserialize)]
+/// # #[serde(crate = "openshop::serde")]
+/// pub struct ListReviews {
+///     pub page: Option<u32>,
+/// }
 ///
 /// #[proxy(GET, "/api/reviews")]
-/// pub async fn list_reviews(ctx: ProxyContext) -> Result<Value> {
-///     Ok(json!({ "shop": ctx.shop, "reviews": [] }))
+/// pub async fn list_reviews(ctx: ProxyContext, query: ListReviews) -> Result<Value> {
+///     Ok(json!({ "shop": ctx.shop, "page": query.page.unwrap_or(1), "reviews": [] }))
 /// }
 ///
 /// #[proxy(GET, "/reviews", liquid)]
-/// pub async fn reviews(ctx: ProxyContext) -> Result<String> {
-///     Ok(format!("<h2>Reviews of {{{{ shop.name }}}} via {}</h2>", ctx.shop))
+/// pub async fn reviews(_ctx: ProxyContext) -> Result<Liquid> {
+///     // In an application, the template is a file next to this one:
+///     // `liquid!("reviews.liquid")`.
+///     let template = Liquid::new("<h2>{{ review_count }} reviews of {{ shop.name }}</h2>");
+///     Ok(template.assign("review_count", 12))
 /// }
 /// ```
 ///
@@ -392,6 +467,16 @@ pub use openshop_macros::webhook;
 /// follows the path: `json` (the default), `liquid` or `html`. The function
 /// returns anything that serializes: a string is the body of a Liquid or HTML
 /// response, everything else is sent as JSON.
+///
+/// A `liquid` answer is rendered by Shopify with the objects of the
+/// storefront. Keep its template in a file next to the handler and return it
+/// with [`liquid!`]: the [`Liquid`] it gives takes what only the server knows
+/// as variables, with [`assign`](Liquid::assign).
+///
+/// A second argument is the typed input of the request, a type that
+/// implements `Deserialize`: read from the query string for `GET` and
+/// `DELETE`, from the JSON body for `POST`, `PUT` and `PATCH`. A request that
+/// does not fit it is answered with `422` before the function runs.
 ///
 /// The functions of one path are declared separately, one per method, and
 /// answer with the same response type. They are listed in the `proxies` of
@@ -402,32 +487,43 @@ pub use openshop_macros::proxy;
 /// HTTP method: `#[route(GET, "/ping")]`.
 ///
 /// ```
-/// use openshop::response::{self, Response};
-/// use openshop::{Result, RouteAuthOutcome, ServerRouteContext, ServerRouteRequestContext, json, route};
+/// use openshop::{Result, RouteAuthContext, RouteAuthOutcome, RouteContext, Value, json, route};
 ///
-/// #[route(GET, "/ping")]
-/// pub async fn ping(_ctx: ServerRouteContext) -> Result<Response> {
-///     Ok(response::json(json!({ "ok": true })))
+/// #[route(GET, "/ping", json)]
+/// pub async fn ping(_ctx: RouteContext) -> Result<Value> {
+///     Ok(json!({ "ok": true }))
 /// }
 ///
-/// async fn partner(ctx: ServerRouteRequestContext) -> Result<RouteAuthOutcome> {
+/// async fn partner(ctx: RouteAuthContext) -> Result<RouteAuthOutcome> {
 ///     Ok(match ctx.request.header("x-partner-key") {
 ///         Some(key) => RouteAuthOutcome::Authenticated(json!({ "key": key })),
 ///         None => RouteAuthOutcome::Unauthorized,
 ///     })
 /// }
 ///
-/// #[route(POST, "/orders/:id", auth = partner)]
-/// pub async fn update_order(ctx: ServerRouteContext) -> Result<Response> {
-///     Ok(response::json(json!({ "order": ctx.params["id"], "by": ctx.auth["key"] })))
+/// #[route(POST, "/orders/:id", json, auth = partner)]
+/// pub async fn update_order(ctx: RouteContext) -> Result<Value> {
+///     Ok(json!({ "order": ctx.params["id"], "by": ctx.auth["key"] }))
 /// }
 /// ```
 ///
 /// The method is `GET`, `HEAD`, `POST`, `PUT`, `PATCH`, `DELETE` or
 /// `OPTIONS`. Without `auth`, the route is public; with `auth = <function>`,
 /// the function decides before the handler runs and its value is `ctx.auth`.
-/// The handler returns anything that is a response
-/// ([`response::IntoResponse`]).
+///
+/// With `json`, the handler returns anything that serializes, sent as JSON.
+/// Without it, the handler returns anything that is a response
+/// ([`response::IntoResponse`]): a [`response::Response`], a status with a
+/// body…
+///
+/// A second argument is the typed input of the request, a type that
+/// implements `Deserialize`: read from the query string for `GET`, `HEAD`,
+/// `DELETE` and `OPTIONS`, from the JSON body for `POST`, `PUT` and `PATCH`.
+/// A request that does not fit it is answered with `422` before the function
+/// runs.
+///
+/// A route does not belong to a shop. `ctx.for_shop("demo.myshopify.com")`
+/// resolves an installed one and gives its `db`, `shopify` and `connectors`.
 ///
 /// The functions of one path are declared separately, one per method, each
 /// with its own authentication. They are listed in the `routes` of [`app!`].
@@ -464,13 +560,13 @@ pub use openshop_macros::route;
 ///     }
 /// }
 ///
-/// assert_eq!(VolumeDiscount::KEY, "volumeDiscount");
+/// assert_eq!(VolumeDiscount::NAME, "volumeDiscount");
 /// ```
 ///
 /// `#[function(…)]` states the type of the function and the handle of its
 /// extension, as one of `discount`, `cart_transform`, `delivery_customization`,
 /// `payment_customization`, `checkout_validation` or `fulfillment_constraints`
-/// `= "<handle>"`. The key the function is registered under comes first; left
+/// `= "<handle>"`. The name the function is registered under comes first; left
 /// out, it is the name of the struct with a lowercase initial. The other
 /// options: `label = "…"`, `modes(automatic, code)` for a discount, and, for
 /// the Shopify owner of an instance, `title = "…"` or `title = <function of
@@ -487,30 +583,29 @@ pub use openshop_macros::FunctionConfig;
 /// `#[admin_page("/reviews")]`.
 ///
 /// ```
-/// use openshop::{AdminServerContext, JsonSchema, Result, Value, admin_page, json, serde::Deserialize};
+/// use openshop::{AdminContext, Result, Value, admin_page, input, json};
 ///
-/// #[derive(Deserialize, JsonSchema)]
-/// # #[serde(crate = "openshop::serde")]
+/// #[input]
 /// pub struct SaveReviewInput {
 ///     pub title: String,
 /// }
 ///
 /// pub struct ReviewsPage;
 ///
-/// #[admin_page("/reviews")]
+/// #[admin_page("/reviews", nav = "Reviews")]
 /// impl ReviewsPage {
 ///     #[access]
-///     async fn signed_in(ctx: AdminServerContext) -> Result<bool> {
+///     async fn signed_in(ctx: AdminContext) -> Result<bool> {
 ///         Ok(!ctx.actor.id.is_empty())
 ///     }
 ///
 ///     #[loader]
-///     async fn list_reviews(ctx: AdminServerContext) -> Result<Value> {
+///     async fn list_reviews(ctx: AdminContext) -> Result<Value> {
 ///         Ok(json!({ "reviews": [], "shop": ctx.shop }))
 ///     }
 ///
 ///     #[action(authorize = Self::signed_in)]
-///     async fn save_review(ctx: AdminServerContext, input: SaveReviewInput) -> Result<Value> {
+///     async fn save_review(ctx: AdminContext, input: SaveReviewInput) -> Result<Value> {
 ///         Ok(json!({ "ok": true, "title": input.title, "savedBy": ctx.actor.id }))
 ///     }
 /// }
@@ -518,14 +613,17 @@ pub use openshop_macros::FunctionConfig;
 /// assert_eq!(ReviewsPage::PATH, "/reviews");
 /// ```
 ///
-/// The functions of the block take the [`AdminServerContext`] and are marked
-/// with what they are:
+/// `nav = "…"` gives the page an entry in the menu of the admin, under that
+/// label. A page with a dynamic segment (`/reviews/:id`) has none.
+///
+/// The functions of the block take the [`AdminContext`] and are marked with
+/// what they are:
 ///
 /// - `#[access]`, `async fn(ctx) -> Result<bool>`: the gate of the page and of
 ///   the pages nested under it;
 /// - `#[loader]`, a read, and `#[action]`, a write: `async fn(ctx) ->
 ///   Result<…>`, or `async fn(ctx, input: Input) -> Result<…>` where `Input`
-///   implements `Deserialize` and `JsonSchema` and validates what the page
+///   is an [`#[input]`](macro@input) type, which validates what the page
 ///   sends. The result is anything that serializes.
 ///
 /// A loader or an action is called by the name of its function in camel case
@@ -533,36 +631,43 @@ pub use openshop_macros::FunctionConfig;
 /// `authorize = <function>` adds a rule of its own. Unmarked functions stay
 /// ordinary helpers.
 ///
-/// The type is listed in the `admin_pages` of [`app!`]; its path is the
-/// constant `PATH`.
+/// The type is listed in the `admin_pages` of [`app!`], which is enough for
+/// the page to be served; its path is the constant `PATH`.
 pub use openshop_macros::admin_page;
 
 /// Makes an `async` function an MCP tool: `#[mcp_tool("reviews.count")]`.
 ///
 /// ```
-/// use openshop::{JsonSchema, McpExecutionContext, Result, Value, json, mcp_tool, serde::Deserialize};
+/// use openshop::{McpContext, McpPermission, McpRiskLevel, Result, Value, input, json, mcp_tool};
 ///
-/// #[derive(Deserialize, JsonSchema)]
-/// # #[serde(crate = "openshop::serde")]
+/// /// Declared once: the tools that list it register it.
+/// pub const READ_REVIEWS: McpPermission =
+///     McpPermission::new("reviews:read", "Read reviews").risk(McpRiskLevel::Low);
+///
+/// #[input]
 /// pub struct CountInput {
 ///     pub rating: u8,
 /// }
 ///
 /// /// Counts the reviews of a rating.
-/// #[mcp_tool("reviews.count", permissions("reviews:read"), risk = low)]
-/// pub async fn count_reviews(ctx: McpExecutionContext, input: CountInput) -> Result<Value> {
+/// #[mcp_tool("reviews.count", permissions(READ_REVIEWS), risk = low)]
+/// pub async fn count_reviews(ctx: McpContext, input: CountInput) -> Result<Value> {
 ///     Ok(json!({ "shop": ctx.shop, "rating": input.rating, "count": 0 }))
 /// }
 /// ```
 ///
-/// The function takes the [`McpExecutionContext`] and, optionally, the
-/// arguments of the call: a type that implements `Deserialize` and
-/// `JsonSchema`, whose schema is the input schema of the tool. Without it the
-/// tool takes no argument. The result is anything that serializes.
+/// The function takes the [`McpContext`] and, optionally, the arguments of
+/// the call: an [`#[input]`](macro@input) type, whose schema is the input
+/// schema of the tool. Without it the tool takes no argument. The result is
+/// anything that serializes.
 ///
 /// The description of the tool is its documentation comment, or
 /// `description = "…"`. The other options: `permissions(…)`, the permissions
 /// a token needs, `risk = low | medium | high` and `confirmation_hint = "…"`.
+///
+/// A permission is a [`McpPermission`] constant, or a key (`"reviews:read"`).
+/// A constant comes with its label: listing it registers the permission with
+/// the application, and nothing else declares it.
 ///
 /// The function is listed in the `mcp_tools` of [`app!`]; the name of the
 /// tool is the constant `NAME`.
@@ -572,16 +677,16 @@ pub use openshop_macros::mcp_tool;
 /// `#[mcp_resource("app://guide", name = "Guide")]`.
 ///
 /// ```
-/// use openshop::{McpExecutionContext, Result, mcp_resource};
+/// use openshop::{McpContext, Result, mcp_resource};
 ///
 /// /// How reviews are moderated.
 /// #[mcp_resource("app://reviews/guide", name = "Review guide", mime_type = "text/markdown")]
-/// pub async fn review_guide(ctx: McpExecutionContext) -> Result<String> {
+/// pub async fn review_guide(ctx: McpContext) -> Result<String> {
 ///     Ok(format!("# Reviews of {}", ctx.shop))
 /// }
 /// ```
 ///
-/// The function takes the [`McpExecutionContext`] and returns the content: a
+/// The function takes the [`McpContext`] and returns the content: a
 /// string, or a [`McpResourceContent`]. `name = "…"` is required. The
 /// description is the documentation comment, or `description = "…"`; the
 /// other options are `mime_type = "…"`, `permissions(…)` and `risk = low |
@@ -590,3 +695,69 @@ pub use openshop_macros::mcp_tool;
 /// The function is listed in the `mcp_resources` of [`app!`]; the URI of the
 /// resource is the constant `URI`.
 pub use openshop_macros::mcp_resource;
+
+/// Makes a type the input of a flow, of an MCP tool or of a loader or action
+/// of an admin page.
+///
+/// ```
+/// use openshop::{FlowContext, Result, flow, input};
+///
+/// #[input]
+/// #[derive(Debug)]
+/// pub struct CountVariantsInput {
+///     #[schemars(length(min = 1))]
+///     pub product_id: String,
+/// }
+///
+/// #[flow]
+/// pub async fn count_variants(ctx: FlowContext, input: CountVariantsInput) -> Result<()> {
+///     ctx.logger.info(format!("Counting the variants of {}", input.product_id));
+///     Ok(())
+/// }
+///
+/// let input: CountVariantsInput = openshop::serde_json::from_str(r#"{ "productId": "gid://shopify/Product/1" }"#).unwrap();
+/// assert_eq!(input.product_id, "gid://shopify/Product/1");
+/// ```
+///
+/// The attribute derives `Deserialize`, `Serialize` and `JsonSchema`, without
+/// `serde` or `schemars` among the dependencies of the application: the type
+/// is read from what a run receives, written where a run is dispatched
+/// (`count_variants::dispatch(&ctx, input)`), and its schema validates the
+/// input and describes it to the admin and to MCP.
+///
+/// Fields are named in camel case outside Rust (`product_id` is `productId`),
+/// like the names of flows and the fields of a provider. A `#[serde(rename_all
+/// = "…")]` on the type states another rule. The attributes of `serde` and of
+/// `schemars` work on the type and on its fields; put `#[input]` above the
+/// other attributes of the type.
+///
+/// The payload of a webhook is not an input: Shopify names its fields in
+/// snake case, and a plain `#[derive(Deserialize)]` reads it.
+#[cfg(feature = "schema")]
+pub use openshop_macros::input;
+
+/// Makes an `async` function a test of the application:
+/// `#[openshop::test(APP)]`.
+///
+/// ```no_run
+/// use openshop::testing::TestContext;
+/// use openshop::{App, RunOutcome, app, json};
+///
+/// static APP: App = app! {};
+///
+/// #[openshop::test(APP)]
+/// async fn the_flow_completes(ctx: &TestContext) {
+///     let outcome = ctx.run_flow("syncOrders", json!({ "limit": 5 })).await.unwrap();
+///     assert_eq!(outcome, RunOutcome::Completed);
+/// }
+/// ```
+///
+/// The test receives a [`TestContext`](testing::TestContext) of the
+/// application, started on an isolated database with its shop installed, and
+/// the context is shut down when the function returns. Take `&mut
+/// TestContext` to create resources with a factory. The function returns
+/// nothing, or a `Result` whose error fails the test.
+///
+/// The attributes of a test, such as `#[ignore]`, go below this one.
+#[cfg(feature = "testing")]
+pub use openshop_macros::test;

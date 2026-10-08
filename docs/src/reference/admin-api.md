@@ -61,8 +61,10 @@ still answers `401` without a valid token.
 
 Each value of `GET /api/pages` is `visible`, `hidden`, or `disabled`. A page
 without a configured mode resolves to `visible`, or to `hidden` when its
-collection (flows, providers, crons, functions) is empty. This endpoint stays
-available even when every page is `disabled`.
+collection (flows, providers, crons, functions) is empty. The `mcp` page
+without a configured mode resolves to `disabled` when MCP is turned off with
+`McpConfig::disabled()`. This endpoint stays available even when every page is
+`disabled`.
 
 When a page is `disabled`, its admin API group returns `404` with `{ "error": "Not found" }`:
 

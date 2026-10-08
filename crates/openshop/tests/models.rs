@@ -7,7 +7,7 @@ use chrono::{DateTime, Utc};
 use common::{TempProject, empty_database};
 use openshop::db::migrate::{FRAMEWORK_MIGRATIONS, check_migrations, generate_migrations, migrate_schema};
 use openshop::testing::TestDb;
-use openshop::{Model, OpenShopConfig, PgPool, Record, Value, json};
+use openshop::{Model, OpenShopConfig, PgPool, Value, json};
 use uuid::Uuid;
 
 const SHOP: &str = "one.myshopify.com";
@@ -15,7 +15,7 @@ const OTHER_SHOP: &str = "two.myshopify.com";
 
 #[derive(Debug, Clone, PartialEq, Model)]
 #[model(
-    table = "reviews",
+    "reviews",
     index(shop, product_id),
     unique(shop, product_id, author, name = "reviews_one_per_author")
 )]
@@ -37,7 +37,7 @@ struct Review {
 
 /// A table without shop or timestamps, with a renamed column and a keyword field.
 #[derive(Debug, Clone, PartialEq, Model)]
-#[model(table = "settings")]
+#[model("settings")]
 struct Setting {
     id: Uuid,
     #[model(unique)]
@@ -61,7 +61,7 @@ fn new_review(product: &str, author: &str, rating: i32) -> NewReview {
 }
 
 async fn database() -> TestDb {
-    TestDb::create_with_models(&[Review::model(), Setting::model()])
+    TestDb::create_with_models(&[Review::table(), Setting::table()])
         .await
         .unwrap()
 }
@@ -86,7 +86,7 @@ fn the_struct_describes_the_table() {
         ]
     );
     assert_eq!(
-        Review::model().create_sql(),
+        Review::table().create_sql(),
         "CREATE TABLE IF NOT EXISTS \"reviews\" (\n\
          \x20 \"id\" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,\n\
          \x20 \"shop\" text NOT NULL,\n\
@@ -106,7 +106,7 @@ fn the_struct_describes_the_table() {
 
     assert_eq!((Setting::TABLE, Setting::HAS_SHOP), ("settings", false));
     assert_eq!(
-        Setting::model().create_sql(),
+        Setting::table().create_sql(),
         "CREATE TABLE IF NOT EXISTS \"settings\" (\n\
          \x20 \"id\" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,\n\
          \x20 \"key\" text NOT NULL,\n\
@@ -123,7 +123,7 @@ fn the_struct_describes_the_table() {
 
     // A registered model is what the configuration pushes and migrates.
     let config = OpenShopConfig::builder().add::<Review>().build().unwrap();
-    assert_eq!(config.models, [Review::model()]);
+    assert_eq!(config.models, [Review::table()]);
 }
 
 #[tokio::test]
@@ -380,7 +380,7 @@ async fn a_model_without_shop_has_plain_rows() {
 /// The same table one release later: a column renamed and retyped, one
 /// added with a default, one added nullable, one dropped, an index replaced.
 #[derive(Debug, Clone, PartialEq, Model)]
-#[model(table = "reviews", index(shop, score))]
+#[model("reviews", index(shop, score))]
 struct ReviewV2 {
     id: Uuid,
     shop: String,
@@ -427,11 +427,11 @@ async fn generated_migrations_follow_the_models_from_one_release_to_the_next() {
     let project = TempProject::new();
 
     // First release: the framework schema and the table of the model.
-    let first = generate_migrations(project.path(), &[], false, &[Review::model()]).unwrap();
+    let first = generate_migrations(project.path(), &[], false, &[Review::table()]).unwrap();
     assert_eq!(first.files.len(), FRAMEWORK_MIGRATIONS.len() + 1);
     assert!(first.warnings.is_empty());
     migrate_schema(&db.pool, project.path()).await.unwrap();
-    check_migrations(project.path(), &[Review::model()]).unwrap();
+    check_migrations(project.path(), &[Review::table()]).unwrap();
 
     let reviews = Review::for_shop(&db.pool, SHOP);
     let review = reviews.insert(new_review("p1", "ada", 5)).await.unwrap();
@@ -441,7 +441,7 @@ async fn generated_migrations_follow_the_models_from_one_release_to_the_next() {
     );
 
     // Second release: the struct changed, `check` refuses to go on without a migration.
-    let error = check_migrations(project.path(), &[ReviewV2::model()]).unwrap_err();
+    let error = check_migrations(project.path(), &[ReviewV2::table()]).unwrap_err();
     assert!(
         error
             .to_string()
@@ -453,7 +453,7 @@ async fn generated_migrations_follow_the_models_from_one_release_to_the_next() {
         project.path(),
         &["--name=reviews_v2".to_string()],
         false,
-        &[ReviewV2::model()],
+        &[ReviewV2::table()],
     )
     .unwrap();
     assert_eq!(second.files.len(), 1);
@@ -491,7 +491,7 @@ async fn generated_migrations_follow_the_models_from_one_release_to_the_next() {
     let applied = migrate_schema(&db.pool, project.path()).await.unwrap();
     assert_eq!(applied.len(), 1);
     assert!(applied[0].ends_with("_reviews_v2"));
-    check_migrations(project.path(), &[ReviewV2::model()]).unwrap();
+    check_migrations(project.path(), &[ReviewV2::table()]).unwrap();
 
     // The table is the one the new struct describes, with its data.
     assert_eq!(
@@ -526,21 +526,21 @@ async fn generated_migrations_follow_the_models_from_one_release_to_the_next() {
     );
 
     // Nothing is left to generate.
-    let third = generate_migrations(project.path(), &[], false, &[ReviewV2::model()]).unwrap();
+    let third = generate_migrations(project.path(), &[], false, &[ReviewV2::table()]).unwrap();
     assert_eq!((third.files.len(), third.snapshot), (0, None));
     db.cleanup().await.unwrap();
 }
 
 #[tokio::test]
 async fn the_development_push_adds_the_columns_a_model_gained() {
-    let db = TestDb::create_with_models(&[Review::model()]).await.unwrap();
+    let db = TestDb::create_with_models(&[Review::table()]).await.unwrap();
     let review = Review::for_shop(&db.pool, SHOP)
         .insert(new_review("p1", "ada", 5))
         .await
         .unwrap();
 
     // The next start of `dev`, with the struct of the next release.
-    openshop::db::migrate::push_schema(&db.pool, &[ReviewV2::model()], false)
+    openshop::db::migrate::push_schema(&db.pool, &[ReviewV2::table()], false)
         .await
         .unwrap();
 
@@ -566,7 +566,7 @@ async fn the_development_push_adds_the_columns_a_model_gained() {
 /// A vote on a review. Deleting the review deletes its votes; a vote can
 /// answer another vote, and survives it.
 #[derive(Debug, Clone, PartialEq, Model)]
-#[model(table = "review_votes", index(review_id))]
+#[model("review_votes", index(review_id))]
 struct ReviewVote {
     id: Uuid,
     shop: String,
@@ -598,7 +598,7 @@ async fn foreign_keys(pool: &PgPool, table: &str) -> Vec<String> {
 
 #[test]
 fn references_are_part_of_the_model() {
-    let model = ReviewVote::model();
+    let model = ReviewVote::table();
     // The table itself is created without them, so that models register in any order.
     assert!(!model.create_sql().contains("REFERENCES"));
     let statements: Vec<String> = model
@@ -620,7 +620,7 @@ fn references_are_part_of_the_model() {
 #[tokio::test]
 async fn the_database_enforces_references() {
     // The referencing model comes first: the push still creates both tables, then the constraints.
-    let db = TestDb::create_with_models(&[ReviewVote::model(), Review::model()])
+    let db = TestDb::create_with_models(&[ReviewVote::table(), Review::table()])
         .await
         .unwrap();
     assert_eq!(
@@ -631,7 +631,7 @@ async fn the_database_enforces_references() {
         ]
     );
     // Pushing again, as at the next start of `dev`, changes nothing.
-    openshop::db::migrate::push_schema(&db.pool, &[ReviewVote::model(), Review::model()], false)
+    openshop::db::migrate::push_schema(&db.pool, &[ReviewVote::table(), Review::table()], false)
         .await
         .unwrap();
     assert_eq!(foreign_keys(&db.pool, "review_votes").await.len(), 2);
@@ -676,7 +676,7 @@ async fn the_database_enforces_references() {
 /// The votes one release later: the link is kept under another column name,
 /// and answers are no longer tracked.
 #[derive(Debug, Clone, PartialEq, Model)]
-#[model(table = "review_votes")]
+#[model("review_votes")]
 struct ReviewVoteV2 {
     id: Uuid,
     shop: String,
@@ -690,7 +690,7 @@ async fn generated_migrations_carry_the_references() {
     let db = empty_database().await;
     let project = TempProject::new();
 
-    let first = generate_migrations(project.path(), &[], false, &[ReviewVote::model(), Review::model()]).unwrap();
+    let first = generate_migrations(project.path(), &[], false, &[ReviewVote::table(), Review::table()]).unwrap();
     assert!(first.warnings.is_empty());
     let sql = std::fs::read_to_string(first.files.last().unwrap()).unwrap();
     let position = |needle: &str| sql.find(needle).unwrap_or_else(|| panic!("{needle} in:\n{sql}"));
@@ -709,7 +709,7 @@ async fn generated_migrations_carry_the_references() {
         .await
         .unwrap();
 
-    let second = generate_migrations(project.path(), &[], false, &[ReviewVoteV2::model(), Review::model()]).unwrap();
+    let second = generate_migrations(project.path(), &[], false, &[ReviewVoteV2::table(), Review::table()]).unwrap();
     assert_eq!(
         std::fs::read_to_string(&second.files[0]).unwrap(),
         "-- models\n\
@@ -727,7 +727,7 @@ async fn generated_migrations_carry_the_references() {
          ALTER TABLE \"review_votes\" DROP COLUMN IF EXISTS \"answers\";\n"
     );
     migrate_schema(&db.pool, project.path()).await.unwrap();
-    check_migrations(project.path(), &[ReviewVoteV2::model(), Review::model()]).unwrap();
+    check_migrations(project.path(), &[ReviewVoteV2::table(), Review::table()]).unwrap();
 
     assert_eq!(
         foreign_keys(&db.pool, "review_votes").await,

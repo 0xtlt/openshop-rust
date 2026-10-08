@@ -6,10 +6,10 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use common::{TestApp, create_config, noop_flow};
+use openshop::server::listen;
 use openshop::testing::{TestContext, TestOptions, sign_query, to_query_string};
 use openshop::{
     IndexMap, OpenShopConfig, PgPool, ServerOptions, ShopifyAppConfig, ShopifyConfig, UiSource, Value, json,
-    start_api_server,
 };
 use reqwest::header::{CACHE_CONTROL, CONTENT_SECURITY_POLICY, CONTENT_TYPE, HOST, HeaderMap, LOCATION, REFERER};
 use reqwest::{Method, RequestBuilder, StatusCode};
@@ -891,7 +891,7 @@ async fn start_api_server_returns_a_closable_server_handle_that_can_rebind_the_s
     // a server that kept its port would fail all of them.
     let mut rebound = false;
     for _ in 0..3 {
-        let first = start_api_server(&test.app, 0, ServerOptions::default()).await.unwrap();
+        let first = listen(&test.app, 0, ServerOptions::default()).await.unwrap();
         let port = first.addr.port();
         assert_ne!(port, 0);
 
@@ -906,7 +906,7 @@ async fn start_api_server_returns_a_closable_server_handle_that_can_rebind_the_s
         assert_eq!(health.json::<Value>().await.unwrap()["status"], "ok");
         first.shutdown().await.unwrap();
 
-        if let Ok(second) = start_api_server(&test.app, port, ServerOptions::default()).await {
+        if let Ok(second) = listen(&test.app, port, ServerOptions::default()).await {
             assert_eq!(second.addr.port(), port);
             let health = reqwest::get(format!("http://127.0.0.1:{port}/health")).await.unwrap();
             assert_eq!(health.status(), StatusCode::OK);
@@ -922,10 +922,10 @@ async fn start_api_server_returns_a_closable_server_handle_that_can_rebind_the_s
 #[tokio::test]
 async fn start_api_server_fails_when_the_port_is_taken() {
     let test = TestApp::new(create_config([noop_flow("test-flow")])).await;
-    let running = start_api_server(&test.app, 0, ServerOptions::default()).await.unwrap();
+    let running = listen(&test.app, 0, ServerOptions::default()).await.unwrap();
     let port = running.addr.port();
 
-    let error = start_api_server(&test.app, port, ServerOptions::default())
+    let error = listen(&test.app, port, ServerOptions::default())
         .await
         .err()
         .expect("the port is already bound");
@@ -942,7 +942,7 @@ async fn start_api_server_fails_when_the_port_is_taken() {
 async fn start_api_server_serves_the_configured_ui() {
     let ui = UiDir::new();
     let test = TestApp::new(create_config([noop_flow("test-flow")])).await;
-    let server = start_api_server(&test.app, 0, ui.server(true)).await.unwrap();
+    let server = listen(&test.app, 0, ui.server(true)).await.unwrap();
     let base = format!("http://127.0.0.1:{}", server.addr.port());
 
     let asset = reqwest::get(format!("{base}/asset.txt")).await.unwrap();

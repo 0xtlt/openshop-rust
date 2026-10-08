@@ -8,7 +8,7 @@ generation step and no generated file.
 ## Inline operations
 
 ```rust,ignore
-use openshop::{FlowContext, Result, graphql};
+use openshop::prelude::*;
 
 async fn recent_order_names(ctx: &FlowContext, limit: u32) -> Result<Vec<String>> {
     let data = ctx
@@ -137,7 +137,8 @@ places, to write a function that returns its data, or to build input objects
 whose fields are checked.
 
 ```rust,ignore
-use openshop::{Result, ShopifyClient, graphql};
+use openshop::ShopifyClient;
+use openshop::prelude::*;
 
 graphql! {
     /// Writes metafields and reports what Shopify refused.
@@ -161,7 +162,7 @@ async fn set_color(shopify: &ShopifyClient, product_id: &str) -> Result<Vec<Stri
     };
     let data: metafields_set::Data = shopify.execute(metafields_set::operation(variables)).await?;
 
-    let payload = data.metafields_set.ok_or_else(|| openshop::anyhow!("No payload"))?;
+    let payload = data.metafields_set.ok_or_else(|| anyhow!("No payload"))?;
     Ok(payload.user_errors.into_iter().map(|error| error.message).collect())
 }
 ```
@@ -188,8 +189,8 @@ currently `2026-04`: the version `ctx.shopify` and `app.shopify_client(…)`
 call. Nothing has to be downloaded to use `graphql!`.
 
 A client created for another version with
-`create_shopify_client(&app, shop, shopify_app, Some("2026-07"))` needs the
-schema of that version:
+`ShopifyClient::new(&app, shop, shopify_app).with_api_version("2026-07")`
+needs the schema of that version:
 
 ```bash
 openshop codegen --api-version=2026-07

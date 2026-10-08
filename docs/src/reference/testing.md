@@ -20,30 +20,42 @@ through the context.
 
 ```rust,ignore
 // tests/app.rs
-use openshop::testing::{TestContext, TestOptions};
+use my_app::APP;
+use openshop::testing::TestContext;
 
-#[tokio::test]
-async fn serves_health() {
-    let ctx = TestContext::with_options(
-        my_app::APP.config().expect("valid config"),
-        TestOptions {
-            access_token: Some("test-access-token".to_string()),
-            ..Default::default()
-        },
-    )
-    .await
-    .expect("test context");
-
+#[openshop::test(APP)]
+async fn serves_health(ctx: &TestContext) {
     let response = ctx.http.get(ctx.url_for("/health")).send().await.unwrap();
     assert_eq!(response.status(), 200);
-
-    ctx.shutdown().await.unwrap();
 }
 ```
 
+`#[openshop::test(APP)]` makes an `async` function a test of the application
+declared with `app!`. It starts the application on an isolated database with
+its shop installed, passes the `TestContext` to the function, and shuts the
+context down when the function returns.
+
+| Part | Contract |
+| --- | --- |
+| `#[openshop::test(APP)]` | Names the application under test: `APP`, or a path such as `my_app::APP`. |
+| `ctx: &TestContext` | The only argument. Take `&mut TestContext` to [create resources with a factory](#use-factories-and-automatic-cleanup). |
+| Return type | Nothing, or a `Result` whose error fails the test. |
+| Other attributes of the test, such as `#[ignore]` | They go below `#[openshop::test]`. |
+
+The attribute runs the test on a runtime of its own: there is no
+`#[tokio::test]` to add.
+
+A context can also be started by hand:
+
+| Constructor | Configuration | Options |
+| --- | --- | --- |
+| `TestContext::for_app(&APP).await`, or `APP.test().await` | `APP.config()` | [`TestOptions::installed()`](#testoptions). What `#[openshop::test]` calls. |
+| `TestContext::new(config).await` | Given | `TestOptions::default()`: the shop is not installed. |
+| `TestContext::with_options(config, options).await` | Given | Given |
+
 `APP.config()` is the validated configuration of the application declared with
-`app!`; each call builds a new one. `TestContext::new(config)` uses the default
-options. Creating a context:
+`app!`; each call builds a new one. A context started by hand ends with
+`ctx.shutdown().await`. Creating a context:
 
 1. creates a schema named `test_<uuid>` in the test database and pushes the
    framework tables and the configuration's models into it;
@@ -57,10 +69,11 @@ development database. Contexts are independent, so tests can run in parallel
 against one database.
 
 `shutdown()` destroys factory-created resources, closes the server, and drops
-the schema. A context that is dropped without `shutdown()`, for example because
-an assertion panicked first, still drops its schema on a best-effort basis: the
-attempt is limited to a few seconds and gives up when the schema is locked.
-Factory-created resources are only destroyed by `shutdown()` or `cleanup()`.
+the schema. `#[openshop::test]` calls it when the function returns. A context
+that is dropped without `shutdown()`, for example because an assertion panicked
+first, still drops its schema on a best-effort basis: the attempt is limited to
+a few seconds and gives up when the schema is locked. Factory-created resources
+are only destroyed by `shutdown()` or `cleanup()`.
 
 The example imports the application from the app's library target. In a
 binary-only project, write the tests in a `#[cfg(test)]` module of
@@ -77,7 +90,7 @@ of the declaration, to add to the whole application.
 ```rust,ignore
 use my_app::flows::sync_orders::sync_orders;
 use my_app::providers::warehouse::Warehouse;
-use openshop::testing::TestContext;
+use openshop::testing::{TestContext, TestOptions};
 use openshop::{Flow, OpenShopConfig};
 
 async fn context() -> TestContext {
@@ -88,12 +101,17 @@ async fn context() -> TestContext {
         .build()
         .expect("valid config");
 
-    TestContext::new(config).await.expect("test context")
+    TestContext::with_options(config, TestOptions::installed())
+        .await
+        .expect("test context")
 }
 ```
 
 `build()` refuses a key registered twice, for example with
 `[openshop] Invalid config: flows.syncOrders is registered twice`.
+
+Such a configuration is not a declared `App`: its context is started by hand,
+in a test that ends with `ctx.shutdown().await`.
 
 ## `TestOptions`
 
@@ -102,7 +120,7 @@ async fn context() -> TestContext {
 | `shop` | `test.myshopify.com` | Default shop for flows, proxy signatures, tokens, and factories. |
 | `secret` | `test-secret` | Shopify API secret of the single-app setup. Signs proxy requests and session tokens. |
 | `api_key` | `test-app` | Shopify API key of the single-app setup. Session-token audience. |
-| `access_token` | `None` | Inserts an installation so Shopify client calls and factories can run. |
+| `access_token` | `None`; `test-access-token` with `TestOptions::installed()` | Inserts an installation so Shopify client calls and factories can run. |
 | `encryption_key` | `None` | `ENCRYPTION_KEY` of the application. |
 | `host` | `None` | `HOST` of the application. |
 | `production` | `false` | Production mode, for example to test encryption enforcement. |
@@ -112,7 +130,20 @@ async fn context() -> TestContext {
 | `live_shopify` | `false` | Sends Shopify requests over the network instead of to the mock transport, for tests that create real resources with factories. |
 
 `TestOptions` implements `Default`; set the fields you need with struct update
-syntax.
+syntax. `TestOptions::installed()` is the default options with an
+`access_token`: the shop has installed the application, so that flows, proxies
+and the admin find a token for it. `#[openshop::test]` uses it.
+
+```rust,ignore
+use openshop::testing::TestOptions;
+
+fn another_shop() -> TestOptions {
+    TestOptions {
+        shop: "another-shop.myshopify.com".to_string(),
+        ..TestOptions::installed()
+    }
+}
+```
 
 ## `TestContext`
 
@@ -135,16 +166,18 @@ syntax.
 | `authorization_header()` / `authorization_header_for(shop, sub)` | `Bearer <session token>`. |
 | `create(&factory, overrides)`, `cleanup()` | Factory resources; see below. |
 | `reset_fakes()` | Resets every provider fake. |
-| `shutdown()` | Cleans up and drops the schema. |
+| `shutdown()` | Cleans up and drops the schema. `#[openshop::test]` calls it. |
 
 ## Test a flow
 
 ```rust,ignore
+use my_app::APP;
 use my_app::flows::sync_orders::sync_orders;
-use openshop::engine::RunFlowResult;
-use openshop::json;
+use my_app::providers::warehouse::Warehouse;
+use openshop::prelude::*;
 use openshop::testing::{MockTransport, TestContext};
 
+#[openshop::test(APP)]
 async fn syncs_orders(ctx: &TestContext) {
     ctx.transport.respond_with(|request| {
         let query = request.body["query"].as_str().unwrap_or_default();
@@ -156,15 +189,16 @@ async fn syncs_orders(ctx: &TestContext) {
             ] } } }),
         ))
     });
-    ctx.fakes.method("warehouse", "push").returns(true);
+    // The fake takes what `push` returns, and gives back what it received.
+    let push = ctx.fakes.for_call(Warehouse::PUSH);
+    push.returns(1);
 
-    let result = ctx.run_flow(sync_orders::NAME, json!({ "limit": 10 })).await.unwrap();
+    let outcome = ctx.run_flow(sync_orders::NAME, json!({ "limit": 10 })).await.unwrap();
 
-    assert_eq!(result, RunFlowResult::Completed);
-    let push = ctx.fakes.method("warehouse", "push");
-    assert!(push.called());
+    assert_eq!(outcome, RunOutcome::Completed);
     assert_eq!(push.call_count(), 1);
-    assert!(push.last_call().unwrap().args.is_array());
+    let orders = push.last_call().unwrap().args;
+    assert_eq!(orders[0].id, "gid://shopify/Order/1");
 }
 ```
 
@@ -173,9 +207,9 @@ async fn syncs_orders(ctx: &TestContext) {
 `run_flow(flow, input)` inserts a running row and executes the flow
 immediately with fake provider connectors. It does not require a worker, and
 the run is not retried: a failing flow returns
-`RunFlowResult::Failed { error, will_retry: false }`.
+`RunOutcome::Failed { error, will_retry: false }`.
 
-| `RunFlowResult` | Meaning |
+| `RunOutcome` | Meaning |
 | --- | --- |
 | `Completed` | The flow returned `Ok(())`. |
 | `Sleeping { resume_at }` | The flow called `step.sleep`. |
@@ -200,10 +234,13 @@ server.
 Use `dispatch_flow(flow, input)` to test queueing:
 
 ```rust,ignore
+use my_app::APP;
 use my_app::flows::sync_orders::sync_orders;
+use openshop::prelude::*;
+use openshop::sqlx;
 use openshop::testing::TestContext;
-use openshop::{json, sqlx};
 
+#[openshop::test(APP)]
 async fn queues_a_run(ctx: &TestContext) {
     let run_id = ctx.dispatch_flow(sync_orders::NAME, json!({ "limit": 10 })).await.unwrap();
 
@@ -223,10 +260,50 @@ queued runs to execute.
 
 ## Configure provider fakes
 
-Every configured provider method gets a `FakeMethod`:
+Every configured provider method gets a fake.
+`ctx.fakes.for_call(Warehouse::PUSH)` returns the fake of a method of a
+[provider struct](providers.md#the-methods), or of any
+[typed call](providers.md#typed-calls), as a `TypedFake`: it takes what the
+method returns, and gives back the arguments as the method receives them.
 
 ```rust,ignore
-use openshop::json;
+use my_app::providers::warehouse::{Order, Warehouse};
+use openshop::testing::TestContext;
+
+// `Warehouse::push(&self, orders: Vec<Order>) -> Result<usize>`
+fn configure(ctx: &TestContext) {
+    let push = ctx.fakes.for_call(Warehouse::PUSH);
+
+    push.returns(2);
+    push.rejects("warehouse offline");
+    push.on_call_returns(0, 2);
+    push.on_call_rejects(1, "rate limited");
+
+    println!("{} {}", push.called(), push.call_count());
+    let last: Option<Vec<Order>> = push.last_call().map(|call| call.args);
+    let all: Vec<Vec<Order>> = push.calls().into_iter().map(|call| call.args).collect();
+    println!("{} {}", last.is_some(), all.len());
+
+    push.reset();
+}
+```
+
+| `TypedFake` | Contract |
+| --- | --- |
+| `returns(value)` | Answers every call without a more specific rule. `value` has the type the method returns. |
+| `rejects(error)` | Makes every call without a more specific rule fail. |
+| `on_call_returns(n, value)`, `on_call_rejects(n, error)` | The answer of the `n`-th call, zero-based. |
+| `called()`, `call_count()` | Whether, and how many times, the method was called. |
+| `calls()`, `last_call()` | The recorded calls, oldest first, as `TypedCall`s: `args` has the type of the arguments of the method. A method with several arguments gives them as a tuple, one without argument as `()`. |
+| `reset()` | Forgets the recorded calls and every rule. |
+| `untyped()` | The `FakeMethod` behind it, to answer with something the method could not return, or to replace its body. |
+
+`ctx.fakes.method("warehouse", "push")` returns the same fake without the
+types, a `FakeMethod`. It takes any serializable value, records the arguments
+as JSON, and can replace the body of the method:
+
+```rust,ignore
+use openshop::prelude::*;
 use openshop::testing::TestContext;
 
 fn configure(ctx: &TestContext) {
@@ -248,43 +325,46 @@ fn configure(ctx: &TestContext) {
 
 A call is answered by the first rule that applies: the rule for that call
 index (zero-based), then the implementation, then `rejects`, then `returns`. A
-fake without any rule returns `null`. `ctx.fakes.method(…)` panics for an
-unknown provider or method; `ctx.fakes.get(…)` returns an `Option` instead.
+fake without any rule returns `null`. `ctx.fakes.for_call(…)` and
+`ctx.fakes.method(…)` panic for an unknown provider or method;
+`ctx.fakes.get(…)` returns an `Option` instead.
 
-`ctx.fakes.for_call(Warehouse::PUSH)` returns the fake of a method of a
-[provider struct](providers.md#the-methods), or of any
-[typed call](providers.md#typed-calls): the same one as
-`ctx.fakes.method("warehouse", "push")`. Give it a result of the type the call
-returns: `connectors.invoke(…)` refuses the default `null` with
-`Invalid result from "warehouse.push": …`, unless the call returns `()` or an
-`Option`.
+Give the fake of a typed method a result with `returns(…)`:
+`Warehouse::on(..).push(..)` refuses the default `null` with
+`Invalid result from "warehouse.push": …`, unless the method returns `()` or
+an `Option`.
 
 Each `FakeCall` contains `args`, `returned_value`, `thrown_error`, and
-`timestamp`. `reset()` clears behavior and history for one method;
-`ctx.reset_fakes()` resets every provider fake.
+`timestamp`; a `TypedCall` has the same fields, with typed `args`. `reset()`
+clears behavior and history for one method; `ctx.reset_fakes()` resets every
+provider fake.
 
-The module also exports `create_fake_providers(&config.providers)` for tests
-that do not need an HTTP context. `FakeProviders::connectors()` returns the
-`Connectors` to pass to `RunFlowOptions::connectors`.
+The module also exports `FakeProviders`: `FakeProviders::new(&config.providers)`
+builds the fakes for tests that do not need an HTTP context.
+`FakeProviders::connectors()` returns the `Connectors` to pass to
+`RunFlowOptions::connectors`.
 
 ## Test a proxy route
 
 The proxy client signs app proxy parameters like Shopify does:
 
 ```rust,ignore
+use my_app::APP;
 use openshop::testing::TestContext;
+use serde::Deserialize;
 
-#[derive(serde::Deserialize)]
+#[derive(Deserialize)]
 struct Reviews {
     reviews: Vec<Review>,
 }
 
-#[derive(serde::Deserialize)]
+#[derive(Deserialize)]
 struct Review {
     id: u64,
     rating: u8,
 }
 
+#[openshop::test(APP)]
 async fn lists_reviews(ctx: &TestContext) {
     let response = ctx
         .proxy()
@@ -319,15 +399,23 @@ relative to `/proxy`. Chain:
 otherwise. `response.json::<T>()` deserializes it. `ctx.proxy_for(shop, secret)`
 signs for another shop or with another app's secret.
 
+A proxy with a typed input answers `422` to a query or a body that does not
+fit it, before its handler runs: `qs(&[("page", "two")])` on a handler that
+takes `page: Option<u32>` gives `response.status == 422`. The answer of a
+`liquid` proxy is in `response.text`: the variables its handler assigns, then
+the template file as it is written. See [Proxy routes](proxy-routes.md).
+
 ## Test the Admin API
 
 The context's request builders add a signed Shopify session token:
 
 ```rust,ignore
-use openshop::Value;
+use my_app::APP;
+use openshop::prelude::*;
 use openshop::response::Method;
 use openshop::testing::TestContext;
 
+#[openshop::test(APP)]
 async fn lists_runs(ctx: &TestContext) {
     let response = ctx.get("/api/runs").send().await.unwrap();
     assert_eq!(response.status(), 200);
@@ -355,7 +443,7 @@ does not build:
 
 | Function | Produces |
 | --- | --- |
-| `create_session_token(shop, secret, api_key, sub)` | A session token as issued by App Bridge, valid for one minute. |
+| `session_token(shop, secret, api_key, sub)` | A session token as issued by App Bridge, valid for one minute. |
 | `sign_session_token(&claims, secret)` | An HS256 JWT with the claims you choose. |
 | `sign_webhook_body(body, secret)` | The `X-Shopify-Hmac-Sha256` value for a webhook body. |
 | `sign_query(&[(key, value)], secret)` | The query map with the `hmac` parameter Shopify adds to OAuth and app-launch URLs. |
@@ -363,8 +451,10 @@ does not build:
 | `to_query_string(&query)` | A query map serialized for a URL. |
 
 ```rust,ignore
+use my_app::APP;
 use openshop::testing::{TestContext, sign_webhook_body};
 
+#[openshop::test(APP)]
 async fn delivers_a_webhook(ctx: &TestContext) {
     let body = r##"{"id":1,"name":"#1001"}"##;
     let response = ctx
@@ -388,8 +478,8 @@ Factories create Shopify resources through the context's Shopify client and
 remember how to delete them:
 
 ```rust,ignore
-use openshop::testing::{Factory, define_factory};
-use openshop::{Value, bail, json};
+use openshop::prelude::*;
+use openshop::testing::Factory;
 
 #[derive(Clone)]
 pub struct Customer {
@@ -416,7 +506,7 @@ const DELETE_CUSTOMER: &str = "#graphql
 ";
 
 pub fn customer_factory() -> Factory<Customer> {
-    define_factory(
+    Factory::new(
         |shopify, overrides: Value| async move {
             let email = overrides["email"].as_str().unwrap_or("test@example.com").to_string();
             let data = shopify
@@ -436,12 +526,18 @@ pub fn customer_factory() -> Factory<Customer> {
 }
 ```
 
-Create and track a resource:
+`Factory::new(create, destroy)` takes what creates a resource, from the
+client of the shop and the overrides of a test, and what destroys it
+afterwards.
+
+Create and track a resource, in a test that takes `&mut TestContext`:
 
 ```rust,ignore
-use openshop::json;
+use my_app::APP;
+use openshop::prelude::*;
 use openshop::testing::TestContext;
 
+#[openshop::test(APP)]
 async fn creates_a_customer(ctx: &mut TestContext) {
     let customer = ctx
         .create(&customer_factory(), json!({ "email": "flow-test@example.com" }))
@@ -453,15 +549,18 @@ async fn creates_a_customer(ctx: &mut TestContext) {
 
 `ctx.cleanup()` destroys tracked resources in last-in, first-out order. Cleanup
 continues after a destroy error and logs the failure. `ctx.shutdown()` calls
-cleanup again safely before closing the server.
+cleanup again safely before closing the server, and `#[openshop::test]` calls
+`shutdown()` when the function returns.
 
 Without an installation that has an access token, `ctx.create()` fails with
-`No Shopify client available. Is the test shop installed?`.
+`No Shopify client available. Is the test shop installed?`. The context of
+`#[openshop::test]` has one.
 
 By default a `TestContext` talks to its `MockTransport`, so its factories
 exercise your scripted responses, not a real shop. Set
 `TestOptions::live_shopify` to `true`, with the `shop` and `access_token` of a
-development shop, to create real resources. Prefer a dedicated development
+development shop, to create real resources, in a context started with
+`TestContext::with_options(…)`. Prefer a dedicated development
 shop and never run destructive factories against a production shop.
 
 For manual lifecycle control, `openshop::testing` also exports `FactoryScope`.
@@ -473,9 +572,11 @@ inspect `scope.size()`, and call `scope.cleanup()` in teardown.
 `ctx.db` is the `sqlx` pool of the context's schema:
 
 ```rust,ignore
+use my_app::APP;
 use openshop::sqlx;
 use openshop::testing::TestContext;
 
+#[openshop::test(APP)]
 async fn runs_belong_to_the_test_shop(ctx: &TestContext) {
     let shops: Vec<(String,)> = sqlx::query_as("SELECT shop FROM flow_runs")
         .fetch_all(&ctx.db)
@@ -486,22 +587,30 @@ async fn runs_belong_to_the_test_shop(ctx: &TestContext) {
 }
 ```
 
+A test context stands for its shop, like the context of a handler: it is a
+`ShopScope`, for the Shopify app `default`. The rows of a
+[model](database.md#app-models) are read and written with `Review::of(ctx)`,
+and `sync_orders::dispatch(ctx, input)` queues a run for the shop of the test.
+`Review::for_shop(&ctx.db, "other.myshopify.com")` reads another shop.
+
 The schema starts empty and is dropped by `shutdown()`, so tests do not need to
 delete their rows. `TestDb::create()` and `TestDb::create_with_models(&models)`
 give the same isolated schema (`pool`, `schema`, `cleanup()`) without a
-server.
+server. `models` are `Table`s, such as `Review::table()`.
 
 ## Test admin functions
 
 Call a custom admin page loader or action without HTTP:
 
 ```rust,ignore
+use my_app::APP;
 use my_app::admin::reviews::ReviewsPage;
+use openshop::prelude::*;
 use openshop::testing::{
-    AdminFunctionTestOptions, TestContext, create_admin_function_test_context, invoke_admin_function,
+    AdminTestOptions, TestContext, admin_context, invoke_admin_function,
 };
-use openshop::{Value, json};
 
+#[openshop::test(APP)]
 async fn saves_a_review(ctx: &TestContext) {
     let config = ctx.app.config();
     let page = config
@@ -509,7 +618,7 @@ async fn saves_a_review(ctx: &TestContext) {
         .iter()
         .find(|page| page.path == ReviewsPage::PATH)
         .expect("the reviews page");
-    let context = create_admin_function_test_context(&ctx.app, AdminFunctionTestOptions::default())
+    let context = admin_context(&ctx.app, AdminTestOptions::default())
         .await
         .unwrap();
 
@@ -526,7 +635,9 @@ async fn saves_a_review(ctx: &TestContext) {
 actions, by the name the page view calls them with: `saveReview` for a function
 `save_review` marked `#[action]`.
 
-`AdminFunctionTestOptions` has the fields `shop` (`test.myshopify.com`),
+`admin_context(&app, options)` builds the `AdminContext` a function receives,
+with `ctx.db`, `ctx.shopify` and `ctx.connectors` for the shop of the options.
+`AdminTestOptions` has the fields `shop` (`test.myshopify.com`),
 `shopify_app` (`default`), `actor_id` (`test-actor`), `params` (empty), and
 `request_id` (`test-request`). `invoke_admin_function` applies the function's
 own `authorize` rule and input schema, then deserializes the output. It does
@@ -536,7 +647,9 @@ through `ctx.post("/api/pages/custom/…")`.
 ## Test runner integration
 
 Tests run with `cargo test` (or `openshop test`). They need a reachable
-PostgreSQL database and an async test attribute such as `#[tokio::test]`.
+PostgreSQL database. `#[openshop::test]` runs a test on a runtime of its own; a
+test that starts its context by hand needs an async test attribute such as
+`#[tokio::test]`.
 
 The context does not start a worker or the scheduler, and it does not make real
 Shopify requests unless `live_shopify` is set. `shutdown()` closes the HTTP

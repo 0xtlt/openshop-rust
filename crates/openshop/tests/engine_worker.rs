@@ -7,8 +7,8 @@ use std::time::{Duration, Instant};
 use common::{TEST_SHOP, TestApp, create_config, noop_flow};
 use openshop::db::schema::{FlowRun, StepResult};
 use openshop::{
-    CancellationToken, Concurrency, DispatchFlowParams, DispatchOptions, Flow, FlowContext, InputSchema, OpenShop,
-    OpenShopConfig, PartialRetryPolicy, PartialWorkerConfig, Worker, bail, cancel_run, json,
+    CancellationToken, Concurrency, DispatchOptions, Flow, FlowContext, InputSchema, OpenShop, OpenShopConfig,
+    RetryPolicy, Worker, WorkerConfig, bail, cancel_run, json,
 };
 use tokio::sync::{Barrier, Notify};
 use uuid::Uuid;
@@ -17,37 +17,39 @@ const TIMEOUT: Duration = Duration::from_secs(10);
 const POLL: Duration = Duration::from_millis(15);
 
 /// A worker that polls fast enough for tests.
-fn worker_with(app: &OpenShop, config: PartialWorkerConfig) -> Worker {
-    Worker::new(app.clone(), config.poll_interval_ms(20).poll_max_interval_ms(40))
+fn worker_with(app: &OpenShop, config: WorkerConfig) -> Worker {
+    Worker::new(
+        app.clone(),
+        config
+            .poll_interval(Duration::from_millis(20))
+            .poll_max_interval(Duration::from_millis(40)),
+    )
 }
 
 fn worker(app: &OpenShop, concurrency: usize) -> Worker {
-    worker_with(app, PartialWorkerConfig::new().concurrency(concurrency))
+    worker_with(app, WorkerConfig::new().concurrency(concurrency))
 }
 
 /// A worker whose poll interval outlasts the test: after its first poll and
 /// its first deadline sweep, only a run that finishes makes it claim again.
 fn worker_without_polling(app: &OpenShop, concurrency: usize) -> Worker {
-    let config = PartialWorkerConfig::new()
+    let config = WorkerConfig::new()
         .concurrency(concurrency)
-        .poll_interval_ms(60_000)
-        .poll_max_interval_ms(60_000);
+        .poll_interval(Duration::from_millis(60_000))
+        .poll_max_interval(Duration::from_millis(60_000));
     Worker::new(app.clone(), config)
 }
 
 async fn dispatch(test: &TestApp, flow: &str) -> Uuid {
-    dispatch_with(test, DispatchFlowParams::new(flow, TEST_SHOP)).await
+    dispatch_with(test, DispatchOptions::new(flow, TEST_SHOP)).await
 }
 
-async fn dispatch_with(test: &TestApp, params: DispatchFlowParams) -> Uuid {
+async fn dispatch_with(test: &TestApp, params: DispatchOptions) -> Uuid {
     test.app.dispatch_flow(params).await.unwrap().run_id
 }
 
-fn without_retry() -> DispatchOptions {
-    DispatchOptions {
-        retry_policy: Some(PartialRetryPolicy::new().max_attempts(0)),
-        ..Default::default()
-    }
+fn without_retry() -> RetryPolicy {
+    RetryPolicy::new().max_attempts(0)
 }
 
 async fn find_run(test: &TestApp, run_id: Uuid) -> FlowRun {
@@ -134,7 +136,7 @@ async fn handles_failing_flow_gracefully() {
     let test = TestApp::new(create_config([fail_flow, noop_flow("quick-flow")])).await;
     let failing = dispatch_with(
         &test,
-        DispatchFlowParams::new("fail-flow", TEST_SHOP).options(without_retry()),
+        DispatchOptions::new("fail-flow", TEST_SHOP).retry_policy(without_retry()),
     )
     .await;
 
@@ -197,7 +199,11 @@ async fn never_runs_more_than_its_concurrency_limit() {
     // The limit comes from the application, the polling from the worker's own settings.
     let config = OpenShopConfig::builder()
         .flow(flow)
-        .worker(PartialWorkerConfig::new().concurrency(1).poll_interval_ms(30_000))
+        .worker(
+            WorkerConfig::new()
+                .concurrency(1)
+                .poll_interval(Duration::from_millis(30_000)),
+        )
         .build()
         .unwrap();
     let test = TestApp::new(config).await;
@@ -206,7 +212,7 @@ async fn never_runs_more_than_its_concurrency_limit() {
         runs.push(dispatch(&test, "slow-flow").await);
     }
 
-    let worker = worker_with(&test.app, PartialWorkerConfig::new());
+    let worker = worker_with(&test.app, WorkerConfig::new());
     worker.start().await;
     for run_id in runs {
         wait_for_status(&test, run_id, "completed").await;
@@ -368,7 +374,7 @@ async fn passes_the_input_the_shop_and_the_app_to_the_flow() {
     let test = TestApp::new(create_config([flow])).await;
     let run_id = dispatch_with(
         &test,
-        DispatchFlowParams::new("echo-flow", "other.myshopify.com")
+        DispatchOptions::new("echo-flow", "other.myshopify.com")
             .input(json!({ "limit": 3, "tags": ["a", "b"] }))
             .shopify_app("client-a"),
     )
@@ -413,7 +419,11 @@ async fn retries_a_failed_run_and_replays_its_completed_steps() {
             }
         }
     })
-    .retry_policy(PartialRetryPolicy::new().max_attempts(3).initial_interval_ms(20));
+    .retry_policy(
+        RetryPolicy::new()
+            .max_attempts(3)
+            .initial_interval(Duration::from_millis(20)),
+    );
     let test = TestApp::new(create_config([flow])).await;
     let run_id = dispatch(&test, "flaky-flow").await;
 
@@ -445,7 +455,11 @@ async fn gives_up_after_max_attempts() {
             async move { bail!("failure #{}", tries.fetch_add(1, Ordering::SeqCst) + 1) }
         }
     })
-    .retry_policy(PartialRetryPolicy::new().max_attempts(3).initial_interval_ms(10));
+    .retry_policy(
+        RetryPolicy::new()
+            .max_attempts(3)
+            .initial_interval(Duration::from_millis(10)),
+    );
     let test = TestApp::new(create_config([flow])).await;
     let run_id = dispatch(&test, "fail-flow").await;
 
@@ -567,10 +581,7 @@ async fn does_not_claim_runs_scheduled_in_the_future() {
     let test = TestApp::new(create_config([flow])).await;
     let delayed = dispatch_with(
         &test,
-        DispatchFlowParams::new("quick-flow", TEST_SHOP).options(DispatchOptions {
-            delay_ms: Some(60_000),
-            ..Default::default()
-        }),
+        DispatchOptions::new("quick-flow", TEST_SHOP).delay(Duration::from_millis(60_000)),
     )
     .await;
 
@@ -610,7 +621,7 @@ async fn claims_runs_in_availability_order() {
     for (n, hours_ago) in [(1, 1), (2, 3), (3, 2)] {
         let run_id = dispatch_with(
             &test,
-            DispatchFlowParams::new("ordered-flow", TEST_SHOP).input(json!({ "n": n })),
+            DispatchOptions::new("ordered-flow", TEST_SHOP).input(json!({ "n": n })),
         )
         .await;
         sqlx::query("UPDATE flow_runs SET available_at = now() - make_interval(hours => $2) WHERE id = $1")
@@ -729,10 +740,7 @@ async fn does_not_start_a_run_whose_deadline_passed_since_the_last_sweep() {
     // A run becomes claimable with its deadline already behind it, ahead of another one in the queue.
     let overdue = dispatch_with(
         &test,
-        DispatchFlowParams::new("guarded-flow", TEST_SHOP).options(DispatchOptions {
-            delay_ms: Some(60_000),
-            ..Default::default()
-        }),
+        DispatchOptions::new("guarded-flow", TEST_SHOP).delay(Duration::from_millis(60_000)),
     )
     .await;
     sqlx::query(
@@ -841,7 +849,7 @@ async fn takes_over_a_run_whose_lease_expired() {
     .await
     .unwrap();
 
-    let worker = worker_with(&test.app, PartialWorkerConfig::new().concurrency(1));
+    let worker = worker_with(&test.app, WorkerConfig::new().concurrency(1));
     worker.start().await;
     let taken_over = wait_for_status(&test, run_id, "completed").await;
     worker.stop().await;
@@ -876,11 +884,7 @@ async fn a_live_worker_keeps_a_lease_shorter_than_its_flow() {
     )]))
     .await;
     let run_id = dispatch(&test, "slow-flow").await;
-    let short_lease = || {
-        PartialWorkerConfig::new()
-            .concurrency(1)
-            .lease_duration_ms(LEASE.as_millis() as u64)
-    };
+    let short_lease = || WorkerConfig::new().concurrency(1).lease_duration(LEASE);
 
     let first = worker_with(&test.app, short_lease());
     let second = worker_with(&test.app, short_lease());
@@ -940,7 +944,7 @@ async fn two_workers_never_execute_the_same_run_twice() {
     for n in 0..RUNS {
         dispatch_with(
             &test,
-            DispatchFlowParams::new("counted-flow", TEST_SHOP).input(json!({ "n": n })),
+            DispatchOptions::new("counted-flow", TEST_SHOP).input(json!({ "n": n })),
         )
         .await;
     }
@@ -984,7 +988,7 @@ fn explode(_ctx: FlowContext) -> std::future::Ready<openshop::Result<()>> {
 async fn records_a_panicking_flow_as_failed_and_frees_its_slot() {
     let panicking = Flow::new("panic-flow", |ctx: FlowContext| async move {
         let divisor = ctx.input["divisor"].as_u64().unwrap_or(0);
-        ctx.logger.info(json!({ "result": 10 / divisor }), "divided");
+        ctx.logger.info_with("divided", json!({ "result": 10 / divisor }));
         Ok(())
     });
     let test = TestApp::new(create_config([
@@ -1000,7 +1004,11 @@ async fn records_a_panicking_flow_as_failed_and_frees_its_slot() {
         ("panic-flow", "Flow panicked: attempt to divide by zero"),
         ("explode-flow", "Flow panicked: exploded before the first await"),
     ] {
-        let run_id = dispatch_with(&test, DispatchFlowParams::new(flow, TEST_SHOP).options(without_retry())).await;
+        let run_id = dispatch_with(
+            &test,
+            DispatchOptions::new(flow, TEST_SHOP).retry_policy(without_retry()),
+        )
+        .await;
         let run = wait_for_status(&test, run_id, "failed").await;
         assert_eq!(run.error.as_deref(), Some(error));
         assert_eq!(run.worker_id, None);
@@ -1026,7 +1034,7 @@ async fn survives_a_panic_outside_of_the_flow_body() {
 
     let run_id = dispatch_with(
         &test,
-        DispatchFlowParams::new("validated-flow", TEST_SHOP).options(without_retry()),
+        DispatchOptions::new("validated-flow", TEST_SHOP).retry_policy(without_retry()),
     )
     .await;
     let run = wait_for_status(&test, run_id, "failed").await;

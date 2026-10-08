@@ -4,6 +4,11 @@
 use chrono::{DateTime, SecondsFormat, Utc};
 use serde::Serializer;
 
+/// A duration in whole milliseconds, as retry policies and worker settings are stored.
+pub(crate) fn millis(duration: std::time::Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+}
+
 pub fn to_iso(value: &DateTime<Utc>) -> String {
     value.to_rfc3339_opts(SecondsFormat::Millis, true)
 }

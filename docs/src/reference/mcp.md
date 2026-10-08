@@ -37,14 +37,19 @@ embedded admin UI.
 
 ## Tokens
 
-Create and manage tokens from the embedded `/mcp` page. Set the `Mcp` page mode
-to `Hidden` to remove only its sidebar link, or to `Disabled` to block the page
-and `/api/mcp/*`. Give `McpConfig::new().enabled(false)` to the `mcp` setting
-of `app!` to disable the JSON-RPC endpoint. Set both to disable MCP completely. See
-[Admin pages](configuration.md#admin-pages).
+Create and manage tokens from the embedded `/mcp` page.
 
-A project created by `openshop init` sets both: MCP is off until the two lines
-are removed from `src/main.rs`.
+`mcp: McpConfig::disabled()` in `app!` turns MCP off: `POST /mcp` is refused,
+and the `Mcp` page of the admin is disabled with it, which blocks the page and
+`/api/mcp/*`. `McpConfig::new().enabled(false)` is the same setting. A project
+created by `openshop init` sets it: MCP is off until the line is removed from
+`src/main.rs`.
+
+The `Mcp` page has its own mode. Set it to `Hidden` to remove only its sidebar
+link, or to `Disabled` to block the page and `/api/mcp/*` while the JSON-RPC
+endpoint stays on. A mode set for the page is kept when MCP is turned off:
+with `Visible`, the page stays available next to a refused endpoint. See
+[Admin pages](configuration.md#admin-pages).
 
 `Hidden` is navigation-only: the direct page URL and admin API remain available.
 It must not be used as an access-control boundary.
@@ -98,50 +103,73 @@ Custom keys must match `namespace:action_resource`: a lowercase namespace
 Wildcard-style names such as `*`, `all`, `admin`, `root`, `full_access`, and
 `full-access` are forbidden.
 
-Custom permissions are data, given to the `mcp` setting of `app!`:
+A custom permission is declared once, as a constant, next to what requires
+it:
 
 ```rust,ignore
-use openshop::{App, McpConfig, McpPermissionDefinition, McpRiskLevel, app};
+use openshop::prelude::*;
 
-pub const READ_INVENTORY: &str = "warehouse:read_inventory";
+pub const READ_INVENTORY: McpPermission =
+    McpPermission::new("warehouse:read_inventory", "Read warehouse inventory")
+        .description("Allows MCP tokens to read the inventory of the warehouse.")
+        .group("Warehouse")
+        .risk(McpRiskLevel::Low);
+```
 
+`McpPermission::new(key, label)` takes the key and the label the admin shows.
+`.description(…)`, `.group(…)`, and `.risk(…)` are optional: a custom
+permission defaults to medium risk and to the namespace of its key as its
+group.
+
+A tool or a resource that lists the constant in its `permissions(…)` registers
+it with the application: the permission needs no entry of its own in `app!`.
+A permission that no tool and no resource lists, here a constant
+`EXPORT_INVENTORY`, is given to the `mcp` setting:
+
+```rust,ignore
 static APP: App = app! {
-    mcp: McpConfig::new().permission(
-        READ_INVENTORY,
-        McpPermissionDefinition::new("Read warehouse inventory")
-            .group("Warehouse")
-            .risk_level(McpRiskLevel::Low),
-    ),
+    mcp: McpConfig::new().permission(EXPORT_INVENTORY),
 };
 ```
 
-`McpPermissionDefinition` also has `.description(…)`. Custom permissions
-default to medium risk and to the namespace as their group. Unknown
-permissions, conflicts with core names, and malformed definitions fail
+`permissions(…)` also accepts a key as a string, `"warehouse:read_inventory"`,
+which must then be a core permission or one registered elsewhere.
+
+Unknown permissions, conflicts with core names, and malformed definitions fail
 configuration validation with an error that starts with
-`[openshop] Invalid MCP config:`.
+`[openshop] Invalid MCP config:`. So does a key declared with two different
+definitions
+(`[openshop] Invalid MCP config: permission "warehouse:read_inventory" is declared with two definitions`).
 
 ## Custom tools
 
 `#[mcp_tool(name)]` makes an `async` function a tool:
 
 ```rust,ignore
-use openshop::{McpExecutionContext, Result, Value, json, mcp_tool};
-use schemars::JsonSchema;
-use serde::Deserialize;
+use openshop::prelude::*;
+use serde::Serialize;
 
-#[derive(Deserialize, JsonSchema)]
+#[input]
 pub struct ListInventory {
     pub location: Option<String>,
 }
 
+/// What `list_inventory` answers.
+#[derive(Serialize)]
+pub struct Inventory {
+    pub shop: String,
+    pub location: Option<String>,
+    pub items: Vec<String>,
+}
+
 /// List warehouse inventory.
-#[mcp_tool("warehouse.inventory.list", permissions("warehouse:read_inventory"), risk = low)]
-pub async fn list_inventory(ctx: McpExecutionContext, input: ListInventory) -> Result<Value> {
-    Ok(json!({
-        "content": [{ "type": "text", "text": format!("Inventory for {}", ctx.shop) }],
-        "structuredContent": { "ok": true, "location": input.location },
-    }))
+#[mcp_tool("warehouse.inventory.list", permissions(READ_INVENTORY), risk = low)]
+pub async fn list_inventory(ctx: McpContext, input: ListInventory) -> Result<Inventory> {
+    Ok(Inventory {
+        shop: ctx.shop,
+        location: input.location,
+        items: Vec::new(),
+    })
 }
 ```
 
@@ -161,24 +189,34 @@ not compile.
 
 | Option | Default | Purpose |
 | --- | --- | --- |
-| `permissions("a:b", CONSTANT)` | None: every valid token can call the tool | Permissions a token must hold, all of them, as strings or constants. Each must be a core or custom permission. |
+| `permissions(READ_INVENTORY, "read_logs")` | None: every valid token can call the tool | Permissions a token must hold, all of them: `McpPermission` constants, which the tool registers, or keys as strings, each a core or registered permission. |
 | `risk = low` | Reported as `low` | `low`, `medium`, or `high`, reported as `riskLevel` by `GET /api/mcp/capabilities`. |
 | `confirmation_hint = "…"` | None | Free text reported as `confirmationHint` by `GET /api/mcp/capabilities`. |
 | `description = "…"` | The documentation comment | The description of the tool. |
 
-The function receives a `McpExecutionContext` and, optionally, the `arguments`
-of the call as a second argument: a type that implements `Deserialize` and
-`JsonSchema`, whose JSON Schema is the input schema of the tool. A function
-that takes the context alone is a tool without arguments: its input schema is
-an object that accepts no property. The result is any `Serialize` value.
+The function receives a `McpContext` and, optionally, the `arguments`
+of the call as a second argument: a type marked `#[input]`, whose JSON Schema
+is the input schema of the tool. `#[input]` derives `Deserialize`,
+`Serialize`, and `JsonSchema` for the type and names its fields in camel case
+outside Rust (`product_id` is `productId`). A function that takes the context
+alone is a tool without arguments: its input schema is an object that accepts
+no property. The result is any `Serialize` value: a struct, a string, a
+`serde_json::Value`.
 
 | Context field | Meaning |
 | --- | --- |
-| `app_handle`, `shop`, `token_id` | Immutable token scope. |
+| `shopify_app`, `shop`, `token_id` | Immutable token scope: the handle of the Shopify app, the shop, and the token. |
 | `permissions` | Current grants. |
 | `signal` | `CancellationToken` cancelled when the client disconnects or after 30 seconds. |
 | `db` | `PgPool`, the shared `sqlx` pool. |
+| `shopify` | `ShopifyClient`, the Admin API of the shop. |
+| `connectors` | `Connectors`, the providers of the shop. |
 | `app` | `OpenShop` handle. |
+
+Nothing is read when the context is built: the access token of the shop is
+read at the first Shopify request, and the provider configuration at the first
+provider call. `McpContext` belongs to a shop, so what needs one takes the
+context itself: `Review::of(&ctx)` and `sync_orders::dispatch(&ctx, …)`.
 
 A string result becomes text content. A JSON object or array becomes formatted
 text plus `structuredContent`. Objects already containing a `content` array or
@@ -203,16 +241,16 @@ The same validator checks the typed input of a flow.
 `#[mcp_resource(uri, name = "…")]` makes an `async` function a resource:
 
 ```rust,ignore
-use openshop::{McpExecutionContext, Result, mcp_resource};
+use openshop::prelude::*;
 
 /// How inventory sync works.
 #[mcp_resource(
     "openshop://warehouse/guide",
     name = "Warehouse guide",
     mime_type = "text/markdown",
-    permissions("warehouse:read_inventory")
+    permissions(READ_INVENTORY)
 )]
-pub async fn warehouse_guide(_ctx: McpExecutionContext) -> Result<String> {
+pub async fn warehouse_guide(_ctx: McpContext) -> Result<String> {
     Ok("# Warehouse sync".to_string())
 }
 ```
@@ -224,7 +262,7 @@ constant `warehouse_guide::URI`.
 Resource URIs must be URIs (`scheme://…`), and `name = "…"` is required and
 non-empty. The description is the documentation comment of the function, or
 `description = "…"`; it is optional. The function receives the
-`McpExecutionContext` and returns the text, as a `String` or a `&str`, or a
+`McpContext` and returns the text, as a `String` or a `&str`, or a
 `McpResourceContent { text, mime_type }` to choose the MIME type of that
 answer. The MIME type defaults to the `mime_type = "…"` of the attribute and
 then to `text/plain`. `permissions(…)` and `risk = …` behave as for tools.
@@ -287,19 +325,20 @@ payload errors use their explicit HTTP status and a body of the form
 
 ## Without the attribute
 
-`#[mcp_tool]` and `#[mcp_resource]` are built on `McpToolDefinition` and
-`McpResourceDefinition`, which can be used directly when a tool or a resource
+`#[mcp_tool]` and `#[mcp_resource]` are built on `McpTool` and
+`McpResource`, which can be used directly when a tool or a resource
 is only known at run time:
 
 ```rust,ignore
-use openshop::{McpResourceContent, McpResourceDefinition, McpRiskLevel, McpToolDefinition, json};
+use openshop::prelude::*;
+use openshop::{McpResource, McpResourceContent, McpTool};
 
-pub fn inventory_tool() -> McpToolDefinition {
-    McpToolDefinition::new("List warehouse inventory.", |ctx, _input| async move {
+pub fn inventory_tool() -> McpTool {
+    McpTool::new("List warehouse inventory.", |ctx, _input| async move {
         Ok(json!({ "shop": ctx.shop, "items": [] }))
     })
-    .required_permissions(["warehouse:read_inventory"])
-    .risk_level(McpRiskLevel::Low)
+    .permissions([READ_INVENTORY])
+    .risk(McpRiskLevel::Low)
     .input_schema(json!({
         "type": "object",
         "additionalProperties": false,
@@ -307,13 +346,13 @@ pub fn inventory_tool() -> McpToolDefinition {
     }))
 }
 
-pub fn warehouse_guide() -> McpResourceDefinition {
-    McpResourceDefinition::new("Warehouse guide", |_ctx| async move {
+pub fn warehouse_guide() -> McpResource {
+    McpResource::new("Warehouse guide", |_ctx| async move {
         Ok(McpResourceContent::from("# Warehouse sync"))
     })
     .description("How inventory sync works.")
     .mime_type("text/markdown")
-    .required_permissions(["warehouse:read_inventory"])
+    .permissions([READ_INVENTORY])
 }
 ```
 
@@ -326,13 +365,13 @@ the `McpConfig` of the `mcp` setting:
 registered twice is refused when the configuration is built, for example with
 `[openshop] Invalid config: mcp.tools.warehouse.inventory.list is registered twice`.
 
-The tool function receives the `McpExecutionContext` and the arguments as a
+The tool function receives the `McpContext` and the arguments as a
 `JsonMap`; the resource function returns a `McpResourceContent`.
 
 | Builder method | Default | Purpose |
 | --- | --- | --- |
-| `.required_permissions([...])` | None: every valid token can call the tool or read the resource | Permissions a token must hold, all of them. |
+| `.permissions([...])` | None: every valid token can call the tool or read the resource | Permissions a token must hold, all of them: `McpPermission` constants, which are registered with the tool or the resource, or keys as strings. |
 | `.input_schema(value)` (tools) | Any JSON object | JSON Schema of the `arguments`. |
-| `.risk_level(level)` | Reported as `low` | `McpRiskLevel::Low`, `Medium`, or `High`. |
+| `.risk(level)` | Reported as `low` | `McpRiskLevel::Low`, `Medium`, or `High`. |
 | `.confirmation_hint(text)` (tools) | None | Free text reported as `confirmationHint`. |
 | `.description(text)`, `.mime_type(text)` (resources) | None | The description and the default MIME type of the resource. |

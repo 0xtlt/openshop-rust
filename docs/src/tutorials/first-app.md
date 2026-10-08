@@ -36,16 +36,19 @@ cd my-app
 
 The CLI prints `[openshop] Created my-app in` followed by the project path. Keep
 this terminal in `my-app` for the remaining commands. The generated project pins
-the OpenShop version that created it: its `Cargo.toml` depends on the matching
-git tag.
+the OpenShop version that created it: its `Cargo.toml` depends on `openshop` at
+the matching git tag, and on `serde`.
 
 Open these three files:
 
 | File | What it contains |
 | --- | --- |
-| `src/providers/warehouse.rs` | The `warehouse` provider: two configuration fields, a connection check, and a `push` method |
-| `src/flows/sync_orders.rs` | The sample flow with `fetch-orders` and `send-to-warehouse` steps |
-| `src/main.rs` | The configuration that registers the provider and the flow, a sample cron schedule, and an error hook, with MCP turned off |
+| `src/providers/warehouse.rs` | The `warehouse` provider: the `Warehouse` struct with two configuration fields, and a `#[provider]` block with a connection check and a `push` method |
+| `src/flows/sync_orders.rs` | The sample flow, a function marked `#[flow("syncOrders")]` with `fetch-orders` and `send-to-warehouse` steps, and `SyncOrdersInput`, the input of a run |
+| `src/main.rs` | The application: an `app!` declaration that lists the provider and the flow, with a sample cron schedule, an error hook, and MCP turned off. `main` runs it with `APP.main()` |
+
+Each building block is declared where it is written, with an attribute on the
+function or the struct. `src/main.rs` only lists them.
 
 There is also a `migrations/` directory containing the initial database migration.
 The [project structure reference](../reference/project-structure.md) describes the
@@ -109,34 +112,46 @@ container is ready and that the exported URL matches it.
 
 ## 4. Keep the first run manual
 
-The generated configuration schedules `syncOrders` every five minutes. In
-`src/main.rs`, replace everything above `#[tokio::main]` with:
+The generated application schedules `syncOrders` every five minutes. In
+`src/main.rs`, the declaration of the application and the `main` function read:
 
 ```rust
-mod flows;
-mod providers;
+static APP: App = app! {
+    providers: [Warehouse],
+    flows: [sync_orders],
+    crons: [
+        Cron::new("*/5 * * * *", sync_orders::NAME)
+            .name("Quick sync")
+            .input(json!({ "limit": 10 })),
+    ],
+    // MCP is off: `POST /mcp` is refused and the admin has no MCP page.
+    // Remove this line to turn it on.
+    mcp: McpConfig::disabled(),
+    on_error: report_failure,
+};
 
-use openshop::{AdminPageId, AdminPageMode, McpConfig, OpenShopConfig, Result};
-
-fn config() -> Result<OpenShopConfig> {
-    OpenShopConfig::builder()
-        .provider(providers::warehouse::warehouse())
-        .flow(flows::sync_orders::sync_orders())
-        .mcp(McpConfig::new().enabled(false))
-        .page(AdminPageId::Mcp, AdminPageMode::Disabled)
-        .on_error(|error, context| async move {
-            eprintln!(
-                "[openshop:error] Flow \"{}\" failed: {error}",
-                context.flow.unwrap_or_default()
-            );
-        })
-        .build()
+fn main() -> Result<()> {
+    APP.main()
 }
 ```
 
-We will run the flow from the admin UI after saving its provider credentials.
-This removes the generated schedule for now and keeps the error hook and the
-two lines that turn MCP off. The
+Remove the `crons` entry, so that the declaration becomes:
+
+```rust
+static APP: App = app! {
+    providers: [Warehouse],
+    flows: [sync_orders],
+    // MCP is off: `POST /mcp` is refused and the admin has no MCP page.
+    // Remove this line to turn it on.
+    mcp: McpConfig::disabled(),
+    on_error: report_failure,
+};
+```
+
+Leave the rest of the file unchanged. We will run the flow from the admin UI
+after saving its provider credentials. This removes the generated schedule for
+now and keeps the error hook, `report_failure`, and the line that turns MCP
+off. The
 [flow guide](../guides/define-flow.md#3-schedule-the-flow-for-installed-shops) adds a
 schedule that explicitly targets installed shops.
 
@@ -203,9 +218,15 @@ In a second terminal, from `my-app`, check the project:
 cargo test
 ```
 
-This compiles the project and runs the generated `config_is_valid` test, which
-validates your configuration. A second generated test executes `syncOrders` against PostgreSQL with a
-fake warehouse; it is skipped unless you run `cargo test -- --ignored`.
+This compiles the project and runs the generated `the_application_is_valid`
+test, which builds the configuration of the application and checks that it
+lists the flow and the provider. A second generated test,
+`sync_orders_pushes_orders_to_the_warehouse`, is marked `#[openshop::test(APP)]`:
+it starts the application on an isolated PostgreSQL schema and runs
+`syncOrders` with a scripted Shopify answer and a fake warehouse. The fake,
+`ctx.fakes.for_call(Warehouse::PUSH)`, is typed like the method: it returns a
+`usize` and gives back the `Vec<Order>` it received. The test is skipped
+unless you run `cargo test -- --ignored`.
 
 ## What you built
 

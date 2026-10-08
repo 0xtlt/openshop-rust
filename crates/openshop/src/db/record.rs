@@ -1,6 +1,6 @@
 //! Typed rows of application tables.
 //!
-//! `#[derive(Model)]` implements [`Record`] for a struct and gives it typed
+//! `#[derive(Model)]` implements [`Model`] for a struct and gives it typed
 //! columns and an entry point, such as `Review::for_shop(&db, &shop)`. The
 //! [`Rows`] it returns insert, read, update and delete rows of that struct.
 
@@ -13,7 +13,7 @@ use sqlx::postgres::{PgHasArrayType, PgRow};
 use sqlx::{Encode, FromRow, PgPool, Postgres, QueryBuilder, Type};
 use uuid::Uuid;
 
-use super::model::{Model, quote};
+use super::model::{Table, quote};
 
 /// A Rust type that a column can hold.
 ///
@@ -86,7 +86,7 @@ impl<T> Bindable for T where T: for<'q> Encode<'q, Postgres> + Type<Postgres> + 
 pub type SqlBuilder = QueryBuilder<'static, Postgres>;
 
 /// A struct mapped to an application table. Implemented by `#[derive(Model)]`.
-pub trait Record: Sized + Send + Unpin + for<'r> FromRow<'r, PgRow> {
+pub trait Model: Sized + Send + Unpin + for<'r> FromRow<'r, PgRow> {
     /// What an insertion takes: the fields, without those the database fills
     /// (`id`, `created_at`, `updated_at`) and without `shop`, which the rows
     /// of a shop fill.
@@ -99,7 +99,7 @@ pub trait Record: Sized + Send + Unpin + for<'r> FromRow<'r, PgRow> {
     const HAS_SHOP: bool;
 
     /// The table definition, for the schema push and the migrations.
-    fn model() -> Model;
+    fn table() -> Table;
 
     fn id(&self) -> Uuid;
 
@@ -239,7 +239,7 @@ fn id_is<M>(id: Uuid) -> Condition<M> {
     Column::<M, Uuid>::new("id").eq(id)
 }
 
-fn column_list<M: Record>() -> String {
+fn column_list<M: Model>() -> String {
     M::COLUMNS
         .iter()
         .map(|column| quote(column))
@@ -251,13 +251,13 @@ fn column_list<M: Record>() -> String {
 ///
 /// Every operation on the rows of a shop is limited to that shop: a row of
 /// another shop is not found, updated or deleted, even by its id.
-pub struct Rows<'a, M: Record> {
+pub struct Rows<'a, M: Model> {
     db: &'a PgPool,
     shop: Option<String>,
     marker: PhantomData<fn() -> M>,
 }
 
-impl<'a, M: Record> Rows<'a, M> {
+impl<'a, M: Model> Rows<'a, M> {
     /// Called by the entry points `#[derive(Model)]` generates.
     #[doc(hidden)]
     pub fn new(db: &'a PgPool, shop: Option<String>) -> Self {
@@ -341,7 +341,7 @@ impl<'a, M: Record> Rows<'a, M> {
 }
 
 /// Rows of a model that match conditions, in an order, within limits.
-pub struct Query<'a, M: Record> {
+pub struct Query<'a, M: Model> {
     db: &'a PgPool,
     shop: Option<String>,
     conditions: Vec<Condition<M>>,
@@ -350,7 +350,7 @@ pub struct Query<'a, M: Record> {
     offset: Option<i64>,
 }
 
-impl<M: Record> Query<'_, M> {
+impl<M: Model> Query<'_, M> {
     /// Keeps the rows that also satisfy `condition`.
     pub fn filter(mut self, condition: Condition<M>) -> Self {
         self.conditions.push(condition);

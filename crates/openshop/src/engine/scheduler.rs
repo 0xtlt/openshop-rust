@@ -5,17 +5,17 @@
 
 use anyhow::{Result, anyhow, bail};
 use chrono::Local;
-use croner::Cron;
+
 use croner::parser::{CronParser, Seconds};
 use serde_json::Value;
 use tokio::task::JoinHandle;
 
-use super::dispatch::DispatchFlowParams;
+use super::dispatch::DispatchOptions;
 use super::step::error_message;
 use crate::app::OpenShop;
 use crate::runtime::logger;
 use crate::server::shopify_apps::DEFAULT_SHOPIFY_APP_HANDLE;
-use crate::types::{CronEntry, CronShops};
+use crate::types::{Cron, CronShops};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct CronTarget {
@@ -60,7 +60,7 @@ async fn resolve_installed_targets(app: &OpenShop, shops: &[String]) -> Result<V
     Ok(targets)
 }
 
-async fn resolve_targets(app: &OpenShop, entry: &CronEntry) -> Result<Vec<CronTarget>> {
+async fn resolve_targets(app: &OpenShop, entry: &Cron) -> Result<Vec<CronTarget>> {
     match entry.shops.clone().unwrap_or_default() {
         CronShops::Global => Ok(vec![default_target("__global__")]),
         CronShops::All => {
@@ -79,7 +79,7 @@ async fn resolve_targets(app: &OpenShop, entry: &CronEntry) -> Result<Vec<CronTa
 }
 
 /// Parses a five-field expression, a six-field one with seconds, or a nickname such as `@daily`.
-pub fn parse_schedule(schedule: &str, flow: &str) -> Result<Cron> {
+pub fn parse_schedule(schedule: &str, flow: &str) -> Result<croner::Cron> {
     let trimmed = schedule.trim();
     let fields = trimmed.split_whitespace().count();
     if !trimmed.starts_with('@') && fields != 5 && fields != 6 {
@@ -94,7 +94,7 @@ pub fn parse_schedule(schedule: &str, flow: &str) -> Result<Cron> {
         .map_err(|error| anyhow!("[openshop] Invalid cron schedule \"{schedule}\" for flow \"{flow}\": {error}"))
 }
 
-async fn run_entry(app: &OpenShop, entry: &CronEntry) {
+async fn run_entry(app: &OpenShop, entry: &Cron) {
     let flow = &entry.flow;
     let targets = match resolve_targets(app, entry).await {
         Ok(targets) => targets,
@@ -134,7 +134,7 @@ async fn run_entry(app: &OpenShop, entry: &CronEntry) {
                 return Ok(());
             }
 
-            let mut params = DispatchFlowParams::new(flow.clone(), shop.clone()).shopify_app(shopify_app.clone());
+            let mut params = DispatchOptions::new(flow.clone(), shop.clone()).shopify_app(shopify_app.clone());
             if let Some(input @ Value::Object(_)) = &entry.input {
                 params = params.input(input.clone());
             }

@@ -59,16 +59,23 @@ const UI_TEMPLATE: &[(&str, &str)] = &[
 
 /// What to add to the application so that it serves the example page.
 const UI_NEXT_STEPS: &str = r#"
-Register the page and the bundle in your configuration:
+Declare the server side of the page, and list it with the bundle in your application:
 
-    .custom_pages([CustomAdminNavigationItem {
-        label: "Hello".to_string(),
-        path: "/hello".to_string(),
-    }])
-    .admin_page(AdminPage::new("/hello").loader("greeting", |ctx, _input| async move {
-        Ok(json!({ "message": format!("Hello {}", ctx.shop) }))
-    }))
-    .admin_ui(UiSource::Dir("ui/dist".into()))
+    pub struct HelloPage;
+
+    #[admin_page("/hello", nav = "Hello")]
+    impl HelloPage {
+        #[loader]
+        async fn greeting(ctx: AdminContext) -> Result<Value> {
+            Ok(json!({ "message": format!("Hello {}", ctx.shop) }))
+        }
+    }
+
+    static APP: App = app! {
+        admin_pages: [HelloPage],
+        admin_ui: openshop::UiSource::Dir("ui/dist".into()),
+        // …
+    };
 
 Then build the bundle (once: `rustup target add wasm32-unknown-unknown` and `cargo install trunk`):
 
@@ -313,9 +320,13 @@ mod tests {
         assert!(read(".gitignore").contains("target/"));
         assert!(read(".env.example").contains("DATABASE_URL="));
         assert!(read("src/flows/sync_orders.rs").contains("syncOrders"));
+        // The application is declared, and starts with MCP off.
         let main = read("src/main.rs");
-        assert!(main.contains(".mcp(McpConfig::new().enabled(false))"));
-        assert!(main.contains(".page(AdminPageId::Mcp, AdminPageMode::Disabled)"));
+        assert!(main.contains("static APP: App = app! {"));
+        assert!(main.contains("mcp: McpConfig::disabled(),"));
+        assert!(main.contains("APP.main()"));
+        assert!(read("src/providers/warehouse.rs").contains("#[provider]"));
+        assert!(!manifest.contains("tokio") && !manifest.contains("schemars"));
 
         for path in TEMPLATE.iter().map(|(path, _)| path) {
             assert!(!read(path).contains("__"), "{path} still has a placeholder");

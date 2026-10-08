@@ -9,7 +9,7 @@ use regex::Regex;
 use serde::Serialize;
 
 use super::core::CoreCapabilities;
-use crate::types::{McpConfig, McpPermissionDefinition, McpResourceDefinition, McpRiskLevel, McpToolDefinition};
+use crate::types::{McpConfig, McpPermission, McpResource, McpRiskLevel, McpTool};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -34,14 +34,14 @@ pub struct RegisteredMcpPermission {
 pub struct RegisteredMcpTool {
     pub name: String,
     pub source: McpSource,
-    pub definition: McpToolDefinition,
+    pub definition: McpTool,
 }
 
 #[derive(Clone)]
 pub struct RegisteredMcpResource {
     pub uri: String,
     pub source: McpSource,
-    pub definition: McpResourceDefinition,
+    pub definition: McpResource,
 }
 
 #[derive(Clone)]
@@ -155,7 +155,7 @@ pub fn core_mcp_permissions() -> IndexMap<String, RegisteredMcpPermission> {
 }
 
 fn normalize_permissions(
-    custom: &IndexMap<String, McpPermissionDefinition>,
+    custom: &IndexMap<String, McpPermission>,
 ) -> Result<IndexMap<String, RegisteredMcpPermission>> {
     let mut permissions = core_mcp_permissions();
 
@@ -175,11 +175,11 @@ fn normalize_permissions(
         permissions.insert(
             key.clone(),
             RegisteredMcpPermission {
-                label: permission.label.clone(),
-                description: permission.description.clone(),
+                label: permission.label.to_string(),
+                description: permission.description.map(str::to_string),
                 group: permission
                     .group
-                    .clone()
+                    .map(str::to_string)
                     .unwrap_or_else(|| key.split(':').next().unwrap_or("Custom").to_string()),
                 risk_level: permission.risk_level.unwrap_or(McpRiskLevel::Medium),
                 key: key.clone(),
@@ -212,8 +212,8 @@ fn assert_known_permissions(
 }
 
 fn normalize_tools(
-    custom: &IndexMap<String, McpToolDefinition>,
-    core: &IndexMap<String, McpToolDefinition>,
+    custom: &IndexMap<String, McpTool>,
+    core: &IndexMap<String, McpTool>,
     permissions: &IndexMap<String, RegisteredMcpPermission>,
 ) -> Result<IndexMap<String, RegisteredMcpTool>> {
     let mut tools = IndexMap::new();
@@ -262,8 +262,8 @@ fn normalize_tools(
 }
 
 fn normalize_resources(
-    custom: &IndexMap<String, McpResourceDefinition>,
-    core: &IndexMap<String, McpResourceDefinition>,
+    custom: &IndexMap<String, McpResource>,
+    core: &IndexMap<String, McpResource>,
     permissions: &IndexMap<String, RegisteredMcpPermission>,
 ) -> Result<IndexMap<String, RegisteredMcpResource>> {
     let mut resources = IndexMap::new();
@@ -317,7 +317,19 @@ fn normalize_resources(
 pub fn build_mcp_registry(mcp: Option<&McpConfig>, core: &CoreCapabilities) -> Result<McpRegistry> {
     let empty = McpConfig::default();
     let mcp = mcp.unwrap_or(&empty);
-    let permissions = normalize_permissions(&mcp.custom_permissions)?;
+    // The permissions tools and resources came with are registered with them.
+    let custom = mcp.permissions();
+    let declared = mcp.tools.values().flat_map(|tool| &tool.declared_permissions).chain(
+        mcp.resources
+            .values()
+            .flat_map(|resource| &resource.declared_permissions),
+    );
+    for permission in declared {
+        if custom.get(permission.key) != Some(permission) {
+            fail!("permission \"{}\" is declared with two definitions", permission.key);
+        }
+    }
+    let permissions = normalize_permissions(&custom)?;
 
     Ok(McpRegistry {
         enabled: mcp.enabled != Some(false),
