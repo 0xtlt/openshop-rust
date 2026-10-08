@@ -37,7 +37,8 @@ pub struct OpenShopConfig {
     /// Keyed by topic, either `orders/create` or `ORDERS_CREATE`.
     pub webhooks: IndexMap<String, Webhook>,
     pub crons: Vec<Cron>,
-    pub pages: Option<AdminPagesConfig>,
+    /// Which built-in pages of the admin are visible, hidden or disabled.
+    pub builtin_pages: Option<AdminPagesConfig>,
     pub experimental: Option<ExperimentalConfig>,
     pub worker: WorkerConfig,
     pub retry_policy: RetryPolicy,
@@ -247,15 +248,18 @@ impl OpenShopBuilder {
         self
     }
 
-    pub fn pages(mut self, pages: AdminPagesConfig) -> Self {
-        self.config.pages = Some(self.config.pages.unwrap_or_default().merge(pages));
+    /// Sets the mode of several built-in pages of the admin: flows,
+    /// providers, crons, functions, MCP. Merges with earlier calls.
+    pub fn builtin_pages(mut self, pages: AdminPagesConfig) -> Self {
+        self.config.builtin_pages = Some(self.config.builtin_pages.unwrap_or_default().merge(pages));
         self
     }
 
-    pub fn page(mut self, id: AdminPageId, mode: AdminPageMode) -> Self {
-        let mut pages = self.config.pages.unwrap_or_default();
+    /// Sets the mode of one built-in page of the admin.
+    pub fn builtin_page(mut self, id: AdminPageId, mode: AdminPageMode) -> Self {
+        let mut pages = self.config.builtin_pages.unwrap_or_default();
         pages.set(id, mode);
-        self.config.pages = Some(pages);
+        self.config.builtin_pages = Some(pages);
         self
     }
 
@@ -315,8 +319,9 @@ impl OpenShopBuilder {
     /// Registers handlers of a public server route such as `/ping` or
     /// `/orders/:id`. The methods of a path can be registered separately, each
     /// with its own authentication.
-    pub fn route(mut self, path: impl Into<String>, route: Route) -> Self {
+    pub fn route<A: Send + 'static>(mut self, path: impl Into<String>, route: Route<A>) -> Self {
         let path = path.into();
+        let route = route.erased();
         match self.config.routes.get_mut(&path) {
             Some(registered) => {
                 if let Err(problem) = registered.merge(route) {

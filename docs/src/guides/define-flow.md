@@ -23,7 +23,7 @@ pub struct SyncOrdersInput {
     pub limit: u32,
 }
 
-#[flow("syncOrders", timeout = Duration::from_secs(60), step_timeout = Duration::from_secs(15))]
+#[flow("syncOrders", timeout = "60s", step_timeout = "15s")]
 pub async fn sync_orders(ctx: FlowContext, input: SyncOrdersInput) -> Result<()> {
     let orders: Vec<Order> = ctx
         .step

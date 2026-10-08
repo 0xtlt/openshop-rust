@@ -369,7 +369,7 @@ pub use openshop_macros::graphql;
 ///
 /// Every other entry is a setting, written `name: value` and passed to the
 /// method of that name of [`OpenShopBuilder`](builder::OpenShopBuilder): `crons`, `on_error`, `mcp`,
-/// `shopify`, `worker`, `retry_policy`, `pages`, `custom_pages`, `admin_ui`,
+/// `shopify`, `worker`, `retry_policy`, `builtin_pages`, `custom_pages`, `admin_ui`,
 /// `max_request_body_bytes`… A value can fail with `?`, such as one read from
 /// the environment (`shopify: shopify_apps()?`): the error is the one
 /// `APP.config()` and `APP.main()` return.
@@ -414,9 +414,10 @@ pub use openshop_macros::app;
 /// describes it to the admin and to MCP. Without a name, the flow is named
 /// after the function in camel case.
 ///
-/// Options follow the name: `timeout = <Duration>`, `step_timeout =
-/// <Duration>`, `concurrency = allow | reject` and `retry_policy =
-/// <RetryPolicy>`.
+/// Options follow the name: `timeout = "10m"` and `step_timeout = "30s"`,
+/// durations written as text and checked when the crate compiles (`ms`, `s`,
+/// `m`, `h`, `d`, as in `"1h30m"`) or any expression of type `Duration`,
+/// `concurrency = allow | reject` and `retry_policy = <RetryPolicy>`.
 ///
 /// The function stays an ordinary function. The attribute adds a type of the
 /// same name, which is what the `flows` of [`app!`] list. It carries the
@@ -517,22 +518,30 @@ pub use openshop_macros::proxy;
 ///     Ok(json!({ "ok": true }))
 /// }
 ///
-/// async fn partner(ctx: RouteAuthContext) -> Result<RouteAuthOutcome> {
+/// /// What an authenticated request is known by.
+/// pub struct Partner {
+///     pub key: String,
+/// }
+///
+/// async fn partner(ctx: RouteAuthContext) -> Result<RouteAuthOutcome<Partner>> {
 ///     Ok(match ctx.request.header("x-partner-key") {
-///         Some(key) => RouteAuthOutcome::Authenticated(json!({ "key": key })),
+///         Some(key) => RouteAuthOutcome::Authenticated(Partner { key: key.to_string() }),
 ///         None => RouteAuthOutcome::Unauthorized,
 ///     })
 /// }
 ///
 /// #[route(POST, "/orders/:id", json, auth = partner)]
-/// pub async fn update_order(ctx: RouteContext) -> Result<Value> {
-///     Ok(json!({ "order": ctx.params["id"], "by": ctx.auth["key"] }))
+/// pub async fn update_order(ctx: RouteContext<Partner>) -> Result<Value> {
+///     Ok(json!({ "order": ctx.params["id"], "by": ctx.auth.key }))
 /// }
 /// ```
 ///
 /// The method is `GET`, `HEAD`, `POST`, `PUT`, `PATCH`, `DELETE` or
 /// `OPTIONS`. Without `auth`, the route is public; with `auth = <function>`,
-/// the function decides before the handler runs and its value is `ctx.auth`.
+/// the function decides before the handler runs. What it returns for an
+/// authenticated request is `ctx.auth`, with its type: the handler takes a
+/// `RouteContext<Partner>`, and the compiler checks that the two agree. A
+/// plain [`RouteContext`] carries a `Value`.
 ///
 /// With `json`, the handler returns anything that serializes, sent as JSON.
 /// Without it, the handler returns anything that is a response
@@ -780,6 +789,12 @@ pub use openshop_macros::input;
 /// the context is shut down when the function returns. Take `&mut
 /// TestContext` to create resources with a factory. The function returns
 /// nothing, or a `Result` whose error fails the test.
+///
+/// The argument is what the test starts from: an application, or any
+/// expression that resolves to a test context or to a `Result` of one, such
+/// as a function of the test file. `#[openshop::test(context())]` starts the
+/// context `async fn context() -> TestContext` builds, for a configuration
+/// made by hand or other [`TestOptions`](testing::TestOptions).
 ///
 /// The attributes of a test, such as `#[ignore]`, go below this one.
 #[cfg(feature = "testing")]

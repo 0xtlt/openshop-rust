@@ -85,15 +85,14 @@ async fn save_config(ctx: &TestContext, config: Value) {
     common::save_provider_config(ctx, "warehouse", config).await;
 }
 
-#[tokio::test]
-async fn a_typed_call_receives_the_stored_configuration_and_returns_a_typed_result() {
-    let ctx = context().await;
+#[openshop::test(context())]
+async fn a_typed_call_receives_the_stored_configuration_and_returns_a_typed_result(ctx: &TestContext) {
     save_config(
-        &ctx,
+        ctx,
         json!({ "apiUrl": "https://warehouse.test", "apiKey": "secret-1", "batchSize": "25" }),
     )
     .await;
-    let connectors = connectors(&ctx).await;
+    let connectors = connectors(ctx).await;
 
     let receipt = connectors.invoke(PUSH, &orders()).await.unwrap();
     assert_eq!(
@@ -110,7 +109,6 @@ async fn a_typed_call_receives_the_stored_configuration_and_returns_a_typed_resu
         connectors.invoke(PING, &()).await.unwrap(),
         "pong from https://warehouse.test"
     );
-    ctx.shutdown().await.unwrap();
 }
 
 #[tokio::test]
@@ -139,26 +137,19 @@ async fn arguments_can_be_passed_in_their_borrowed_form() {
     ctx.shutdown().await.unwrap();
 }
 
-#[tokio::test]
-async fn optional_fields_left_blank_are_absent_from_the_typed_configuration() {
-    let ctx = context().await;
-    save_config(&ctx, json!({ "apiUrl": "https://warehouse.test", "apiKey": "other" })).await;
+#[openshop::test(context())]
+async fn optional_fields_left_blank_are_absent_from_the_typed_configuration(ctx: &TestContext) {
+    save_config(ctx, json!({ "apiUrl": "https://warehouse.test", "apiKey": "other" })).await;
 
-    let receipt = connectors(&ctx).await.invoke(PUSH, &orders()).await.unwrap();
+    let receipt = connectors(ctx).await.invoke(PUSH, &orders()).await.unwrap();
     assert_eq!(receipt.batch_size, 50);
     assert!(!receipt.authorized);
-    ctx.shutdown().await.unwrap();
 }
 
-#[tokio::test]
-async fn a_typed_call_is_also_reachable_by_name() {
-    let ctx = context().await;
-    save_config(
-        &ctx,
-        json!({ "apiUrl": "https://warehouse.test", "apiKey": "secret-1" }),
-    )
-    .await;
-    let connectors = connectors(&ctx).await;
+#[openshop::test(context())]
+async fn a_typed_call_is_also_reachable_by_name(ctx: &TestContext) {
+    save_config(ctx, json!({ "apiUrl": "https://warehouse.test", "apiKey": "secret-1" })).await;
+    let connectors = connectors(ctx).await;
 
     let receipt = connectors
         .call("warehouse", "push", json!([{ "id": "#1", "total": 7 }]))
@@ -175,19 +166,15 @@ async fn a_typed_call_is_also_reachable_by_name() {
         error.to_string(),
         "Invalid arguments for \"warehouse.push\": missing field `total`"
     );
-    ctx.shutdown().await.unwrap();
 }
 
-#[tokio::test]
-async fn a_provider_that_is_not_configured_fails_with_the_missing_field() {
-    let ctx = context().await;
-
-    let error = connectors(&ctx).await.invoke(PUSH, &orders()).await.unwrap_err();
+#[openshop::test(context())]
+async fn a_provider_that_is_not_configured_fails_with_the_missing_field(ctx: &TestContext) {
+    let error = connectors(ctx).await.invoke(PUSH, &orders()).await.unwrap_err();
     assert_eq!(
         error.to_string(),
         "Invalid configuration for provider \"warehouse\": missing field `apiUrl`"
     );
-    ctx.shutdown().await.unwrap();
 }
 
 #[tokio::test]
@@ -204,11 +191,9 @@ async fn invoking_a_call_that_is_not_registered_fails_by_name() {
     ctx.shutdown().await.unwrap();
 }
 
-#[tokio::test]
-async fn the_typed_checker_receives_the_stored_configuration() {
-    let ctx = context().await;
-
-    let unconfigured: Value = common::check_provider(&ctx, "warehouse").await;
+#[openshop::test(context())]
+async fn the_typed_checker_receives_the_stored_configuration(ctx: &TestContext) {
+    let unconfigured: Value = common::check_provider(ctx, "warehouse").await;
     assert_eq!(
         unconfigured,
         json!({
@@ -218,11 +203,10 @@ async fn the_typed_checker_receives_the_stored_configuration() {
     );
 
     for (api_key, expected) in [("secret-1", true), ("wrong", false)] {
-        save_config(&ctx, json!({ "apiUrl": "https://warehouse.test", "apiKey": api_key })).await;
-        let checked: Value = common::check_provider(&ctx, "warehouse").await;
+        save_config(ctx, json!({ "apiUrl": "https://warehouse.test", "apiKey": api_key })).await;
+        let checked: Value = common::check_provider(ctx, "warehouse").await;
         assert_eq!(checked, json!({ "ok": expected }), "{api_key}");
     }
-    ctx.shutdown().await.unwrap();
 }
 
 #[tokio::test]

@@ -528,10 +528,8 @@ fn a_flow_keeps_its_name_and_its_options() {
     assert_eq!((plain.timeout, plain.concurrency), (None, None));
 }
 
-#[tokio::test]
-async fn a_flow_runs_with_its_typed_input() {
-    let ctx = TestContext::new(APP.config().unwrap()).await.unwrap();
-
+#[openshop::test(TestContext::new(APP.config().unwrap()))]
+async fn a_flow_runs_with_its_typed_input(ctx: &TestContext) {
     let result = ctx.run_flow(greet::NAME, json!({ "name": "Ada" })).await.unwrap();
     assert_eq!(result, RunOutcome::Completed);
     assert_eq!(seen("greet:"), ["greet:hello Ada"]);
@@ -559,7 +557,6 @@ async fn a_flow_runs_with_its_typed_input() {
         result,
         RunOutcome::Failed { ref error, .. } if error.contains("invalid digit")
     ));
-    ctx.shutdown().await.unwrap();
 }
 
 // ─── Webhooks ────────────────────────────────────────────────────────

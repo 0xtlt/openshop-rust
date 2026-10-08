@@ -112,7 +112,7 @@ the environment (`shopify: shopify_apps()?`): the error is the one
 | `shopify` | [`ShopifyConfig`](#shopify) | Single app resolved from env and Shopify TOML |
 | `worker` | `WorkerConfig` | See [Worker defaults](#worker-defaults) |
 | `retry_policy` | `RetryPolicy` | See [Retry defaults](#retry-defaults) |
-| `pages` | [`AdminPagesConfig`](#admin-pages) | Every admin page `visible` |
+| `builtin_pages` | [`AdminPagesConfig`](#admin-pages) | Every built-in page of the admin `visible` |
 | `admin_ui` | `UiSource` | The admin UI bundle built into the framework; see [Custom admin pages](custom-admin-pages.md#serve-the-bundle) |
 | `max_request_body_bytes` | `usize` | `2 * 1024 * 1024` (2 MB); larger request bodies are answered with `413` |
 
@@ -172,8 +172,8 @@ configuration is built.
 | `.admin_page(page)` | `AdminPage` | No custom admin pages |
 | `.custom_pages(navigation)` | The entries of the admin menu for the pages of the application (`CustomAdminNavigationItem`), in place of the ones the pages declare | One entry per page that declares a `nav` label; see [Custom admin pages](custom-admin-pages.md) |
 | `.experimental(config)` | `ExperimentalConfig` | Same as above; replaces `.custom_pages(…)` |
-| `.pages(config)` | `AdminPagesConfig` | Every admin page `visible` |
-| `.page(id, mode)` | `AdminPageId` and `AdminPageMode` | — |
+| `.builtin_pages(config)` | `AdminPagesConfig` | Every built-in page of the admin `visible` |
+| `.builtin_page(id, mode)` | `AdminPageId` and `AdminPageMode` | — |
 | `.model(table)` | `Table` | No app tables pushed in development |
 | `.admin_ui(ui)` | `UiSource` | The admin UI bundle built into the framework; see [Custom admin pages](custom-admin-pages.md#serve-the-bundle) |
 | `.max_request_body_bytes(bytes)` | `usize` | `2 * 1024 * 1024` (2 MB); larger request bodies are answered with `413` |
@@ -200,7 +200,7 @@ Calling the other methods again:
   registered instead of replacing them. Its `enabled`, when set, replaces the
   earlier value.
 - `.cron(…)`, `.crons(…)`, and `.admin_page(…)` append.
-- `.pages(…)` and `.page(…)` merge with earlier calls; later values win.
+- `.builtin_pages(…)` and `.builtin_page(…)` merge with earlier calls; later values win.
 - The remaining settings (`.shopify(…)`, `.worker(…)`, `.retry_policy(…)`,
   `.on_error(…)`, `.custom_pages(…)`, `.experimental(…)`, `.admin_ui(…)`,
   `.max_request_body_bytes(…)`) replace the earlier value.
@@ -384,7 +384,7 @@ use openshop::{AdminPageMode, AdminPagesConfig};
 
 pub static APP: App = app! {
     flows: [flows::sync_orders::sync_orders],
-    pages: AdminPagesConfig {
+    builtin_pages: AdminPagesConfig {
         functions: Some(AdminPageMode::Hidden),
         mcp: Some(AdminPageMode::Disabled),
         ..Default::default()
@@ -400,8 +400,8 @@ pub static APP: App = app! {
 
 The fields of `AdminPagesConfig` are `flows`, `providers`, `crons`,
 `functions`, and `mcp`, each an `Option<AdminPageMode>`. On the builder,
-`.pages(AdminPagesConfig { … })` sets several pages at once and
-`.page(id, mode)` sets one, named by an `AdminPageId`: `Flows`, `Providers`,
+`.builtin_pages(AdminPagesConfig { … })` sets several pages at once and
+`.builtin_page(id, mode)` sets one, named by an `AdminPageId`: `Flows`, `Providers`,
 `Crons`, `Functions`, or `Mcp`.
 
 `Hidden` is navigation-only and must not be used as an access-control boundary.
@@ -425,7 +425,7 @@ The dashboard and the protocol can also be set apart:
 - Set only the page mode to `Disabled` to block MCP administration while
   existing MCP tokens can continue using `POST /mcp`.
 - Set `McpConfig::disabled()` and a page mode, such as
-  `mcp: Some(AdminPageMode::Visible)` in `pages`, to stop the protocol while
+  `mcp: Some(AdminPageMode::Visible)` in `builtin_pages`, to stop the protocol while
   leaving the dashboard available for token administration.
 
 ## Runtime validation

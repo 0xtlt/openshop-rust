@@ -123,8 +123,8 @@ larger configurations easier to split:
   ambiguous with `/reviews/:id`.
 - Turning MCP off, with `mcp: McpConfig::disabled()` or `.enabled(false)`,
   also disables the MCP page of the admin and `/api/mcp/*`, unless the
-  application sets a mode for that page with the `pages` setting or
-  `.page(AdminPageId::Mcp, …)`.
+  application sets a mode for that page with the `builtin_pages` setting or
+  `.builtin_page(AdminPageId::Mcp, …)`.
 
 ## Proxy and server routes
 

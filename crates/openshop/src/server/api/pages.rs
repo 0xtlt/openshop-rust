@@ -15,7 +15,7 @@ pub fn resolved_admin_pages(config: &OpenShopConfig) -> ResolvedAdminPages {
     // With MCP turned off there is nothing to manage: its page is off too,
     // unless the application states a mode for it.
     let mcp_disabled = config.mcp.as_ref().is_some_and(|mcp| mcp.enabled == Some(false));
-    let mut pages = config.pages.unwrap_or_default();
+    let mut pages = config.builtin_pages.unwrap_or_default();
     if mcp_disabled && pages.get(AdminPageId::Mcp).is_none() {
         pages.set(AdminPageId::Mcp, AdminPageMode::Disabled);
     }

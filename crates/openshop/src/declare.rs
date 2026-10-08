@@ -119,7 +119,10 @@ pub fn proxy_input<T: DeserializeOwned>(ctx: &ProxyContext, query: bool) -> Resu
 /// The typed input of a `#[route]`: the query string, or the JSON body. A
 /// request that does not fit is answered with `422`.
 #[doc(hidden)]
-pub fn route_input<T: DeserializeOwned>(ctx: &RouteContext, query: bool) -> Result<T, Box<crate::response::Response>> {
+pub fn route_input<T: DeserializeOwned, A>(
+    ctx: &RouteContext<A>,
+    query: bool,
+) -> Result<T, Box<crate::response::Response>> {
     let input = if query {
         from_query(ctx.request.query())
     } else if ctx.request.body.is_empty() {

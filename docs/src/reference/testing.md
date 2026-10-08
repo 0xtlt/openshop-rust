@@ -37,13 +37,49 @@ context down when the function returns.
 
 | Part | Contract |
 | --- | --- |
-| `#[openshop::test(APP)]` | Names the application under test: `APP`, or a path such as `my_app::APP`. |
+| `#[openshop::test(APP)]` | Names the application under test: `APP`, or a path such as `my_app::APP`. It can also be an expression that starts a context: see below. |
 | `ctx: &TestContext` | The only argument. Take `&mut TestContext` to [create resources with a factory](#use-factories-and-automatic-cleanup). |
 | Return type | Nothing, or a `Result` whose error fails the test. |
 | Other attributes of the test, such as `#[ignore]` | They go below `#[openshop::test]`. |
 
 The attribute runs the test on a runtime of its own: there is no
 `#[tokio::test]` to add.
+
+The argument of the attribute is what the test starts from. Besides an
+application, it is any expression that resolves to a `TestContext`, or to a
+`Result` of one, such as a constructor or a function of the test file:
+
+```rust,ignore
+use openshop::builder::Flow;
+use openshop::testing::{TestContext, TestOptions};
+use openshop::{OpenShopConfig, json};
+
+fn config() -> OpenShopConfig {
+    OpenShopConfig::builder()
+        .flow(Flow::new("noop", |_ctx| async { Ok(()) }))
+        .build()
+        .expect("valid config")
+}
+
+/// A context for a shop that has not installed the application.
+async fn uninstalled() -> TestContext {
+    TestContext::new(config()).await.expect("test context")
+}
+
+#[openshop::test(uninstalled())]
+async fn lists_the_flow(ctx: &TestContext) {
+    let response = ctx.get("/api/flows").send().await.unwrap();
+    assert_eq!(response.status(), 200);
+}
+
+#[openshop::test(TestContext::with_options(config(), TestOptions::installed()))]
+async fn runs_the_flow(ctx: &TestContext) {
+    ctx.run_flow("noop", json!({})).await.unwrap();
+}
+```
+
+A test whose context depends on values it makes itself, such as a recorder
+its configuration captures, starts the context by hand.
 
 A context can also be started by hand:
 

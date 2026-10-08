@@ -10,10 +10,11 @@ const SHAPE: &str =
 
 pub fn test(arguments: TokenStream, item: ItemFn) -> syn::Result<TokenStream> {
     let krate = quote!(::openshop);
-    let app: Expr = syn::parse2(arguments).map_err(|error| {
+    // An application, or an expression that resolves to a test context.
+    let subject: Expr = syn::parse2(arguments).map_err(|error| {
         syn::Error::new(
             error.span(),
-            "expected the application under test: `#[openshop::test(APP)]`",
+            "expected what the test starts from: `#[openshop::test(APP)]`, or an expression that gives a test context",
         )
     })?;
 
@@ -49,9 +50,10 @@ pub fn test(arguments: TokenStream, item: ItemFn) -> syn::Result<TokenStream> {
             #body
 
             #[allow(unused_mut)]
-            let mut context = #krate::testing::TestContext::for_app(&#app)
-                .await
-                .expect("the application under test starts");
+            let mut context = {
+                use #krate::testing::IntoTestContext as _;
+                (#subject).into_test_context().await.expect("the test context starts")
+            };
             let outcome = #name(#borrow).await;
             context.shutdown().await.expect("the test context shuts down");
             #krate::testing::TestOutcome::check(outcome);
@@ -89,7 +91,7 @@ mod tests {
         for expected in [
             "# [doc = r\" Runs the flow.\"] # [ignore = \"slow\"] # [:: openshop :: testing :: tokio :: test (crate = \"::openshop::testing::tokio\")] async fn runs_the_flow ()",
             "async fn runs_the_flow (ctx : & TestContext) -> Result < () >",
-            ":: openshop :: testing :: TestContext :: for_app (& crate :: APP)",
+            "use :: openshop :: testing :: IntoTestContext as _ ; (crate :: APP) . into_test_context () . await",
             "let outcome = runs_the_flow (& context) . await ;",
             "context . shutdown () . await",
             ":: openshop :: testing :: TestOutcome :: check (outcome) ;",
@@ -107,7 +109,7 @@ mod tests {
     fn refuses_what_is_not_an_async_function_of_a_borrowed_context() {
         assert_eq!(
             refusal(quote!(), parse_quote! { async fn runs(ctx: &TestContext) {} }),
-            "expected the application under test: `#[openshop::test(APP)]`"
+            "expected what the test starts from: `#[openshop::test(APP)]`, or an expression that gives a test context"
         );
         for item in [
             parse_quote! { fn runs(ctx: &TestContext) {} },

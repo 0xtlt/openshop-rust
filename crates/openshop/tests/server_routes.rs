@@ -145,7 +145,8 @@ fn config() -> OpenShopConfig {
         )
         .route(
             "/auth-throws",
-            Route::authenticated(|ctx| async move {
+            // Never authenticates: the type of the value has to be stated.
+            Route::<Value>::authenticated(|ctx| async move {
                 if ctx.request.header("x-panic").is_some() {
                     panic!("route authentication panic");
                 }
@@ -209,60 +210,54 @@ async fn store_vault_secret(ctx: &TestContext, app_handle: &str, shop: &str, sec
     .unwrap();
 }
 
-#[tokio::test]
-async fn mounts_index_and_dynamic_routes_under_routes() {
-    let ctx = TestContext::new(config()).await.unwrap();
-
+#[openshop::test(TestContext::new(config()))]
+async fn mounts_index_and_dynamic_routes_under_routes(ctx: &TestContext) {
     for path in ["", "/"] {
-        let root = get(&ctx, path).send().await.unwrap();
+        let root = get(ctx, path).send().await.unwrap();
         assert_eq!(root.status(), 201);
         assert_eq!(header(&root, "x-server-route"), Some("open"));
         assert_eq!(json_body(root).await, json!({ "route": "open", "params": {} }));
     }
 
-    let dynamic = get(&ctx, "/orders/123").send().await.unwrap();
+    let dynamic = get(ctx, "/orders/123").send().await.unwrap();
     assert_eq!(dynamic.status(), 201);
     assert_eq!(json_body(dynamic).await["params"], json!({ "id": "123" }));
 
-    let encoded = get(&ctx, "/orders/order%20%2342").send().await.unwrap();
+    let encoded = get(ctx, "/orders/order%20%2342").send().await.unwrap();
     assert_eq!(json_body(encoded).await["params"], json!({ "id": "order #42" }));
 
     // The static route wins over the dynamic one registered before it.
-    let static_route = get(&ctx, "/orders/new").send().await.unwrap();
+    let static_route = get(ctx, "/orders/new").send().await.unwrap();
     assert_eq!(static_route.status(), 200);
     assert_eq!(json_body(static_route).await, json!({ "route": "new" }));
 
-    assert_eq!(get(&ctx, "/missing").send().await.unwrap().status(), 404);
-    assert_eq!(get(&ctx, "/orders/123/items").send().await.unwrap().status(), 404);
-    ctx.shutdown().await.unwrap();
+    assert_eq!(get(ctx, "/missing").send().await.unwrap().status(), 404);
+    assert_eq!(get(ctx, "/orders/123/items").send().await.unwrap().status(), 404);
 }
 
-#[tokio::test]
-async fn returns_405_and_allow_for_a_method_without_a_handler() {
-    let ctx = TestContext::new(config()).await.unwrap();
-
-    let response = post(&ctx, "").send().await.unwrap();
+#[openshop::test(TestContext::new(config()))]
+async fn returns_405_and_allow_for_a_method_without_a_handler(ctx: &TestContext) {
+    let response = post(ctx, "").send().await.unwrap();
     assert_eq!(response.status(), 405);
     assert_eq!(header(&response, "allow"), Some("GET"));
     assert_eq!(json_body(response).await, json!({ "error": "Method not allowed" }));
 
     // HEAD is not implied by GET.
-    let head = request(&ctx, Method::HEAD, "").send().await.unwrap();
+    let head = request(ctx, Method::HEAD, "").send().await.unwrap();
     assert_eq!(head.status(), 405);
     assert_eq!(header(&head, "allow"), Some("GET"));
 
-    let options = request(&ctx, Method::OPTIONS, "/orders/123").send().await.unwrap();
+    let options = request(ctx, Method::OPTIONS, "/orders/123").send().await.unwrap();
     assert_eq!(options.status(), 405);
 
     // Declared methods are listed in a fixed order, and the check comes before authentication.
-    let response = request(&ctx, Method::DELETE, "/throws").send().await.unwrap();
+    let response = request(ctx, Method::DELETE, "/throws").send().await.unwrap();
     assert_eq!(response.status(), 405);
     assert_eq!(header(&response, "allow"), Some("GET, POST"));
 
-    let response = get(&ctx, "/auth-throws").send().await.unwrap();
+    let response = get(ctx, "/auth-throws").send().await.unwrap();
     assert_eq!(response.status(), 405);
     assert_eq!(header(&response, "allow"), Some("POST"));
-    ctx.shutdown().await.unwrap();
 }
 
 #[tokio::test]
@@ -366,11 +361,9 @@ async fn handlers_receive_the_full_request() {
     ctx.shutdown().await.unwrap();
 }
 
-#[tokio::test]
-async fn auth_can_read_the_body_and_passes_its_result_to_the_handler() {
-    let ctx = TestContext::new(config()).await.unwrap();
-
-    let response = post(&ctx, "/authenticated")
+#[openshop::test(TestContext::new(config()))]
+async fn auth_can_read_the_body_and_passes_its_result_to_the_handler(ctx: &TestContext) {
+    let response = post(ctx, "/authenticated")
         .json(&json!({ "token": "valid", "event": "created" }))
         .send()
         .await
@@ -383,7 +376,6 @@ async fn auth_can_read_the_body_and_passes_its_result_to_the_handler() {
             "body": { "token": "valid", "event": "created" },
         })
     );
-    ctx.shutdown().await.unwrap();
 }
 
 #[tokio::test]
@@ -444,37 +436,35 @@ async fn auth_unauthorized_returns_401_and_an_auth_response_short_circuits() {
     ctx.shutdown().await.unwrap();
 }
 
-#[tokio::test]
-async fn authentication_and_handler_errors_fail_with_500() {
-    let ctx = TestContext::new(config()).await.unwrap();
+#[openshop::test(TestContext::new(config()))]
+async fn authentication_and_handler_errors_fail_with_500(ctx: &TestContext) {
     let internal_error = json!({ "error": "Internal server route error" });
 
-    let auth_failed = post(&ctx, "/auth-throws").send().await.unwrap();
+    let auth_failed = post(ctx, "/auth-throws").send().await.unwrap();
     assert_eq!(auth_failed.status(), 500);
     assert_eq!(json_body(auth_failed).await, internal_error);
 
-    let failed = get(&ctx, "/throws").send().await.unwrap();
+    let failed = get(ctx, "/throws").send().await.unwrap();
     assert_eq!(failed.status(), 500);
     assert_eq!(json_body(failed).await, internal_error);
 
     // An unreadable body in authentication is an error, not a rejection.
-    let malformed = post(&ctx, "/authenticated").body("{ not json").send().await.unwrap();
+    let malformed = post(ctx, "/authenticated").body("{ not json").send().await.unwrap();
     assert_eq!(malformed.status(), 500);
     assert_eq!(json_body(malformed).await, internal_error);
 
     // Panics are contained the same way.
-    let auth_panicked = post(&ctx, "/auth-throws").header("x-panic", "1").send().await.unwrap();
+    let auth_panicked = post(ctx, "/auth-throws").header("x-panic", "1").send().await.unwrap();
     assert_eq!(auth_panicked.status(), 500);
     assert_eq!(json_body(auth_panicked).await, internal_error);
 
-    let panicked = post(&ctx, "/throws").send().await.unwrap();
+    let panicked = post(ctx, "/throws").send().await.unwrap();
     assert_eq!(panicked.status(), 500);
     assert_eq!(json_body(panicked).await, internal_error);
 
-    let recovered = post(&ctx, "/throws").body("payload").send().await.unwrap();
+    let recovered = post(ctx, "/throws").body("payload").send().await.unwrap();
     assert_eq!(recovered.status(), 200);
     assert_eq!(recovered.text().await.unwrap(), "recovered");
-    ctx.shutdown().await.unwrap();
 }
 
 #[tokio::test]
@@ -524,15 +514,14 @@ async fn for_shop_loads_only_the_active_app_and_shop_connectors() {
     ctx.shutdown().await.unwrap();
 }
 
-#[tokio::test]
-async fn for_shop_requires_a_valid_and_actively_installed_shop() {
-    let ctx = TestContext::new(config()).await.unwrap();
-    install(&ctx, "clientB", "b.myshopify.com", Some("token-b"), false).await;
-    install(&ctx, "clientB", "uninstalled.myshopify.com", Some("token"), true).await;
-    install(&ctx, "clientB", "pending.myshopify.com", None, false).await;
+#[openshop::test(TestContext::new(config()))]
+async fn for_shop_requires_a_valid_and_actively_installed_shop(ctx: &TestContext) {
+    install(ctx, "clientB", "b.myshopify.com", Some("token-b"), false).await;
+    install(ctx, "clientB", "uninstalled.myshopify.com", Some("token"), true).await;
+    install(ctx, "clientB", "pending.myshopify.com", None, false).await;
 
     let resolved = get(
-        &ctx,
+        ctx,
         "/shop-context?shop=https%3A%2F%2FB.MyShopify.com%2Fadmin&app=clientB",
     )
     .send()
@@ -573,11 +562,10 @@ async fn for_shop_requires_a_valid_and_actively_installed_shop() {
         ),
         ("shop=b.myshopify.com", "[openshop] Missing Shopify app handle"),
     ] {
-        let response = get(&ctx, &format!("/shop-context?{query}")).send().await.unwrap();
+        let response = get(ctx, &format!("/shop-context?{query}")).send().await.unwrap();
         assert_eq!(response.status(), 400, "{query}");
         assert_eq!(json_body(response).await, json!({ "error": error }), "{query}");
     }
-    ctx.shutdown().await.unwrap();
 }
 
 #[tokio::test]
@@ -626,7 +614,7 @@ fn rejects_routes_without_handlers_and_ambiguous_routes_when_the_config_is_built
 
     let error = error_of(OpenShopConfig::builder().route(
         "/missing-handler",
-        Route::authenticated(|_ctx| async move { Ok(RouteAuthOutcome::Unauthorized) }),
+        Route::<Value>::authenticated(|_ctx| async move { Ok(RouteAuthOutcome::Unauthorized) }),
     ));
     assert!(error.contains("define at least one HTTP method"), "{error}");
 

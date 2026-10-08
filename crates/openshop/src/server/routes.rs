@@ -20,7 +20,9 @@ use crate::app::OpenShop;
 use crate::declare::InvalidInput;
 use crate::engine::step::error_message;
 use crate::runtime::logger;
-use crate::types::{Route, RouteAuth, RouteAuthContext, RouteAuthOutcome, RouteContext, RouteMethod, RouteRequest};
+use crate::types::{
+    Route, RouteAuth, RouteAuthContext, RouteAuthOutcome, RouteAuthValue, RouteContext, RouteMethod, RouteRequest,
+};
 
 pub use super::connectors::resolve_shop_context;
 
@@ -71,7 +73,8 @@ async fn handle(
         body,
     };
 
-    let mut auth = Value::Null;
+    // A public route has no authentication value: its handlers find `Null`.
+    let mut auth: RouteAuthValue = Box::new(Value::Null);
     if let RouteAuth::Custom(authenticate) = &authentication {
         let context = RouteAuthContext {
             request: request.clone(),

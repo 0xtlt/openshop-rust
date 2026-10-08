@@ -41,5 +41,5 @@ pub use crate::types::{
     Fields, Flow, FlowRunFn, Function, FunctionOwner, FunctionTitle, FunctionType, InputSchema, McpResource,
     McpResourceFn, McpTool, McpToolFn, MethodResult, OnErrorFn, Provider, ProviderCall, ProviderChecker, ProviderField,
     ProviderMethod, ProviderTransformer, Proxy, ProxyHandler, ProxyResponseType, ROUTE_METHODS, RequiredPermission,
-    Route, RouteAuth, RouteAuthFn, RouteHandler, RouteMethod, Webhook, WebhookFn,
+    Route, RouteAuth, RouteAuthFn, RouteAuthValue, RouteHandler, RouteMethod, Webhook, WebhookFn,
 };

@@ -82,10 +82,8 @@ async fn count(ctx: &TestContext, table: &str) -> i64 {
 
 // ─── GET /api/pages ──────────────────────────────────────────────────
 
-#[tokio::test]
-async fn get_pages_hides_config_backed_pages_without_resources() {
-    let ctx = context(builder()).await;
-
+#[openshop::test(context(builder()))]
+async fn get_pages_hides_config_backed_pages_without_resources(ctx: &TestContext) {
     let (status, pages) = send(ctx.get("/api/pages")).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(
@@ -98,7 +96,6 @@ async fn get_pages_hides_config_backed_pages_without_resources() {
             "mcp": "visible",
         })
     );
-    ctx.shutdown().await.unwrap();
 }
 
 #[tokio::test]
@@ -121,9 +118,9 @@ async fn get_pages_shows_pages_backed_by_resources() {
     // Explicit modes win over the resource-based default, and a flow-less app hides Flows.
     let config = OpenShopConfig::builder()
         .provider(Provider::new("warehouse").field("token", Field::password("Token")))
-        .page(AdminPageId::Providers, AdminPageMode::Hidden)
-        .page(AdminPageId::Crons, AdminPageMode::Visible)
-        .page(AdminPageId::Functions, AdminPageMode::Disabled);
+        .builtin_page(AdminPageId::Providers, AdminPageMode::Hidden)
+        .builtin_page(AdminPageId::Crons, AdminPageMode::Visible)
+        .builtin_page(AdminPageId::Functions, AdminPageMode::Disabled);
     let ctx = context(config).await;
     let (_, pages) = send(ctx.get("/api/pages")).await;
     assert_eq!(
@@ -139,14 +136,11 @@ async fn get_pages_shows_pages_backed_by_resources() {
     ctx.shutdown().await.unwrap();
 }
 
-#[tokio::test]
-async fn get_pages_requires_an_authenticated_shopify_session() {
-    let ctx = TestContext::new(create_config([noop_flow("test-flow")])).await.unwrap();
-
+#[openshop::test(TestContext::new(create_config([noop_flow("test-flow")])))]
+async fn get_pages_requires_an_authenticated_shopify_session(ctx: &TestContext) {
     let (status, body) = send(ctx.http.get(format!("{}/api/pages", ctx.url))).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
     assert_eq!(body, json!({ "error": "Unauthorized: missing session token" }));
-    ctx.shutdown().await.unwrap();
 }
 
 // ─── Page gate ───────────────────────────────────────────────────────
@@ -155,8 +149,8 @@ async fn get_pages_requires_an_authenticated_shopify_session() {
 async fn hidden_pages_remain_reachable_on_the_admin_api() {
     let ctx = context(
         builder()
-            .page(AdminPageId::Functions, AdminPageMode::Hidden)
-            .page(AdminPageId::Mcp, AdminPageMode::Hidden),
+            .builtin_page(AdminPageId::Functions, AdminPageMode::Hidden)
+            .builtin_page(AdminPageId::Mcp, AdminPageMode::Hidden),
     )
     .await;
 
@@ -190,9 +184,9 @@ async fn hidden_pages_remain_reachable_on_the_admin_api() {
 async fn disabled_pages_return_404_on_their_admin_api_group() {
     let ctx = context(
         builder()
-            .page(AdminPageId::Flows, AdminPageMode::Disabled)
-            .page(AdminPageId::Functions, AdminPageMode::Disabled)
-            .page(AdminPageId::Mcp, AdminPageMode::Disabled),
+            .builtin_page(AdminPageId::Flows, AdminPageMode::Disabled)
+            .builtin_page(AdminPageId::Functions, AdminPageMode::Disabled)
+            .builtin_page(AdminPageId::Mcp, AdminPageMode::Disabled),
     )
     .await;
 
@@ -237,9 +231,8 @@ async fn disabled_pages_return_404_on_their_admin_api_group() {
     ctx.shutdown().await.unwrap();
 }
 
-#[tokio::test]
-async fn disabled_flows_page_blocks_run_mutations() {
-    let ctx = context(builder().page(AdminPageId::Flows, AdminPageMode::Disabled)).await;
+#[openshop::test(context(builder().builtin_page(AdminPageId::Flows, AdminPageMode::Disabled)))]
+async fn disabled_flows_page_blocks_run_mutations(ctx: &TestContext) {
     let run_id = ctx.dispatch_flow("test-flow", json!({})).await.unwrap();
 
     let requests = [
@@ -265,16 +258,15 @@ async fn disabled_flows_page_blocks_run_mutations() {
         .await
         .unwrap();
     assert_eq!(status, "pending");
-    assert_eq!(count(&ctx, "flow_runs").await, 1);
-    ctx.shutdown().await.unwrap();
+    assert_eq!(count(ctx, "flow_runs").await, 1);
 }
 
 #[tokio::test]
 async fn disabled_providers_and_crons_pages_block_reads_and_writes() {
     let ctx = context(
         full_builder()
-            .page(AdminPageId::Providers, AdminPageMode::Disabled)
-            .page(AdminPageId::Crons, AdminPageMode::Disabled),
+            .builtin_page(AdminPageId::Providers, AdminPageMode::Disabled)
+            .builtin_page(AdminPageId::Crons, AdminPageMode::Disabled),
     )
     .await;
 
@@ -317,11 +309,11 @@ async fn disabled_providers_and_crons_pages_block_reads_and_writes() {
 async fn disabled_pages_do_not_reveal_themselves_without_a_session() {
     let ctx = context(
         full_builder()
-            .page(AdminPageId::Flows, AdminPageMode::Disabled)
-            .page(AdminPageId::Providers, AdminPageMode::Disabled)
-            .page(AdminPageId::Crons, AdminPageMode::Disabled)
-            .page(AdminPageId::Functions, AdminPageMode::Disabled)
-            .page(AdminPageId::Mcp, AdminPageMode::Disabled),
+            .builtin_page(AdminPageId::Flows, AdminPageMode::Disabled)
+            .builtin_page(AdminPageId::Providers, AdminPageMode::Disabled)
+            .builtin_page(AdminPageId::Crons, AdminPageMode::Disabled)
+            .builtin_page(AdminPageId::Functions, AdminPageMode::Disabled)
+            .builtin_page(AdminPageId::Mcp, AdminPageMode::Disabled),
     )
     .await;
 
@@ -353,29 +345,26 @@ async fn disabled_pages_do_not_reveal_themselves_without_a_session() {
 
 // ─── MCP protocol ────────────────────────────────────────────────────
 
-#[tokio::test]
-async fn disabling_the_mcp_admin_page_does_not_disable_the_mcp_protocol() {
-    let ctx = context(builder().page(AdminPageId::Mcp, AdminPageMode::Disabled)).await;
-    let token = insert_mcp_token(&ctx, "protocol-only token").await;
+#[openshop::test(context(builder().builtin_page(AdminPageId::Mcp, AdminPageMode::Disabled)))]
+async fn disabling_the_mcp_admin_page_does_not_disable_the_mcp_protocol(ctx: &TestContext) {
+    let token = insert_mcp_token(ctx, "protocol-only token").await;
 
     let (status, body) = send(ctx.get("/api/mcp/capabilities")).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert_eq!(body, not_found());
 
-    let (status, body) = send(mcp_initialize(&ctx, &token)).await;
+    let (status, body) = send(mcp_initialize(ctx, &token)).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["jsonrpc"], "2.0");
     assert_eq!(body["id"], 1);
     assert!(body["result"].is_object(), "{body}");
-    ctx.shutdown().await.unwrap();
 }
 
-#[tokio::test]
-async fn mcp_enabled_false_rejects_mcp_protocol_requests() {
-    let ctx = context(builder().mcp(McpConfig::disabled())).await;
-    let token = insert_mcp_token(&ctx, "disabled protocol token").await;
+#[openshop::test(context(builder().mcp(McpConfig::disabled())))]
+async fn mcp_enabled_false_rejects_mcp_protocol_requests(ctx: &TestContext) {
+    let token = insert_mcp_token(ctx, "disabled protocol token").await;
 
-    let (status, body) = send(mcp_initialize(&ctx, &token)).await;
+    let (status, body) = send(mcp_initialize(ctx, &token)).await;
     assert_eq!(status, StatusCode::FORBIDDEN);
     assert_eq!(body, json!({ "error": "MCP is disabled" }));
 
@@ -383,7 +372,6 @@ async fn mcp_enabled_false_rejects_mcp_protocol_requests() {
     let (_, pages) = send(ctx.get("/api/pages")).await;
     assert_eq!(pages["mcp"], "disabled");
     assert_eq!(status_of(ctx.get("/api/mcp/capabilities")).await, StatusCode::NOT_FOUND);
-    ctx.shutdown().await.unwrap();
 }
 
 #[tokio::test]
@@ -391,7 +379,7 @@ async fn the_mcp_page_stays_when_the_application_asks_for_it() {
     let ctx = context(
         builder()
             .mcp(McpConfig::disabled())
-            .page(AdminPageId::Mcp, AdminPageMode::Visible),
+            .builtin_page(AdminPageId::Mcp, AdminPageMode::Visible),
     )
     .await;
 

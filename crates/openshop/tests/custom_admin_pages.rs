@@ -122,15 +122,13 @@ async fn assert_rpc_error(response: Response, status: u16, code: &str, message: 
     request_id
 }
 
-#[tokio::test]
-async fn passes_trusted_identity_and_dynamic_params_to_a_loader() {
-    let ctx = context(reviews_app().build().unwrap()).await;
-
-    let first = load(&ctx, "/reviews/41", "details", Value::Null).await;
+#[openshop::test(context(reviews_app().build().unwrap()))]
+async fn passes_trusted_identity_and_dynamic_params_to_a_loader(ctx: &TestContext) {
+    let first = load(ctx, "/reviews/41", "details", Value::Null).await;
     assert_eq!(first.status(), 200);
     assert_eq!(json_body(first).await["id"], "41");
 
-    let response = load(&ctx, "/reviews/42", "details", Value::Null).await;
+    let response = load(ctx, "/reviews/42", "details", Value::Null).await;
     assert_eq!(response.status(), 200);
     assert_eq!(response.headers()["content-type"], "application/json; charset=UTF-8");
     assert_eq!(
@@ -140,7 +138,7 @@ async fn passes_trusted_identity_and_dynamic_params_to_a_loader() {
 
     // Identity never comes from the query string or the input.
     let url = "/api/pages/custom/reviews/42/_rpc/loader/details?shop=attacker.myshopify.com";
-    let response = request_as(&ctx, REVIEWER, Method::POST, url)
+    let response = request_as(ctx, REVIEWER, Method::POST, url)
         .json(&json!({ "input": { "shop": "attacker.myshopify.com", "actor": { "id": "1" } } }))
         .send()
         .await
@@ -149,7 +147,6 @@ async fn passes_trusted_identity_and_dynamic_params_to_a_loader() {
         json_body(response).await,
         json!({ "id": "42", "actorId": "123", "shop": TEST_SHOP, "shopifyApp": "default" })
     );
-    ctx.shutdown().await.unwrap();
 }
 
 #[tokio::test]
@@ -299,9 +296,8 @@ async fn invalid_custom_navigation_is_rejected_when_the_config_is_built() {
     ctx.shutdown().await.unwrap();
 }
 
-#[tokio::test]
-async fn rejects_rpc_requests_without_a_session_token() {
-    let ctx = context(reviews_app().build().unwrap()).await;
+#[openshop::test(context(reviews_app().build().unwrap()))]
+async fn rejects_rpc_requests_without_a_session_token(ctx: &TestContext) {
     let rpc_url = format!("{}/api/pages/custom/reviews/42/_rpc/loader/details", ctx.url);
 
     let response = ctx
@@ -336,7 +332,6 @@ async fn rejects_rpc_requests_without_a_session_token() {
         json_body(response).await,
         json!({ "error": "Unauthorized: Invalid JWT signature" })
     );
-    ctx.shutdown().await.unwrap();
 }
 
 #[tokio::test]
@@ -389,30 +384,27 @@ async fn lists_navigation_and_page_access_for_the_actor() {
     ctx.shutdown().await.unwrap();
 }
 
-#[tokio::test]
-async fn an_application_without_pages_has_no_custom_pages() {
-    let ctx = context(OpenShopConfig::builder().build().unwrap()).await;
-
-    let custom_pages = request_as(&ctx, REVIEWER, Method::GET, "/api/pages/custom")
+#[openshop::test(context(OpenShopConfig::builder().build().unwrap()))]
+async fn an_application_without_pages_has_no_custom_pages(ctx: &TestContext) {
+    let custom_pages = request_as(ctx, REVIEWER, Method::GET, "/api/pages/custom")
         .send()
         .await
         .unwrap();
     assert_eq!(custom_pages.status(), 200);
     assert_eq!(json_body(custom_pages).await, json!({ "navigation": [], "pages": [] }));
 
-    let denied = access(&ctx, REVIEWER, "?path=/reviews").await;
+    let denied = access(ctx, REVIEWER, "?path=/reviews").await;
     assert_eq!(denied.status(), 404);
     assert_eq!(json_body(denied).await, json!({ "allowed": false }));
 
-    let response = load(&ctx, "/reviews/42", "details", Value::Null).await;
+    let response = load(ctx, "/reviews/42", "details", Value::Null).await;
     assert_rpc_error(response, 404, "NOT_FOUND", "Not found").await;
 
-    let built_in_pages = request_as(&ctx, REVIEWER, Method::GET, "/api/pages")
+    let built_in_pages = request_as(ctx, REVIEWER, Method::GET, "/api/pages")
         .send()
         .await
         .unwrap();
     assert_eq!(built_in_pages.status(), 200);
-    ctx.shutdown().await.unwrap();
 }
 
 #[tokio::test]
@@ -1146,9 +1138,8 @@ struct SavedReview {
     saved_by: String,
 }
 
-#[tokio::test]
-async fn functions_can_be_invoked_without_http() {
-    let ctx = context(reviews_app().build().unwrap()).await;
+#[openshop::test(context(reviews_app().build().unwrap()))]
+async fn functions_can_be_invoked_without_http(ctx: &TestContext) {
     let save = AdminFunction::typed_action(|ctx, input: SaveReview| async move {
         Ok(json!({ "title": input.title, "rating": input.rating, "savedBy": ctx.actor.id }))
     })
@@ -1205,5 +1196,4 @@ async fn functions_can_be_invoked_without_http() {
         .await
         .unwrap_err();
     assert_eq!(error.to_string(), "Admin function authorization rejected");
-    ctx.shutdown().await.unwrap();
 }

@@ -1340,34 +1340,67 @@ impl RouteAuthContext {
     }
 }
 
+/// What the handler of a route receives. `A` is what the authentication
+/// function of the route returns for an authenticated request: a `Value` by
+/// default, `Null` on a public route.
 #[derive(Clone)]
-pub struct RouteContext {
+pub struct RouteContext<A = Value> {
     pub request: RouteRequest,
     pub params: IndexMap<String, String>,
-    /// Value produced by the route's authentication function (`Null` for public routes).
-    pub auth: Value,
+    /// What the authentication function of the route returned.
+    pub auth: A,
     pub db: PgPool,
     pub app: OpenShop,
 }
 
-impl RouteContext {
+impl<A> RouteContext<A> {
+    /// Resolves an installed shop, and gives what a context gives for it:
+    /// its database, its Shopify client and its providers.
     pub async fn for_shop(&self, shop: impl Into<RouteShopInput>) -> Result<RouteShopContext> {
         crate::server::routes::resolve_shop_context(&self.app, shop.into()).await
     }
 }
 
-/// Outcome of a route authentication function.
-pub enum RouteAuthOutcome {
+/// Outcome of a route authentication function. `A` is what an authenticated
+/// request is known by, which the handler finds in `ctx.auth`: any type, a
+/// `Value` unless stated.
+///
+/// ```
+/// use openshop::prelude::*;
+///
+/// pub struct Partner {
+///     pub key: String,
+/// }
+///
+/// async fn partner(ctx: RouteAuthContext) -> Result<RouteAuthOutcome<Partner>> {
+///     Ok(match ctx.request.header("x-partner-key") {
+///         Some(key) => RouteAuthOutcome::Authenticated(Partner { key: key.to_string() }),
+///         None => RouteAuthOutcome::Unauthorized,
+///     })
+/// }
+///
+/// #[route(GET, "/whoami", json, auth = partner)]
+/// async fn whoami(ctx: RouteContext<Partner>) -> Result<Value> {
+///     Ok(json!({ "key": ctx.auth.key }))
+/// }
+/// ```
+pub enum RouteAuthOutcome<A = Value> {
     /// Request is authenticated; the value is exposed as `ctx.auth`.
-    Authenticated(Value),
+    Authenticated(A),
     /// Rejects with `401 Unauthorized`.
     Unauthorized,
     /// Short-circuits with a custom response.
     Response(axum::response::Response),
 }
 
-pub type RouteAuthFn = Arc<dyn Fn(RouteAuthContext) -> BoxFuture<'static, Result<RouteAuthOutcome>> + Send + Sync>;
-pub type RouteHandler = Arc<dyn Fn(RouteContext) -> BoxFuture<'static, Result<axum::response::Response>> + Send + Sync>;
+/// The value of an authenticated request as the server carries it from the
+/// authentication function of a route to its handler, whatever its type.
+pub type RouteAuthValue = Box<dyn std::any::Any + Send>;
+
+pub type RouteAuthFn =
+    Arc<dyn Fn(RouteAuthContext) -> BoxFuture<'static, Result<RouteAuthOutcome<RouteAuthValue>>> + Send + Sync>;
+pub type RouteHandler =
+    Arc<dyn Fn(RouteContext<RouteAuthValue>) -> BoxFuture<'static, Result<axum::response::Response>> + Send + Sync>;
 
 #[derive(Clone)]
 pub enum RouteAuth {
@@ -1385,12 +1418,24 @@ pub struct RouteMethod {
     pub handler: RouteHandler,
 }
 
-/// A public HTTP route mounted under `/routes` with an explicit authentication contract.
-#[derive(Clone)]
-pub struct Route {
+/// A public HTTP route mounted under `/routes` with an explicit authentication
+/// contract. `A` is what its authentication function returns for an
+/// authenticated request, and what its handlers find in `ctx.auth`.
+pub struct Route<A = Value> {
     /// Authentication of the handlers added to this definition.
     pub auth: RouteAuth,
     pub handlers: IndexMap<&'static str, RouteMethod>,
+    value: PhantomData<fn() -> A>,
+}
+
+impl<A> Clone for Route<A> {
+    fn clone(&self) -> Self {
+        Self {
+            auth: self.auth.clone(),
+            handlers: self.handlers.clone(),
+            value: PhantomData,
+        }
+    }
 }
 
 macro_rules! route_methods {
@@ -1398,7 +1443,7 @@ macro_rules! route_methods {
         $(
             pub fn $name<F, Fut>(self, handler: F) -> Self
             where
-                F: Fn(RouteContext) -> Fut + Send + Sync + 'static,
+                F: Fn(RouteContext<A>) -> Fut + Send + Sync + 'static,
                 Fut: Future<Output = Result<axum::response::Response>> + Send + 'static,
             {
                 self.handler($method, handler)
@@ -1408,43 +1453,99 @@ macro_rules! route_methods {
 }
 
 impl Route {
-    /// A route without authentication (`auth: 'none'`).
+    /// A route without authentication (`auth: 'none'`). Its handlers find
+    /// `Null` in `ctx.auth`.
     pub fn public() -> Self {
         Self {
             auth: RouteAuth::None,
             handlers: IndexMap::new(),
+            value: PhantomData,
         }
     }
+}
 
+impl<A: Send + 'static> Route<A> {
+    /// A route whose requests `auth` decides on before a handler runs. What
+    /// it returns for an authenticated request is the `ctx.auth` of the
+    /// handlers, with its type.
     pub fn authenticated<F, Fut>(auth: F) -> Self
     where
         F: Fn(RouteAuthContext) -> Fut + Send + Sync + 'static,
-        Fut: Future<Output = Result<RouteAuthOutcome>> + Send + 'static,
+        Fut: Future<Output = Result<RouteAuthOutcome<A>>> + Send + 'static,
     {
         Self {
-            auth: RouteAuth::Custom(Arc::new(move |ctx| Box::pin(auth(ctx)))),
+            auth: RouteAuth::Custom(Arc::new(move |ctx| {
+                let outcome = auth(ctx);
+                Box::pin(async move {
+                    Ok(match outcome.await? {
+                        RouteAuthOutcome::Authenticated(value) => {
+                            RouteAuthOutcome::Authenticated(Box::new(value) as RouteAuthValue)
+                        }
+                        RouteAuthOutcome::Unauthorized => RouteAuthOutcome::Unauthorized,
+                        RouteAuthOutcome::Response(response) => RouteAuthOutcome::Response(response),
+                    })
+                })
+            })),
             handlers: IndexMap::new(),
+            value: PhantomData,
         }
     }
 
     fn handler<F, Fut>(mut self, method: &'static str, handler: F) -> Self
     where
-        F: Fn(RouteContext) -> Fut + Send + Sync + 'static,
+        F: Fn(RouteContext<A>) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Result<axum::response::Response>> + Send + 'static,
     {
         self.handlers.insert(
             method,
             RouteMethod {
                 auth: self.auth.clone(),
-                handler: Arc::new(move |ctx| Box::pin(handler(ctx))),
+                // The value comes from the authentication of this definition: it is an `A`.
+                handler: Arc::new(move |ctx| -> BoxFuture<'static, Result<axum::response::Response>> {
+                    let RouteContext {
+                        request,
+                        params,
+                        auth,
+                        db,
+                        app,
+                    } = ctx;
+                    match auth.downcast::<A>() {
+                        Ok(auth) => Box::pin(handler(RouteContext {
+                            request,
+                            params,
+                            auth: *auth,
+                            db,
+                            app,
+                        })),
+                        Err(_) => Box::pin(async {
+                            Err(anyhow!(
+                                "[openshop] A route handler received the authentication value of another route"
+                            ))
+                        }),
+                    }
+                }),
             },
         );
         self
     }
 
+    route_methods!(get => "GET", head => "HEAD", post => "POST", put => "PUT", patch => "PATCH", delete => "DELETE", options => "OPTIONS");
+
+    /// The definition without the type of its authentication value, as an
+    /// application stores it: its handlers already know that type.
+    pub(crate) fn erased(self) -> Route {
+        Route {
+            auth: self.auth,
+            handlers: self.handlers,
+            value: PhantomData,
+        }
+    }
+}
+
+impl<A> Route<A> {
     /// Adds the handlers of another definition of the same path, each keeping
     /// its own authentication. Fails when both handle a method.
-    pub(crate) fn merge(&mut self, other: Self) -> Result<(), String> {
+    pub(crate) fn merge(&mut self, other: Route) -> Result<(), String> {
         for (method, handler) in other.handlers {
             if self.handlers.contains_key(method) {
                 return Err(format!("handles {method} twice"));
@@ -1453,8 +1554,6 @@ impl Route {
         }
         Ok(())
     }
-
-    route_methods!(get => "GET", head => "HEAD", post => "POST", put => "PUT", patch => "PATCH", delete => "DELETE", options => "OPTIONS");
 
     /// Declared methods in canonical order.
     pub(crate) fn allowed_methods(&self) -> Vec<&'static str> {

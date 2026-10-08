@@ -248,11 +248,10 @@ async fn the_methods_can_be_called_on_a_value() {
     assert!(warehouse.check().await.unwrap());
 }
 
-#[tokio::test]
-async fn the_connectors_run_the_methods_with_the_saved_configuration() {
-    let ctx = context().await;
+#[openshop::test(context())]
+async fn the_connectors_run_the_methods_with_the_saved_configuration(ctx: &TestContext) {
     save_config(
-        &ctx,
+        ctx,
         json!({
             "apiUrl": "https://warehouse.test",
             "apiKey": "secret-1",
@@ -262,7 +261,7 @@ async fn the_connectors_run_the_methods_with_the_saved_configuration() {
         }),
     )
     .await;
-    let connectors = connectors(&ctx).await;
+    let connectors = connectors(ctx).await;
     let warehouse = Warehouse::on(&connectors);
     let orders = orders();
 
@@ -309,13 +308,11 @@ async fn the_connectors_run_the_methods_with_the_saved_configuration() {
         .await
         .unwrap();
     assert_eq!(by_name, "2 x SKU-4 at https://warehouse.test");
-    ctx.shutdown().await.unwrap();
 }
 
-#[tokio::test]
-async fn a_shop_without_configuration_fails_before_the_method_runs() {
-    let ctx = context().await;
-    let connectors = connectors(&ctx).await;
+#[openshop::test(context())]
+async fn a_shop_without_configuration_fails_before_the_method_runs(ctx: &TestContext) {
+    let connectors = connectors(ctx).await;
 
     let error = Warehouse::on(&connectors).ping().await.unwrap_err();
     assert_eq!(
@@ -324,12 +321,10 @@ async fn a_shop_without_configuration_fails_before_the_method_runs() {
     );
     // A provider without fields needs none.
     assert_eq!(Clock::on(&connectors).year().await.unwrap(), 2026);
-    ctx.shutdown().await.unwrap();
 }
 
-#[tokio::test]
-async fn the_form_validates_what_the_struct_expects() {
-    let ctx = context().await;
+#[openshop::test(context())]
+async fn the_form_validates_what_the_struct_expects(ctx: &TestContext) {
     let save = |config: Value| {
         ctx.put("/api/providers/warehouse")
             .json(&json!({ "config": config }))
@@ -358,11 +353,11 @@ async fn the_form_validates_what_the_struct_expects() {
     // The connection check is the method marked `#[checker]`.
     for (api_key, expected) in [("secret-1", true), ("wrong", false)] {
         save_config(
-            &ctx,
+            ctx,
             json!({ "apiUrl": "https://warehouse.test", "apiKey": api_key, "useSandbox": false }),
         )
         .await;
-        let checked: Value = common::check_provider(&ctx, "warehouse").await;
+        let checked: Value = common::check_provider(ctx, "warehouse").await;
         assert_eq!(checked, json!({ "ok": expected }), "{api_key}");
     }
 
@@ -374,7 +369,6 @@ async fn the_form_validates_what_the_struct_expects() {
         json!({ "apiUrl": "https://warehouse.test", "useSandbox": false })
     );
     assert_eq!(warehouse["fields"]["apiKey"]["hasValue"], true);
-    ctx.shutdown().await.unwrap();
 }
 
 #[tokio::test]

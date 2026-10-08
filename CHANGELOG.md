@@ -25,6 +25,11 @@
   Liquid literal the value cannot close.
 - `#[route(GET, "/path", json)]`: the function returns anything that
   serializes, like a proxy.
+- What the authentication function of a route returns for an authenticated
+  request keeps its type: `RouteAuthOutcome<Partner>` on one side,
+  `ctx: RouteContext<Partner>` and `ctx.auth.key` on the other, and a route
+  whose handler and authentication disagree does not compile. Without a type,
+  both carry a `Value`, as before.
 - An admin page is served as soon as it is listed in `admin_pages`, and
   `#[admin_page("/reviews", nav = "Reviews")]` gives it its entry in the menu
   of the admin. `custom_pages` only sets the menu by hand.
@@ -37,8 +42,11 @@
   `.shops([…])`; `"all"` and `"global"` are no longer read from a string.
 - `#[openshop::test(APP)]` makes an `async fn(ctx: &TestContext)` a test of
   the application: started on an isolated database with its shop installed,
-  and shut down when the function returns. `TestContext::for_app`, `APP.test()`
-  and `TestOptions::installed()` do the same by hand.
+  and shut down when the function returns. The argument can also be an
+  expression that resolves to a test context, `#[openshop::test(context())]`.
+  `TestContext::for_app`, `APP.test()` and `TestOptions::installed()` do the
+  same by hand. A test context stands for its shop: `Review::of(ctx)` and
+  `sync_orders::dispatch(ctx, input)` take it.
 - `use openshop::prelude::*;` imports what the code of an application uses.
 - The root of the crate holds what an application names, about half of what
   it exported: the attributes, `app!`, the contexts, the settings and the
@@ -51,7 +59,12 @@
   `IntoVariable` in `openshop::shopify` and `Declared` in `openshop::declare`.
 - Durations are `Duration`s: `RetryPolicy::initial_interval` and
   `max_interval`, `WorkerConfig::poll_interval`, `poll_max_interval` and
-  `lease_duration`, `DispatchOptions::delay`.
+  `lease_duration`, `DispatchOptions::delay`. In `#[flow]`, `timeout` and
+  `step_timeout` are written as text checked when the crate compiles:
+  `timeout = "10m"`, `"30s"`, `"1h30m"`.
+- The setting of the built-in pages of the admin is `builtin_pages`, with
+  `.builtin_pages(…)` and `.builtin_page(id, mode)` on the builder, next to
+  `admin_pages`, the pages of the application.
 - Names. A definition is named after what it defines: `Field`, `Fields`,
   `Function`, `FunctionType`, `Proxy`, `Route`, `McpTool`, `McpResource`,
   `McpPermission`, `Cron`. A context is named after its attribute:

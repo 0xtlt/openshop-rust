@@ -228,6 +228,50 @@ pub struct TestContext {
     server: ServerHandle,
 }
 
+/// What `#[openshop::test(…)]` starts a test from: a declared application,
+/// or anything that resolves to a test context.
+///
+/// - `#[openshop::test(APP)]`: an [`App`], started with its shop installed;
+/// - `#[openshop::test(TestContext::new(config()))]`, or a function of the
+///   test file that returns a context, `#[openshop::test(context())]`: a
+///   future of a `TestContext`, or of a `Result` of one.
+pub trait IntoTestContext {
+    fn into_test_context(self) -> impl Future<Output = Result<TestContext>>;
+}
+
+impl IntoTestContext for &App {
+    async fn into_test_context(self) -> Result<TestContext> {
+        TestContext::for_app(self).await
+    }
+}
+
+impl<F> IntoTestContext for F
+where
+    F: Future,
+    F::Output: StartedTestContext,
+{
+    async fn into_test_context(self) -> Result<TestContext> {
+        self.await.started()
+    }
+}
+
+/// What a future resolves to for a test to start from it.
+pub trait StartedTestContext {
+    fn started(self) -> Result<TestContext>;
+}
+
+impl StartedTestContext for TestContext {
+    fn started(self) -> Result<TestContext> {
+        Ok(self)
+    }
+}
+
+impl<E: Into<anyhow::Error>> StartedTestContext for std::result::Result<TestContext, E> {
+    fn started(self) -> Result<TestContext> {
+        self.map_err(Into::into)
+    }
+}
+
 /// A test stands for its shop, in the single-app setup: what takes a context
 /// takes the test context, `Review::of(ctx)` or `sync_orders::dispatch(ctx, …)`.
 impl ShopScope for TestContext {

@@ -117,12 +117,30 @@ async fn rate(_ctx: RouteContext, body: Option<Strict>) -> Result<Value> {
     Ok(json!({ "rating": rating }))
 }
 
+/// What an authenticated request is known by: any type, which the handler
+/// finds in `ctx.auth`.
+struct Partner {
+    key: String,
+}
+
+async fn partner(ctx: RouteAuthContext) -> Result<RouteAuthOutcome<Partner>> {
+    Ok(match ctx.request.header("x-partner-key") {
+        Some(key) => RouteAuthOutcome::Authenticated(Partner { key: key.to_string() }),
+        None => RouteAuthOutcome::Unauthorized,
+    })
+}
+
+#[route(GET, "/whoami", json, auth = partner)]
+async fn whoami(ctx: RouteContext<Partner>) -> Result<Value> {
+    Ok(json!({ "partner": ctx.auth.key }))
+}
+
 static APP: App = app! {
     flows: [write_note, refresh],
     models: [Note],
     webhooks: [orders_create],
     proxies: [list_notes, add_note, greeting, strict],
-    routes: [count, echo, rate],
+    routes: [count, echo, rate, whoami],
 };
 
 #[openshop::test(APP)]
@@ -315,6 +333,22 @@ async fn the_typed_input_is_the_request_without_what_shopify_adds(ctx: &TestCont
         refused.json::<Value>().await.unwrap(),
         json!({ "error": "Invalid input: rating is 1 to 5" })
     );
+}
+
+#[openshop::test(APP)]
+async fn a_route_gets_what_its_authentication_returned_with_its_type(ctx: &TestContext) {
+    let anonymous = ctx.http.get(ctx.url_for("/routes/whoami")).send().await.unwrap();
+    assert_eq!(anonymous.status(), 401);
+
+    let known = ctx
+        .http
+        .get(ctx.url_for("/routes/whoami"))
+        .header("x-partner-key", "partner-1")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(known.status(), 200);
+    assert_eq!(known.json::<Value>().await.unwrap(), json!({ "partner": "partner-1" }));
 }
 
 #[test]

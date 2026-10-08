@@ -29,7 +29,12 @@ Create `src/routes/status.rs`:
 use openshop::prelude::*;
 use subtle::ConstantTimeEq;
 
-async fn service_token(ctx: RouteAuthContext) -> Result<RouteAuthOutcome> {
+/// What an authenticated request is known by.
+pub struct Service {
+    pub name: &'static str,
+}
+
+async fn service_token(ctx: RouteAuthContext) -> Result<RouteAuthOutcome<Service>> {
     let Some(token) = std::env::var("INBOUND_API_TOKEN").ok().filter(|token| !token.is_empty()) else {
         return Ok(RouteAuthOutcome::Unauthorized);
     };
@@ -37,15 +42,15 @@ async fn service_token(ctx: RouteAuthContext) -> Result<RouteAuthOutcome> {
     let supplied = ctx.request.header("authorization").unwrap_or_default();
 
     Ok(if bool::from(supplied.as_bytes().ct_eq(expected.as_bytes())) {
-        RouteAuthOutcome::Authenticated(json!({ "service": "warehouse" }))
+        RouteAuthOutcome::Authenticated(Service { name: "warehouse" })
     } else {
         RouteAuthOutcome::Unauthorized
     })
 }
 
 #[route(GET, "/status", json, auth = service_token)]
-pub async fn status(ctx: RouteContext) -> Result<Value> {
-    Ok(json!({ "ok": true, "service": ctx.auth["service"] }))
+pub async fn status(ctx: RouteContext<Service>) -> Result<Value> {
+    Ok(json!({ "ok": true, "service": ctx.auth.name }))
 }
 ```
 
@@ -75,7 +80,8 @@ does not compile, because the module has the same name.
 The route is served at `GET /routes/status`. Returning
 `RouteAuthOutcome::Unauthorized` from the authentication function rejects the
 request with 401; the value inside `RouteAuthOutcome::Authenticated` becomes
-`ctx.auth` in the route function. Without `json`, the route function returns
+`ctx.auth` in the route function, with its type: the function takes a
+`RouteContext<Service>`, and the compiler checks that both agree. Without `json`, the route function returns
 anything that is an HTTP response: use the helpers of the `response` module
 (`response::json`, `response::json_with_status`, `response::text`,
 `response::status`) or build any response with the custom status and headers
@@ -99,7 +105,7 @@ pub struct StockUpdate {
 }
 
 #[route(POST, "/stock", json, auth = service_token)]
-pub async fn update_stock(_ctx: RouteContext, update: StockUpdate) -> Result<Value> {
+pub async fn update_stock(_ctx: RouteContext<Service>, update: StockUpdate) -> Result<Value> {
     Ok(json!({ "ok": true, "sku": update.sku, "quantity": update.quantity }))
 }
 ```

@@ -144,46 +144,40 @@ fn header<'a>(response: &'a Response, name: &str) -> Option<&'a str> {
     response.headers().get(name).and_then(|value| value.to_str().ok())
 }
 
-#[tokio::test]
-async fn get_without_valid_proxy_signature_returns_401() {
-    let ctx = TestContext::new(ping_config()).await.unwrap();
-
-    let response = get(&ctx, "/proxy/ping?shop=test.myshopify.com").send().await.unwrap();
+#[openshop::test(TestContext::new(ping_config()))]
+async fn get_without_valid_proxy_signature_returns_401(ctx: &TestContext) {
+    let response = get(ctx, "/proxy/ping?shop=test.myshopify.com").send().await.unwrap();
     assert_error(response, 401, "Invalid proxy signature").await;
 
-    let response = get(&ctx, "/proxy/ping").send().await.unwrap();
+    let response = get(ctx, "/proxy/ping").send().await.unwrap();
     assert_error(response, 401, "Invalid proxy signature").await;
-    ctx.shutdown().await.unwrap();
 }
 
-#[tokio::test]
-async fn get_with_invalid_proxy_signature_returns_401() {
-    let ctx = TestContext::new(ping_config()).await.unwrap();
+#[openshop::test(TestContext::new(ping_config()))]
+async fn get_with_invalid_proxy_signature_returns_401(ctx: &TestContext) {
     let params = [("shop", "test.myshopify.com"), ("logged_in_customer_id", "42")];
 
     let not_hex = "/proxy/ping?shop=test.myshopify.com&logged_in_customer_id=42&signature=bad-signature";
-    assert_error(get(&ctx, not_hex).send().await.unwrap(), 401, "Invalid proxy signature").await;
+    assert_error(get(ctx, not_hex).send().await.unwrap(), 401, "Invalid proxy signature").await;
 
     let other_secret = signed_query(&params, "another-secret");
-    let response = get(&ctx, &format!("/proxy/ping?{other_secret}")).send().await.unwrap();
+    let response = get(ctx, &format!("/proxy/ping?{other_secret}")).send().await.unwrap();
     assert_error(response, 401, "Invalid proxy signature").await;
 
     // The signature covers every parameter: the customer cannot be swapped afterwards.
     let tampered = signed_query(&params, &ctx.secret).replace("logged_in_customer_id=42", "logged_in_customer_id=43");
-    let response = get(&ctx, &format!("/proxy/ping?{tampered}")).send().await.unwrap();
+    let response = get(ctx, &format!("/proxy/ping?{tampered}")).send().await.unwrap();
     assert_error(response, 401, "Invalid proxy signature").await;
-    ctx.shutdown().await.unwrap();
 }
 
-#[tokio::test]
-async fn get_with_valid_hmac_returns_handler_json() {
-    let ctx = TestContext::new(ping_config()).await.unwrap();
+#[openshop::test(TestContext::new(ping_config()))]
+async fn get_with_valid_hmac_returns_handler_json(ctx: &TestContext) {
     let query = signed_query(
         &[("shop", "test.myshopify.com"), ("logged_in_customer_id", "42")],
         &ctx.secret,
     );
 
-    let response = get(&ctx, &format!("/proxy/ping?{query}")).send().await.unwrap();
+    let response = get(ctx, &format!("/proxy/ping?{query}")).send().await.unwrap();
     assert_eq!(response.status(), 200);
     assert_eq!(header(&response, "content-type"), Some("application/json"));
     assert_eq!(
@@ -199,13 +193,10 @@ async fn get_with_valid_hmac_returns_handler_json() {
             "queryCustomerId": "42",
         })
     );
-    ctx.shutdown().await.unwrap();
 }
 
-#[tokio::test]
-async fn customer_id_comes_only_from_a_numeric_signed_parameter() {
-    let ctx = TestContext::new(ping_config()).await.unwrap();
-
+#[openshop::test(TestContext::new(ping_config()))]
+async fn customer_id_comes_only_from_a_numeric_signed_parameter(ctx: &TestContext) {
     // Shopify sends an empty `logged_in_customer_id` for anonymous visitors.
     let anonymous = ctx.proxy().get("/ping").send().await.unwrap();
     assert_eq!(anonymous.status, 200);
@@ -220,29 +211,23 @@ async fn customer_id_comes_only_from_a_numeric_signed_parameter() {
     let customer = ctx.proxy().get("/ping").as_customer("789456").send().await.unwrap();
     assert_eq!(customer.body["customerId"], "789456");
     assert_eq!(customer.body["queryCustomerId"], "789456");
-    ctx.shutdown().await.unwrap();
 }
 
-#[tokio::test]
-async fn signed_request_with_an_invalid_shop_returns_401() {
-    let ctx = TestContext::new(ping_config()).await.unwrap();
-
+#[openshop::test(TestContext::new(ping_config()))]
+async fn signed_request_with_an_invalid_shop_returns_401(ctx: &TestContext) {
     for params in [
         vec![("shop", "evil.example.com"), ("logged_in_customer_id", "42")],
         vec![("shop", "test.myshopify.com.evil.com")],
         vec![("logged_in_customer_id", "42")],
     ] {
         let query = signed_query(&params, &ctx.secret);
-        let response = get(&ctx, &format!("/proxy/ping?{query}")).send().await.unwrap();
+        let response = get(ctx, &format!("/proxy/ping?{query}")).send().await.unwrap();
         assert_error(response, 401, "Invalid shop parameter").await;
     }
-    ctx.shutdown().await.unwrap();
 }
 
-#[tokio::test]
-async fn handlers_receive_the_sanitized_query_and_request_details() {
-    let ctx = TestContext::new(echo_config()).await.unwrap();
-
+#[openshop::test(TestContext::new(echo_config()))]
+async fn handlers_receive_the_sanitized_query_and_request_details(ctx: &TestContext) {
     let response = ctx
         .proxy()
         .get("/echo")
@@ -272,13 +257,12 @@ async fn handlers_receive_the_sanitized_query_and_request_details() {
 
     // The shop is normalized, in the context and in the query alike.
     let query = signed_query(&[("shop", "Test.MyShopify.com")], &ctx.secret);
-    let response = get(&ctx, &format!("/proxy/echo?{query}")).send().await.unwrap();
+    let response = get(ctx, &format!("/proxy/echo?{query}")).send().await.unwrap();
     assert_eq!(response.status(), 200);
     let body = json_body(response).await;
     assert_eq!(body["shop"], "test.myshopify.com");
     assert_eq!(body["query"]["shop"], "test.myshopify.com");
     assert_eq!(body["query"].get("logged_in_customer_id"), None);
-    ctx.shutdown().await.unwrap();
 }
 
 #[tokio::test]
@@ -387,9 +371,8 @@ async fn index_route_is_served_at_the_prefix_root() {
     ctx.shutdown().await.unwrap();
 }
 
-#[tokio::test]
-async fn non_get_methods_receive_the_parsed_json_body() {
-    let ctx = TestContext::new(echo_config()).await.unwrap();
+#[openshop::test(TestContext::new(echo_config()))]
+async fn non_get_methods_receive_the_parsed_json_body(ctx: &TestContext) {
     let proxy = ctx.proxy();
     let review = json!({ "text": "Great product!", "rating": 5 });
 
@@ -416,7 +399,7 @@ async fn non_get_methods_receive_the_parsed_json_body() {
     assert_eq!(empty.body["body"], Value::Null);
 
     let query = signed_query(&[("shop", ctx.shop.as_str())], &ctx.secret);
-    let malformed = request(&ctx, Method::POST, &format!("/proxy/echo?{query}"))
+    let malformed = request(ctx, Method::POST, &format!("/proxy/echo?{query}"))
         .header("content-type", "application/json")
         .body("{ not json")
         .send()
@@ -429,7 +412,6 @@ async fn non_get_methods_receive_the_parsed_json_body() {
     let response = proxy.get("/echo").json(review).send().await.unwrap();
     assert_eq!(response.status, 200);
     assert_eq!(response.body["body"], Value::Null);
-    ctx.shutdown().await.unwrap();
 }
 
 #[tokio::test]
@@ -465,10 +447,8 @@ async fn handler_errors_return_500_without_details() {
     ctx.shutdown().await.unwrap();
 }
 
-#[tokio::test]
-async fn unknown_paths_and_unregistered_methods_return_404() {
-    let ctx = TestContext::new(ping_config()).await.unwrap();
-
+#[openshop::test(TestContext::new(ping_config()))]
+async fn unknown_paths_and_unregistered_methods_return_404(ctx: &TestContext) {
     assert_eq!(ctx.proxy().get("/missing").send().await.unwrap().status, 404);
     assert_eq!(ctx.proxy().get("/ping/extra").send().await.unwrap().status, 404);
     // `/ping` only declares GET.
@@ -476,24 +456,22 @@ async fn unknown_paths_and_unregistered_methods_return_404() {
     assert_eq!(ctx.proxy().delete("/ping").send().await.unwrap().status, 404);
 
     let token = ctx.session_token_for(&ctx.shop, CUSTOMER_GID);
-    let response = get(&ctx, "/ext/missing").bearer_auth(&token).send().await.unwrap();
+    let response = get(ctx, "/ext/missing").bearer_auth(&token).send().await.unwrap();
     assert_eq!(response.status(), 404);
-    let response = request(&ctx, Method::POST, "/ext/ping")
+    let response = request(ctx, Method::POST, "/ext/ping")
         .bearer_auth(&token)
         .send()
         .await
         .unwrap();
     assert_eq!(response.status(), 404);
-    ctx.shutdown().await.unwrap();
 }
 
-#[tokio::test]
-async fn get_with_app_proxy_signature_resolves_the_matching_shopify_app() {
-    let ctx = TestContext::new(client_apps()).await.unwrap();
+#[openshop::test(TestContext::new(client_apps()))]
+async fn get_with_app_proxy_signature_resolves_the_matching_shopify_app(ctx: &TestContext) {
     let params = [("shop", "client-b-shop.myshopify.com"), ("logged_in_customer_id", "42")];
 
     let query = signed_query(&params, "client-b-secret");
-    let response = get(&ctx, &format!("/proxy/ping?{query}")).send().await.unwrap();
+    let response = get(ctx, &format!("/proxy/ping?{query}")).send().await.unwrap();
     assert_eq!(response.status(), 200);
     let body = json_body(response).await;
     assert_eq!(body["shop"], "client-b-shop.myshopify.com");
@@ -501,14 +479,13 @@ async fn get_with_app_proxy_signature_resolves_the_matching_shopify_app() {
     assert_eq!(body["shopifyApp"], "clientB");
 
     let query = signed_query(&params, "client-a-secret");
-    let response = get(&ctx, &format!("/proxy/ping?{query}")).send().await.unwrap();
+    let response = get(ctx, &format!("/proxy/ping?{query}")).send().await.unwrap();
     assert_eq!(json_body(response).await["shopifyApp"], "clientA");
 
     // The env-based secret is not an app of a multi-app setup.
     let query = signed_query(&params, &ctx.secret);
-    let response = get(&ctx, &format!("/proxy/ping?{query}")).send().await.unwrap();
+    let response = get(ctx, &format!("/proxy/ping?{query}")).send().await.unwrap();
     assert_error(response, 401, "Invalid proxy signature").await;
-    ctx.shutdown().await.unwrap();
 }
 
 #[tokio::test]
@@ -531,46 +508,40 @@ async fn proxy_signature_matching_several_shopify_apps_is_rejected() {
     ctx.shutdown().await.unwrap();
 }
 
-#[tokio::test]
-async fn extension_mode_rejects_unsigned_forged_query_identity() {
-    let ctx = TestContext::new(ping_config()).await.unwrap();
-
-    let response = get(&ctx, "/ext/ping?shop=victim.myshopify.com&logged_in_customer_id=999")
+#[openshop::test(TestContext::new(ping_config()))]
+async fn extension_mode_rejects_unsigned_forged_query_identity(ctx: &TestContext) {
+    let response = get(ctx, "/ext/ping?shop=victim.myshopify.com&logged_in_customer_id=999")
         .send()
         .await
         .unwrap();
     assert_error(response, 401, "Unauthorized: missing session token").await;
-    ctx.shutdown().await.unwrap();
 }
 
-#[tokio::test]
-async fn extension_mode_rejects_app_proxy_signatures() {
-    let ctx = TestContext::new(ping_config()).await.unwrap();
+#[openshop::test(TestContext::new(ping_config()))]
+async fn extension_mode_rejects_app_proxy_signatures(ctx: &TestContext) {
     let query = signed_query(
         &[("shop", "test.myshopify.com"), ("logged_in_customer_id", "42")],
         &ctx.secret,
     );
 
-    let response = get(&ctx, &format!("/ext/ping?{query}")).send().await.unwrap();
+    let response = get(ctx, &format!("/ext/ping?{query}")).send().await.unwrap();
     assert_error(response, 401, "Unauthorized: missing session token").await;
 
     // Only the Bearer scheme carries a session token.
     let token = ctx.session_token_for("jwt-shop.myshopify.com", CUSTOMER_GID);
-    let response = get(&ctx, "/ext/ping")
+    let response = get(ctx, "/ext/ping")
         .header("Authorization", format!("Basic {token}"))
         .send()
         .await
         .unwrap();
     assert_error(response, 401, "Unauthorized: missing session token").await;
-    ctx.shutdown().await.unwrap();
 }
 
-#[tokio::test]
-async fn extension_mode_uses_jwt_identity_and_ignores_query_identity() {
-    let ctx = TestContext::new(ping_config()).await.unwrap();
+#[openshop::test(TestContext::new(ping_config()))]
+async fn extension_mode_uses_jwt_identity_and_ignores_query_identity(ctx: &TestContext) {
     let token = ctx.session_token_for("jwt-shop.myshopify.com", CUSTOMER_GID);
 
-    let response = get(&ctx, "/ext/ping?shop=attacker.myshopify.com&logged_in_customer_id=999")
+    let response = get(ctx, "/ext/ping?shop=attacker.myshopify.com&logged_in_customer_id=999")
         .bearer_auth(token)
         .send()
         .await
@@ -589,12 +560,10 @@ async fn extension_mode_uses_jwt_identity_and_ignores_query_identity() {
             "queryCustomerId": "123",
         })
     );
-    ctx.shutdown().await.unwrap();
 }
 
-#[tokio::test]
-async fn extension_mode_resolves_shopify_app_from_jwt_audience() {
-    let ctx = TestContext::new(client_apps()).await.unwrap();
+#[openshop::test(TestContext::new(client_apps()))]
+async fn extension_mode_resolves_shopify_app_from_jwt_audience(ctx: &TestContext) {
     let token = signed_session_token(
         "jwt-client-b.myshopify.com",
         "client-b-secret",
@@ -602,7 +571,7 @@ async fn extension_mode_resolves_shopify_app_from_jwt_audience() {
         CUSTOMER_GID,
     );
 
-    let response = get(&ctx, "/ext/ping?shop=attacker.myshopify.com&logged_in_customer_id=999")
+    let response = get(ctx, "/ext/ping?shop=attacker.myshopify.com&logged_in_customer_id=999")
         .bearer_auth(token)
         .send()
         .await
@@ -621,26 +590,21 @@ async fn extension_mode_resolves_shopify_app_from_jwt_audience() {
         "client-b-key",
         CUSTOMER_GID,
     );
-    let response = get(&ctx, "/ext/ping").bearer_auth(mismatched).send().await.unwrap();
+    let response = get(ctx, "/ext/ping").bearer_auth(mismatched).send().await.unwrap();
     assert_error(response, 401, "Unauthorized: invalid or expired session token").await;
-    ctx.shutdown().await.unwrap();
 }
 
-#[tokio::test]
-async fn extension_mode_rejects_jwt_with_wrong_audience() {
-    let ctx = TestContext::new(ping_config()).await.unwrap();
+#[openshop::test(TestContext::new(ping_config()))]
+async fn extension_mode_rejects_jwt_with_wrong_audience(ctx: &TestContext) {
     let token = signed_session_token("jwt-shop.myshopify.com", &ctx.secret, "wrong-app", CUSTOMER_GID);
 
-    let response = get(&ctx, "/ext/ping").bearer_auth(token).send().await.unwrap();
+    let response = get(ctx, "/ext/ping").bearer_auth(token).send().await.unwrap();
     assert_error(response, 401, "Unauthorized: invalid or expired session token").await;
-    ctx.shutdown().await.unwrap();
 }
 
-#[tokio::test]
-async fn extension_mode_rejects_invalid_bearer_token() {
-    let ctx = TestContext::new(ping_config()).await.unwrap();
-
-    let response = get(&ctx, "/ext/ping")
+#[openshop::test(TestContext::new(ping_config()))]
+async fn extension_mode_rejects_invalid_bearer_token(ctx: &TestContext) {
+    let response = get(ctx, "/ext/ping")
         .bearer_auth("not-a-valid-token")
         .send()
         .await
@@ -648,27 +612,23 @@ async fn extension_mode_rejects_invalid_bearer_token() {
     assert_error(response, 401, "Unauthorized: missing token audience").await;
 
     let forged = signed_session_token("jwt-shop.myshopify.com", "not-the-secret", &ctx.api_key, CUSTOMER_GID);
-    let response = get(&ctx, "/ext/ping").bearer_auth(forged).send().await.unwrap();
+    let response = get(ctx, "/ext/ping").bearer_auth(forged).send().await.unwrap();
     assert_error(response, 401, "Unauthorized: invalid or expired session token").await;
-    ctx.shutdown().await.unwrap();
 }
 
-#[tokio::test]
-async fn extension_mode_rejects_expired_bearer_token() {
-    let ctx = TestContext::new(ping_config()).await.unwrap();
+#[openshop::test(TestContext::new(ping_config()))]
+async fn extension_mode_rejects_expired_bearer_token(ctx: &TestContext) {
     let token = session_token("jwt-shop.myshopify.com", CUSTOMER_GID, &ctx.api_key, -3600, &ctx.secret);
 
-    let response = get(&ctx, "/ext/ping").bearer_auth(token).send().await.unwrap();
+    let response = get(ctx, "/ext/ping").bearer_auth(token).send().await.unwrap();
     assert_error(response, 401, "Unauthorized: invalid or expired session token").await;
-    ctx.shutdown().await.unwrap();
 }
 
-#[tokio::test]
-async fn numeric_admin_sub_is_not_treated_as_a_customer_id() {
-    let ctx = TestContext::new(ping_config()).await.unwrap();
+#[openshop::test(TestContext::new(ping_config()))]
+async fn numeric_admin_sub_is_not_treated_as_a_customer_id(ctx: &TestContext) {
     let token = ctx.session_token_for("jwt-shop.myshopify.com", "123");
 
-    let response = get(&ctx, "/ext/ping?logged_in_customer_id=123")
+    let response = get(ctx, "/ext/ping?logged_in_customer_id=123")
         .bearer_auth(token)
         .send()
         .await
@@ -679,19 +639,17 @@ async fn numeric_admin_sub_is_not_treated_as_a_customer_id() {
     assert_eq!(body["customerId"], Value::Null);
     assert_eq!(body["queryShop"], "jwt-shop.myshopify.com");
     assert_eq!(body["queryCustomerId"], Value::Null);
-    ctx.shutdown().await.unwrap();
 }
 
-#[tokio::test]
-async fn proxy_mode_accepts_session_tokens_and_prefers_them_over_the_signature() {
-    let ctx = TestContext::new(ping_config()).await.unwrap();
+#[openshop::test(TestContext::new(ping_config()))]
+async fn proxy_mode_accepts_session_tokens_and_prefers_them_over_the_signature(ctx: &TestContext) {
     let query = signed_query(
         &[("shop", "test.myshopify.com"), ("logged_in_customer_id", "42")],
         &ctx.secret,
     );
 
     let token = ctx.session_token_for("jwt-shop.myshopify.com", CUSTOMER_GID);
-    let response = get(&ctx, &format!("/proxy/ping?{query}"))
+    let response = get(ctx, &format!("/proxy/ping?{query}"))
         .bearer_auth(token)
         .send()
         .await
@@ -705,18 +663,16 @@ async fn proxy_mode_accepts_session_tokens_and_prefers_them_over_the_signature()
 
     // A bad token is never rescued by a valid signature.
     let expired = session_token("jwt-shop.myshopify.com", CUSTOMER_GID, &ctx.api_key, -3600, &ctx.secret);
-    let response = get(&ctx, &format!("/proxy/ping?{query}"))
+    let response = get(ctx, &format!("/proxy/ping?{query}"))
         .bearer_auth(expired)
         .send()
         .await
         .unwrap();
     assert_error(response, 401, "Unauthorized: invalid or expired session token").await;
-    ctx.shutdown().await.unwrap();
 }
 
-#[tokio::test]
-async fn session_tokens_are_rejected_on_routes_limited_to_proxy_signatures() {
-    let ctx = TestContext::new(ping_config()).await.unwrap();
+#[openshop::test(TestContext::new(ping_config()))]
+async fn session_tokens_are_rejected_on_routes_limited_to_proxy_signatures(ctx: &TestContext) {
     let router = create_proxy_routes(&ctx.app, "/signed", &[ProxyAuthKind::AppProxyHmac], false)
         .unwrap()
         .with_state(ctx.app.clone());
@@ -734,18 +690,16 @@ async fn session_tokens_are_rejected_on_routes_limited_to_proxy_signatures() {
     assert_eq!(json_body(response).await["authKind"], "appProxyHmac");
 
     server.abort();
-    ctx.shutdown().await.unwrap();
 }
 
-#[tokio::test]
-async fn server_proxy_routes_allow_shopify_ui_extension_cors() {
-    let ctx = TestContext::new(ping_config()).await.unwrap();
+#[openshop::test(TestContext::new(ping_config()))]
+async fn server_proxy_routes_allow_shopify_ui_extension_cors(ctx: &TestContext) {
     let token = ctx.session_token_for("jwt-shop.myshopify.com", CUSTOMER_GID);
 
     for prefix in ["/proxy", "/ext"] {
         let path = format!("{prefix}/ping");
 
-        let preflight = request(&ctx, Method::OPTIONS, &path)
+        let preflight = request(ctx, Method::OPTIONS, &path)
             .header("Origin", EXTENSION_ORIGIN)
             .header("Access-Control-Request-Method", "GET")
             .header("Access-Control-Request-Headers", "authorization")
@@ -764,7 +718,7 @@ async fn server_proxy_routes_allow_shopify_ui_extension_cors() {
         let methods = header(&preflight, "access-control-allow-methods").unwrap_or_default();
         assert!(methods.contains("GET") && methods.contains("POST"), "{methods}");
 
-        let response = get(&ctx, &path)
+        let response = get(ctx, &path)
             .header("Origin", EXTENSION_ORIGIN)
             .bearer_auth(&token)
             .send()
@@ -774,7 +728,7 @@ async fn server_proxy_routes_allow_shopify_ui_extension_cors() {
         assert_eq!(header(&response, "access-control-allow-origin"), Some(EXTENSION_ORIGIN));
 
         // Rejections are readable by the extension too.
-        let rejected = get(&ctx, &path)
+        let rejected = get(ctx, &path)
             .header("Origin", EXTENSION_ORIGIN)
             .bearer_auth("not-a-valid-token")
             .send()
@@ -783,7 +737,6 @@ async fn server_proxy_routes_allow_shopify_ui_extension_cors() {
         assert_eq!(rejected.status(), 401, "{prefix}");
         assert_eq!(header(&rejected, "access-control-allow-origin"), Some(EXTENSION_ORIGIN));
     }
-    ctx.shutdown().await.unwrap();
 }
 
 #[tokio::test]

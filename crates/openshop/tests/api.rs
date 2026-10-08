@@ -229,10 +229,8 @@ fn strings(values: &Value, key: &str) -> Vec<String> {
 
 // ─── Flows ───────────────────────────────────────────────────────────
 
-#[tokio::test]
-async fn get_flows_returns_flow_list() {
-    let ctx = api_context().await;
-
+#[openshop::test(api_context())]
+async fn get_flows_returns_flow_list(ctx: &TestContext) {
     let (status, data) = send(ctx.get("/api/flows")).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(
@@ -243,7 +241,6 @@ async fn get_flows_returns_flow_list() {
             "inputSchema": null,
         }])
     );
-    ctx.shutdown().await.unwrap();
 }
 
 #[cfg(feature = "schema")]
@@ -295,10 +292,8 @@ async fn get_flows_exposes_the_generated_input_schema() {
 
 // ─── Crons ───────────────────────────────────────────────────────────
 
-#[tokio::test]
-async fn get_crons_returns_cron_list() {
-    let ctx = api_context().await;
-
+#[openshop::test(api_context())]
+async fn get_crons_returns_cron_list(ctx: &TestContext) {
     let (status, data) = send(ctx.get("/api/crons")).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(
@@ -314,12 +309,10 @@ async fn get_crons_returns_cron_list() {
             "enabled": true,
         }])
     );
-    ctx.shutdown().await.unwrap();
 }
 
-#[tokio::test]
-async fn post_crons_toggle_disables_a_cron() {
-    let ctx = api_context().await;
+#[openshop::test(api_context())]
+async fn post_crons_toggle_disables_a_cron(ctx: &TestContext) {
     let key = "test-flow:*/5 * * * *";
 
     let (status, body) = send(
@@ -347,13 +340,10 @@ async fn post_crons_toggle_disables_a_cron() {
         .await
         .unwrap();
     assert_eq!(overrides, 1);
-    ctx.shutdown().await.unwrap();
 }
 
-#[tokio::test]
-async fn post_crons_toggle_validates_its_body() {
-    let ctx = api_context().await;
-
+#[openshop::test(api_context())]
+async fn post_crons_toggle_validates_its_body(ctx: &TestContext) {
     for body in [
         json!({}),
         json!({ "key": "test-flow:*/5 * * * *" }),
@@ -373,14 +363,12 @@ async fn post_crons_toggle_validates_its_body() {
 
     let (_, data) = send(ctx.get("/api/crons")).await;
     assert_eq!(data[0]["enabled"], true);
-    ctx.shutdown().await.unwrap();
 }
 
 // ─── Runs ────────────────────────────────────────────────────────────
 
-#[tokio::test]
-async fn get_runs_returns_all_runs() {
-    let ctx = api_context().await;
+#[openshop::test(api_context())]
+async fn get_runs_returns_all_runs(ctx: &TestContext) {
     let run_id = ctx
         .dispatch_flow("test-flow", json!({ "source": "test" }))
         .await
@@ -413,12 +401,10 @@ async fn get_runs_returns_all_runs() {
     assert_iso_millis(&run["availableAt"]);
     assert!(run["retryPolicy"].is_object());
     assert!(run.get("flow_name").is_none());
-    ctx.shutdown().await.unwrap();
 }
 
-#[tokio::test]
-async fn get_runs_supports_search() {
-    let ctx = api_context().await;
+#[openshop::test(api_context())]
+async fn get_runs_supports_search(ctx: &TestContext) {
     let run_id = ctx.dispatch_flow("test-flow", json!({})).await.unwrap();
     let id_fragment = &run_id.to_string()[..8];
 
@@ -431,15 +417,13 @@ async fn get_runs_supports_search() {
     let (status, data) = send(ctx.get("/api/runs?search=nonexistent")).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(data, json!([]));
-    ctx.shutdown().await.unwrap();
 }
 
-#[tokio::test]
-async fn get_flow_runs_returns_filtered_runs() {
-    let ctx = api_context().await;
+#[openshop::test(api_context())]
+async fn get_flow_runs_returns_filtered_runs(ctx: &TestContext) {
     let base = base_time();
-    let own = seed_run(&ctx, "test-flow", "completed", base).await;
-    let other = seed_run(&ctx, "other-flow", "completed", base).await;
+    let own = seed_run(ctx, "test-flow", "completed", base).await;
+    let other = seed_run(ctx, "other-flow", "completed", base).await;
 
     let (status, data) = send(ctx.get("/api/flows/test-flow/runs?limit=10")).await;
     assert_eq!(status, StatusCode::OK);
@@ -452,18 +436,16 @@ async fn get_flow_runs_returns_filtered_runs() {
     let (status, data) = send(ctx.get("/api/flows/missing/runs")).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(data, json!([]));
-    ctx.shutdown().await.unwrap();
 }
 
-#[tokio::test]
-async fn get_runs_filters_by_status_and_date_range() {
-    let ctx = api_context().await;
+#[openshop::test(api_context())]
+async fn get_runs_filters_by_status_and_date_range(ctx: &TestContext) {
     let base = base_time();
     let hours_ago = |hours: i64| base - chrono::Duration::hours(hours);
-    let completed = seed_run(&ctx, "test-flow", "completed", hours_ago(3)).await.to_string();
-    let failed = seed_run(&ctx, "test-flow", "failed", hours_ago(2)).await.to_string();
-    let canceled = seed_run(&ctx, "other-flow", "canceled", hours_ago(1)).await.to_string();
-    let pending = seed_run(&ctx, "test-flow", "pending", base).await.to_string();
+    let completed = seed_run(ctx, "test-flow", "completed", hours_ago(3)).await.to_string();
+    let failed = seed_run(ctx, "test-flow", "failed", hours_ago(2)).await.to_string();
+    let canceled = seed_run(ctx, "other-flow", "canceled", hours_ago(1)).await.to_string();
+    let pending = seed_run(ctx, "test-flow", "pending", base).await.to_string();
     let (completed, failed, canceled, pending) =
         (completed.as_str(), failed.as_str(), canceled.as_str(), pending.as_str());
     let everything = [pending, canceled, failed, completed];
@@ -499,12 +481,10 @@ async fn get_runs_filters_by_status_and_date_range() {
 
     let (_, data) = send(ctx.get("/api/flows/test-flow/runs?status=completed")).await;
     assert_eq!(strings(&data, "id"), [completed]);
-    ctx.shutdown().await.unwrap();
 }
 
-#[tokio::test]
-async fn get_runs_paginates_newest_first_with_clamped_limits() {
-    let ctx = api_context().await;
+#[openshop::test(api_context())]
+async fn get_runs_paginates_newest_first_with_clamped_limits(ctx: &TestContext) {
     let base = base_time();
     sqlx::query(
         "INSERT INTO flow_runs (shop, flow_name, status, input, available_at, created_at) \
@@ -554,7 +534,6 @@ async fn get_runs_paginates_newest_first_with_clamped_limits() {
         created_at("/api/flows/test-flow/runs?limit=2&offset=1".to_string()).await,
         [minutes_ago(1), minutes_ago(2)]
     );
-    ctx.shutdown().await.unwrap();
 }
 
 // ─── Run detail ──────────────────────────────────────────────────────
@@ -597,13 +576,12 @@ async fn get_run_returns_run_with_steps() {
     ctx.shutdown().await.unwrap();
 }
 
-#[tokio::test]
-async fn get_run_orders_steps_by_creation_time() {
-    let ctx = api_context().await;
+#[openshop::test(api_context())]
+async fn get_run_orders_steps_by_creation_time(ctx: &TestContext) {
     let base = base_time();
     let seconds = chrono::Duration::seconds;
-    let run_id = seed_run(&ctx, "test-flow", "completed", base).await;
-    let unrelated = seed_run(&ctx, "test-flow", "completed", base).await;
+    let run_id = seed_run(ctx, "test-flow", "completed", base).await;
+    let unrelated = seed_run(ctx, "test-flow", "completed", base).await;
     seed_step(&ctx.db, run_id, "third", "completed", base + seconds(3)).await;
     seed_step(&ctx.db, run_id, "first", "completed", base + seconds(1)).await;
     seed_step(&ctx.db, run_id, "second", "failed", base + seconds(2)).await;
@@ -616,13 +594,10 @@ async fn get_run_orders_steps_by_creation_time() {
 
     let (_, data) = send(ctx.get(&format!("/api/runs/{unrelated}"))).await;
     assert_eq!(strings(&data["steps"], "stepName"), ["elsewhere"]);
-    ctx.shutdown().await.unwrap();
 }
 
-#[tokio::test]
-async fn get_run_returns_404_for_unknown() {
-    let ctx = api_context().await;
-
+#[openshop::test(api_context())]
+async fn get_run_returns_404_for_unknown(ctx: &TestContext) {
     for id in [NIL_RUN, "not-a-uuid"] {
         for (method, path) in [
             (Method::GET, format!("/api/runs/{id}")),
@@ -637,15 +612,12 @@ async fn get_run_returns_404_for_unknown() {
             assert_eq!(body, error("Run not found"), "{method} {path}");
         }
     }
-    ctx.shutdown().await.unwrap();
 }
 
 // ─── Trigger flow ────────────────────────────────────────────────────
 
-#[tokio::test]
-async fn post_flow_run_triggers_a_flow() {
-    let ctx = api_context().await;
-
+#[openshop::test(api_context())]
+async fn post_flow_run_triggers_a_flow(ctx: &TestContext) {
     let (status, data) = send(
         ctx.post("/api/flows/test-flow/run")
             .json(&json!({ "input": { "source": "admin" } })),
@@ -661,13 +633,10 @@ async fn post_flow_run_triggers_a_flow() {
     assert_eq!(run.shop, ctx.shop);
     assert_eq!(run.app_handle, "default");
     assert_eq!(run.input, Some(json!({ "source": "admin" })));
-    ctx.shutdown().await.unwrap();
 }
 
-#[tokio::test]
-async fn post_flow_run_rejects_unknown_flow() {
-    let ctx = api_context().await;
-
+#[openshop::test(api_context())]
+async fn post_flow_run_rejects_unknown_flow(ctx: &TestContext) {
     let (status, body) = send(ctx.post("/api/flows/nope/run").json(&json!({ "input": {} }))).await;
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
     assert_eq!(body, "Internal Server Error");
@@ -677,13 +646,10 @@ async fn post_flow_run_rejects_unknown_flow() {
         .await
         .unwrap();
     assert_eq!(runs, 0);
-    ctx.shutdown().await.unwrap();
 }
 
-#[tokio::test]
-async fn post_flow_run_defaults_input_when_the_body_is_missing_or_invalid() {
-    let ctx = context(api_config_with(noop_flow("test-flow").concurrency(Concurrency::Allow))).await;
-
+#[openshop::test(context(api_config_with(noop_flow("test-flow").concurrency(Concurrency::Allow))))]
+async fn post_flow_run_defaults_input_when_the_body_is_missing_or_invalid(ctx: &TestContext) {
     let requests = [
         ctx.post("/api/flows/test-flow/run"),
         ctx.post("/api/flows/test-flow/run").body("not json"),
@@ -696,7 +662,6 @@ async fn post_flow_run_defaults_input_when_the_body_is_missing_or_invalid() {
         let run_id = Uuid::parse_str(data["runId"].as_str().expect("runId")).unwrap();
         assert_eq!(find_run(&ctx.db, run_id).await.expect("run").input, Some(json!({})));
     }
-    ctx.shutdown().await.unwrap();
 }
 
 #[tokio::test]
@@ -715,10 +680,8 @@ async fn flow_names_are_decoded_from_the_path() {
     ctx.shutdown().await.unwrap();
 }
 
-#[tokio::test]
-async fn post_flow_run_conflicts_while_a_run_is_active() {
-    let ctx = api_context().await;
-
+#[openshop::test(api_context())]
+async fn post_flow_run_conflicts_while_a_run_is_active(ctx: &TestContext) {
     let (status, first) = send(ctx.post("/api/flows/test-flow/run").json(&json!({ "input": {} }))).await;
     assert_eq!(status, StatusCode::ACCEPTED);
     let first_run = first["runId"].as_str().expect("runId");
@@ -732,14 +695,12 @@ async fn post_flow_run_conflicts_while_a_run_is_active() {
             "existingRunId": first_run,
         })
     );
-    ctx.shutdown().await.unwrap();
 }
 
 // ─── Cancel, retry, delete ───────────────────────────────────────────
 
-#[tokio::test]
-async fn post_run_cancel_cancels_a_pending_run() {
-    let ctx = api_context().await;
+#[openshop::test(api_context())]
+async fn post_run_cancel_cancels_a_pending_run(ctx: &TestContext) {
     let run_id = ctx.dispatch_flow("test-flow", json!({})).await.unwrap();
 
     let (status, body) = send(ctx.post(&format!("/api/runs/{run_id}/cancel"))).await;
@@ -749,7 +710,6 @@ async fn post_run_cancel_cancels_a_pending_run() {
     let run = find_run(&ctx.db, run_id).await.expect("run");
     assert_eq!(run.status, "canceled");
     assert!(run.completed_at.is_some());
-    ctx.shutdown().await.unwrap();
 }
 
 #[tokio::test]
@@ -785,32 +745,29 @@ async fn post_run_cancel_aborts_a_run_in_progress() {
     ctx.shutdown().await.unwrap();
 }
 
-#[tokio::test]
-async fn post_run_cancel_rejects_finished_runs() {
-    let ctx = api_context().await;
+#[openshop::test(api_context())]
+async fn post_run_cancel_rejects_finished_runs(ctx: &TestContext) {
     let base = base_time();
 
     for status in ["completed", "failed", "canceled"] {
-        let run_id = seed_run(&ctx, "test-flow", status, base).await;
+        let run_id = seed_run(ctx, "test-flow", status, base).await;
         let (code, body) = send(ctx.post(&format!("/api/runs/{run_id}/cancel"))).await;
         assert_eq!(code, StatusCode::CONFLICT);
         assert_eq!(body, error(&format!("Cannot cancel a run with status \"{status}\"")));
         assert_eq!(run_status(&ctx.db, run_id).await, status);
     }
     for status in ["running", "sleeping"] {
-        let run_id = seed_run(&ctx, "test-flow", status, base).await;
+        let run_id = seed_run(ctx, "test-flow", status, base).await;
         let (code, _) = send(ctx.post(&format!("/api/runs/{run_id}/cancel"))).await;
         assert_eq!(code, StatusCode::OK);
         assert_eq!(run_status(&ctx.db, run_id).await, "canceled");
     }
-    ctx.shutdown().await.unwrap();
 }
 
-#[tokio::test]
-async fn post_run_retry_retries_a_failed_run() {
-    let ctx = api_context().await;
-    let run_id = dispatch_without_retries(&ctx, "test-flow").await;
-    execute(&ctx, run_id, "test-flow").await;
+#[openshop::test(api_context())]
+async fn post_run_retry_retries_a_failed_run(ctx: &TestContext) {
+    let run_id = dispatch_without_retries(ctx, "test-flow").await;
+    execute(ctx, run_id, "test-flow").await;
 
     // Manually set to failed so we can retry.
     sqlx::query("UPDATE flow_runs SET status = 'failed', error = 'boom', attempts = 2, worker_id = 'w1' WHERE id = $1")
@@ -848,7 +805,6 @@ async fn post_run_retry_retries_a_failed_run() {
     .await
     .unwrap();
     assert_eq!(payload, json!({ "mode": "resume", "flowName": "test-flow" }));
-    ctx.shutdown().await.unwrap();
 }
 
 #[tokio::test]
@@ -901,33 +857,30 @@ async fn post_run_retry_resume_keeps_completed_steps_and_reset_discards_them() {
     ctx.shutdown().await.unwrap();
 }
 
-#[tokio::test]
-async fn post_run_retry_rejects_active_runs() {
-    let ctx = api_context().await;
+#[openshop::test(api_context())]
+async fn post_run_retry_rejects_active_runs(ctx: &TestContext) {
     let base = base_time();
 
     for status in ["pending", "running", "sleeping"] {
-        let run_id = seed_run(&ctx, "test-flow", status, base).await;
+        let run_id = seed_run(ctx, "test-flow", status, base).await;
         let (code, body) = send(ctx.post(&format!("/api/runs/{run_id}/retry"))).await;
         assert_eq!(code, StatusCode::CONFLICT);
         assert_eq!(body, error(&format!("Cannot retry a run with status \"{status}\"")));
         assert_eq!(run_status(&ctx.db, run_id).await, status);
     }
     for status in ["completed", "canceled"] {
-        let run_id = seed_run(&ctx, "test-flow", status, base).await;
+        let run_id = seed_run(ctx, "test-flow", status, base).await;
         let (code, _) = send(ctx.post(&format!("/api/runs/{run_id}/retry"))).await;
         assert_eq!(code, StatusCode::OK);
         assert_eq!(run_status(&ctx.db, run_id).await, "pending");
     }
-    ctx.shutdown().await.unwrap();
 }
 
-#[tokio::test]
-async fn delete_run_removes_the_run_with_its_steps_and_logs() {
-    let ctx = api_context().await;
+#[openshop::test(api_context())]
+async fn delete_run_removes_the_run_with_its_steps_and_logs(ctx: &TestContext) {
     let base = base_time();
-    let run_id = seed_run(&ctx, "test-flow", "completed", base).await;
-    let kept = seed_run(&ctx, "test-flow", "failed", base).await;
+    let run_id = seed_run(ctx, "test-flow", "completed", base).await;
+    let kept = seed_run(ctx, "test-flow", "failed", base).await;
     for id in [run_id, kept] {
         seed_step(&ctx.db, id, "step", "completed", base).await;
         seed_log(&ctx.db, id, "info", "line", json!({}), base).await;
@@ -947,32 +900,28 @@ async fn delete_run_removes_the_run_with_its_steps_and_logs() {
 
     let (status, _) = send(ctx.delete(&format!("/api/runs/{run_id}"))).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
-    ctx.shutdown().await.unwrap();
 }
 
-#[tokio::test]
-async fn delete_run_rejects_active_runs() {
-    let ctx = api_context().await;
+#[openshop::test(api_context())]
+async fn delete_run_rejects_active_runs(ctx: &TestContext) {
     let base = base_time();
 
     for status in ["pending", "running", "sleeping"] {
-        let run_id = seed_run(&ctx, "test-flow", status, base).await;
+        let run_id = seed_run(ctx, "test-flow", status, base).await;
         let (code, body) = send(ctx.delete(&format!("/api/runs/{run_id}"))).await;
         assert_eq!(code, StatusCode::CONFLICT);
         assert_eq!(body, error("Cannot delete an active run — cancel it first"));
         assert!(find_run(&ctx.db, run_id).await.is_some());
     }
-    ctx.shutdown().await.unwrap();
 }
 
-#[tokio::test]
-async fn post_runs_bulk_delete_deletes_finished_runs_and_skips_the_rest() {
-    let ctx = api_context().await;
+#[openshop::test(api_context())]
+async fn post_runs_bulk_delete_deletes_finished_runs_and_skips_the_rest(ctx: &TestContext) {
     let base = base_time();
-    let completed = seed_run(&ctx, "test-flow", "completed", base).await;
-    let failed = seed_run(&ctx, "test-flow", "failed", base).await;
-    let pending = seed_run(&ctx, "test-flow", "pending", base).await;
-    let untouched = seed_run(&ctx, "test-flow", "completed", base).await;
+    let completed = seed_run(ctx, "test-flow", "completed", base).await;
+    let failed = seed_run(ctx, "test-flow", "failed", base).await;
+    let pending = seed_run(ctx, "test-flow", "pending", base).await;
+    let untouched = seed_run(ctx, "test-flow", "completed", base).await;
     for id in [completed, failed, pending, untouched] {
         seed_step(&ctx.db, id, "step", "completed", base).await;
         seed_log(&ctx.db, id, "info", "line", json!({}), base).await;
@@ -999,13 +948,11 @@ async fn post_runs_bulk_delete_deletes_finished_runs_and_skips_the_rest() {
     let (status, body) = send(ctx.post("/api/runs/bulk-delete").json(&json!({ "ids": [pending] }))).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body, json!({ "deleted": 0, "skipped": 1 }));
-    ctx.shutdown().await.unwrap();
 }
 
-#[tokio::test]
-async fn post_runs_bulk_delete_validates_its_body() {
-    let ctx = api_context().await;
-    let run_id = seed_run(&ctx, "test-flow", "completed", base_time()).await;
+#[openshop::test(api_context())]
+async fn post_runs_bulk_delete_validates_its_body(ctx: &TestContext) {
+    let run_id = seed_run(ctx, "test-flow", "completed", base_time()).await;
 
     let invalid = [
         ctx.post("/api/runs/bulk-delete"),
@@ -1036,46 +983,38 @@ async fn post_runs_bulk_delete_validates_its_body() {
     .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body, json!({ "deleted": 1, "skipped": 99 }));
-    ctx.shutdown().await.unwrap();
 }
 
 // ─── Auth ────────────────────────────────────────────────────────────
 
-#[tokio::test]
-async fn request_without_token_returns_401() {
-    let ctx = api_context().await;
-
-    let (status, body) = send(anonymous(&ctx, Method::GET, "/api/flows")).await;
+#[openshop::test(api_context())]
+async fn request_without_token_returns_401(ctx: &TestContext) {
+    let (status, body) = send(anonymous(ctx, Method::GET, "/api/flows")).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
     assert_eq!(body, error("Unauthorized: missing session token"));
 
-    let (status, body) = send(anonymous(&ctx, Method::GET, "/api/flows").header("Authorization", "Basic abc")).await;
+    let (status, body) = send(anonymous(ctx, Method::GET, "/api/flows").header("Authorization", "Basic abc")).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
     assert_eq!(body, error("Unauthorized: missing session token"));
 
     // The session token is only read from the Authorization header.
     let path = format!("/api/flows?shop={}&token={}", ctx.shop, ctx.session_token());
-    let (status, _) = send(anonymous(&ctx, Method::GET, &path)).await;
+    let (status, _) = send(anonymous(ctx, Method::GET, &path)).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
-    ctx.shutdown().await.unwrap();
 }
 
-#[tokio::test]
-async fn request_with_invalid_token_returns_401() {
-    let ctx = api_context().await;
-
-    let (status, body) = send(request_as(&ctx, "invalid.token.here", Method::GET, "/api/flows")).await;
+#[openshop::test(api_context())]
+async fn request_with_invalid_token_returns_401(ctx: &TestContext) {
+    let (status, body) = send(request_as(ctx, "invalid.token.here", Method::GET, "/api/flows")).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
     assert_eq!(body, error("Unauthorized: missing token audience"));
 
-    let (status, _) = send(request_as(&ctx, "garbage", Method::GET, "/api/flows")).await;
+    let (status, _) = send(request_as(ctx, "garbage", Method::GET, "/api/flows")).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
-    ctx.shutdown().await.unwrap();
 }
 
-#[tokio::test]
-async fn request_with_forged_or_expired_token_returns_401() {
-    let ctx = api_context().await;
+#[openshop::test(api_context())]
+async fn request_with_forged_or_expired_token_returns_401(ctx: &TestContext) {
     let now = Utc::now().timestamp();
     let claims = |shop: &str, exp: i64| {
         json!({
@@ -1116,17 +1055,14 @@ async fn request_with_forged_or_expired_token_returns_401() {
         ),
     ];
     for (token, message) in cases {
-        let (status, body) = send(request_as(&ctx, &token, Method::GET, "/api/flows")).await;
+        let (status, body) = send(request_as(ctx, &token, Method::GET, "/api/flows")).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED, "{message}");
         assert_eq!(body, error(message));
     }
-    ctx.shutdown().await.unwrap();
 }
 
-#[tokio::test]
-async fn unknown_api_paths_require_a_session_then_return_404() {
-    let ctx = api_context().await;
-
+#[openshop::test(api_context())]
+async fn unknown_api_paths_require_a_session_then_return_404(ctx: &TestContext) {
     let cases = [
         (Method::GET, "/api"),
         (Method::GET, "/api/"),
@@ -1138,7 +1074,7 @@ async fn unknown_api_paths_require_a_session_then_return_404() {
         (Method::PATCH, "/api/providers/warehouse"),
     ];
     for (method, path) in cases {
-        let (status, body) = send(anonymous(&ctx, method.clone(), path)).await;
+        let (status, body) = send(anonymous(ctx, method.clone(), path)).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED, "{method} {path}");
         assert_eq!(body, error("Unauthorized: missing session token"));
 
@@ -1146,7 +1082,6 @@ async fn unknown_api_paths_require_a_session_then_return_404() {
         assert_eq!(status, StatusCode::NOT_FOUND, "{method} {path}");
         assert_eq!(body, "404 Not Found", "{method} {path}");
     }
-    ctx.shutdown().await.unwrap();
 }
 
 #[tokio::test]
@@ -1222,11 +1157,10 @@ fn logging_flow() -> Flow {
     })
 }
 
-#[tokio::test]
-async fn get_run_logs_returns_logs_with_filters() {
-    let ctx = context(api_config_with(logging_flow())).await;
+#[openshop::test(context(api_config_with(logging_flow())))]
+async fn get_run_logs_returns_logs_with_filters(ctx: &TestContext) {
     let run_id = ctx.dispatch_flow("test-flow", json!({})).await.unwrap();
-    execute(&ctx, run_id, "test-flow").await;
+    execute(ctx, run_id, "test-flow").await;
 
     // All logs: the three lines of the flow plus the ones of the engine.
     let (status, data) = send(ctx.get(&format!("/api/runs/{run_id}/logs?levels=info,warn,error"))).await;
@@ -1262,7 +1196,6 @@ async fn get_run_logs_returns_logs_with_filters() {
     assert_eq!(strings(&filtered["logs"], "message"), ["warn message"]);
     assert_eq!(filtered["logs"][0]["_matched"], true);
     assert_eq!(filtered["total"], total);
-    ctx.shutdown().await.unwrap();
 }
 
 /// Six log lines one second apart; the API returns them newest first.
@@ -1295,12 +1228,11 @@ async fn query_logs(ctx: &TestContext, run_id: Uuid, params: &[(&str, &str)]) ->
     data["logs"].clone()
 }
 
-#[tokio::test]
-async fn get_run_logs_supports_the_query_syntax() {
-    let ctx = api_context().await;
-    let (run_id, _) = seed_order_logs(&ctx).await;
+#[openshop::test(api_context())]
+async fn get_run_logs_supports_the_query_syntax(ctx: &TestContext) {
+    let (run_id, _) = seed_order_logs(ctx).await;
 
-    let all = query_logs(&ctx, run_id, &[]).await;
+    let all = query_logs(ctx, run_id, &[]).await;
     assert_eq!(
         strings(&all, "message"),
         [
@@ -1340,7 +1272,7 @@ async fn get_run_logs_supports_the_query_syntax() {
         (r#"|~ "(""#, &[]),
     ];
     for (query, expected) in cases {
-        let logs = query_logs(&ctx, run_id, &[("q", query)]).await;
+        let logs = query_logs(ctx, run_id, &[("q", query)]).await;
         assert_eq!(strings(&logs, "message"), expected, "q={query}");
         assert!(
             logs.as_array().unwrap().iter().all(|log| log["_matched"] == true),
@@ -1348,18 +1280,16 @@ async fn get_run_logs_supports_the_query_syntax() {
         );
     }
 
-    let warnings = query_logs(&ctx, run_id, &[("levels", "warn,error"), ("q", "order")]).await;
+    let warnings = query_logs(ctx, run_id, &[("levels", "warn,error"), ("q", "order")]).await;
     assert_eq!(strings(&warnings, "message"), ["Order 1002 failed"]);
 
-    let none = query_logs(&ctx, run_id, &[("levels", "debug")]).await;
+    let none = query_logs(ctx, run_id, &[("levels", "debug")]).await;
     assert_eq!(none, json!([]));
-    ctx.shutdown().await.unwrap();
 }
 
-#[tokio::test]
-async fn get_run_logs_expands_context_around_matches() {
-    let ctx = api_context().await;
-    let (run_id, _) = seed_order_logs(&ctx).await;
+#[openshop::test(api_context())]
+async fn get_run_logs_expands_context_around_matches(ctx: &TestContext) {
+    let (run_id, _) = seed_order_logs(ctx).await;
     let flagged = |logs: &Value| -> Vec<(String, bool)> {
         logs.as_array()
             .unwrap()
@@ -1369,7 +1299,7 @@ async fn get_run_logs_expands_context_around_matches() {
     };
     let line = |message: &str, matched: bool| (message.to_string(), matched);
 
-    let around = query_logs(&ctx, run_id, &[("q", "failed C:1")]).await;
+    let around = query_logs(ctx, run_id, &[("q", "failed C:1")]).await;
     assert_eq!(
         flagged(&around),
         [
@@ -1379,13 +1309,13 @@ async fn get_run_logs_expands_context_around_matches() {
         ]
     );
 
-    let before = query_logs(&ctx, run_id, &[("q", "B:1 failed")]).await;
+    let before = query_logs(ctx, run_id, &[("q", "B:1 failed")]).await;
     assert_eq!(
         flagged(&before),
         [line("Order 1003 synced", false), line("Order 1002 failed", true)]
     );
 
-    let after = query_logs(&ctx, run_id, &[("q", "failed A:2")]).await;
+    let after = query_logs(ctx, run_id, &[("q", "failed A:2")]).await;
     assert_eq!(
         flagged(&after),
         [
@@ -1396,7 +1326,7 @@ async fn get_run_logs_expands_context_around_matches() {
     );
 
     // Context lines are taken from the level-filtered list.
-    let filtered = query_logs(&ctx, run_id, &[("levels", "info,error"), ("q", "failed C:1")]).await;
+    let filtered = query_logs(ctx, run_id, &[("levels", "info,error"), ("q", "failed C:1")]).await;
     assert_eq!(
         flagged(&filtered),
         [
@@ -1407,41 +1337,39 @@ async fn get_run_logs_expands_context_around_matches() {
     );
 
     // Context alone is not a filter.
-    let unfiltered = query_logs(&ctx, run_id, &[("q", "C:2")]).await;
+    let unfiltered = query_logs(ctx, run_id, &[("q", "C:2")]).await;
     assert_eq!(unfiltered.as_array().unwrap().len(), 6);
     assert!(unfiltered[0].get("_matched").is_none());
-    ctx.shutdown().await.unwrap();
 }
 
-#[tokio::test]
-async fn get_run_logs_restricts_by_time_range() {
-    let ctx = api_context().await;
-    let (run_id, base) = seed_order_logs(&ctx).await;
+#[openshop::test(api_context())]
+async fn get_run_logs_restricts_by_time_range(ctx: &TestContext) {
+    let (run_id, base) = seed_order_logs(ctx).await;
     let at = |seconds: i64| to_iso(&(base + chrono::Duration::seconds(seconds)));
 
-    let from = query_logs(&ctx, run_id, &[("q", &format!("from:{}", at(3)))]).await;
+    let from = query_logs(ctx, run_id, &[("q", &format!("from:{}", at(3)))]).await;
     assert_eq!(
         strings(&from, "message"),
         ["Done", "Order 1003 synced", "Order 1002 failed"]
     );
     assert!(from[0].get("_matched").is_none());
 
-    let to = query_logs(&ctx, run_id, &[("q", &format!("to:{}", at(1)))]).await;
+    let to = query_logs(ctx, run_id, &[("q", &format!("to:{}", at(1)))]).await;
     assert_eq!(strings(&to, "message"), ["Order 1001 synced", "Fetching orders"]);
 
-    let between = query_logs(&ctx, run_id, &[("q", &format!("between:{},{}", at(1), at(3)))]).await;
+    let between = query_logs(ctx, run_id, &[("q", &format!("between:{},{}", at(1), at(3)))]).await;
     assert_eq!(
         strings(&between, "message"),
         ["Order 1002 failed", "Rate limit hit", "Order 1001 synced"]
     );
 
-    let combined = query_logs(&ctx, run_id, &[("q", &format!("from:{} synced", at(3)))]).await;
+    let combined = query_logs(ctx, run_id, &[("q", &format!("from:{} synced", at(3)))]).await;
     assert_eq!(strings(&combined, "message"), ["Order 1003 synced"]);
 
     // The lines were written an hour ago.
-    assert_eq!(query_logs(&ctx, run_id, &[("q", "last:5m")]).await, json!([]));
+    assert_eq!(query_logs(ctx, run_id, &[("q", "last:5m")]).await, json!([]));
     assert_eq!(
-        query_logs(&ctx, run_id, &[("q", "last:2h")])
+        query_logs(ctx, run_id, &[("q", "last:2h")])
             .await
             .as_array()
             .unwrap()
@@ -1449,16 +1377,14 @@ async fn get_run_logs_restricts_by_time_range() {
         6
     );
 
-    let invalid = query_logs(&ctx, run_id, &[("q", "from:yesterday")]).await;
+    let invalid = query_logs(ctx, run_id, &[("q", "from:yesterday")]).await;
     assert_eq!(invalid.as_array().unwrap().len(), 6);
-    ctx.shutdown().await.unwrap();
 }
 
-#[tokio::test]
-async fn get_run_logs_export_returns_json() {
-    let ctx = context(api_config_with(logging_flow())).await;
+#[openshop::test(context(api_config_with(logging_flow())))]
+async fn get_run_logs_export_returns_json(ctx: &TestContext) {
     let run_id = ctx.dispatch_flow("test-flow", json!({})).await.unwrap();
-    execute(&ctx, run_id, "test-flow").await;
+    execute(ctx, run_id, "test-flow").await;
 
     let response = ctx
         .get(&format!(
@@ -1498,13 +1424,11 @@ async fn get_run_logs_export_returns_json() {
     messages.sort();
     assert_eq!(messages, ["error message", "warn message"]);
     assert!(logs[0].get("_matched").is_none());
-    ctx.shutdown().await.unwrap();
 }
 
-#[tokio::test]
-async fn get_run_logs_export_returns_csv() {
-    let ctx = api_context().await;
-    let (run_id, base) = seed_order_logs(&ctx).await;
+#[openshop::test(api_context())]
+async fn get_run_logs_export_returns_csv(ctx: &TestContext) {
+    let (run_id, base) = seed_order_logs(ctx).await;
     let (first_id,): (Uuid,) =
         sqlx::query_as("SELECT id FROM logs WHERE flow_run_id = $1 AND message = 'Order 1001 synced'")
             .bind(run_id.to_string())
@@ -1545,13 +1469,11 @@ async fn get_run_logs_export_returns_csv() {
         .await
         .unwrap();
     assert_eq!(response.text().await.unwrap().lines().count(), 3);
-    ctx.shutdown().await.unwrap();
 }
 
-#[tokio::test]
-async fn get_run_logs_export_sanitizes_unknown_formats() {
-    let ctx = api_context().await;
-    let (run_id, _) = seed_order_logs(&ctx).await;
+#[openshop::test(api_context())]
+async fn get_run_logs_export_sanitizes_unknown_formats(ctx: &TestContext) {
+    let (run_id, _) = seed_order_logs(ctx).await;
 
     for (format, extension) in [
         ("xml", "xml"),
@@ -1575,7 +1497,6 @@ async fn get_run_logs_export_sanitizes_unknown_formats() {
         let logs: Value = response.json().await.unwrap();
         assert_eq!(logs.as_array().unwrap().len(), 6);
     }
-    ctx.shutdown().await.unwrap();
 }
 
 // ─── Providers ───────────────────────────────────────────────────────
@@ -1594,10 +1515,8 @@ async fn stored_provider_config(db: &PgPool, shop: &str) -> Value {
     config
 }
 
-#[tokio::test]
-async fn get_providers_returns_provider_list() {
-    let ctx = api_context().await;
-
+#[openshop::test(api_context())]
+async fn get_providers_returns_provider_list(ctx: &TestContext) {
     let (status, data) = send(ctx.get("/api/providers")).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(
@@ -1616,13 +1535,10 @@ async fn get_providers_returns_provider_list() {
         }])
     );
     assert!(data[0]["fields"]["apiKey"].get("validate").is_none());
-    ctx.shutdown().await.unwrap();
 }
 
-#[tokio::test]
-async fn put_providers_masks_and_preserves_password_fields() {
-    let ctx = api_context().await;
-
+#[openshop::test(api_context())]
+async fn put_providers_masks_and_preserves_password_fields(ctx: &TestContext) {
     let (status, body) = send(ctx.put("/api/providers/warehouse").json(&warehouse_credentials())).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body, json!({ "ok": true }));
@@ -1667,7 +1583,6 @@ async fn put_providers_masks_and_preserves_password_fields() {
         .await
         .unwrap();
     assert_eq!(rows, 1);
-    ctx.shutdown().await.unwrap();
 }
 
 #[tokio::test]
@@ -1795,10 +1710,8 @@ async fn production_refuses_to_store_secrets_without_an_encryption_key() {
     ctx.shutdown().await.unwrap();
 }
 
-#[tokio::test]
-async fn saved_provider_stays_configured_before_and_after_a_health_check() {
-    let ctx = api_context().await;
-
+#[openshop::test(api_context())]
+async fn saved_provider_stays_configured_before_and_after_a_health_check(ctx: &TestContext) {
     // Nothing is stored yet: the check runs against an empty configuration and records nothing.
     let (status, check) = send(ctx.post("/api/providers/warehouse/check")).await;
     assert_eq!(status, StatusCode::OK);
@@ -1838,13 +1751,10 @@ async fn saved_provider_stays_configured_before_and_after_a_health_check() {
     let (_, failed) = send(ctx.get("/api/providers")).await;
     assert_eq!(failed[0]["configured"], true);
     assert_eq!(failed[0]["lastCheckOk"], false);
-    ctx.shutdown().await.unwrap();
 }
 
-#[tokio::test]
-async fn put_providers_rejects_missing_required_fields() {
-    let ctx = api_context().await;
-
+#[openshop::test(api_context())]
+async fn put_providers_rejects_missing_required_fields(ctx: &TestContext) {
     let (status, body) = send(
         ctx.put("/api/providers/warehouse")
             .json(&json!({ "config": { "endpoint": "https://warehouse.test" } })),
@@ -1864,7 +1774,6 @@ async fn put_providers_rejects_missing_required_fields() {
         .await
         .unwrap();
     assert_eq!(rows, 0);
-    ctx.shutdown().await.unwrap();
 }
 
 #[tokio::test]
@@ -1992,15 +1901,12 @@ async fn post_providers_check_reports_checker_failures() {
 
 // ─── Health ──────────────────────────────────────────────────────────
 
-#[tokio::test]
-async fn get_health_returns_ok() {
-    let ctx = api_context().await;
-
-    let (status, data) = send(anonymous(&ctx, Method::GET, "/health")).await;
+#[openshop::test(api_context())]
+async fn get_health_returns_ok(ctx: &TestContext) {
+    let (status, data) = send(anonymous(ctx, Method::GET, "/health")).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(data["status"], "ok");
     assert_iso_millis(&data["timestamp"]);
-    ctx.shutdown().await.unwrap();
 }
 
 // ─── Shopify functions list ──────────────────────────────────────────
@@ -2042,16 +1948,15 @@ async fn get_functions_returns_definitions_without_calling_shopify() {
 
 // ─── Tenant isolation ────────────────────────────────────────────────
 
-#[tokio::test]
-async fn sessions_cannot_reach_runs_and_logs_of_another_shop() {
-    let ctx = api_context().await;
+#[openshop::test(api_context())]
+async fn sessions_cannot_reach_runs_and_logs_of_another_shop(ctx: &TestContext) {
     let base = base_time();
-    let run_id = seed_run(&ctx, "test-flow", "completed", base).await;
-    let active = seed_run(&ctx, "test-flow", "pending", base).await;
+    let run_id = seed_run(ctx, "test-flow", "completed", base).await;
+    let active = seed_run(ctx, "test-flow", "pending", base).await;
     seed_step(&ctx.db, run_id, "step", "completed", base).await;
     seed_log(&ctx.db, run_id, "info", "private line", json!({}), base).await;
     let intruder = ctx.session_token_for(OTHER_SHOP, "2");
-    let as_intruder = |method: Method, path: String| request_as(&ctx, &intruder, method, &path);
+    let as_intruder = |method: Method, path: String| request_as(ctx, &intruder, method, &path);
 
     for path in ["/api/runs", "/api/runs?search=test-flow", "/api/flows/test-flow/runs"] {
         let (status, data) = send(as_intruder(Method::GET, path.to_string())).await;
@@ -2098,15 +2003,13 @@ async fn sessions_cannot_reach_runs_and_logs_of_another_shop() {
     assert_eq!(own_ids, expected);
     let (status, _) = send(ctx.get(&format!("/api/runs/{foreign}"))).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
-    ctx.shutdown().await.unwrap();
 }
 
-#[tokio::test]
-async fn sessions_cannot_reach_providers_and_crons_of_another_shop() {
-    let ctx = api_context().await;
+#[openshop::test(api_context())]
+async fn sessions_cannot_reach_providers_and_crons_of_another_shop(ctx: &TestContext) {
     let key = "test-flow:*/5 * * * *";
     let intruder = ctx.session_token_for(OTHER_SHOP, "2");
-    let as_intruder = |method: Method, path: &str| request_as(&ctx, &intruder, method, path);
+    let as_intruder = |method: Method, path: &str| request_as(ctx, &intruder, method, path);
 
     let (status, _) = send(ctx.put("/api/providers/warehouse").json(&warehouse_credentials())).await;
     assert_eq!(status, StatusCode::OK);
@@ -2163,7 +2066,6 @@ async fn sessions_cannot_reach_providers_and_crons_of_another_shop() {
     assert_eq!(own[0]["lastCheckOk"], Value::Null);
     let (_, crons) = send(ctx.get("/api/crons")).await;
     assert_eq!(crons[0]["enabled"], false);
-    ctx.shutdown().await.unwrap();
 }
 
 #[tokio::test]
@@ -2309,10 +2211,8 @@ async fn cors_allows_known_origins_on_the_api() {
     ctx.shutdown().await.unwrap();
 }
 
-#[tokio::test]
-async fn cors_omits_headers_for_unknown_origins() {
-    let ctx = api_context().await;
-
+#[openshop::test(api_context())]
+async fn cors_omits_headers_for_unknown_origins(ctx: &TestContext) {
     for origin in [
         "https://evil.example.com",
         "https://admin.shopify.com.evil.example.com",
@@ -2326,21 +2226,19 @@ async fn cors_omits_headers_for_unknown_origins() {
     }
 
     // CORS is scoped to the API.
-    let response = anonymous(&ctx, Method::GET, "/health")
+    let response = anonymous(ctx, Method::GET, "/health")
         .header(ORIGIN, "https://admin.shopify.com")
         .send()
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(allowed_origin(&response), None);
-    ctx.shutdown().await.unwrap();
 }
 
-#[tokio::test]
-async fn cors_answers_preflight_requests_without_a_session() {
-    let ctx = api_context().await;
+#[openshop::test(api_context())]
+async fn cors_answers_preflight_requests_without_a_session(ctx: &TestContext) {
     let preflight = |origin: &str| {
-        anonymous(&ctx, Method::OPTIONS, "/api/providers/warehouse")
+        anonymous(ctx, Method::OPTIONS, "/api/providers/warehouse")
             .header(ORIGIN, origin)
             .header(ACCESS_CONTROL_REQUEST_METHOD, "PUT")
             .header(ACCESS_CONTROL_REQUEST_HEADERS, "authorization,content-type")
@@ -2365,7 +2263,6 @@ async fn cors_answers_preflight_requests_without_a_session() {
 
     let response = preflight("https://evil.example.com").await.unwrap();
     assert_eq!(allowed_origin(&response), None);
-    ctx.shutdown().await.unwrap();
 }
 
 #[tokio::test]

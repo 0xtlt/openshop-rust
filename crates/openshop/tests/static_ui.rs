@@ -740,10 +740,8 @@ async fn reserved_paths_are_never_served_the_shell() {
     ctx.shutdown().await.unwrap();
 }
 
-#[tokio::test]
-async fn server_without_ui_returns_404_for_pages_and_assets() {
-    let ctx = context_with(static_config(), ServerOptions::default()).await;
-
+#[openshop::test(context_with(static_config(), ServerOptions::default()))]
+async fn server_without_ui_returns_404_for_pages_and_assets(ctx: &TestContext) {
     for path in [
         "/".to_string(),
         "/flows".to_string(),
@@ -752,26 +750,23 @@ async fn server_without_ui_returns_404_for_pages_and_assets() {
         "/asset.txt".to_string(),
         signed_launch("/", SHOP, SECRET),
     ] {
-        let reply = get(&ctx, &path).await;
+        let reply = get(ctx, &path).await;
         assert_eq!(reply.status, StatusCode::NOT_FOUND, "{path}");
         assert_eq!(reply.body, "404 Not Found", "{path}");
         assert_eq!(reply.header("x-robots-tag"), Some(ROBOTS), "{path}");
     }
 
-    assert_eq!(get(&ctx, "/health").await.status, StatusCode::OK);
-    assert_eq!(get(&ctx, "/robots.txt").await.status, StatusCode::OK);
+    assert_eq!(get(ctx, "/health").await.status, StatusCode::OK);
+    assert_eq!(get(ctx, "/robots.txt").await.status, StatusCode::OK);
     assert_eq!(fetch(ctx.get("/api/flows")).await.status, StatusCode::OK);
-    ctx.shutdown().await.unwrap();
 }
 
 #[cfg(feature = "embedded-ui")]
-#[tokio::test]
-async fn embedded_ui_serves_the_bundled_shell_and_assets() {
-    let ctx = context_with(static_config(), ServerOptions::production()).await;
+#[openshop::test(context_with(static_config(), ServerOptions::production()))]
+async fn embedded_ui_serves_the_bundled_shell_and_assets(ctx: &TestContext) {
+    assert_unauthorized_ui(&get(ctx, "/").await);
 
-    assert_unauthorized_ui(&get(&ctx, "/").await);
-
-    let shell = get(&ctx, &signed_launch("/", SHOP, SECRET)).await;
+    let shell = get(ctx, &signed_launch("/", SHOP, SECRET)).await;
     assert_eq!(shell.status, StatusCode::OK);
     assert!(shell.body.contains("<title>OpenShop</title>"), "{}", shell.body);
     assert!(
@@ -789,7 +784,7 @@ async fn embedded_ui_serves_the_bundled_shell_and_assets() {
     // The bundle referenced by the shell is served without a launch signature.
     let start = shell.body.find("/openshop-ui-").expect("bundle reference");
     let length = shell.body[start..].find(".js").expect("bundle extension") + ".js".len();
-    let bundle = get(&ctx, &shell.body[start..start + length]).await;
+    let bundle = get(ctx, &shell.body[start..start + length]).await;
     assert_eq!(bundle.status, StatusCode::OK);
     assert!(
         bundle.content_type().contains("javascript"),
@@ -798,8 +793,7 @@ async fn embedded_ui_serves_the_bundled_shell_and_assets() {
     );
     assert!(!bundle.body.is_empty());
 
-    assert_eq!(get(&ctx, "/missing.js").await.status, StatusCode::NOT_FOUND);
-    ctx.shutdown().await.unwrap();
+    assert_eq!(get(ctx, "/missing.js").await.status, StatusCode::NOT_FOUND);
 }
 
 // ─── Health and crawler headers ──────────────────────────────────────

@@ -363,10 +363,8 @@ fn respond_to_graphql(ctx: &TestContext, status: u16, body: Value) {
 
 // ─── Admin API: capabilities ─────────────────────────────────────────
 
-#[tokio::test]
-async fn capabilities_list_core_and_custom_permissions_tools_and_resources() {
-    let ctx = context().await;
-
+#[openshop::test(context())]
+async fn capabilities_list_core_and_custom_permissions_tools_and_resources(ctx: &TestContext) {
     let (status, body) = send(ctx.get("/api/mcp/capabilities")).await;
     assert_eq!(status, 200);
     assert_eq!(body["enabled"], true);
@@ -459,16 +457,13 @@ async fn capabilities_list_core_and_custom_permissions_tools_and_resources() {
 
     let (status, _) = send(ctx.http.get(format!("{}/api/mcp/capabilities", ctx.url))).await;
     assert_eq!(status, 401);
-    ctx.shutdown().await.unwrap();
 }
 
 // ─── Admin API: tokens ───────────────────────────────────────────────
 
-#[tokio::test]
-async fn admin_can_create_a_token_and_only_receives_the_secret_once() {
-    let ctx = context().await;
-
-    let issued = create_token(&ctx, &["read_logs"]).await;
+#[openshop::test(context())]
+async fn admin_can_create_a_token_and_only_receives_the_secret_once(ctx: &TestContext) {
+    let issued = create_token(ctx, &["read_logs"]).await;
     assert!(issued.token_id.starts_with("mtk_"));
     assert!(issued.token.starts_with(&format!("oshp_mcp_{}.", issued.token_id)));
     assert!(issued.secret().len() >= 32);
@@ -495,13 +490,11 @@ async fn admin_can_create_a_token_and_only_receives_the_secret_once() {
     // Tokens expire after 90 days unless told otherwise.
     let days = days_from_now(&list[0]["expiresAt"]);
     assert!((89.9..=90.0).contains(&days), "{days}");
-    ctx.shutdown().await.unwrap();
 }
 
-#[tokio::test]
-async fn tokens_are_hashed_at_rest_and_the_secret_is_never_returned_again() {
-    let ctx = context().await;
-    let issued = create_token(&ctx, &["read_logs"]).await;
+#[openshop::test(context())]
+async fn tokens_are_hashed_at_rest_and_the_secret_is_never_returned_again(ctx: &TestContext) {
+    let issued = create_token(ctx, &["read_logs"]).await;
 
     let stored = |ctx: &TestContext| {
         let db = ctx.db.clone();
@@ -518,14 +511,14 @@ async fn tokens_are_hashed_at_rest_and_the_secret_is_never_returned_again() {
         }
     };
 
-    let (hash, fingerprint, row) = stored(&ctx).await;
+    let (hash, fingerprint, row) = stored(ctx).await;
     assert!(hash.starts_with("scrypt:"), "{hash}");
     assert_eq!(hash.split(':').count(), 3);
     assert!(!row.contains(issued.secret()));
     assert!(!row.contains(&issued.token));
     assert_eq!(issued.item["tokenFingerprint"], fingerprint.as_str());
 
-    let detail = token_detail(&ctx, &issued).await;
+    let detail = token_detail(ctx, &issued).await;
     let (_, list) = send(ctx.get("/api/mcp/tokens")).await;
     for body in [&issued.item, &detail, &list] {
         let text = body.to_string();
@@ -538,18 +531,16 @@ async fn tokens_are_hashed_at_rest_and_the_secret_is_never_returned_again() {
     let (status, rotated) = send(ctx.post(&issued.path("/rotate"))).await;
     assert_eq!(status, 200);
     let rotated_secret = rotated["token"].as_str().unwrap().split_once('.').unwrap().1;
-    let (rotated_hash, rotated_fingerprint, rotated_row) = stored(&ctx).await;
+    let (rotated_hash, rotated_fingerprint, rotated_row) = stored(ctx).await;
     assert!(rotated_hash.starts_with("scrypt:"));
     assert_ne!(rotated_hash, hash);
     assert_ne!(rotated_fingerprint, fingerprint);
     assert!(!rotated_row.contains(rotated_secret));
     assert!(!rotated_row.contains(issued.secret()));
-    ctx.shutdown().await.unwrap();
 }
 
-#[tokio::test]
-async fn token_creation_validates_the_name_and_the_permissions() {
-    let ctx = context().await;
+#[openshop::test(context())]
+async fn token_creation_validates_the_name_and_the_permissions(ctx: &TestContext) {
     let create = |body: Value| send(ctx.post("/api/mcp/tokens").json(&body));
 
     for body in [
@@ -586,13 +577,10 @@ async fn token_creation_validates_the_name_and_the_permissions() {
     let (_, list) = send(ctx.get("/api/mcp/tokens")).await;
     assert_eq!(list.as_array().unwrap().len(), 1);
     assert_eq!(sorted(&list[0]["permissions"]), ["demo:read_status", "read_logs"]);
-    ctx.shutdown().await.unwrap();
 }
 
-#[tokio::test]
-async fn admin_token_api_rejects_invalid_explicit_expiration_values() {
-    let ctx = context().await;
-
+#[openshop::test(context())]
+async fn admin_token_api_rejects_invalid_explicit_expiration_values(ctx: &TestContext) {
     for expires_at in [json!("not-a-date"), json!(5), json!(""), json!("   "), json!(true)] {
         let (status, body) = send(
             ctx.post("/api/mcp/tokens")
@@ -614,7 +602,7 @@ async fn admin_token_api_rejects_invalid_explicit_expiration_values() {
     let (_, list) = send(ctx.get("/api/mcp/tokens")).await;
     assert_eq!(list, json!([]));
 
-    let issued = create_token(&ctx, &[]).await;
+    let issued = create_token(ctx, &[]).await;
     let (status, body) = send(ctx.patch(&issued.path("")).json(&json!({ "expiresInDays": 0 }))).await;
     assert_eq!(status, 400);
     assert_eq!(body["error"], "expiresInDays must be a positive integer or null");
@@ -627,52 +615,50 @@ async fn admin_token_api_rejects_invalid_explicit_expiration_values() {
     assert_eq!(body["error"], "expiresAt must be a valid date string or null");
 
     // A rejected patch changes nothing.
-    let detail = token_detail(&ctx, &issued).await;
+    let detail = token_detail(ctx, &issued).await;
     assert_eq!(detail["name"], "test token");
     assert_eq!(detail["expiresAt"], issued.item["expiresAt"]);
-    ctx.shutdown().await.unwrap();
 }
 
-#[tokio::test]
-async fn token_expiration_follows_expires_at_and_expires_in_days() {
-    let ctx = context().await;
+#[openshop::test(context())]
+async fn token_expiration_follows_expires_at_and_expires_in_days(ctx: &TestContext) {
     let shop = ctx.shop.clone();
 
-    let in_thirty_days = create_token_as(&ctx, &shop, &[], json!({ "expiresInDays": 30 })).await;
+    let in_thirty_days = create_token_as(ctx, &shop, &[], json!({ "expiresInDays": 30 })).await;
     let days = days_from_now(&in_thirty_days.item["expiresAt"]);
     assert!((29.9..=30.0).contains(&days), "{days}");
 
-    let never = create_token_as(&ctx, &shop, &[], json!({ "expiresInDays": null })).await;
+    let never = create_token_as(ctx, &shop, &[], json!({ "expiresInDays": null })).await;
     assert_eq!(never.item["expiresAt"], Value::Null);
 
-    let explicit = create_token_as(&ctx, &shop, &[], json!({ "expiresAt": "2030-01-01T00:00:00.000Z" })).await;
+    let explicit = create_token_as(ctx, &shop, &[], json!({ "expiresAt": "2030-01-01T00:00:00.000Z" })).await;
     assert_eq!(explicit.item["expiresAt"], "2030-01-01T00:00:00.000Z");
 
     // `expiresAt` wins over `expiresInDays`.
-    let both = create_token_as(&ctx, &shop, &[], json!({ "expiresAt": null, "expiresInDays": 30 })).await;
+    let both = create_token_as(ctx, &shop, &[], json!({ "expiresAt": null, "expiresInDays": 30 })).await;
     assert_eq!(both.item["expiresAt"], Value::Null);
 
     let (status, body) = send(ctx.patch(&never.path("")).json(&json!({ "expiresInDays": 7 }))).await;
     assert_eq!((status, body), (200, json!({ "ok": true })));
-    let patched = token_detail(&ctx, &never).await;
+    let patched = token_detail(ctx, &never).await;
     let days = days_from_now(&patched["expiresAt"]);
     assert!((6.9..=7.0).contains(&days), "{days}");
 
     // Other updates keep the expiration.
     send(ctx.patch(&never.path("")).json(&json!({ "name": "renamed" }))).await;
-    let renamed = token_detail(&ctx, &never).await;
+    let renamed = token_detail(ctx, &never).await;
     assert_eq!(renamed["name"], "renamed");
     assert_eq!(renamed["expiresAt"], patched["expiresAt"]);
 
     send(ctx.patch(&explicit.path("")).json(&json!({ "expiresAt": null }))).await;
-    assert_eq!(token_detail(&ctx, &explicit).await["expiresAt"], Value::Null);
+    assert_eq!(token_detail(ctx, &explicit).await["expiresAt"], Value::Null);
     send(
         ctx.patch(&explicit.path(""))
             .json(&json!({ "expiresAt": "2031-06-01T12:00:00+02:00" })),
     )
     .await;
     assert_eq!(
-        token_detail(&ctx, &explicit).await["expiresAt"],
+        token_detail(ctx, &explicit).await["expiresAt"],
         "2031-06-01T10:00:00.000Z"
     );
 
@@ -682,19 +668,17 @@ async fn token_expiration_follows_expires_at_and_expires_in_days() {
             .json(&json!({ "expiresAt": "2020-01-01T00:00:00.000Z" })),
     )
     .await;
-    let (status, body) = initialize_status(&ctx, &explicit.token).await;
+    let (status, body) = initialize_status(ctx, &explicit.token).await;
     assert_eq!(status, 403);
     assert_eq!(body, json!({ "error": "Forbidden: MCP token has expired" }));
     send(ctx.patch(&explicit.path("")).json(&json!({ "expiresInDays": 1 }))).await;
-    let (status, _) = initialize_status(&ctx, &explicit.token).await;
+    let (status, _) = initialize_status(ctx, &explicit.token).await;
     assert_eq!(status, 200);
-    ctx.shutdown().await.unwrap();
 }
 
-#[tokio::test]
-async fn rotating_a_token_keeps_its_token_id_and_invalidates_the_old_secret() {
-    let ctx = context().await;
-    let issued = create_token(&ctx, &["read_logs"]).await;
+#[openshop::test(context())]
+async fn rotating_a_token_keeps_its_token_id_and_invalidates_the_old_secret(ctx: &TestContext) {
+    let issued = create_token(ctx, &["read_logs"]).await;
 
     let (status, rotated) = send(ctx.post(&issued.path("/rotate"))).await;
     assert_eq!(status, 200);
@@ -703,39 +687,35 @@ async fn rotating_a_token_keeps_its_token_id_and_invalidates_the_old_secret() {
     assert!(rotated_token.starts_with(&format!("oshp_mcp_{}.", issued.token_id)));
     assert_ne!(rotated_token, issued.token);
 
-    let (status, body) = initialize_status(&ctx, &issued.token).await;
+    let (status, body) = initialize_status(ctx, &issued.token).await;
     assert_eq!(status, 401);
     assert_eq!(body, json!({ "error": "Unauthorized: invalid MCP token" }));
 
-    let (status, _) = initialize_status(&ctx, rotated_token).await;
+    let (status, _) = initialize_status(ctx, rotated_token).await;
     assert_eq!(status, 200);
 
     // The token keeps its identity and grants.
-    let detail = token_detail(&ctx, &issued).await;
+    let detail = token_detail(ctx, &issued).await;
     assert_eq!(detail["id"], issued.id.as_str());
     assert_eq!(detail["tokenId"], issued.token_id.as_str());
     assert_eq!(detail["permissions"], json!(["read_logs"]));
     assert_ne!(detail["tokenFingerprint"], issued.item["tokenFingerprint"]);
-    ctx.shutdown().await.unwrap();
 }
 
-#[tokio::test]
-async fn revoked_tokens_cannot_be_rotated() {
-    let ctx = context().await;
-    let issued = create_token(&ctx, &["read_logs"]).await;
+#[openshop::test(context())]
+async fn revoked_tokens_cannot_be_rotated(ctx: &TestContext) {
+    let issued = create_token(ctx, &["read_logs"]).await;
     send(ctx.post(&issued.path("/revoke"))).await;
 
     let (status, body) = send(ctx.post(&issued.path("/rotate"))).await;
     assert_eq!(status, 409);
     assert_eq!(body["error"], "Cannot rotate a revoked token");
     assert!(body.get("token").is_none());
-    ctx.shutdown().await.unwrap();
 }
 
-#[tokio::test]
-async fn revoked_tokens_cannot_be_reactivated_through_patch() {
-    let ctx = context().await;
-    let issued = create_token(&ctx, &["read_logs"]).await;
+#[openshop::test(context())]
+async fn revoked_tokens_cannot_be_reactivated_through_patch(ctx: &TestContext) {
+    let issued = create_token(ctx, &["read_logs"]).await;
     send(ctx.post(&issued.path("/revoke"))).await;
 
     let (status, body) = send(
@@ -746,16 +726,14 @@ async fn revoked_tokens_cannot_be_reactivated_through_patch() {
     assert_eq!(status, 409);
     assert_eq!(body["error"], "Cannot update a revoked token");
 
-    let detail = token_detail(&ctx, &issued).await;
+    let detail = token_detail(ctx, &issued).await;
     assert_eq!(detail["status"], "revoked");
     assert_eq!(detail["name"], "test token");
-    ctx.shutdown().await.unwrap();
 }
 
-#[tokio::test]
-async fn revoked_tokens_cannot_have_permissions_changed() {
-    let ctx = context().await;
-    let issued = create_token(&ctx, &["read_logs"]).await;
+#[openshop::test(context())]
+async fn revoked_tokens_cannot_have_permissions_changed(ctx: &TestContext) {
+    let issued = create_token(ctx, &["read_logs"]).await;
     send(ctx.post(&issued.path("/revoke"))).await;
 
     let (status, body) = send(
@@ -766,38 +744,34 @@ async fn revoked_tokens_cannot_have_permissions_changed() {
     assert_eq!(status, 409);
     assert_eq!(body["error"], "Cannot update a revoked token");
 
-    let detail = token_detail(&ctx, &issued).await;
+    let detail = token_detail(ctx, &issued).await;
     assert_eq!(detail["permissions"], json!(["read_logs"]));
-    ctx.shutdown().await.unwrap();
 }
 
-#[tokio::test]
-async fn revoking_a_token_records_the_revocation_and_blocks_it() {
-    let ctx = context().await;
-    let issued = create_token(&ctx, &[]).await;
+#[openshop::test(context())]
+async fn revoking_a_token_records_the_revocation_and_blocks_it(ctx: &TestContext) {
+    let issued = create_token(ctx, &[]).await;
 
     let (status, body) = send(ctx.post(&issued.path("/revoke"))).await;
     assert_eq!((status, body), (200, json!({ "ok": true })));
 
-    let detail = token_detail(&ctx, &issued).await;
+    let detail = token_detail(ctx, &issued).await;
     assert_eq!(detail["status"], "revoked");
     let revoked_at = timestamp(&detail["revokedAt"]);
     assert!((Utc::now() - revoked_at).num_seconds().abs() < 60);
 
-    let (status, body) = initialize_status(&ctx, &issued.token).await;
+    let (status, body) = initialize_status(ctx, &issued.token).await;
     assert_eq!(status, 403);
     assert_eq!(body, json!({ "error": "Forbidden: MCP token is not active" }));
 
     // Revoking again is harmless.
     let (status, _) = send(ctx.post(&issued.path("/revoke"))).await;
     assert_eq!(status, 200);
-    ctx.shutdown().await.unwrap();
 }
 
-#[tokio::test]
-async fn patch_renames_disables_and_reactivates_tokens() {
-    let ctx = context().await;
-    let issued = create_token(&ctx, &[]).await;
+#[openshop::test(context())]
+async fn patch_renames_disables_and_reactivates_tokens(ctx: &TestContext) {
+    let issued = create_token(ctx, &[]).await;
 
     let (status, body) = send(
         ctx.patch(&issued.path(""))
@@ -805,13 +779,13 @@ async fn patch_renames_disables_and_reactivates_tokens() {
     )
     .await;
     assert_eq!((status, body), (200, json!({ "ok": true })));
-    let detail = token_detail(&ctx, &issued).await;
+    let detail = token_detail(ctx, &issued).await;
     assert_eq!(detail["name"], "renamed");
     assert_eq!(detail["status"], "disabled");
     assert_eq!(detail["revokedAt"], Value::Null);
     assert!(timestamp(&detail["updatedAt"]) >= timestamp(&issued.item["updatedAt"]));
 
-    let (status, body) = initialize_status(&ctx, &issued.token).await;
+    let (status, body) = initialize_status(ctx, &issued.token).await;
     assert_eq!(status, 403);
     assert_eq!(body, json!({ "error": "Forbidden: MCP token is not active" }));
 
@@ -822,29 +796,27 @@ async fn patch_renames_disables_and_reactivates_tokens() {
     )
     .await;
     assert_eq!(status, 200);
-    let detail = token_detail(&ctx, &issued).await;
+    let detail = token_detail(ctx, &issued).await;
     assert_eq!(detail["status"], "disabled");
     assert_eq!(detail["name"], "renamed");
 
     send(ctx.patch(&issued.path("")).json(&json!({ "status": "active" }))).await;
-    let (status, _) = initialize_status(&ctx, &issued.token).await;
+    let (status, _) = initialize_status(ctx, &issued.token).await;
     assert_eq!(status, 200);
 
     // Rotating a disabled token hands out a working secret again.
     send(ctx.patch(&issued.path("")).json(&json!({ "status": "disabled" }))).await;
     let (_, rotated) = send(ctx.post(&issued.path("/rotate"))).await;
-    assert_eq!(token_detail(&ctx, &issued).await["status"], "active");
-    let (status, _) = initialize_status(&ctx, rotated["token"].as_str().unwrap()).await;
+    assert_eq!(token_detail(ctx, &issued).await["status"], "active");
+    let (status, _) = initialize_status(ctx, rotated["token"].as_str().unwrap()).await;
     assert_eq!(status, 200);
-    ctx.shutdown().await.unwrap();
 }
 
-#[tokio::test]
-async fn permissions_can_be_replaced_and_apply_to_the_next_request() {
-    let ctx = context().await;
-    let issued = create_token(&ctx, &["read_logs"]).await;
+#[openshop::test(context())]
+async fn permissions_can_be_replaced_and_apply_to_the_next_request(ctx: &TestContext) {
+    let issued = create_token(ctx, &["read_logs"]).await;
 
-    let tools = call(&ctx, &issued.token, "tools/list", json!({})).await;
+    let tools = call(ctx, &issued.token, "tools/list", json!({})).await;
     assert_eq!(
         strings(&tools["result"]["tools"], "name"),
         ["openshop.shops.list", "openshop.logs.search"]
@@ -856,10 +828,10 @@ async fn permissions_can_be_replaced_and_apply_to_the_next_request() {
     )
     .await;
     assert_eq!((status, body), (200, json!({ "ok": true })));
-    let detail = token_detail(&ctx, &issued).await;
+    let detail = token_detail(ctx, &issued).await;
     assert_eq!(sorted(&detail["permissions"]), ["demo:read_status", "read_flows"]);
 
-    let tools = call(&ctx, &issued.token, "tools/list", json!({})).await;
+    let tools = call(ctx, &issued.token, "tools/list", json!({})).await;
     assert_eq!(
         strings(&tools["result"]["tools"], "name"),
         ["openshop.shops.list", "openshop.flows.list", "demo.status"]
@@ -873,21 +845,19 @@ async fn permissions_can_be_replaced_and_apply_to_the_next_request() {
     assert_eq!(status, 400);
     assert_eq!(body, json!({ "error": "Unknown permission \"nope\"" }));
     assert_eq!(
-        sorted(&token_detail(&ctx, &issued).await["permissions"]),
+        sorted(&token_detail(ctx, &issued).await["permissions"]),
         ["demo:read_status", "read_flows"]
     );
 
     // Without a list every grant is removed.
     let (status, _) = send(ctx.put(&issued.path("/permissions")).json(&json!({}))).await;
     assert_eq!(status, 200);
-    assert_eq!(token_detail(&ctx, &issued).await["permissions"], json!([]));
-    ctx.shutdown().await.unwrap();
+    assert_eq!(token_detail(ctx, &issued).await["permissions"], json!([]));
 }
 
-#[tokio::test]
-async fn token_details_report_stale_permissions() {
-    let ctx = context().await;
-    let issued = create_token(&ctx, &["read_logs"]).await;
+#[openshop::test(context())]
+async fn token_details_report_stale_permissions(ctx: &TestContext) {
+    let issued = create_token(ctx, &["read_logs"]).await;
 
     // A grant for a permission the application no longer defines.
     sqlx::query(
@@ -908,32 +878,30 @@ async fn token_details_report_stale_permissions() {
     .await
     .unwrap();
 
-    let detail = token_detail(&ctx, &issued).await;
+    let detail = token_detail(ctx, &issued).await;
     assert_eq!(sorted(&detail["permissions"]), ["legacy:read_things", "read_logs"]);
     assert_eq!(detail["stalePermissions"], json!(["legacy:read_things"]));
 
     let (_, list) = send(ctx.get("/api/mcp/tokens")).await;
     assert_eq!(list[0]["stalePermissions"], json!(["legacy:read_things"]));
 
-    let tools = call(&ctx, &issued.token, "tools/list", json!({})).await;
+    let tools = call(ctx, &issued.token, "tools/list", json!({})).await;
     assert_eq!(
         strings(&tools["result"]["tools"], "name"),
         ["openshop.shops.list", "openshop.logs.search"]
     );
-    ctx.shutdown().await.unwrap();
 }
 
-#[tokio::test]
-async fn token_details_include_the_ten_most_recent_audits() {
-    let ctx = context().await;
-    let issued = create_token(&ctx, &[]).await;
+#[openshop::test(context())]
+async fn token_details_include_the_ten_most_recent_audits(ctx: &TestContext) {
+    let issued = create_token(ctx, &[]).await;
 
-    let denied = call_tool(&ctx, &issued.token, "openshop.flows.list", json!({})).await;
+    let denied = call_tool(ctx, &issued.token, "openshop.flows.list", json!({})).await;
     assert_eq!(denied["error"]["code"], -32003);
-    let listed = call_tool(&ctx, &issued.token, "openshop.shops.list", json!({})).await;
+    let listed = call_tool(ctx, &issued.token, "openshop.shops.list", json!({})).await;
     assert!(listed.get("error").is_none());
 
-    let detail = token_detail(&ctx, &issued).await;
+    let detail = token_detail(ctx, &issued).await;
     let recent = detail["recentAudits"].as_array().unwrap();
     assert_eq!(recent.len(), 2);
     let newest = &recent[0];
@@ -988,16 +956,14 @@ async fn token_details_include_the_ten_most_recent_audits() {
         .await
         .unwrap();
 
-    let detail = token_detail(&ctx, &issued).await;
+    let detail = token_detail(ctx, &issued).await;
     let expected: Vec<String> = (2..12).rev().map(|index| format!("bulk.{index}")).collect();
     assert_eq!(strings(&detail["recentAudits"], "capabilityName"), expected);
-    ctx.shutdown().await.unwrap();
 }
 
-#[tokio::test]
-async fn admin_token_list_is_isolated_by_shop() {
-    let ctx = context().await;
-    let shop_b = create_token_as(&ctx, SHOP_B, &["read_logs"], json!({})).await;
+#[openshop::test(context())]
+async fn admin_token_list_is_isolated_by_shop(ctx: &TestContext) {
+    let shop_b = create_token_as(ctx, SHOP_B, &["read_logs"], json!({})).await;
     let contains = |list: &Value| {
         list.as_array()
             .unwrap()
@@ -1007,7 +973,7 @@ async fn admin_token_list_is_isolated_by_shop() {
 
     let (_, list_a) = send(ctx.get("/api/mcp/tokens")).await;
     assert!(!contains(&list_a));
-    let (_, list_b) = send(admin_as(&ctx, Method::GET, "/api/mcp/tokens", SHOP_B)).await;
+    let (_, list_b) = send(admin_as(ctx, Method::GET, "/api/mcp/tokens", SHOP_B)).await;
     assert!(contains(&list_b));
 
     // Another shop can neither read nor change the token.
@@ -1028,21 +994,18 @@ async fn admin_token_list_is_isolated_by_shop() {
         assert_eq!(error, json!({ "error": "Token not found" }));
     }
 
-    let (status, detail) = send(admin_as(&ctx, Method::GET, &shop_b.path(""), SHOP_B)).await;
+    let (status, detail) = send(admin_as(ctx, Method::GET, &shop_b.path(""), SHOP_B)).await;
     assert_eq!(status, 200);
     assert_eq!(detail["name"], "test token");
     assert_eq!(detail["status"], "active");
     assert_eq!(detail["permissions"], json!(["read_logs"]));
     assert_eq!(detail["tokenFingerprint"], shop_b.item["tokenFingerprint"]);
-    let (status, _) = initialize_status(&ctx, &shop_b.token).await;
+    let (status, _) = initialize_status(ctx, &shop_b.token).await;
     assert_eq!(status, 200);
-    ctx.shutdown().await.unwrap();
 }
 
-#[tokio::test]
-async fn unknown_and_malformed_token_ids_are_not_found() {
-    let ctx = context().await;
-
+#[openshop::test(context())]
+async fn unknown_and_malformed_token_ids_are_not_found(ctx: &TestContext) {
     for id in [Uuid::new_v4().to_string(), "not-a-uuid".to_string()] {
         let attempts = [
             (Method::GET, format!("/api/mcp/tokens/{id}")),
@@ -1057,89 +1020,82 @@ async fn unknown_and_malformed_token_ids_are_not_found() {
             assert_eq!(error, json!({ "error": "Token not found" }));
         }
     }
-    ctx.shutdown().await.unwrap();
 }
 
 // ─── MCP endpoint: authentication and transport ──────────────────────
 
-#[tokio::test]
-async fn mcp_rejects_missing_and_invalid_bearer_tokens() {
-    let ctx = context().await;
+#[openshop::test(context())]
+async fn mcp_rejects_missing_and_invalid_bearer_tokens(ctx: &TestContext) {
     let initialize = json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize" }).to_string();
-    let issued = create_token(&ctx, &[]).await;
+    let issued = create_token(ctx, &[]).await;
 
     let missing = json!({ "error": "Unauthorized: missing MCP bearer token" });
-    let (status, body) = mcp_send(&ctx, None, initialize.clone()).await;
+    let (status, body) = mcp_send(ctx, None, initialize.clone()).await;
     assert_eq!((status, body), (401, missing.clone()));
     for authorization in ["Basic abc", "Bearer", &format!("bearer {}", issued.token)] {
-        let (status, body) = mcp_send(&ctx, Some(authorization), initialize.clone()).await;
+        let (status, body) = mcp_send(ctx, Some(authorization), initialize.clone()).await;
         assert_eq!((status, body), (401, missing.clone()), "{authorization}");
     }
 
     // A Shopify session token is not an MCP token.
     let malformed = json!({ "error": "Unauthorized: invalid MCP token format" });
     for token in ["not-a-token", "oshp_mcp_tok_abc.secret", &ctx.session_token()] {
-        let (status, body) = mcp_send(&ctx, Some(&bearer(token)), initialize.clone()).await;
+        let (status, body) = mcp_send(ctx, Some(&bearer(token)), initialize.clone()).await;
         assert_eq!((status, body), (401, malformed.clone()), "{token}");
     }
 
-    let (status, body) = mcp_send(&ctx, Some("Bearer oshp_mcp_mtk_unknown.secret"), initialize.clone()).await;
+    let (status, body) = mcp_send(ctx, Some("Bearer oshp_mcp_mtk_unknown.secret"), initialize.clone()).await;
     assert_eq!(status, 401);
     assert_eq!(body, json!({ "error": "Unauthorized: unknown MCP token" }));
 
-    let (status, body) = mcp_send(&ctx, Some(&bearer(&format!("{}x", issued.token))), initialize.clone()).await;
+    let (status, body) = mcp_send(ctx, Some(&bearer(&format!("{}x", issued.token))), initialize.clone()).await;
     assert_eq!(status, 401);
     assert_eq!(body, json!({ "error": "Unauthorized: invalid MCP token" }));
 
     // Rejected attempts do not count as usage.
-    assert_eq!(token_detail(&ctx, &issued).await["lastUsedAt"], Value::Null);
-    ctx.shutdown().await.unwrap();
+    assert_eq!(token_detail(ctx, &issued).await["lastUsedAt"], Value::Null);
 }
 
-#[tokio::test]
-async fn mcp_rejects_expired_and_revoked_tokens() {
-    let ctx = context().await;
+#[openshop::test(context())]
+async fn mcp_rejects_expired_and_revoked_tokens(ctx: &TestContext) {
     let shop = ctx.shop.clone();
 
     let expires_at = (Utc::now() - chrono::Duration::seconds(60)).to_rfc3339();
-    let expired = create_token_as(&ctx, &shop, &[], json!({ "expiresAt": expires_at })).await;
-    let (status, body) = initialize_status(&ctx, &expired.token).await;
+    let expired = create_token_as(ctx, &shop, &[], json!({ "expiresAt": expires_at })).await;
+    let (status, body) = initialize_status(ctx, &expired.token).await;
     assert_eq!(status, 403);
     assert_eq!(body, json!({ "error": "Forbidden: MCP token has expired" }));
 
-    let active = create_token(&ctx, &[]).await;
+    let active = create_token(ctx, &[]).await;
     send(ctx.post(&active.path("/revoke"))).await;
-    let (status, body) = initialize_status(&ctx, &active.token).await;
+    let (status, body) = initialize_status(ctx, &active.token).await;
     assert_eq!(status, 403);
     assert_eq!(body, json!({ "error": "Forbidden: MCP token is not active" }));
 
     // The state of a token is only disclosed to whoever holds its secret.
-    let (status, body) = initialize_status(&ctx, &format!("{}x", active.token)).await;
+    let (status, body) = initialize_status(ctx, &format!("{}x", active.token)).await;
     assert_eq!(status, 401);
     assert_eq!(body, json!({ "error": "Unauthorized: invalid MCP token" }));
 
     for issued in [&expired, &active] {
-        assert_eq!(token_detail(&ctx, issued).await["lastUsedAt"], Value::Null);
-        assert!(audits(&ctx, &issued.token_id).await.is_empty());
+        assert_eq!(token_detail(ctx, issued).await["lastUsedAt"], Value::Null);
+        assert!(audits(ctx, &issued.token_id).await.is_empty());
     }
-    ctx.shutdown().await.unwrap();
 }
 
-#[tokio::test]
-async fn mcp_calls_update_last_used_at() {
-    let ctx = context().await;
-    let issued = create_token(&ctx, &[]).await;
+#[openshop::test(context())]
+async fn mcp_calls_update_last_used_at(ctx: &TestContext) {
+    let issued = create_token(ctx, &[]).await;
     assert_eq!(issued.item["lastUsedAt"], Value::Null);
 
     let before = Utc::now() - chrono::Duration::seconds(1);
-    let (status, _) = initialize_status(&ctx, &issued.token).await;
+    let (status, _) = initialize_status(ctx, &issued.token).await;
     assert_eq!(status, 200);
 
-    let detail = token_detail(&ctx, &issued).await;
+    let detail = token_detail(ctx, &issued).await;
     let last_used_at = timestamp(&detail["lastUsedAt"]);
     assert!(last_used_at >= before, "{last_used_at} < {before}");
     assert!(timestamp(&detail["updatedAt"]) >= last_used_at - chrono::Duration::milliseconds(1));
-    ctx.shutdown().await.unwrap();
 }
 
 #[tokio::test]
@@ -1149,7 +1105,7 @@ async fn mcp_is_rejected_when_disabled_in_the_config() {
     let config = OpenShopConfig::builder()
         .flow(log_flow())
         .mcp(McpConfig::disabled())
-        .page(AdminPageId::Mcp, AdminPageMode::Visible)
+        .builtin_page(AdminPageId::Mcp, AdminPageMode::Visible)
         .build()
         .unwrap();
     let ctx = TestContext::new(config).await.unwrap();
@@ -1202,22 +1158,21 @@ async fn post_mcp_chunked(ctx: &TestContext, token: &str, body: String) -> Strin
     .unwrap()
 }
 
-#[tokio::test]
-async fn mcp_rejects_oversized_request_bodies_without_relying_on_content_length() {
-    let ctx = context().await;
-    let issued = create_token(&ctx, &["read_logs"]).await;
+#[openshop::test(context())]
+async fn mcp_rejects_oversized_request_bodies_without_relying_on_content_length(ctx: &TestContext) {
+    let issued = create_token(ctx, &["read_logs"]).await;
     let authorization = bearer(&issued.token);
 
-    let (status, body) = mcp_send(&ctx, Some(&authorization), padded_request(MAX_PAYLOAD_BYTES + 1)).await;
+    let (status, body) = mcp_send(ctx, Some(&authorization), padded_request(MAX_PAYLOAD_BYTES + 1)).await;
     assert_eq!(status, 413);
     assert_eq!(body, json!({ "error": "MCP payload too large" }));
 
     // The limit itself is still accepted.
-    let (status, body) = mcp_send(&ctx, Some(&authorization), padded_request(MAX_PAYLOAD_BYTES)).await;
+    let (status, body) = mcp_send(ctx, Some(&authorization), padded_request(MAX_PAYLOAD_BYTES)).await;
     assert_eq!(status, 200, "{body}");
     assert_eq!(body["result"]["protocolVersion"], PROTOCOL_VERSION);
 
-    let response = post_mcp_chunked(&ctx, &issued.token, padded_request(MAX_PAYLOAD_BYTES + 1)).await;
+    let response = post_mcp_chunked(ctx, &issued.token, padded_request(MAX_PAYLOAD_BYTES + 1)).await;
     let (head, body) = response.split_once("\r\n\r\n").expect("HTTP response");
     assert!(head.starts_with("HTTP/1.1 413 "), "{head}");
     assert!(
@@ -1226,15 +1181,13 @@ async fn mcp_rejects_oversized_request_bodies_without_relying_on_content_length(
     );
     assert!(body.contains("MCP payload too large"), "{body}");
 
-    let response = post_mcp_chunked(&ctx, &issued.token, padded_request(4_096)).await;
+    let response = post_mcp_chunked(ctx, &issued.token, padded_request(4_096)).await;
     assert!(response.starts_with("HTTP/1.1 200 "), "{response}");
-    ctx.shutdown().await.unwrap();
 }
 
-#[tokio::test]
-async fn mcp_rejects_invalid_json_rpc_requests() {
-    let ctx = context().await;
-    let issued = create_token(&ctx, &[]).await;
+#[openshop::test(context())]
+async fn mcp_rejects_invalid_json_rpc_requests(ctx: &TestContext) {
+    let issued = create_token(ctx, &[]).await;
     let authorization = bearer(&issued.token);
 
     let invalid = json!({
@@ -1249,20 +1202,18 @@ async fn mcp_rejects_invalid_json_rpc_requests() {
         r#"{"jsonrpc":"1.0","id":1,"method":"initialize"}"#,
         r#"{"jsonrpc":"2.0","id":1,"method":7}"#,
     ] {
-        let (status, response) = mcp_send(&ctx, Some(&authorization), body).await;
+        let (status, response) = mcp_send(ctx, Some(&authorization), body).await;
         assert_eq!((status, response), (400, invalid.clone()), "{body}");
     }
-    assert!(audits(&ctx, &issued.token_id).await.is_empty());
-    ctx.shutdown().await.unwrap();
+    assert!(audits(ctx, &issued.token_id).await.is_empty());
 }
 
-#[tokio::test]
-async fn mcp_accepts_notifications_and_reports_unknown_methods() {
-    let ctx = context().await;
-    let issued = create_token(&ctx, &[]).await;
+#[openshop::test(context())]
+async fn mcp_accepts_notifications_and_reports_unknown_methods(ctx: &TestContext) {
+    let issued = create_token(ctx, &[]).await;
 
     let (status, body) = rpc(
-        &ctx,
+        ctx,
         &issued.token,
         json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }),
     )
@@ -1272,7 +1223,7 @@ async fn mcp_accepts_notifications_and_reports_unknown_methods() {
 
     // With an id it is an ordinary request for a method that does not exist.
     let (status, body) = rpc(
-        &ctx,
+        ctx,
         &issued.token,
         json!({ "jsonrpc": "2.0", "id": 7, "method": "notifications/initialized" }),
     )
@@ -1288,7 +1239,7 @@ async fn mcp_accepts_notifications_and_reports_unknown_methods() {
     );
 
     let (status, body) = rpc(
-        &ctx,
+        ctx,
         &issued.token,
         json!({ "jsonrpc": "2.0", "id": "abc", "method": "prompts/list" }),
     )
@@ -1301,20 +1252,18 @@ async fn mcp_accepts_notifications_and_reports_unknown_methods() {
     );
 
     // Requests without an id are answered with a null id.
-    let (status, body) = rpc(&ctx, &issued.token, json!({ "jsonrpc": "2.0", "method": "tools/list" })).await;
+    let (status, body) = rpc(ctx, &issued.token, json!({ "jsonrpc": "2.0", "method": "tools/list" })).await;
     assert_eq!(status, 200);
     assert_eq!(body["id"], Value::Null);
     assert_eq!(strings(&body["result"]["tools"], "name"), ["openshop.shops.list"]);
-    ctx.shutdown().await.unwrap();
 }
 
-#[tokio::test]
-async fn initialize_describes_the_server() {
-    let ctx = context().await;
-    let issued = create_token(&ctx, &[]).await;
+#[openshop::test(context())]
+async fn initialize_describes_the_server(ctx: &TestContext) {
+    let issued = create_token(ctx, &[]).await;
 
     let (status, body) = rpc(
-        &ctx,
+        ctx,
         &issued.token,
         json!({ "jsonrpc": "2.0", "id": "init-1", "method": "initialize", "params": { "protocolVersion": "2025-06-18" } }),
     )
@@ -1346,18 +1295,16 @@ async fn initialize_describes_the_server() {
     .await;
     assert_eq!(status, 200);
     assert_eq!(body["result"]["serverInfo"]["name"], "openshop");
-    assert!(audits(&ctx, &issued.token_id).await.is_empty());
-    ctx.shutdown().await.unwrap();
+    assert!(audits(ctx, &issued.token_id).await.is_empty());
 }
 
 // ─── MCP endpoint: listings ──────────────────────────────────────────
 
-#[tokio::test]
-async fn tools_list_only_returns_tools_allowed_by_granted_permissions() {
-    let ctx = context().await;
-    let issued = create_token(&ctx, &["read_logs"]).await;
+#[openshop::test(context())]
+async fn tools_list_only_returns_tools_allowed_by_granted_permissions(ctx: &TestContext) {
+    let issued = create_token(ctx, &["read_logs"]).await;
 
-    let body = call(&ctx, &issued.token, "tools/list", Value::Null).await;
+    let body = call(ctx, &issued.token, "tools/list", Value::Null).await;
     let names = strings(&body["result"]["tools"], "name");
     assert!(names.contains(&"openshop.shops.list".to_string()));
     assert!(names.contains(&"openshop.logs.search".to_string()));
@@ -1376,8 +1323,8 @@ async fn tools_list_only_returns_tools_allowed_by_granted_permissions() {
 
     // Core tools come first, then the application's tools.
     let everything = [&CORE_PERMISSIONS[..], &["demo:read_status"]].concat();
-    let all = create_token(&ctx, &everything).await;
-    let body = call(&ctx, &all.token, "tools/list", json!({})).await;
+    let all = create_token(ctx, &everything).await;
+    let body = call(ctx, &all.token, "tools/list", json!({})).await;
     let tools = &body["result"]["tools"];
     assert_eq!(strings(tools, "name"), [&CORE_TOOLS[..], &["demo.status"]].concat());
     // A tool without a schema accepts any object.
@@ -1389,15 +1336,12 @@ async fn tools_list_only_returns_tools_allowed_by_granted_permissions() {
             "inputSchema": { "type": "object", "properties": {} },
         })
     );
-    ctx.shutdown().await.unwrap();
 }
 
-#[tokio::test]
-async fn resources_list_only_returns_resources_allowed_by_granted_permissions() {
-    let ctx = context().await;
-
-    let none = create_token(&ctx, &[]).await;
-    let body = call(&ctx, &none.token, "resources/list", json!({})).await;
+#[openshop::test(context())]
+async fn resources_list_only_returns_resources_allowed_by_granted_permissions(ctx: &TestContext) {
+    let none = create_token(ctx, &[]).await;
+    let body = call(ctx, &none.token, "resources/list", json!({})).await;
     assert_eq!(
         body["result"]["resources"],
         json!([
@@ -1411,8 +1355,8 @@ async fn resources_list_only_returns_resources_allowed_by_granted_permissions() 
         ])
     );
 
-    let logs = create_token(&ctx, &["read_logs"]).await;
-    let body = call(&ctx, &logs.token, "resources/list", json!({})).await;
+    let logs = create_token(ctx, &["read_logs"]).await;
+    let body = call(ctx, &logs.token, "resources/list", json!({})).await;
     assert_eq!(
         strings(&body["result"]["resources"], "uri"),
         [
@@ -1423,25 +1367,23 @@ async fn resources_list_only_returns_resources_allowed_by_granted_permissions() 
         ]
     );
 
-    let flows = create_token(&ctx, &["read_logs", "read_flows"]).await;
-    let body = call(&ctx, &flows.token, "resources/list", json!({})).await;
+    let flows = create_token(ctx, &["read_logs", "read_flows"]).await;
+    let body = call(ctx, &flows.token, "resources/list", json!({})).await;
     assert_eq!(
         strings(&body["result"]["resources"], "uri"),
         [&CORE_RESOURCES[..], &["openshop://demo/status"]].concat()
     );
-    ctx.shutdown().await.unwrap();
 }
 
-#[tokio::test]
-async fn resources_list_and_resources_read_expose_documentation_resources() {
-    let ctx = context().await;
-    let issued = create_token(&ctx, &["read_logs"]).await;
+#[openshop::test(context())]
+async fn resources_list_and_resources_read_expose_documentation_resources(ctx: &TestContext) {
+    let issued = create_token(ctx, &["read_logs"]).await;
 
-    let list = call(&ctx, &issued.token, "resources/list", json!({})).await;
+    let list = call(ctx, &issued.token, "resources/list", json!({})).await;
     let uris = strings(&list["result"]["resources"], "uri");
     assert!(uris.contains(&"openshop://docs/log-search".to_string()));
 
-    let read = read_resource(&ctx, &issued.token, "openshop://docs/log-search").await;
+    let read = read_resource(ctx, &issued.token, "openshop://docs/log-search").await;
     let contents = read["result"]["contents"].as_array().unwrap();
     assert_eq!(contents.len(), 1);
     assert_eq!(contents[0]["uri"], "openshop://docs/log-search");
@@ -1450,7 +1392,7 @@ async fn resources_list_and_resources_read_expose_documentation_resources() {
     assert!(text.starts_with("# OpenShop log search\n"));
     assert!(text.contains("openshop.logs.search"));
 
-    let recorded = audits(&ctx, &issued.token_id).await;
+    let recorded = audits(ctx, &issued.token_id).await;
     assert_eq!(recorded.len(), 1);
     assert_eq!(recorded[0].capability_type.as_deref(), Some("resource"));
     assert_eq!(
@@ -1459,34 +1401,32 @@ async fn resources_list_and_resources_read_expose_documentation_resources() {
     );
     assert_eq!(recorded[0].permission_keys, Some(json!(["read_logs"])));
     assert_eq!(recorded[0].status, "success");
-    ctx.shutdown().await.unwrap();
 }
 
-#[tokio::test]
-async fn resources_read_enforces_permissions_and_reports_unknown_resources() {
-    let ctx = context().await;
-    let issued = create_token(&ctx, &[]).await;
+#[openshop::test(context())]
+async fn resources_read_enforces_permissions_and_reports_unknown_resources(ctx: &TestContext) {
+    let issued = create_token(ctx, &[]).await;
 
-    let denied = read_resource(&ctx, &issued.token, "openshop://docs/log-search").await;
+    let denied = read_resource(ctx, &issued.token, "openshop://docs/log-search").await;
     assert_eq!(
         denied["error"],
         json!({ "code": -32003, "message": "Permission denied for resource \"openshop://docs/log-search\"" })
     );
     assert!(denied.get("result").is_none());
 
-    let unknown = read_resource(&ctx, &issued.token, "openshop://nope").await;
+    let unknown = read_resource(ctx, &issued.token, "openshop://nope").await;
     assert_eq!(
         unknown["error"],
         json!({ "code": -32602, "message": "Unknown resource \"openshop://nope\"" })
     );
-    let missing = call(&ctx, &issued.token, "resources/read", json!({})).await;
+    let missing = call(ctx, &issued.token, "resources/read", json!({})).await;
     assert_eq!(
         missing["error"],
         json!({ "code": -32602, "message": "Unknown resource \"\"" })
     );
 
     // Only the denied read of an existing resource is audited.
-    let recorded = audits(&ctx, &issued.token_id).await;
+    let recorded = audits(ctx, &issued.token_id).await;
     assert_eq!(recorded.len(), 1);
     assert_eq!(recorded[0].capability_type.as_deref(), Some("resource"));
     assert_eq!(
@@ -1496,16 +1436,14 @@ async fn resources_read_enforces_permissions_and_reports_unknown_resources() {
     assert_eq!(recorded[0].permission_keys, Some(json!(["read_logs"])));
     assert_eq!(recorded[0].status, "denied");
     assert_eq!(recorded[0].error.as_deref(), Some("Permission denied"));
-    ctx.shutdown().await.unwrap();
 }
 
-#[tokio::test]
-async fn core_resources_describe_permissions_tools_and_recent_runs() {
-    let ctx = context().await;
+#[openshop::test(context())]
+async fn core_resources_describe_permissions_tools_and_recent_runs(ctx: &TestContext) {
     let shop = ctx.shop.clone();
-    let own_run = logged_run(&ctx, "default", &shop).await;
-    logged_run(&ctx, "default", SHOP_B).await;
-    let issued = create_token(&ctx, &["read_logs", "read_flows"]).await;
+    let own_run = logged_run(ctx, "default", &shop).await;
+    logged_run(ctx, "default", SHOP_B).await;
+    let issued = create_token(ctx, &["read_logs", "read_flows"]).await;
 
     let content = |body: &Value| -> (String, Value) {
         let content = &body["result"]["contents"][0];
@@ -1513,7 +1451,7 @@ async fn core_resources_describe_permissions_tools_and_recent_runs() {
         (content["mimeType"].as_str().unwrap().to_string(), parsed)
     };
 
-    let (mime_type, permissions) = content(&read_resource(&ctx, &issued.token, "openshop://permissions").await);
+    let (mime_type, permissions) = content(&read_resource(ctx, &issued.token, "openshop://permissions").await);
     assert_eq!(mime_type, "application/json");
     let core: Vec<&String> = permissions["core"].as_object().unwrap().keys().collect();
     assert_eq!(core, CORE_PERMISSIONS);
@@ -1527,7 +1465,7 @@ async fn core_resources_describe_permissions_tools_and_recent_runs() {
     );
 
     let (mime_type, reference) =
-        content(&read_resource(&ctx, &issued.token, "openshop://tools/openshop.logs.search").await);
+        content(&read_resource(ctx, &issued.token, "openshop://tools/openshop.logs.search").await);
     assert_eq!(mime_type, "application/json");
     assert_eq!(reference["name"], "openshop.logs.search");
     assert_eq!(reference["description"], "Search logs for a visible OpenShop flow run.");
@@ -1535,7 +1473,7 @@ async fn core_resources_describe_permissions_tools_and_recent_runs() {
     assert_eq!(reference["inputSchema"]["properties"]["limit"]["maximum"], 200);
 
     // Only the runs of the token's shop.
-    let (mime_type, recent) = content(&read_resource(&ctx, &issued.token, "openshop://runs/recent").await);
+    let (mime_type, recent) = content(&read_resource(ctx, &issued.token, "openshop://runs/recent").await);
     assert_eq!(mime_type, "application/json");
     let runs = recent["runs"].as_array().unwrap();
     assert_eq!(runs.len(), 1);
@@ -1543,20 +1481,18 @@ async fn core_resources_describe_permissions_tools_and_recent_runs() {
     assert_eq!(runs[0]["flowName"], "log-flow");
     assert_eq!(runs[0]["status"], "completed");
     assert!(timestamp(&runs[0]["completedAt"]) >= timestamp(&runs[0]["createdAt"]));
-    ctx.shutdown().await.unwrap();
 }
 
 // ─── MCP endpoint: tools/call ────────────────────────────────────────
 
-#[tokio::test]
-async fn tools_call_denies_missing_permissions_and_writes_audit() {
-    let ctx = context().await;
+#[openshop::test(context())]
+async fn tools_call_denies_missing_permissions_and_writes_audit(ctx: &TestContext) {
     let shop = ctx.shop.clone();
-    let run_id = logged_run(&ctx, "default", &shop).await;
-    let issued = create_token(&ctx, &[]).await;
+    let run_id = logged_run(ctx, "default", &shop).await;
+    let issued = create_token(ctx, &[]).await;
 
     let (status, body) = rpc(
-        &ctx,
+        ctx,
         &issued.token,
         json!({
             "jsonrpc": "2.0",
@@ -1576,7 +1512,7 @@ async fn tools_call_denies_missing_permissions_and_writes_audit() {
         })
     );
 
-    let recorded = audits(&ctx, &issued.token_id).await;
+    let recorded = audits(ctx, &issued.token_id).await;
     assert_eq!(recorded.len(), 1);
     let audit = &recorded[0];
     assert_eq!(audit.status, "denied");
@@ -1589,7 +1525,6 @@ async fn tools_call_denies_missing_permissions_and_writes_audit() {
     assert_eq!(audit.target_shop, None);
     assert_eq!(audit.request_id.as_deref(), Some("req-42"));
     assert!(audit.duration_ms.is_some_and(|duration| duration >= 0));
-    ctx.shutdown().await.unwrap();
 }
 
 #[tokio::test]
@@ -1681,12 +1616,11 @@ async fn tools_call_validates_arguments_before_running_a_tool() {
     ctx.shutdown().await.unwrap();
 }
 
-#[tokio::test]
-async fn custom_tools_and_resources_are_served_and_audited() {
-    let ctx = context().await;
-    let issued = create_token(&ctx, &["demo:read_status"]).await;
+#[openshop::test(context())]
+async fn custom_tools_and_resources_are_served_and_audited(ctx: &TestContext) {
+    let issued = create_token(ctx, &["demo:read_status"]).await;
 
-    let body = call_tool(&ctx, &issued.token, "demo.status", json!({})).await;
+    let body = call_tool(ctx, &issued.token, "demo.status", json!({})).await;
     assert_eq!(
         body["result"],
         json!({
@@ -1695,16 +1629,16 @@ async fn custom_tools_and_resources_are_served_and_audited() {
         })
     );
     // Arguments may be omitted altogether.
-    let body = call(&ctx, &issued.token, "tools/call", json!({ "name": "demo.status" })).await;
+    let body = call(ctx, &issued.token, "tools/call", json!({ "name": "demo.status" })).await;
     assert_eq!(body["result"]["structuredContent"], json!({ "ok": true }));
 
-    let body = read_resource(&ctx, &issued.token, "openshop://demo/status").await;
+    let body = read_resource(ctx, &issued.token, "openshop://demo/status").await;
     assert_eq!(
         body["result"],
         json!({ "contents": [{ "uri": "openshop://demo/status", "mimeType": "text/plain", "text": "demo" }] })
     );
 
-    let recorded = audits(&ctx, &issued.token_id).await;
+    let recorded = audits(ctx, &issued.token_id).await;
     let summary: Vec<Value> = recorded
         .iter()
         .map(|audit| {
@@ -1727,10 +1661,9 @@ async fn custom_tools_and_resources_are_served_and_audited() {
     assert!(recorded.iter().all(|audit| audit.error.is_none()));
 
     // Without the custom permission the tool is neither listed nor callable.
-    let other = create_token(&ctx, &["read_logs"]).await;
-    let body = call_tool(&ctx, &other.token, "demo.status", json!({})).await;
+    let other = create_token(ctx, &["read_logs"]).await;
+    let body = call_tool(ctx, &other.token, "demo.status", json!({})).await;
     assert_eq!(body["error"]["code"], -32003);
-    ctx.shutdown().await.unwrap();
 }
 
 fn showcase_mcp() -> McpConfig {
@@ -1807,12 +1740,11 @@ fn showcase_mcp() -> McpConfig {
         )
 }
 
-#[tokio::test]
-async fn custom_tools_receive_the_execution_context_and_have_their_results_normalized() {
-    let ctx = TestContext::new(config_with(showcase_mcp())).await.unwrap();
-    let issued = create_token(&ctx, &["demo:use_tools", "read_logs"]).await;
+#[openshop::test(TestContext::new(config_with(showcase_mcp())))]
+async fn custom_tools_receive_the_execution_context_and_have_their_results_normalized(ctx: &TestContext) {
+    let issued = create_token(ctx, &["demo:use_tools", "read_logs"]).await;
 
-    let body = call_tool(&ctx, &issued.token, "demo.context", json!({ "anything": [1, 2] })).await;
+    let body = call_tool(ctx, &issued.token, "demo.context", json!({ "anything": [1, 2] })).await;
     let context = &body["result"]["structuredContent"];
     assert_eq!(context["shop"], ctx.shop.as_str());
     assert_eq!(context["appHandle"], "default");
@@ -1827,38 +1759,36 @@ async fn custom_tools_receive_the_execution_context_and_have_their_results_norma
         *context
     );
 
-    let body = call_tool(&ctx, &issued.token, "demo.text", json!({})).await;
+    let body = call_tool(ctx, &issued.token, "demo.text", json!({})).await;
     assert_eq!(
         body["result"],
         json!({ "content": [{ "type": "text", "text": "plain text" }] })
     );
 
-    let body = call_tool(&ctx, &issued.token, "demo.content", json!({})).await;
+    let body = call_tool(ctx, &issued.token, "demo.content", json!({})).await;
     assert_eq!(
         body["result"],
         json!({ "content": [{ "type": "text", "text": "custom" }], "isError": false })
     );
 
-    let body = call_tool(&ctx, &issued.token, "demo.list", json!({})).await;
+    let body = call_tool(ctx, &issued.token, "demo.list", json!({})).await;
     assert_eq!(body["result"]["structuredContent"], json!([1, "two"]));
     assert_eq!(body["result"]["content"][0]["text"], "[\n  1,\n  \"two\"\n]");
 
-    let body = call_tool(&ctx, &issued.token, "demo.nothing", json!({})).await;
+    let body = call_tool(ctx, &issued.token, "demo.nothing", json!({})).await;
     assert_eq!(body["result"], json!({ "content": [{ "type": "text", "text": "" }] }));
 
     // Repeated required permissions are recorded once.
-    let recorded = audits(&ctx, &issued.token_id).await;
+    let recorded = audits(ctx, &issued.token_id).await;
     assert_eq!(recorded.len(), 5);
     assert_eq!(recorded[0].permission_keys, Some(json!(["demo:use_tools"])));
-    ctx.shutdown().await.unwrap();
 }
 
-#[tokio::test]
-async fn custom_resources_choose_their_mime_type() {
-    let ctx = TestContext::new(config_with(showcase_mcp())).await.unwrap();
-    let issued = create_token(&ctx, &["demo:use_tools"]).await;
+#[openshop::test(TestContext::new(config_with(showcase_mcp())))]
+async fn custom_resources_choose_their_mime_type(ctx: &TestContext) {
+    let issued = create_token(ctx, &["demo:use_tools"]).await;
 
-    let list = call(&ctx, &issued.token, "resources/list", json!({})).await;
+    let list = call(ctx, &issued.token, "resources/list", json!({})).await;
     let listed = list["result"]["resources"].as_array().unwrap();
     assert_eq!(
         listed[1..],
@@ -1870,7 +1800,7 @@ async fn custom_resources_choose_their_mime_type() {
     );
 
     // The content's own type wins over the definition's.
-    let body = read_resource(&ctx, &issued.token, "demo://report").await;
+    let body = read_resource(ctx, &issued.token, "demo://report").await;
     assert_eq!(
         body["result"]["contents"],
         json!([{
@@ -1879,21 +1809,19 @@ async fn custom_resources_choose_their_mime_type() {
             "text": json!({ "shop": ctx.shop }).to_string(),
         }])
     );
-    let body = read_resource(&ctx, &issued.token, "demo://notes").await;
+    let body = read_resource(ctx, &issued.token, "demo://notes").await;
     assert_eq!(
         body["result"]["contents"],
         json!([{ "uri": "demo://notes", "mimeType": "text/markdown", "text": "# Notes" }])
     );
-    ctx.shutdown().await.unwrap();
 }
 
-#[tokio::test]
-async fn tool_and_resource_errors_are_reported_and_audited() {
-    let ctx = TestContext::new(config_with(showcase_mcp())).await.unwrap();
-    let issued = create_token(&ctx, &[]).await;
+#[openshop::test(TestContext::new(config_with(showcase_mcp())))]
+async fn tool_and_resource_errors_are_reported_and_audited(ctx: &TestContext) {
+    let issued = create_token(ctx, &[]).await;
 
     let (status, body) = rpc(
-        &ctx,
+        ctx,
         &issued.token,
         json!({ "jsonrpc": "2.0", "id": 9, "method": "tools/call", "params": { "name": "demo.fail" } }),
     )
@@ -1904,10 +1832,10 @@ async fn tool_and_resource_errors_are_reported_and_audited() {
         json!({ "jsonrpc": "2.0", "id": 9, "error": { "code": -32000, "message": "boom" } })
     );
 
-    let body = read_resource(&ctx, &issued.token, "demo://broken").await;
+    let body = read_resource(ctx, &issued.token, "demo://broken").await;
     assert_eq!(body["error"], json!({ "code": -32000, "message": "unreadable" }));
 
-    let recorded = audits(&ctx, &issued.token_id).await;
+    let recorded = audits(ctx, &issued.token_id).await;
     assert_eq!(recorded.len(), 2);
     assert_eq!(recorded[0].capability_type.as_deref(), Some("tool"));
     assert_eq!(recorded[0].capability_name.as_deref(), Some("demo.fail"));
@@ -1918,28 +1846,25 @@ async fn tool_and_resource_errors_are_reported_and_audited() {
     assert_eq!(recorded[1].capability_name.as_deref(), Some("demo://broken"));
     assert_eq!(recorded[1].status, "error");
     assert_eq!(recorded[1].error.as_deref(), Some("unreadable"));
-    ctx.shutdown().await.unwrap();
 }
 
-#[tokio::test]
-async fn a_panicking_tool_is_reported_as_an_error_and_audited() {
-    let ctx = TestContext::new(config_with(showcase_mcp())).await.unwrap();
-    let issued = create_token(&ctx, &[]).await;
+#[openshop::test(TestContext::new(config_with(showcase_mcp())))]
+async fn a_panicking_tool_is_reported_as_an_error_and_audited(ctx: &TestContext) {
+    let issued = create_token(ctx, &[]).await;
 
-    let body = call_tool(&ctx, &issued.token, "demo.panic", json!({})).await;
+    let body = call_tool(ctx, &issued.token, "demo.panic", json!({})).await;
     assert_eq!(body["error"]["code"], -32000);
     assert_eq!(body["error"]["message"], "Tool \"demo.panic\" panicked");
 
-    let recorded = audits(&ctx, &issued.token_id).await;
+    let recorded = audits(ctx, &issued.token_id).await;
     assert_eq!(recorded.len(), 1);
     assert_eq!(recorded[0].capability_name.as_deref(), Some("demo.panic"));
     assert_eq!(recorded[0].status, "error");
     assert_eq!(recorded[0].error.as_deref(), Some("Tool \"demo.panic\" panicked"));
 
     // The server keeps answering.
-    let body = call_tool(&ctx, &issued.token, "demo.text", json!({})).await;
+    let body = call_tool(ctx, &issued.token, "demo.text", json!({})).await;
     assert_eq!(body["result"]["content"][0]["text"], "plain text");
-    ctx.shutdown().await.unwrap();
 }
 
 #[derive(Default)]
@@ -2071,19 +1996,20 @@ async fn a_client_disconnect_drops_the_running_tool_and_cancels_its_signal() {
 
 // ─── Core tools ──────────────────────────────────────────────────────
 
-#[tokio::test]
-async fn openshop_shops_list_is_available_without_grants_and_lists_active_installations_for_the_token_app() {
-    let ctx = context().await;
+#[openshop::test(context())]
+async fn openshop_shops_list_is_available_without_grants_and_lists_active_installations_for_the_token_app(
+    ctx: &TestContext,
+) {
     let shop = ctx.shop.clone();
-    install(&ctx, "default", &shop, Some("token-a")).await;
-    install(&ctx, "default", SHOP_B, Some("token-b")).await;
-    install(&ctx, "default", "uninstalled.myshopify.com", Some("token-c")).await;
-    uninstall(&ctx, "uninstalled.myshopify.com").await;
-    install(&ctx, "default", "pending.myshopify.com", None).await;
-    install(&ctx, "other", "hidden.myshopify.com", Some("token-d")).await;
-    let issued = create_token(&ctx, &[]).await;
+    install(ctx, "default", &shop, Some("token-a")).await;
+    install(ctx, "default", SHOP_B, Some("token-b")).await;
+    install(ctx, "default", "uninstalled.myshopify.com", Some("token-c")).await;
+    uninstall(ctx, "uninstalled.myshopify.com").await;
+    install(ctx, "default", "pending.myshopify.com", None).await;
+    install(ctx, "other", "hidden.myshopify.com", Some("token-d")).await;
+    let issued = create_token(ctx, &[]).await;
 
-    let body = call_tool(&ctx, &issued.token, "openshop.shops.list", json!({})).await;
+    let body = call_tool(ctx, &issued.token, "openshop.shops.list", json!({})).await;
     let listed = &body["result"]["structuredContent"]["shops"];
     assert_eq!(strings(listed, "shop"), [SHOP_B, shop.as_str()]);
     assert_eq!(listed[0]["scopes"], "read_products");
@@ -2096,23 +2022,21 @@ async fn openshop_shops_list_is_available_without_grants_and_lists_active_instal
         body["result"]["structuredContent"]
     );
 
-    let recorded = audits(&ctx, &issued.token_id).await;
+    let recorded = audits(ctx, &issued.token_id).await;
     assert_eq!(recorded.len(), 1);
     assert_eq!(recorded[0].status, "success");
     assert_eq!(recorded[0].permission_keys, Some(json!([])));
-    ctx.shutdown().await.unwrap();
 }
 
-#[tokio::test]
-async fn openshop_admin_graphql_requires_its_explicit_permission() {
-    let ctx = context().await;
+#[openshop::test(context())]
+async fn openshop_admin_graphql_requires_its_explicit_permission(ctx: &TestContext) {
     let shop = ctx.shop.clone();
-    install(&ctx, "default", &shop, Some("offline-admin-token")).await;
-    respond_to_graphql(&ctx, 200, json!({ "data": { "shop": { "name": "Forbidden" } } }));
-    let issued = create_token(&ctx, &CORE_PERMISSIONS[..9]).await;
+    install(ctx, "default", &shop, Some("offline-admin-token")).await;
+    respond_to_graphql(ctx, 200, json!({ "data": { "shop": { "name": "Forbidden" } } }));
+    let issued = create_token(ctx, &CORE_PERMISSIONS[..9]).await;
 
     let body = call_tool(
-        &ctx,
+        ctx,
         &issued.token,
         "openshop.admin.graphql",
         json!({ "shop": shop, "apiVersion": "2026-04", "query": "query { shop { name } }" }),
@@ -2122,23 +2046,21 @@ async fn openshop_admin_graphql_requires_its_explicit_permission() {
         body["error"],
         json!({ "code": -32003, "message": "Permission denied for tool \"openshop.admin.graphql\"" })
     );
-    assert!(graphql_requests(&ctx).is_empty());
+    assert!(graphql_requests(ctx).is_empty());
 
-    let recorded = audits(&ctx, &issued.token_id).await;
+    let recorded = audits(ctx, &issued.token_id).await;
     assert_eq!(recorded.len(), 1);
     assert_eq!(recorded[0].status, "denied");
     assert_eq!(recorded[0].permission_keys, Some(json!(["shopify_admin_graphql"])));
     assert_eq!(recorded[0].target_shop, None);
-    ctx.shutdown().await.unwrap();
 }
 
-#[tokio::test]
-async fn openshop_admin_graphql_defaults_omitted_api_version_to_the_latest_stable_version() {
-    let ctx = context().await;
+#[openshop::test(context())]
+async fn openshop_admin_graphql_defaults_omitted_api_version_to_the_latest_stable_version(ctx: &TestContext) {
     let shop = ctx.shop.clone();
-    install(&ctx, "default", &shop, Some("offline-admin-token")).await;
-    respond_to_graphql(&ctx, 200, json!({ "data": { "shop": { "name": "Latest Shop" } } }));
-    let issued = create_token(&ctx, &["shopify_admin_graphql"]).await;
+    install(ctx, "default", &shop, Some("offline-admin-token")).await;
+    respond_to_graphql(ctx, 200, json!({ "data": { "shop": { "name": "Latest Shop" } } }));
+    let issued = create_token(ctx, &["shopify_admin_graphql"]).await;
     let latest = latest_stable_shopify_admin_api_version(Utc::now());
 
     for arguments in [
@@ -2146,7 +2068,7 @@ async fn openshop_admin_graphql_defaults_omitted_api_version_to_the_latest_stabl
         json!({ "shop": shop, "query": "query { shop { name } }", "apiVersion": "latest" }),
     ] {
         ctx.transport.clear();
-        let body = call_tool(&ctx, &issued.token, "openshop.admin.graphql", arguments).await;
+        let body = call_tool(ctx, &issued.token, "openshop.admin.graphql", arguments).await;
         let result = &body["result"]["structuredContent"];
         let version = result["apiVersion"].as_str().unwrap();
         assert_eq!(version, latest);
@@ -2157,7 +2079,7 @@ async fn openshop_admin_graphql_defaults_omitted_api_version_to_the_latest_stabl
         }));
         assert_eq!(result["data"]["shop"]["name"], "Latest Shop");
 
-        let requests = graphql_requests(&ctx);
+        let requests = graphql_requests(ctx);
         assert_eq!(requests.len(), 1);
         assert_eq!(
             requests[0].url,
@@ -2168,26 +2090,26 @@ async fn openshop_admin_graphql_defaults_omitted_api_version_to_the_latest_stabl
             Some("offline-admin-token")
         );
     }
-    ctx.shutdown().await.unwrap();
 }
 
-#[tokio::test]
-async fn openshop_admin_graphql_runs_against_an_installed_shop_returns_raw_shopify_json_and_audits_the_target_shop() {
-    let ctx = context().await;
-    install(&ctx, "default", SHOP_B, Some("offline-admin-token")).await;
+#[openshop::test(context())]
+async fn openshop_admin_graphql_runs_against_an_installed_shop_returns_raw_shopify_json_and_audits_the_target_shop(
+    ctx: &TestContext,
+) {
+    install(ctx, "default", SHOP_B, Some("offline-admin-token")).await;
     respond_to_graphql(
-        &ctx,
+        ctx,
         200,
         json!({
             "data": { "shop": { "name": "Integration Shop" } },
             "extensions": { "cost": { "requestedQueryCost": 1 } },
         }),
     );
-    let issued = create_token(&ctx, &["shopify_admin_graphql"]).await;
+    let issued = create_token(ctx, &["shopify_admin_graphql"]).await;
 
     let query = "query Shop($first: Int) { shop { name } }";
     let body = call_tool(
-        &ctx,
+        ctx,
         &issued.token,
         "openshop.admin.graphql",
         json!({ "shop": SHOP_B, "apiVersion": "2026-04", "query": query, "variables": { "first": 1 } }),
@@ -2207,7 +2129,7 @@ async fn openshop_admin_graphql_runs_against_an_installed_shop_returns_raw_shopi
         expected
     );
 
-    let requests = graphql_requests(&ctx);
+    let requests = graphql_requests(ctx);
     assert_eq!(requests.len(), 1);
     assert_eq!(
         requests[0].url,
@@ -2222,21 +2144,21 @@ async fn openshop_admin_graphql_runs_against_an_installed_shop_returns_raw_shopi
 
     // The shop may be given as a URL; variables default to an empty object.
     let body = call_tool(
-        &ctx,
+        ctx,
         &issued.token,
         "openshop.admin.graphql",
         json!({ "shop": "https://MCP-Other.myshopify.com/admin", "apiVersion": "2025-10", "query": "{ shop { id } }" }),
     )
     .await;
     assert_eq!(body["result"]["structuredContent"]["shop"], SHOP_B);
-    let requests = graphql_requests(&ctx);
+    let requests = graphql_requests(ctx);
     assert_eq!(
         requests[1].url,
         format!("https://{SHOP_B}/admin/api/2025-10/graphql.json")
     );
     assert_eq!(requests[1].body, json!({ "query": "{ shop { id } }", "variables": {} }));
 
-    let recorded = audits(&ctx, &issued.token_id).await;
+    let recorded = audits(ctx, &issued.token_id).await;
     assert_eq!(recorded.len(), 2);
     for audit in &recorded {
         assert_eq!(audit.shop, ctx.shop);
@@ -2244,19 +2166,17 @@ async fn openshop_admin_graphql_runs_against_an_installed_shop_returns_raw_shopi
         assert_eq!(audit.status, "success");
         assert_eq!(audit.capability_name.as_deref(), Some("openshop.admin.graphql"));
     }
-    ctx.shutdown().await.unwrap();
 }
 
-#[tokio::test]
-async fn openshop_admin_graphql_refuses_shops_that_are_not_installed_for_the_token_app() {
-    let ctx = context().await;
-    install(&ctx, "default", "uninstalled.myshopify.com", Some("token-c")).await;
-    uninstall(&ctx, "uninstalled.myshopify.com").await;
-    install(&ctx, "default", "pending.myshopify.com", None).await;
-    install(&ctx, "other", "hidden.myshopify.com", Some("token-d")).await;
-    install(&ctx, "default", SHOP_B, Some("token-b")).await;
-    respond_to_graphql(&ctx, 200, json!({ "data": {} }));
-    let issued = create_token(&ctx, &["shopify_admin_graphql"]).await;
+#[openshop::test(context())]
+async fn openshop_admin_graphql_refuses_shops_that_are_not_installed_for_the_token_app(ctx: &TestContext) {
+    install(ctx, "default", "uninstalled.myshopify.com", Some("token-c")).await;
+    uninstall(ctx, "uninstalled.myshopify.com").await;
+    install(ctx, "default", "pending.myshopify.com", None).await;
+    install(ctx, "other", "hidden.myshopify.com", Some("token-d")).await;
+    install(ctx, "default", SHOP_B, Some("token-b")).await;
+    respond_to_graphql(ctx, 200, json!({ "data": {} }));
+    let issued = create_token(ctx, &["shopify_admin_graphql"]).await;
 
     for shop in [
         "missing.myshopify.com",
@@ -2265,7 +2185,7 @@ async fn openshop_admin_graphql_refuses_shops_that_are_not_installed_for_the_tok
         "hidden.myshopify.com",
     ] {
         let body = call_tool(
-            &ctx,
+            ctx,
             &issued.token,
             "openshop.admin.graphql",
             json!({ "shop": shop, "query": "{ shop { name } }" }),
@@ -2287,13 +2207,13 @@ async fn openshop_admin_graphql_refuses_shops_that_are_not_installed_for_the_tok
         ),
     ];
     for (arguments, message) in invalid {
-        let body = call_tool(&ctx, &issued.token, "openshop.admin.graphql", arguments).await;
+        let body = call_tool(ctx, &issued.token, "openshop.admin.graphql", arguments).await;
         assert_eq!(body["error"], json!({ "code": -32000, "message": message }));
     }
-    assert!(graphql_requests(&ctx).is_empty());
+    assert!(graphql_requests(ctx).is_empty());
 
     // Refused calls are audited with the shop they aimed at.
-    let recorded = audits(&ctx, &issued.token_id).await;
+    let recorded = audits(ctx, &issued.token_id).await;
     assert_eq!(recorded.len(), 7);
     assert!(recorded.iter().all(|audit| audit.status == "error"));
     assert_eq!(recorded[0].target_shop.as_deref(), Some("missing.myshopify.com"));
@@ -2303,14 +2223,12 @@ async fn openshop_admin_graphql_refuses_shops_that_are_not_installed_for_the_tok
     );
     assert_eq!(recorded[3].target_shop.as_deref(), Some("hidden.myshopify.com"));
     assert_eq!(recorded[4].target_shop, None);
-    ctx.shutdown().await.unwrap();
 }
 
-#[tokio::test]
-async fn openshop_admin_graphql_reports_shopify_failures_without_hiding_them() {
-    let ctx = context().await;
-    install(&ctx, "default", SHOP_B, Some("token-b")).await;
-    let issued = create_token(&ctx, &["shopify_admin_graphql"]).await;
+#[openshop::test(context())]
+async fn openshop_admin_graphql_reports_shopify_failures_without_hiding_them(ctx: &TestContext) {
+    install(ctx, "default", SHOP_B, Some("token-b")).await;
+    let issued = create_token(ctx, &["shopify_admin_graphql"]).await;
     let arguments = json!({ "shop": SHOP_B, "apiVersion": "2026-04", "query": "{ shop { name } }" });
 
     ctx.transport.respond_with(|_| {
@@ -2319,35 +2237,34 @@ async fn openshop_admin_graphql_reports_shopify_failures_without_hiding_them() {
             body: "Bad Gateway".to_string(),
         })
     });
-    let body = call_tool(&ctx, &issued.token, "openshop.admin.graphql", arguments.clone()).await;
+    let body = call_tool(ctx, &issued.token, "openshop.admin.graphql", arguments.clone()).await;
     assert_eq!(
         body["result"]["structuredContent"],
         json!({ "shop": SHOP_B, "apiVersion": "2026-04", "status": 502, "ok": false, "responseText": "Bad Gateway" })
     );
 
     // GraphQL errors are part of the raw response.
-    respond_to_graphql(&ctx, 200, json!({ "errors": [{ "message": "Throttled" }] }));
-    let body = call_tool(&ctx, &issued.token, "openshop.admin.graphql", arguments.clone()).await;
+    respond_to_graphql(ctx, 200, json!({ "errors": [{ "message": "Throttled" }] }));
+    let body = call_tool(ctx, &issued.token, "openshop.admin.graphql", arguments.clone()).await;
     let result = &body["result"]["structuredContent"];
     assert_eq!(result["ok"], true);
     assert_eq!(result["errors"], json!([{ "message": "Throttled" }]));
     assert!(result.get("responseText").is_none());
 
-    respond_to_graphql(&ctx, 200, json!([1, 2]));
-    let body = call_tool(&ctx, &issued.token, "openshop.admin.graphql", arguments.clone()).await;
+    respond_to_graphql(ctx, 200, json!([1, 2]));
+    let body = call_tool(ctx, &issued.token, "openshop.admin.graphql", arguments.clone()).await;
     assert_eq!(body["result"]["structuredContent"]["responseText"], "[1,2]");
 
     ctx.transport.respond_with(|_| Err(anyhow!("network down")));
-    let body = call_tool(&ctx, &issued.token, "openshop.admin.graphql", arguments).await;
+    let body = call_tool(ctx, &issued.token, "openshop.admin.graphql", arguments).await;
     assert_eq!(body["error"], json!({ "code": -32000, "message": "network down" }));
 
-    let statuses: Vec<String> = audits(&ctx, &issued.token_id)
+    let statuses: Vec<String> = audits(ctx, &issued.token_id)
         .await
         .into_iter()
         .map(|audit| audit.status)
         .collect();
     assert_eq!(statuses, ["success", "success", "success", "error"]);
-    ctx.shutdown().await.unwrap();
 }
 
 #[tokio::test]
@@ -2385,15 +2302,14 @@ async fn openshop_admin_graphql_decrypts_the_stored_access_token() {
     ctx.shutdown().await.unwrap();
 }
 
-#[tokio::test]
-async fn openshop_logs_search_returns_logs_for_the_token_shop_and_writes_audit() {
-    let ctx = context().await;
+#[openshop::test(context())]
+async fn openshop_logs_search_returns_logs_for_the_token_shop_and_writes_audit(ctx: &TestContext) {
     let shop = ctx.shop.clone();
-    let run_id = logged_run(&ctx, "default", &shop).await;
-    let issued = create_token(&ctx, &["read_logs"]).await;
+    let run_id = logged_run(ctx, "default", &shop).await;
+    let issued = create_token(ctx, &["read_logs"]).await;
 
     let body = call_tool(
-        &ctx,
+        ctx,
         &issued.token,
         "openshop.logs.search",
         json!({ "runId": run_id, "q": "warn", "limit": 10 }),
@@ -2417,13 +2333,13 @@ async fn openshop_logs_search_returns_logs_for_the_token_shop_and_writes_audit()
     assert_eq!(log["_matched"], true);
     timestamp(&log["createdAt"]);
 
-    let recorded = audits(&ctx, &issued.token_id).await;
+    let recorded = audits(ctx, &issued.token_id).await;
     assert_eq!(recorded.len(), 1);
     assert_eq!(recorded[0].status, "success");
     assert_eq!(recorded[0].capability_name.as_deref(), Some("openshop.logs.search"));
 
     // Without a query every line of the default levels is returned.
-    let body = call_tool(&ctx, &issued.token, "openshop.logs.search", json!({ "runId": run_id })).await;
+    let body = call_tool(ctx, &issued.token, "openshop.logs.search", json!({ "runId": run_id })).await;
     let all = &body["result"]["structuredContent"];
     assert_eq!(all["returned"], 4);
     let mut messages = strings(&all["logs"], "message");
@@ -2440,7 +2356,7 @@ async fn openshop_logs_search_returns_logs_for_the_token_shop_and_writes_audit()
     assert!(all["logs"][0].get("_matched").is_none());
 
     let body = call_tool(
-        &ctx,
+        ctx,
         &issued.token,
         "openshop.logs.search",
         json!({ "runId": run_id, "levels": "info", "limit": 2 }),
@@ -2452,7 +2368,7 @@ async fn openshop_logs_search_returns_logs_for_the_token_shop_and_writes_audit()
     assert_eq!(strings(&limited["logs"], "level"), ["info", "info"]);
 
     let body = call_tool(
-        &ctx,
+        ctx,
         &issued.token,
         "openshop.logs.search",
         json!({ "runId": run_id, "q": "|= \"mcp\" != \"warn\"", "includeContext": false }),
@@ -2462,17 +2378,15 @@ async fn openshop_logs_search_returns_logs_for_the_token_shop_and_writes_audit()
         strings(&body["result"]["structuredContent"]["logs"], "message"),
         ["mcp info"]
     );
-    ctx.shutdown().await.unwrap();
 }
 
-#[tokio::test]
-async fn mcp_token_cannot_read_another_shop_run_logs() {
-    let ctx = context().await;
-    let other_run_id = logged_run(&ctx, "default", SHOP_B).await;
-    let issued = create_token(&ctx, &["read_logs"]).await;
+#[openshop::test(context())]
+async fn mcp_token_cannot_read_another_shop_run_logs(ctx: &TestContext) {
+    let other_run_id = logged_run(ctx, "default", SHOP_B).await;
+    let issued = create_token(ctx, &["read_logs"]).await;
 
     let body = call_tool(
-        &ctx,
+        ctx,
         &issued.token,
         "openshop.logs.search",
         json!({ "runId": other_run_id }),
@@ -2483,26 +2397,25 @@ async fn mcp_token_cannot_read_another_shop_run_logs() {
     assert!(body.get("result").is_none());
 
     for run_id in [Uuid::new_v4().to_string(), "not-a-uuid".to_string()] {
-        let body = call_tool(&ctx, &issued.token, "openshop.logs.search", json!({ "runId": run_id })).await;
+        let body = call_tool(ctx, &issued.token, "openshop.logs.search", json!({ "runId": run_id })).await;
         assert_eq!(body["error"], json!({ "code": -32000, "message": "Run not found" }));
     }
 
-    let recorded = audits(&ctx, &issued.token_id).await;
+    let recorded = audits(ctx, &issued.token_id).await;
     assert_eq!(recorded.len(), 3);
     assert!(recorded.iter().all(|audit| audit.status == "error"));
     assert_eq!(recorded[0].error.as_deref(), Some("Run not found"));
 
     // The other shop's own token does see the run.
-    let owner = create_token_as(&ctx, SHOP_B, &["read_logs"], json!({})).await;
+    let owner = create_token_as(ctx, SHOP_B, &["read_logs"], json!({})).await;
     let body = call_tool(
-        &ctx,
+        ctx,
         &owner.token,
         "openshop.logs.search",
         json!({ "runId": other_run_id }),
     )
     .await;
     assert_eq!(body["result"]["structuredContent"]["returned"], 4);
-    ctx.shutdown().await.unwrap();
 }
 
 fn automation_config() -> OpenShopConfig {
@@ -2527,12 +2440,11 @@ fn automation_config() -> OpenShopConfig {
         .unwrap()
 }
 
-#[tokio::test]
-async fn openshop_flows_list_describes_flows_and_their_crons() {
-    let ctx = TestContext::new(automation_config()).await.unwrap();
-    let issued = create_token(&ctx, &["read_flows"]).await;
+#[openshop::test(TestContext::new(automation_config()))]
+async fn openshop_flows_list_describes_flows_and_their_crons(ctx: &TestContext) {
+    let issued = create_token(ctx, &["read_flows"]).await;
 
-    let body = call_tool(&ctx, &issued.token, "openshop.flows.list", json!({})).await;
+    let body = call_tool(ctx, &issued.token, "openshop.flows.list", json!({})).await;
     assert_eq!(
         body["result"]["structuredContent"],
         json!({
@@ -2558,21 +2470,19 @@ async fn openshop_flows_list_describes_flows_and_their_crons() {
         })
     );
 
-    let body = call_tool(&ctx, &issued.token, "openshop.flows.list", json!({ "extra": 1 })).await;
+    let body = call_tool(ctx, &issued.token, "openshop.flows.list", json!({ "extra": 1 })).await;
     assert_eq!(
         body["error"],
         json!({ "code": -32602, "message": "arguments.extra is not allowed" })
     );
-    ctx.shutdown().await.unwrap();
 }
 
-#[tokio::test]
-async fn openshop_flows_run_dispatches_a_run_for_the_token_shop() {
-    let ctx = TestContext::new(automation_config()).await.unwrap();
-    let issued = create_token(&ctx, &["run_flows"]).await;
+#[openshop::test(TestContext::new(automation_config()))]
+async fn openshop_flows_run_dispatches_a_run_for_the_token_shop(ctx: &TestContext) {
+    let issued = create_token(ctx, &["run_flows"]).await;
 
     let body = call_tool(
-        &ctx,
+        ctx,
         &issued.token,
         "openshop.flows.run",
         json!({ "flow": "log-flow", "input": { "source": "mcp" } }),
@@ -2600,14 +2510,14 @@ async fn openshop_flows_run_dispatches_a_run_for_the_token_shop() {
     );
 
     // The flow rejects concurrent runs for the same shop.
-    let body = call_tool(&ctx, &issued.token, "openshop.flows.run", json!({ "flow": "log-flow" })).await;
+    let body = call_tool(ctx, &issued.token, "openshop.flows.run", json!({ "flow": "log-flow" })).await;
     let message = format!(
         "Flow \"log-flow\" is already running for shop \"{}\" (run #{run_id})",
         ctx.shop
     );
     assert_eq!(body["error"], json!({ "code": -32000, "message": message }));
 
-    let body = call_tool(&ctx, &issued.token, "openshop.flows.run", json!({ "flow": "missing" })).await;
+    let body = call_tool(ctx, &issued.token, "openshop.flows.run", json!({ "flow": "missing" })).await;
     assert_eq!(
         body["error"],
         json!({ "code": -32000, "message": "Unknown flow \"missing\"" })
@@ -2620,7 +2530,7 @@ async fn openshop_flows_run_dispatches_a_run_for_the_token_shop() {
             "arguments.input must be object",
         ),
     ] {
-        let body = call_tool(&ctx, &issued.token, "openshop.flows.run", arguments).await;
+        let body = call_tool(ctx, &issued.token, "openshop.flows.run", arguments).await;
         assert_eq!(body["error"], json!({ "code": -32602, "message": message }));
     }
 
@@ -2629,23 +2539,21 @@ async fn openshop_flows_run_dispatches_a_run_for_the_token_shop() {
         .await
         .unwrap();
     assert_eq!(runs, 1);
-    let statuses: Vec<String> = audits(&ctx, &issued.token_id)
+    let statuses: Vec<String> = audits(ctx, &issued.token_id)
         .await
         .into_iter()
         .map(|audit| audit.status)
         .collect();
     assert_eq!(statuses, ["success", "error", "error"]);
-    ctx.shutdown().await.unwrap();
 }
 
-#[tokio::test]
-async fn openshop_crons_list_and_set_enabled_are_scoped_to_the_token_shop() {
-    let ctx = TestContext::new(automation_config()).await.unwrap();
-    let manager = create_token(&ctx, &["read_crons", "manage_crons"]).await;
-    let reader = create_token_as(&ctx, SHOP_B, &["read_crons"], json!({})).await;
+#[openshop::test(TestContext::new(automation_config()))]
+async fn openshop_crons_list_and_set_enabled_are_scoped_to_the_token_shop(ctx: &TestContext) {
+    let manager = create_token(ctx, &["read_crons", "manage_crons"]).await;
+    let reader = create_token_as(ctx, SHOP_B, &["read_crons"], json!({})).await;
     let hourly = "log-flow:0 * * * *";
 
-    let body = call_tool(&ctx, &manager.token, "openshop.crons.list", json!({})).await;
+    let body = call_tool(ctx, &manager.token, "openshop.crons.list", json!({})).await;
     assert_eq!(
         body["result"]["structuredContent"],
         json!({
@@ -2675,7 +2583,7 @@ async fn openshop_crons_list_and_set_enabled_are_scoped_to_the_token_shop() {
     );
 
     let body = call_tool(
-        &ctx,
+        ctx,
         &manager.token,
         "openshop.crons.set_enabled",
         json!({ "key": hourly, "enabled": false }),
@@ -2694,13 +2602,13 @@ async fn openshop_crons_list_and_set_enabled_are_scoped_to_the_token_shop() {
             .map(|cron| cron["enabled"].as_bool().unwrap())
             .collect()
     };
-    let body = call_tool(&ctx, &manager.token, "openshop.crons.list", json!({})).await;
+    let body = call_tool(ctx, &manager.token, "openshop.crons.list", json!({})).await;
     assert_eq!(enabled(&body), [false, true]);
     // The other shop keeps its own state and cannot change anything.
-    let body = call_tool(&ctx, &reader.token, "openshop.crons.list", json!({})).await;
+    let body = call_tool(ctx, &reader.token, "openshop.crons.list", json!({})).await;
     assert_eq!(enabled(&body), [true, true]);
     let body = call_tool(
-        &ctx,
+        ctx,
         &reader.token,
         "openshop.crons.set_enabled",
         json!({ "key": hourly, "enabled": false }),
@@ -2719,7 +2627,7 @@ async fn openshop_crons_list_and_set_enabled_are_scoped_to_the_token_shop() {
     );
 
     let body = call_tool(
-        &ctx,
+        ctx,
         &manager.token,
         "openshop.crons.set_enabled",
         json!({ "key": hourly }),
@@ -2732,7 +2640,7 @@ async fn openshop_crons_list_and_set_enabled_are_scoped_to_the_token_shop() {
 
     // Enabling again updates the same override.
     call_tool(
-        &ctx,
+        ctx,
         &manager.token,
         "openshop.crons.set_enabled",
         json!({ "key": hourly, "enabled": true }),
@@ -2743,23 +2651,21 @@ async fn openshop_crons_list_and_set_enabled_are_scoped_to_the_token_shop() {
         .await
         .unwrap();
     assert_eq!(overrides, [(true,)]);
-    ctx.shutdown().await.unwrap();
 }
 
 // ─── Isolation between Shopify apps ──────────────────────────────────
 
-#[tokio::test]
-async fn mcp_tokens_only_reach_the_data_of_their_own_shopify_app() {
-    let ctx = multi_app_context().await;
+#[openshop::test(multi_app_context())]
+async fn mcp_tokens_only_reach_the_data_of_their_own_shopify_app(ctx: &TestContext) {
     let shop = ctx.shop.clone();
     let session_b = session_token(&shop, "secret-b", "key-b", "1");
-    install(&ctx, "client-a", &shop, Some("token-a")).await;
-    install(&ctx, "client-a", SHOP_B, Some("token-a2")).await;
-    install(&ctx, "client-b", &shop, Some("token-b")).await;
-    install(&ctx, "client-b", "only-b.myshopify.com", Some("token-b2")).await;
-    respond_to_graphql(&ctx, 200, json!({ "data": { "shop": { "name": "Leaked" } } }));
-    let run_a = logged_run(&ctx, "client-a", &shop).await;
-    let run_b = logged_run(&ctx, "client-b", &shop).await;
+    install(ctx, "client-a", &shop, Some("token-a")).await;
+    install(ctx, "client-a", SHOP_B, Some("token-a2")).await;
+    install(ctx, "client-b", &shop, Some("token-b")).await;
+    install(ctx, "client-b", "only-b.myshopify.com", Some("token-b2")).await;
+    respond_to_graphql(ctx, 200, json!({ "data": { "shop": { "name": "Leaked" } } }));
+    let run_a = logged_run(ctx, "client-a", &shop).await;
+    let run_b = logged_run(ctx, "client-b", &shop).await;
 
     let permissions = [
         "read_logs",
@@ -2768,39 +2674,33 @@ async fn mcp_tokens_only_reach_the_data_of_their_own_shopify_app() {
         "manage_crons",
         "shopify_admin_graphql",
     ];
-    let token_a = create_token(&ctx, &permissions).await;
-    let token_b = create_token_with(&ctx, &session_b, &["read_crons"], json!({})).await;
+    let token_a = create_token(ctx, &permissions).await;
+    let token_b = create_token_with(ctx, &session_b, &["read_crons"], json!({})).await;
 
     // The admin API of one app does not show the other app's tokens.
     let (_, list_a) = send(ctx.get("/api/mcp/tokens")).await;
     assert_eq!(strings(&list_a, "tokenId"), [token_a.token_id.as_str()]);
-    let (_, list_b) = send(admin_with(&ctx, Method::GET, "/api/mcp/tokens", &session_b)).await;
+    let (_, list_b) = send(admin_with(ctx, Method::GET, "/api/mcp/tokens", &session_b)).await;
     assert_eq!(strings(&list_b, "tokenId"), [token_b.token_id.as_str()]);
-    let (status, _) = send(admin_with(&ctx, Method::GET, &token_a.path(""), &session_b)).await;
+    let (status, _) = send(admin_with(ctx, Method::GET, &token_a.path(""), &session_b)).await;
     assert_eq!(status, 404);
-    let (status, _) = send(admin_with(&ctx, Method::POST, &token_a.path("/revoke"), &session_b)).await;
+    let (status, _) = send(admin_with(ctx, Method::POST, &token_a.path("/revoke"), &session_b)).await;
     assert_eq!(status, 404);
 
-    let body = call_tool(&ctx, &token_a.token, "openshop.shops.list", json!({})).await;
+    let body = call_tool(ctx, &token_a.token, "openshop.shops.list", json!({})).await;
     assert_eq!(
         strings(&body["result"]["structuredContent"]["shops"], "shop"),
         [SHOP_B, shop.as_str()]
     );
 
     // Runs of the same shop under another app are invisible.
-    let body = call_tool(&ctx, &token_a.token, "openshop.logs.search", json!({ "runId": run_b })).await;
+    let body = call_tool(ctx, &token_a.token, "openshop.logs.search", json!({ "runId": run_b })).await;
     assert_eq!(body["error"], json!({ "code": -32000, "message": "Run not found" }));
-    let body = read_resource(&ctx, &token_a.token, "openshop://runs/recent").await;
+    let body = read_resource(ctx, &token_a.token, "openshop://runs/recent").await;
     let recent: Value = serde_json::from_str(body["result"]["contents"][0]["text"].as_str().unwrap()).unwrap();
     assert_eq!(strings(&recent["runs"], "id"), [run_a.to_string()]);
 
-    let body = call_tool(
-        &ctx,
-        &token_a.token,
-        "openshop.flows.run",
-        json!({ "flow": "log-flow" }),
-    )
-    .await;
+    let body = call_tool(ctx, &token_a.token, "openshop.flows.run", json!({ "flow": "log-flow" })).await;
     let dispatched = Uuid::parse_str(body["result"]["structuredContent"]["runId"].as_str().unwrap()).unwrap();
     let (app_handle, run_shop): (String, String) =
         sqlx::query_as("SELECT app_handle, shop FROM flow_runs WHERE id = $1")
@@ -2813,13 +2713,13 @@ async fn mcp_tokens_only_reach_the_data_of_their_own_shopify_app() {
     // Cron overrides belong to the app that set them.
     let hourly = "log-flow:0 * * * *";
     call_tool(
-        &ctx,
+        ctx,
         &token_a.token,
         "openshop.crons.set_enabled",
         json!({ "key": hourly, "enabled": false }),
     )
     .await;
-    let body = call_tool(&ctx, &token_b.token, "openshop.crons.list", json!({})).await;
+    let body = call_tool(ctx, &token_b.token, "openshop.crons.list", json!({})).await;
     assert_eq!(body["result"]["structuredContent"]["crons"][0]["enabled"], true);
     let overrides: Vec<(String, String)> = sqlx::query_as("SELECT app_handle, shop FROM cron_overrides")
         .fetch_all(&ctx.db)
@@ -2829,7 +2729,7 @@ async fn mcp_tokens_only_reach_the_data_of_their_own_shopify_app() {
 
     // A shop installed for another app only is out of reach.
     let body = call_tool(
-        &ctx,
+        ctx,
         &token_a.token,
         "openshop.admin.graphql",
         json!({ "shop": "only-b.myshopify.com", "query": "{ shop { name } }" }),
@@ -2839,29 +2739,28 @@ async fn mcp_tokens_only_reach_the_data_of_their_own_shopify_app() {
         body["error"]["message"],
         "Shop \"only-b.myshopify.com\" is not installed for app \"client-a\""
     );
-    assert!(graphql_requests(&ctx).is_empty());
+    assert!(graphql_requests(ctx).is_empty());
 
     // For a shop both apps share, the token's own installation is used.
     let body = call_tool(
-        &ctx,
+        ctx,
         &token_a.token,
         "openshop.admin.graphql",
         json!({ "shop": shop, "query": "{ shop { name } }" }),
     )
     .await;
     assert_eq!(body["result"]["structuredContent"]["ok"], true);
-    let requests = graphql_requests(&ctx);
+    let requests = graphql_requests(ctx);
     assert_eq!(requests.len(), 1);
     assert_eq!(header(&requests[0], "X-Shopify-Access-Token"), Some("token-a"));
 
-    let recorded = audits(&ctx, &token_a.token_id).await;
+    let recorded = audits(ctx, &token_a.token_id).await;
     assert!(!recorded.is_empty());
     assert!(
         recorded
             .iter()
             .all(|audit| audit.app_handle == "client-a" && audit.shop == shop)
     );
-    ctx.shutdown().await.unwrap();
 }
 
 // ─── Registry validation ─────────────────────────────────────────────

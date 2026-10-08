@@ -41,12 +41,11 @@ fn sent(ctx: &TestContext) -> Value {
     ctx.transport.last_request().expect("a request to Shopify").body
 }
 
-#[tokio::test]
-async fn an_inline_query_returns_typed_data() {
-    let ctx = context().await;
-    let shopify = shopify(&ctx).await;
+#[openshop::test(context())]
+async fn an_inline_query_returns_typed_data(ctx: &TestContext) {
+    let shopify = shopify(ctx).await;
     respond(
-        &ctx,
+        ctx,
         json!({ "orders": { "nodes": [
             { "id": "gid://shopify/Order/1", "name": "#1001" },
             { "id": "gid://shopify/Order/2", "name": "#1002" },
@@ -66,21 +65,19 @@ async fn an_inline_query_returns_typed_data() {
     assert_eq!(names, ["#1001", "#1002"]);
     assert_eq!(data.orders.nodes[0].id, "gid://shopify/Order/1");
     assert_eq!(
-        sent(&ctx),
+        sent(ctx),
         json!({
             "query": "query($first: Int!) { orders(first: $first) { nodes { id name } } }",
             "variables": { "first": 2 },
         })
     );
-    ctx.shutdown().await.unwrap();
 }
 
-#[tokio::test]
-async fn nullability_lists_aliases_and_scalars_follow_the_schema() {
-    let ctx = context().await;
-    let shopify = shopify(&ctx).await;
+#[openshop::test(context())]
+async fn nullability_lists_aliases_and_scalars_follow_the_schema(ctx: &TestContext) {
+    let shopify = shopify(ctx).await;
     respond(
-        &ctx,
+        ctx,
         json!({ "order": {
             "id": "gid://shopify/Order/1",
             "note": null,
@@ -139,18 +136,16 @@ async fn nullability_lists_aliases_and_scalars_follow_the_schema() {
     assert_eq!(quantity, 2);
 
     assert_eq!(
-        sent(&ctx)["variables"],
+        sent(ctx)["variables"],
         json!({ "id": "gid://shopify/Order/1", "namespace": "custom" })
     );
-    ctx.shutdown().await.unwrap();
 }
 
-#[tokio::test]
-async fn fragments_on_other_types_are_optional_fields() {
-    let ctx = context().await;
-    let shopify = shopify(&ctx).await;
+#[openshop::test(context())]
+async fn fragments_on_other_types_are_optional_fields(ctx: &TestContext) {
+    let shopify = shopify(ctx).await;
     respond(
-        &ctx,
+        ctx,
         json!({ "nodes": [
             { "__typename": "Product", "id": "gid://shopify/Product/1", "title": "Shirt" },
             { "__typename": "Order", "id": "gid://shopify/Order/1", "name": "#1001", "createdAt": "2026-01-01T00:00:00Z" },
@@ -191,16 +186,14 @@ async fn fragments_on_other_types_are_optional_fields() {
     assert_eq!(order.title, None);
     assert_eq!(order.name.as_deref(), Some("#1001"));
     assert_eq!(order.created_at.as_deref(), Some("2026-01-01T00:00:00Z"));
-    assert_eq!(sent(&ctx)["variables"], json!({ "ids": ids }));
-    ctx.shutdown().await.unwrap();
+    assert_eq!(sent(ctx)["variables"], json!({ "ids": ids }));
 }
 
-#[tokio::test]
-async fn optional_variables_can_be_left_out() {
-    let ctx = context().await;
-    let shopify = shopify(&ctx).await;
+#[openshop::test(context())]
+async fn optional_variables_can_be_left_out(ctx: &TestContext) {
+    let shopify = shopify(ctx).await;
     respond(
-        &ctx,
+        ctx,
         json!({ "orders": {
             "nodes": [{ "id": "gid://shopify/Order/1" }],
             "pageInfo": { "hasNextPage": true, "endCursor": "cursor-1" },
@@ -224,7 +217,7 @@ async fn optional_variables_can_be_left_out() {
     assert_eq!(*name, None);
     assert!(data.orders.page_info.has_next_page);
     assert_eq!(data.orders.page_info.end_cursor.as_deref(), Some("cursor-1"));
-    assert_eq!(sent(&ctx)["variables"], json!({ "withName": false }));
+    assert_eq!(sent(ctx)["variables"], json!({ "withName": false }));
 
     // A nullable variable takes a bare value, an `Option`, or nothing.
     let cursor: Option<String> = data.orders.page_info.end_cursor;
@@ -243,10 +236,9 @@ async fn optional_variables_can_be_left_out() {
         .await
         .unwrap();
     assert_eq!(
-        sent(&ctx)["variables"],
+        sent(ctx)["variables"],
         json!({ "withName": true, "after": "cursor-1", "first": 5 })
     );
-    ctx.shutdown().await.unwrap();
 }
 
 graphql! {
@@ -263,12 +255,11 @@ graphql! {
     pub mod shop_name = "{ shop { name currencyCode } }";
 }
 
-#[tokio::test]
-async fn a_module_names_the_types_of_an_operation() {
-    let ctx = context().await;
-    let shopify = shopify(&ctx).await;
+#[openshop::test(context())]
+async fn a_module_names_the_types_of_an_operation(ctx: &TestContext) {
+    let shopify = shopify(ctx).await;
     respond(
-        &ctx,
+        ctx,
         json!({ "metafieldsSet": {
             "metafields": [{ "id": "gid://shopify/Metafield/1", "key": "color" }],
             "userErrors": [{ "field": ["metafields", "0", "value"], "message": "is too long", "code": "TOO_LONG" }],
@@ -297,7 +288,7 @@ async fn a_module_names_the_types_of_an_operation() {
         Some(&["metafields".to_string(), "0".to_string(), "value".to_string()][..])
     );
 
-    let request = sent(&ctx);
+    let request = sent(ctx);
     assert_eq!(request["query"], metafields_set::QUERY);
     // Fields left to `None` are not sent.
     assert_eq!(
@@ -310,21 +301,19 @@ async fn a_module_names_the_types_of_an_operation() {
         }] })
     );
 
-    respond(&ctx, json!({ "shop": { "name": "Test shop", "currencyCode": "EUR" } }));
+    respond(ctx, json!({ "shop": { "name": "Test shop", "currencyCode": "EUR" } }));
     let data = shopify.execute(shop_name::operation()).await.unwrap();
     assert_eq!(
         (data.shop.name.as_str(), data.shop.currency_code.as_str()),
         ("Test shop", "EUR")
     );
-    assert_eq!(sent(&ctx), json!({ "query": "{ shop { name currencyCode } }" }));
-    ctx.shutdown().await.unwrap();
+    assert_eq!(sent(ctx), json!({ "query": "{ shop { name currencyCode } }" }));
 }
 
-#[tokio::test]
-async fn an_inline_operation_takes_input_objects_as_any_serializable_value() {
-    let ctx = context().await;
-    let shopify = shopify(&ctx).await;
-    respond(&ctx, json!({ "metafieldsSet": { "userErrors": [] } }));
+#[openshop::test(context())]
+async fn an_inline_operation_takes_input_objects_as_any_serializable_value(ctx: &TestContext) {
+    let shopify = shopify(ctx).await;
+    respond(ctx, json!({ "metafieldsSet": { "userErrors": [] } }));
     let metafields = json!([{ "ownerId": "gid://shopify/Product/1", "key": "color", "value": "blue" }]);
 
     let data = shopify
@@ -338,8 +327,7 @@ async fn an_inline_operation_takes_input_objects_as_any_serializable_value() {
         .unwrap();
 
     assert!(data.metafields_set.expect("a payload").user_errors.is_empty());
-    assert_eq!(sent(&ctx)["variables"], json!({ "metafields": metafields }));
-    ctx.shutdown().await.unwrap();
+    assert_eq!(sent(ctx)["variables"], json!({ "metafields": metafields }));
 }
 
 #[tokio::test]
@@ -385,13 +373,12 @@ async fn typed_data_is_a_step_output() {
     ctx.shutdown().await.unwrap();
 }
 
-#[tokio::test]
-async fn an_answer_that_does_not_fit_the_operation_is_an_error() {
-    let ctx = context().await;
-    let shopify = shopify(&ctx).await;
+#[openshop::test(context())]
+async fn an_answer_that_does_not_fit_the_operation_is_an_error(ctx: &TestContext) {
+    let shopify = shopify(ctx).await;
 
     respond(
-        &ctx,
+        ctx,
         json!({ "orders": { "nodes": [{ "id": "gid://shopify/Order/1" }] } }),
     );
     let error = shopify
@@ -410,7 +397,6 @@ async fn an_answer_that_does_not_fit_the_operation_is_an_error() {
         .await
         .unwrap_err();
     assert_eq!(error.to_string(), "[openshop] GraphQL errors: Throttled");
-    ctx.shutdown().await.unwrap();
 }
 
 #[test]

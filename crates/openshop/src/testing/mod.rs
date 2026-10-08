@@ -12,7 +12,9 @@ mod fake;
 mod transport;
 
 pub use admin::{AdminTestOptions, admin_context};
-pub use context::{ProxyClient, ProxyRequestBuilder, ProxyResponse, TestContext, TestOptions};
+pub use context::{
+    IntoTestContext, ProxyClient, ProxyRequestBuilder, ProxyResponse, StartedTestContext, TestContext, TestOptions,
+};
 pub use db::TestDb;
 pub use factory::{Factory, FactoryScope};
 pub use fake::{FakeCall, FakeMethod, FakeProviders, TypedCall, TypedFake};

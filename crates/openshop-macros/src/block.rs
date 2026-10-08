@@ -69,6 +69,52 @@ fn declare(item: &ItemFn, kind: &str, doc: String, constants: TokenStream, regis
 
 const FLOW_OPTIONS: [&str; 4] = ["timeout", "step_timeout", "concurrency", "retry_policy"];
 
+const DURATION: &str =
+    "expected a duration such as \"30s\", \"10m\" or \"1h30m\" (units: ms, s, m, h, d), or an expression";
+
+/// The milliseconds of `"90s"`, `"10m"`, `"1h30m"`: numbers, each followed by its unit.
+fn parse_duration(text: &str) -> Option<u64> {
+    let mut rest = text.trim();
+    let mut total: u64 = 0;
+    if rest.is_empty() {
+        return None;
+    }
+    while !rest.is_empty() {
+        let digits = rest.chars().take_while(char::is_ascii_digit).count();
+        let (number, after) = rest.split_at(digits);
+        let number: u64 = number.parse().ok()?;
+        let unit = after.chars().take_while(char::is_ascii_alphabetic).count();
+        let (unit, after) = after.split_at(unit);
+        let factor: u64 = match unit {
+            "ms" => 1,
+            "s" => 1_000,
+            "m" => 60_000,
+            "h" => 3_600_000,
+            "d" => 86_400_000,
+            _ => return None,
+        };
+        total = total.checked_add(number.checked_mul(factor)?)?;
+        rest = after.trim_start();
+    }
+    (total > 0).then_some(total)
+}
+
+/// `timeout = "10m"`: a duration written as text, checked when the crate
+/// compiles. Any other value is an expression of type `Duration`.
+fn duration(value: &Expr) -> syn::Result<TokenStream> {
+    let Expr::Lit(syn::ExprLit {
+        lit: syn::Lit::Str(text),
+        ..
+    }) = value
+    else {
+        return Ok(quote!(#value));
+    };
+    match parse_duration(&text.value()) {
+        Some(millis) => Ok(quote!(::core::time::Duration::from_millis(#millis))),
+        None => Err(syn::Error::new(text.span(), DURATION)),
+    }
+}
+
 /// `concurrency = allow` or `reject`, as words; any other value is an expression.
 fn concurrency(value: &Expr) -> TokenStream {
     let word = match value {
@@ -99,6 +145,10 @@ pub fn flow(arguments: Arguments, item: ItemFn) -> syn::Result<TokenStream> {
             Argument::Text(text) => set_once(&mut name, argument, text.clone())?,
             Argument::Value(option, value) if option == "concurrency" => {
                 options.push(concurrency(value));
+            }
+            Argument::Value(option, value) if option == "timeout" || option == "step_timeout" => {
+                let duration = duration(value)?;
+                options.push(quote!(.#option(#duration)));
             }
             Argument::Value(option, value) if FLOW_OPTIONS.contains(&plain_name(option).as_str()) => {
                 options.push(quote!(.#option(#value)));
@@ -412,7 +462,8 @@ pub fn route(arguments: Arguments, item: ItemFn) -> syn::Result<TokenStream> {
         quote! {
             app.route(
                 Self::PATH,
-                #definition.#setter(|ctx: #krate::RouteContext| async move {
+                // The authentication value has the type the handler takes: `auth` must return it.
+                #definition.#setter(|ctx: #krate::RouteContext<_>| async move {
                     #input
                     #krate::Result::<#krate::response::Response>::Ok(#answer)
                 }),
@@ -673,6 +724,37 @@ mod tests {
                 "pub async fn dispatch (scope : & impl :: openshop :: ShopScope)",
             ],
         );
+        // A duration is text checked here, or any expression.
+        let timed = generated(
+            flow,
+            quote!(timeout = "1h30m", step_timeout = "500ms"),
+            parse_quote! { async fn nightly_cleanup(ctx: FlowContext) -> Result<()> { Ok(()) } },
+        );
+        assert_contains(
+            &timed,
+            &[
+                ". timeout (:: core :: time :: Duration :: from_millis (5400000u64))",
+                ". step_timeout (:: core :: time :: Duration :: from_millis (500u64))",
+            ],
+        );
+        for (text, millis) in [
+            ("90s", 90_000),
+            ("10m", 600_000),
+            ("2h", 7_200_000),
+            ("1d", 86_400_000),
+            ("1h 30m", 5_400_000),
+        ] {
+            assert_eq!(parse_duration(text), Some(millis), "{text}");
+        }
+        for text in ["", "10", "m", "10 minutes", "1.5h", "-5s", "0s", "5x"] {
+            assert_eq!(parse_duration(text), None, "{text}");
+            let refused = refusal(
+                flow,
+                quote!(timeout = #text),
+                parse_quote! { async fn nightly_cleanup(ctx: FlowContext) -> Result<()> { Ok(()) } },
+            );
+            assert_eq!(refused, DURATION);
+        }
         // A concurrency is a word, or any expression.
         let allowed = generated(
             flow,

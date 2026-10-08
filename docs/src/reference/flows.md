@@ -26,8 +26,8 @@ struct Batch {
 
 #[flow(
     "syncOrders",
-    timeout = Duration::from_secs(60),
-    step_timeout = Duration::from_secs(15),
+    timeout = "60s",
+    step_timeout = "15s",
     concurrency = reject,
     retry_policy = RetryPolicy::new().max_attempts(3)
 )]
@@ -63,8 +63,8 @@ cannot be generic.
 | --- | --- | --- | --- |
 | `"syncOrders"`, before the other options | String literal | The name of the function in camel case: `sync_orders` is `syncOrders` | Name of the flow: the key used by dispatch, crons, runs, and logs. |
 | Second argument of the function | A type marked [`#[input]`](#input) | None | The [input](#input) of a run, validated in the worker before the function is called. Invalid input fails the run. |
-| `timeout = …` | Positive `Duration` | None | Per-attempt execution timeout; also anchors the retry deadline at dispatch time. |
-| `step_timeout = …` | Positive `Duration` | None | Default timeout for every step. |
+| `timeout = …` | A positive duration as text, `"60s"`, `"10m"`, `"1h30m"`, checked when the crate compiles. An expression of type `Duration` works as well. | None | Per-attempt execution timeout; also anchors the retry deadline at dispatch time. |
+| `step_timeout = …` | Same as `timeout` | None | Default timeout for every step. |
 | `concurrency = …` | `reject` or `allow`, as a word. An expression such as `Concurrency::Allow` works as well. | `reject` | Controls overlapping active runs for the same app, shop, and flow. |
 | `retry_policy = …` | `RetryPolicy` | App policy | Overrides the app-level policy. |
 

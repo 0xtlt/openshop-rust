@@ -167,7 +167,7 @@ has its own authentication, so the methods of one path can differ, for example
 a public `GET` next to an authenticated `POST`.
 
 The authentication function is an
-`async fn(RouteAuthContext) -> Result<RouteAuthOutcome>`. It runs
+`async fn(RouteAuthContext) -> Result<RouteAuthOutcome<A>>`. It runs
 before the route function and receives the same `request`, `params`, `db`,
 and `app`, so both may read the body. It returns a `RouteAuthOutcome`:
 
@@ -176,6 +176,34 @@ and `app`, so both may read the body. It returns a `RouteAuthOutcome`:
 | `RouteAuthOutcome::Authenticated(value)` | Calls the handler and exposes `value` as `ctx.auth`. |
 | `RouteAuthOutcome::Unauthorized` | Responds `401` with `{ "error": "Unauthorized" }`. |
 | `RouteAuthOutcome::Response(response)` | Stops with a custom response. |
+
+`A` is what an authenticated request is known by. It is any type, and the
+handler takes the context of that type:
+
+```rust,ignore
+use openshop::prelude::*;
+
+pub struct Partner {
+    pub key: String,
+}
+
+async fn partner(ctx: RouteAuthContext) -> Result<RouteAuthOutcome<Partner>> {
+    Ok(match ctx.request.header("x-partner-key") {
+        Some(key) => RouteAuthOutcome::Authenticated(Partner { key: key.to_string() }),
+        None => RouteAuthOutcome::Unauthorized,
+    })
+}
+
+#[route(POST, "/orders/:id", json, auth = partner)]
+pub async fn update_order(ctx: RouteContext<Partner>) -> Result<Value> {
+    Ok(json!({ "order": ctx.params["id"], "by": ctx.auth.key }))
+}
+```
+
+The compiler checks that the two agree: a handler that takes a
+`RouteContext<Partner>` under an authentication that returns something else
+does not compile. `RouteAuthOutcome` and `RouteContext` without a type carry a
+`serde_json::Value`, which is `Null` in the handler of a public route.
 
 An authentication function or handler that returns an error or panics is logged
 and answered with a generic `500` response,
@@ -239,19 +267,23 @@ use openshop::response::{self, Response, StatusCode};
 use crate::flows::sync_orders::{SyncOrdersInput, sync_orders};
 use crate::integrations::warehouse::authenticate_warehouse;
 
-async fn caller(ctx: RouteAuthContext) -> Result<RouteAuthOutcome> {
+/// The shop a verified caller acts for.
+pub struct Caller {
+    pub shop: String,
+}
+
+async fn caller(ctx: RouteAuthContext) -> Result<RouteAuthOutcome<Caller>> {
     // Your own verification. It returns the domain of the shop the verified
     // caller acts for, or `None`.
     let Some(shop) = authenticate_warehouse(&ctx.request).await? else {
         return Ok(RouteAuthOutcome::Unauthorized);
     };
-    Ok(RouteAuthOutcome::Authenticated(json!({ "shop": shop })))
+    Ok(RouteAuthOutcome::Authenticated(Caller { shop }))
 }
 
 #[route(POST, "/warehouse", auth = caller)]
-pub async fn warehouse(ctx: RouteContext) -> Result<Response> {
-    let shop = ctx.auth["shop"].as_str().unwrap_or_default();
-    let tenant = ctx.for_shop(shop).await?;
+pub async fn warehouse(ctx: RouteContext<Caller>) -> Result<Response> {
+    let tenant = ctx.for_shop(&ctx.auth.shop).await?;
 
     let queued = sync_orders::dispatch(&tenant, SyncOrdersInput { limit: 50 }).await?;
 
