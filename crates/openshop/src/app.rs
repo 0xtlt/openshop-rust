@@ -21,9 +21,8 @@ use crate::server::shopify_apps::ShopifyApps;
 use crate::server::static_ui::UiSource;
 use crate::shopify::client::ShopifyClient;
 use crate::types::{
-    AdminPageId, AdminPageMode, AdminPagesConfig, Cron, CustomAdminNavigationItem, CustomPagesConfig, ErrorContext,
-    ExperimentalConfig, Flow, Function, McpConfig, McpResource, McpTool, OnErrorFn, Provider, Proxy, RetryPolicy,
-    Route, ShopifyConfig, Webhook, WorkerConfig,
+    AdminMenuItem, AdminPageId, AdminPageMode, AdminPagesConfig, Cron, ErrorContext, Flow, Function, McpConfig,
+    McpResource, McpTool, OnErrorFn, Provider, Proxy, RetryPolicy, Route, ShopifyConfig, Webhook, WorkerConfig,
 };
 
 /// The validated definition of an OpenShop application.
@@ -39,7 +38,9 @@ pub struct OpenShopConfig {
     pub crons: Vec<Cron>,
     /// Which built-in pages of the admin are visible, hidden or disabled.
     pub builtin_pages: Option<AdminPagesConfig>,
-    pub experimental: Option<ExperimentalConfig>,
+    /// The entries of the admin menu for the pages of the application, when
+    /// set by hand. `None` takes them from the pages that declare a `nav` label.
+    pub admin_menu: Option<Vec<AdminMenuItem>>,
     pub worker: WorkerConfig,
     pub retry_policy: RetryPolicy,
     pub on_error: Option<OnErrorFn>,
@@ -64,29 +65,21 @@ impl OpenShopConfig {
     }
 
     /// Whether the application has admin pages of its own: it lists some,
-    /// or sets `custom_pages`.
+    /// or sets `admin_menu`.
     pub fn custom_pages_enabled(&self) -> bool {
-        !self.admin_pages.is_empty() || self.explicit_navigation().is_some()
-    }
-
-    /// The menu set with `custom_pages`, which then replaces the entries the pages declare.
-    fn explicit_navigation(&self) -> Option<&[CustomAdminNavigationItem]> {
-        self.experimental
-            .as_ref()
-            .and_then(|experimental| experimental.custom_pages.as_ref())
-            .map(|pages| pages.navigation.as_slice())
+        !self.admin_pages.is_empty() || self.admin_menu.is_some()
     }
 
     /// The entries of the admin menu for the pages of the application: the
-    /// ones set with `custom_pages`, else one per page that declares a `nav`
+    /// ones set with `admin_menu`, else one per page that declares a `nav`
     /// label, in the order the pages are listed.
-    pub fn custom_navigation(&self) -> Vec<CustomAdminNavigationItem> {
-        match self.explicit_navigation() {
-            Some(navigation) => navigation.to_vec(),
+    pub fn resolved_admin_menu(&self) -> Vec<AdminMenuItem> {
+        match &self.admin_menu {
+            Some(menu) => menu.clone(),
             None => self
                 .admin_pages
                 .iter()
-                .filter_map(|page| Some(CustomAdminNavigationItem::new(page.nav.clone()?, page.path.clone())))
+                .filter_map(|page| Some(AdminMenuItem::new(page.nav.clone()?, page.path.clone())))
                 .collect(),
         }
     }
@@ -266,17 +259,8 @@ impl OpenShopBuilder {
     /// Sets the entries of the admin menu for the pages of the application,
     /// in place of the ones the pages declare (`#[admin_page("/path", nav =
     /// "Label")]`): for another order, or another label.
-    pub fn custom_pages(mut self, navigation: impl IntoIterator<Item = CustomAdminNavigationItem>) -> Self {
-        self.config.experimental = Some(ExperimentalConfig {
-            custom_pages: Some(CustomPagesConfig {
-                navigation: navigation.into_iter().collect(),
-            }),
-        });
-        self
-    }
-
-    pub fn experimental(mut self, experimental: ExperimentalConfig) -> Self {
-        self.config.experimental = Some(experimental);
+    pub fn admin_menu(mut self, menu: impl IntoIterator<Item = AdminMenuItem>) -> Self {
+        self.config.admin_menu = Some(menu.into_iter().collect());
         self
     }
 

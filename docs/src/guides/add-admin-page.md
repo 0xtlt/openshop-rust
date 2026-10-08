@@ -145,8 +145,8 @@ the directory is resolved from the working directory of the process. The
 `OPENSHOP_UI_DIR` environment variable overrides it.
 
 To set the menu by hand, for another order or another label, add the
-`custom_pages` setting:
-`custom_pages: [openshop::CustomAdminNavigationItem::new("Store", StorePage::PATH)]`.
+`admin_menu` setting:
+`admin_menu: [openshop::AdminMenuItem::new("Store", StorePage::PATH)]`.
 It replaces the entries the pages declare. `StorePage::PATH` is the path given
 to `#[admin_page]`; the configuration is refused, and the app does not start,
 when a path of that list does not match a listed page.

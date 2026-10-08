@@ -8,7 +8,7 @@ use anyhow::{Result, bail};
 use regex::Regex;
 use serde_json::Value;
 
-use crate::admin::validate_custom_admin_navigation;
+use crate::admin::validate_admin_menu;
 use crate::app::OpenShopConfig;
 use crate::engine::scheduler::parse_schedule;
 use crate::runtime::time::millis;
@@ -207,17 +207,17 @@ pub fn validate_openshop_config(config: &OpenShopConfig) -> Result<()> {
             );
         }
     }
-    for (index, item) in config.custom_navigation().iter().enumerate() {
+    for (index, item) in config.resolved_admin_menu().iter().enumerate() {
         if item.label.trim().is_empty() {
-            fail!("experimental.customPages.navigation[{index}].label must be a non-empty string");
+            fail!("adminMenu[{index}].label must be a non-empty string");
         }
         if item.path.trim().is_empty() {
-            fail!("experimental.customPages.navigation[{index}].path must be a non-empty string");
+            fail!("adminMenu[{index}].path must be a non-empty string");
         }
     }
     let admin_pages = config.resolved_admin_pages()?;
     if config.custom_pages_enabled() {
-        validate_custom_admin_navigation(&config.custom_navigation(), &admin_pages)?;
+        validate_admin_menu(&config.resolved_admin_menu(), &admin_pages)?;
     }
 
     for (path, route) in resolve_route_paths("server", config.routes.keys().map(String::as_str))? {

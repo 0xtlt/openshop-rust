@@ -9,8 +9,8 @@ use openshop::testing::{
     sign_session_token,
 };
 use openshop::{
-    AdminActor, AdminContext, AdminPublicError, CustomAdminNavigationItem, OpenShopConfig, Result, ShopifyAppConfig,
-    ShopifyConfig, Value, anyhow, json,
+    AdminActor, AdminContext, AdminMenuItem, AdminPublicError, OpenShopConfig, Result, ShopifyAppConfig, ShopifyConfig,
+    Value, anyhow, json,
 };
 use openshop_shared::build_admin_function_rpc_url;
 use reqwest::{Method, RequestBuilder, Response};
@@ -22,8 +22,8 @@ const TEST_SHOP: &str = "test-integration.myshopify.com";
 const REVIEWER: &str = "123";
 const OTHER_STAFF: &str = "456";
 
-fn navigation(label: &str, path: &str) -> CustomAdminNavigationItem {
-    CustomAdminNavigationItem {
+fn menu_item(label: &str, path: &str) -> AdminMenuItem {
+    AdminMenuItem {
         label: label.to_string(),
         path: path.to_string(),
     }
@@ -52,14 +52,14 @@ fn reviews_app() -> OpenShopBuilder {
     OpenShopConfig::builder()
         .admin_page(reviews_page())
         .admin_page(review_details_page())
-        .custom_pages([navigation("Reviews", "/reviews")])
+        .admin_menu([menu_item("Reviews", "/reviews")])
 }
 
 /// One unrestricted page at `/tools`.
 fn tools_app(page: AdminPage) -> OpenShopConfig {
     OpenShopConfig::builder()
         .admin_page(page)
-        .custom_pages([navigation("Tools", "/tools")])
+        .admin_menu([menu_item("Tools", "/tools")])
         .build()
         .expect("valid config")
 }
@@ -160,7 +160,7 @@ async fn inherits_parent_page_policy_for_child_direct_access_and_rpc() {
             details(ctx, input)
         }))
         .admin_page(AdminPage::new("/reviews/:id/comments").loader("details", details))
-        .custom_pages([navigation("Reviews", "/reviews")])
+        .admin_menu([menu_item("Reviews", "/reviews")])
         .build()
         .unwrap();
     let ctx = context(config).await;
@@ -207,7 +207,7 @@ async fn a_static_page_takes_precedence_over_a_dynamic_sibling() {
     let config = OpenShopConfig::builder()
         .admin_page(AdminPage::new("/reviews/:id").loader("details", details))
         .admin_page(AdminPage::new("/reviews/new").loader("draft", details))
-        .custom_pages([])
+        .admin_menu([])
         .build()
         .unwrap();
     let ctx = context(config).await;
@@ -252,33 +252,33 @@ fn ambiguous_and_reserved_page_routes_are_rejected_when_the_config_is_built() {
 }
 
 #[tokio::test]
-async fn invalid_custom_navigation_is_rejected_when_the_config_is_built() {
-    let error_of = |items: Vec<CustomAdminNavigationItem>| {
+async fn an_invalid_admin_menu_is_rejected_when_the_config_is_built() {
+    let error_of = |items: Vec<AdminMenuItem>| {
         OpenShopConfig::builder()
             .admin_page(reviews_page())
             .admin_page(review_details_page())
-            .custom_pages(items)
+            .admin_menu(items)
             .build()
             .err()
-            .expect("invalid navigation")
+            .expect("invalid menu")
             .to_string()
     };
 
-    let error = error_of(vec![navigation("Missing", "/missing")]);
+    let error = error_of(vec![menu_item("Missing", "/missing")]);
     assert!(
-        error.contains("custom navigation path \"/missing\" does not match a discovered page"),
+        error.contains("adminMenu[0].path \"/missing\" does not match a page of the application"),
         "{error}"
     );
-    let error = error_of(vec![navigation("Review", "/reviews/:id")]);
+    let error = error_of(vec![menu_item("Review", "/reviews/:id")]);
     assert!(error.contains("must be a static custom page path"), "{error}");
-    let error = error_of(vec![navigation(" ", "/reviews")]);
+    let error = error_of(vec![menu_item(" ", "/reviews")]);
     assert!(error.contains("label must be a non-empty string"), "{error}");
-    let error = error_of(vec![navigation("Reviews", "/reviews"), navigation("Again", "/reviews")]);
-    assert!(error.contains("duplicate custom navigation path"), "{error}");
+    let error = error_of(vec![menu_item("Reviews", "/reviews"), menu_item("Again", "/reviews")]);
+    assert!(error.contains("is listed twice"), "{error}");
 
     // A dynamic page can be linked through one of its concrete paths.
     let config = reviews_app()
-        .custom_pages([navigation("Featured", "/reviews/featured")])
+        .admin_menu([menu_item("Featured", "/reviews/featured")])
         .build()
         .unwrap();
     let ctx = context(config).await;
@@ -340,7 +340,7 @@ async fn lists_navigation_and_page_access_for_the_actor() {
         .admin_page(AdminPage::new("/settings"))
         .admin_page(review_details_page())
         .admin_page(reviews_page())
-        .custom_pages([navigation("Reviews", "/reviews"), navigation("Settings", "/settings")])
+        .admin_menu([menu_item("Reviews", "/reviews"), menu_item("Settings", "/settings")])
         .build()
         .unwrap();
     let ctx = context(config).await;
@@ -409,7 +409,7 @@ async fn an_application_without_pages_has_no_custom_pages(ctx: &TestContext) {
 
 #[tokio::test]
 async fn listing_a_page_serves_it_and_its_nav_label_is_its_menu_entry() {
-    // No `custom_pages`: the pages are served because they are listed, and
+    // No `admin_menu`: the pages are served because they are listed, and
     // the menu is made of the ones that declare a label.
     let config = OpenShopConfig::builder()
         .admin_page(reviews_page().nav("Reviews"))
@@ -417,8 +417,8 @@ async fn listing_a_page_serves_it_and_its_nav_label_is_its_menu_entry() {
         .build()
         .unwrap();
     assert_eq!(
-        config.custom_navigation(),
-        [CustomAdminNavigationItem::new("Reviews", "/reviews")]
+        config.resolved_admin_menu(),
+        [AdminMenuItem::new("Reviews", "/reviews")]
     );
     let ctx = context(config).await;
 
@@ -434,12 +434,12 @@ async fn listing_a_page_serves_it_and_its_nav_label_is_its_menu_entry() {
     // A menu set by hand replaces the entries the pages declare.
     let by_hand = OpenShopConfig::builder()
         .admin_page(reviews_page().nav("Reviews"))
-        .custom_pages([CustomAdminNavigationItem::new("Customer reviews", "/reviews")])
+        .admin_menu([AdminMenuItem::new("Customer reviews", "/reviews")])
         .build()
         .unwrap();
     assert_eq!(
-        by_hand.custom_navigation(),
-        [CustomAdminNavigationItem::new("Customer reviews", "/reviews")]
+        by_hand.resolved_admin_menu(),
+        [AdminMenuItem::new("Customer reviews", "/reviews")]
     );
 
     // A page with a dynamic segment cannot be a menu entry.
@@ -469,7 +469,7 @@ async fn page_access_reports_whether_the_actor_may_open_a_path() {
             }
             Err(anyhow!("permission service unavailable"))
         }))
-        .custom_pages([navigation("Reviews", "/reviews"), navigation("Broken", "/broken")])
+        .admin_menu([menu_item("Reviews", "/reviews"), menu_item("Broken", "/broken")])
         .build()
         .unwrap();
     let ctx = context(config).await;
@@ -856,7 +856,7 @@ async fn decodes_dynamic_route_params_and_function_names() {
                 .loader("review details", |_ctx, _input| async move { Ok(json!("by name")) }),
         )
         .admin_page(AdminPage::new("/reviews/:id/comments/:comment_id").loader("params", params))
-        .custom_pages([])
+        .admin_menu([])
         .build()
         .unwrap();
     let ctx = context(config).await;
@@ -1033,7 +1033,7 @@ async fn scopes_connectors_and_shopify_client_to_the_session_shop() {
     let config = OpenShopConfig::builder()
         .provider_as("vault", vault_provider())
         .admin_page(AdminPage::new("/tools").loader("tenant", tenant))
-        .custom_pages([])
+        .admin_menu([])
         .build()
         .unwrap();
     let ctx = context(config).await;
@@ -1099,7 +1099,7 @@ async fn resolves_the_shopify_app_from_the_token_audience() {
         })
         .provider_as("vault", vault_provider())
         .admin_page(AdminPage::new("/tools").loader("tenant", tenant))
-        .custom_pages([])
+        .admin_menu([])
         .build()
         .unwrap();
     let ctx = TestContext::new(config).await.unwrap();

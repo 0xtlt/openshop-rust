@@ -19,12 +19,12 @@ pub const CUSTOM_ADMIN_RESERVED_PREFIXES: [&str; 13] = [
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CustomAdminNavigationItem {
+pub struct AdminMenuItem {
     pub label: String,
     pub path: String,
 }
 
-impl CustomAdminNavigationItem {
+impl AdminMenuItem {
     pub fn new(label: impl Into<String>, path: impl Into<String>) -> Self {
         Self {
             label: label.into(),
@@ -42,7 +42,7 @@ pub struct CustomAdminPageAccess {
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct CustomAdminPagesResponse {
-    pub navigation: Vec<CustomAdminNavigationItem>,
+    pub navigation: Vec<AdminMenuItem>,
     pub pages: Vec<CustomAdminPageAccess>,
 }
 

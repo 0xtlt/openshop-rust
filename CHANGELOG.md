@@ -32,7 +32,10 @@
   both carry a `Value`, as before.
 - An admin page is served as soon as it is listed in `admin_pages`, and
   `#[admin_page("/reviews", nav = "Reviews")]` gives it its entry in the menu
-  of the admin. `custom_pages` only sets the menu by hand.
+  of the admin. The `admin_menu` setting sets the menu by hand, with
+  `AdminMenuItem::new(label, path)`: it replaces `custom_pages`,
+  `CustomAdminNavigationItem`, `ExperimentalConfig` and `.experimental(…)`,
+  and its errors name `adminMenu[0].path`.
 - An MCP permission is a constant, `McpPermission::new("reviews:read", "Read
   reviews")`, and the tools and resources that list it register it.
   `McpConfig::disabled()` turns MCP off, and the MCP page of the admin with
@@ -159,8 +162,7 @@
   `openshop` and `serde` only. It starts with MCP off: `POST /mcp` is refused
   and the admin has no MCP page, until `mcp: McpConfig::disabled()` is removed
   from `src/main.rs`.
-- `OpenShopBuilder::crons`, `mcp_tool` and `mcp_resource`, and
-  `CustomAdminNavigationItem::new(label, path)`.
+- `OpenShopBuilder::crons`, `mcp_tool` and `mcp_resource`.
 - Responses under 1 KB are no longer compressed: on small JSON responses the
   compression took more CPU than the rest of the request and did not make them
   smaller.

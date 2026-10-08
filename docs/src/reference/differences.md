@@ -31,8 +31,9 @@ Consequences:
   instead of producing a failed run at each occurrence.
 - Custom admin pages are served as soon as they are listed in `admin_pages`:
   there is no separate switch to enable them. A page declares its entry in the
-  menu with `nav = "Label"`, and the `custom_pages` setting only sets the menu
-  by hand.
+  menu with `nav = "Label"`, and the `admin_menu` setting sets the menu by
+  hand. There is no `experimental` setting: `experimental.customPages.navigation`
+  is `admin_menu`, and its errors name `adminMenu[0].path`.
 - `GET /api/flows` and the MCP tool `openshop.flows.list` return `inputSchema`
   as JSON Schema (or `null`) rather than arktype's JSON format. Validation
   messages differ accordingly; they still start with

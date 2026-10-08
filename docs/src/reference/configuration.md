@@ -107,8 +107,7 @@ the environment (`shopify: shopify_apps()?`): the error is the one
 | `crons` | [`Cron`](#crons) values, as an array or any other iterator | No crons |
 | `on_error` | `async fn(Arc<openshop::Error>, ErrorContext)`, called after each failed attempt of a flow run | No hook |
 | `mcp` | `McpConfig`: `McpConfig::disabled()` to turn MCP off, or `McpConfig::new()` with a permission no tool or resource lists (`.permission(…)`) and tools or resources built without an attribute | MCP enabled, with the core capabilities and the permissions the tools and resources of the application list |
-| `custom_pages` | The entries of the admin menu for the pages of the application (`CustomAdminNavigationItem::new(label, path)`), as an array or any other iterator, to set another order or other labels than the pages declare | One entry per page that declares `nav = "…"`, in the order of `admin_pages`; see [Custom admin pages](custom-admin-pages.md) |
-| `experimental` | `ExperimentalConfig` | Same as above; replaces `custom_pages` |
+| `admin_menu` | The entries of the admin menu for the pages of the application (`AdminMenuItem::new(label, path)`), as an array or any other iterator, to set another order or other labels than the pages declare | One entry per page that declares `nav = "…"`, in the order of `admin_pages`; see [Custom admin pages](custom-admin-pages.md) |
 | `shopify` | [`ShopifyConfig`](#shopify) | Single app resolved from env and Shopify TOML |
 | `worker` | `WorkerConfig` | See [Worker defaults](#worker-defaults) |
 | `retry_policy` | `RetryPolicy` | See [Retry defaults](#retry-defaults) |
@@ -170,8 +169,7 @@ configuration is built.
 | `.proxy(path, definition)` | Route path and `Proxy` | No proxy routes; `/proxy` and `/ext` are not mounted |
 | `.route(path, route)` | Route path and `Route` | No server routes; `/routes` is not mounted |
 | `.admin_page(page)` | `AdminPage` | No custom admin pages |
-| `.custom_pages(navigation)` | The entries of the admin menu for the pages of the application (`CustomAdminNavigationItem`), in place of the ones the pages declare | One entry per page that declares a `nav` label; see [Custom admin pages](custom-admin-pages.md) |
-| `.experimental(config)` | `ExperimentalConfig` | Same as above; replaces `.custom_pages(…)` |
+| `.admin_menu(menu)` | The entries of the admin menu for the pages of the application (`AdminMenuItem`), in place of the ones the pages declare | One entry per page that declares a `nav` label; see [Custom admin pages](custom-admin-pages.md) |
 | `.builtin_pages(config)` | `AdminPagesConfig` | Every built-in page of the admin `visible` |
 | `.builtin_page(id, mode)` | `AdminPageId` and `AdminPageMode` | — |
 | `.model(table)` | `Table` | No app tables pushed in development |
@@ -202,7 +200,7 @@ Calling the other methods again:
 - `.cron(…)`, `.crons(…)`, and `.admin_page(…)` append.
 - `.builtin_pages(…)` and `.builtin_page(…)` merge with earlier calls; later values win.
 - The remaining settings (`.shopify(…)`, `.worker(…)`, `.retry_policy(…)`,
-  `.on_error(…)`, `.custom_pages(…)`, `.experimental(…)`, `.admin_ui(…)`,
+  `.on_error(…)`, `.admin_menu(…)`, `.admin_ui(…)`,
   `.max_request_body_bytes(…)`) replace the earlier value.
 
 The fields of `OpenShopConfig` are public. `OpenShop::new` validates the
@@ -454,7 +452,7 @@ The checks are:
   only contain letters, numbers, and `_`, and every server route must declare
   at least one HTTP method;
 - custom admin page paths must be valid, unreserved, and unambiguous, and the
-  entries of the admin menu, declared with `nav` or set with `custom_pages`,
+  entries of the admin menu, declared with `nav` or set with `admin_menu`,
   must point to registered static pages;
 - MCP permissions, tools, and resources must be well formed. See
   [MCP](mcp.md).

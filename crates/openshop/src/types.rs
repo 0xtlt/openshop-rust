@@ -23,8 +23,8 @@ use crate::server::connectors::Connectors;
 use crate::shopify::client::ShopifyClient;
 
 pub use openshop_shared::{
-    AdminPageId, AdminPageMode, AdminPagesConfig, CustomAdminNavigationItem, CustomAdminPageAccess,
-    CustomAdminPagesResponse, ResolvedAdminPages,
+    AdminMenuItem, AdminPageId, AdminPageMode, AdminPagesConfig, CustomAdminPageAccess, CustomAdminPagesResponse,
+    ResolvedAdminPages,
 };
 
 /// A JSON object, the Rust counterpart of `Record<string, unknown>`.
@@ -858,16 +858,6 @@ impl ShopifyAppConfig {
             Self::Toml { app_url, .. } | Self::Keys { app_url, .. } => app_url.as_deref(),
         }
     }
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct ExperimentalConfig {
-    pub custom_pages: Option<CustomPagesConfig>,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct CustomPagesConfig {
-    pub navigation: Vec<CustomAdminNavigationItem>,
 }
 
 /// Called when a flow run fails, with the flow name.

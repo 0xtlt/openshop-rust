@@ -16,7 +16,7 @@ use sqlx::PgPool;
 use crate::app::OpenShop;
 use crate::server::connectors::Connectors;
 use crate::shopify::client::ShopifyClient;
-use crate::types::{CustomAdminNavigationItem, InputSchema, ShopScope};
+use crate::types::{AdminMenuItem, InputSchema, ShopScope};
 use openshop_shared::{custom_admin_route_shape_key, is_safe_custom_admin_path, match_custom_admin_path};
 
 pub use crate::types::{CustomAdminPageAccess, CustomAdminPagesResponse, ResolvedAdminPages};
@@ -425,42 +425,35 @@ pub fn resolve_custom_admin_pages(pages: &[AdminPage]) -> Result<Vec<CustomAdmin
     Ok(resolved)
 }
 
-/// Checks that every sidebar entry is a static path of a registered page.
-pub fn validate_custom_admin_navigation(
-    navigation: &[CustomAdminNavigationItem],
-    pages: &[CustomAdminPage],
-) -> Result<Vec<CustomAdminNavigationItem>> {
+/// Checks that every entry of the admin menu is the static path of a listed page.
+pub fn validate_admin_menu(menu: &[AdminMenuItem], pages: &[CustomAdminPage]) -> Result<Vec<AdminMenuItem>> {
     let mut seen: Vec<&str> = Vec::new();
 
-    for (index, item) in navigation.iter().enumerate() {
+    for (index, item) in menu.iter().enumerate() {
         if item.label.trim().is_empty() {
-            bail!(
-                "[openshop] Invalid config: experimental.customPages.navigation[{index}].label must be a non-empty string"
-            );
+            bail!("[openshop] Invalid config: adminMenu[{index}].label must be a non-empty string");
         }
         if !is_safe_custom_admin_path(&item.path, false) || item.path.contains('[') || item.path.contains(':') {
-            bail!(
-                "[openshop] Invalid config: experimental.customPages.navigation[{index}].path must be a static custom page path"
-            );
+            bail!("[openshop] Invalid config: adminMenu[{index}].path must be a static custom page path");
         }
         if !pages
             .iter()
             .any(|page| match_custom_admin_path(&page.route_pattern, &item.path))
         {
             bail!(
-                "[openshop] Invalid config: custom navigation path \"{}\" does not match a discovered page",
+                "[openshop] Invalid config: adminMenu[{index}].path \"{}\" does not match a page of the application",
                 item.path
             );
         }
         if seen.contains(&item.path.as_str()) {
             bail!(
-                "[openshop] Invalid config: duplicate custom navigation path \"{}\"",
+                "[openshop] Invalid config: adminMenu[{index}].path \"{}\" is listed twice",
                 item.path
             );
         }
         seen.push(&item.path);
     }
-    Ok(navigation.to_vec())
+    Ok(menu.to_vec())
 }
 
 /// Calls a loader or action directly, applying its authorization and input validation.
@@ -549,32 +542,25 @@ mod tests {
     }
 
     #[test]
-    fn validates_navigation_against_pages() {
+    fn validates_the_menu_against_pages() {
         let pages = resolve_custom_admin_pages(&[AdminPage::new("/reviews"), AdminPage::new("/reviews/:id")]).unwrap();
-        let item = |label: &str, path: &str| CustomAdminNavigationItem {
+        let item = |label: &str, path: &str| AdminMenuItem {
             label: label.into(),
             path: path.into(),
         };
 
         assert_eq!(
-            validate_custom_admin_navigation(&[item("Reviews", "/reviews")], &pages)
+            validate_admin_menu(&[item("Reviews", "/reviews")], &pages)
                 .unwrap()
                 .len(),
             1
         );
-        let error = |navigation: &[CustomAdminNavigationItem]| {
-            validate_custom_admin_navigation(navigation, &pages)
-                .unwrap_err()
-                .to_string()
-        };
+        let error = |menu: &[AdminMenuItem]| validate_admin_menu(menu, &pages).unwrap_err().to_string();
         assert!(error(&[item(" ", "/reviews")]).contains("label must be a non-empty string"));
         assert!(error(&[item("One", "/reviews/:id")]).contains("must be a static custom page path"));
         assert!(error(&[item("Flows", "/flows")]).contains("must be a static custom page path"));
-        assert!(error(&[item("Orders", "/orders")]).contains("does not match a discovered page"));
-        assert!(
-            error(&[item("Reviews", "/reviews"), item("Again", "/reviews")])
-                .contains("duplicate custom navigation path")
-        );
+        assert!(error(&[item("Orders", "/orders")]).contains("does not match a page of the application"));
+        assert!(error(&[item("Reviews", "/reviews"), item("Again", "/reviews")]).contains("is listed twice"));
     }
 
     #[test]

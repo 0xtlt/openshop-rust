@@ -19,8 +19,7 @@ use uuid::Uuid;
 use super::http::{header, json_response, parse_query};
 use super::shop::ShopSession;
 use crate::admin::{
-    AdminAuthorize, AdminContext, AdminFunctionKind, AdminPublicError, CustomAdminPage,
-    validate_custom_admin_navigation,
+    AdminAuthorize, AdminContext, AdminFunctionKind, AdminPublicError, CustomAdminPage, validate_admin_menu,
 };
 use crate::app::OpenShop;
 use crate::engine::step::error_message;
@@ -143,7 +142,7 @@ async fn list_pages(State(app): State<OpenShop>, Extension(session): Extension<S
     }
 
     let pages = app.custom_pages();
-    let navigation = match validate_custom_admin_navigation(&config.custom_navigation(), pages) {
+    let navigation = match validate_admin_menu(&config.resolved_admin_menu(), pages) {
         Ok(navigation) => navigation,
         Err(error) => {
             logger::warn_with(

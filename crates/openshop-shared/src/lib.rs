@@ -7,7 +7,7 @@ pub mod pages;
 pub mod rpc;
 
 pub use custom_pages::{
-    CUSTOM_ADMIN_RESERVED_PREFIXES, CustomAdminNavigationItem, CustomAdminPageAccess, CustomAdminPagesResponse,
+    AdminMenuItem, CUSTOM_ADMIN_RESERVED_PREFIXES, CustomAdminPageAccess, CustomAdminPagesResponse,
     custom_admin_route_shape_key, is_reserved_custom_admin_path, is_safe_custom_admin_path, match_custom_admin_path,
 };
 pub use pages::{

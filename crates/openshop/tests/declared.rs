@@ -11,11 +11,11 @@ use openshop::builder::{DiscountMode, Flow, FunctionTitle, FunctionType, Proxy, 
 use openshop::response::{Response, StatusCode};
 use openshop::testing::{AdminTestOptions, TestContext, admin_context, invoke_admin_function};
 use openshop::{
-    AdminContext, App, CancellationToken, Concurrency, Cron, CustomAdminNavigationItem, ErrorContext, FlowContext,
-    FunctionConfig, JsonMap, McpContext, McpPermission, McpResourceContent, McpRiskLevel, Model, OpenShopConfig,
-    ProviderConfig, ProxyContext, Result, RetryPolicy, RouteAuthContext, RouteAuthOutcome, RouteContext, RunOutcome,
-    Uuid, Value, WebhookContext, WorkerConfig, admin_page, app, flow, json, mcp_resource, mcp_tool, provider, proxy,
-    response, route, validators, webhook,
+    AdminContext, AdminMenuItem, App, CancellationToken, Concurrency, Cron, ErrorContext, FlowContext, FunctionConfig,
+    JsonMap, McpContext, McpPermission, McpResourceContent, McpRiskLevel, Model, OpenShopConfig, ProviderConfig,
+    ProxyContext, Result, RetryPolicy, RouteAuthContext, RouteAuthOutcome, RouteContext, RunOutcome, Uuid, Value,
+    WebhookContext, WorkerConfig, admin_page, app, flow, json, mcp_resource, mcp_tool, provider, proxy, response,
+    route, validators, webhook,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -315,7 +315,7 @@ static APP: App = app! {
     functions: [VolumeDiscount, HideExpress, CartRules],
     models: [Widget],
     admin_pages: [WidgetsPage],
-    custom_pages: [CustomAdminNavigationItem::new("Widgets", WidgetsPage::PATH)],
+    admin_menu: [AdminMenuItem::new("Widgets", WidgetsPage::PATH)],
     webhooks: [order_changed, uninstalled],
     proxies: [list_widgets, create_widget, banner, page],
     routes: [status, set_status],
@@ -363,8 +363,8 @@ fn an_application_lists_what_it_is_made_of() {
     assert_eq!(config.models[0].table, "widgets");
     assert_eq!(config.admin_pages.len(), 1);
     assert_eq!(
-        config.custom_navigation(),
-        [CustomAdminNavigationItem::new("Widgets", "/widgets")]
+        config.resolved_admin_menu(),
+        [AdminMenuItem::new("Widgets", "/widgets")]
     );
     assert_eq!(
         config.webhooks.keys().collect::<Vec<_>>(),

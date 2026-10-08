@@ -41,24 +41,24 @@ the built-in links, in the order `admin_pages` lists the pages. A page without
 such as `/reviews/:id`, cannot have an entry: a `nav` on it is rejected when
 the configuration is built.
 
-The `custom_pages` setting of `app!` sets the menu by hand, for another order
+The `admin_menu` setting of `app!` sets the menu by hand, for another order
 or another label:
 
 ```rust,ignore
-use openshop::CustomAdminNavigationItem;
+use openshop::AdminMenuItem;
 use openshop::prelude::*;
 
 static APP: App = app! {
     admin_pages: [ReviewsPage, ReviewDetailPage, ModerationPage],
-    custom_pages: [
-        CustomAdminNavigationItem::new("Moderation", ModerationPage::PATH),
-        CustomAdminNavigationItem::new("All reviews", ReviewsPage::PATH),
+    admin_menu: [
+        AdminMenuItem::new("Moderation", ModerationPage::PATH),
+        AdminMenuItem::new("All reviews", ReviewsPage::PATH),
     ],
 };
 ```
 
-It replaces the entries the pages declare: with `custom_pages`, every `nav` is
-ignored, and `custom_pages: []` leaves the menu without any entry of the
+It replaces the entries the pages declare: with `admin_menu`, every `nav` is
+ignored, and `admin_menu: []` leaves the menu without any entry of the
 application. Each path must be a static path of a listed page.
 
 ## Server pages

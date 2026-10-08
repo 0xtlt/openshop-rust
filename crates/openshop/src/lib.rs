@@ -90,11 +90,11 @@ pub use server::connectors::Connectors;
 pub use shopify::{GraphqlOperation, ShopifyClient};
 pub use template::Liquid;
 pub use types::{
-    AdminPageId, AdminPageMode, AdminPagesConfig, Concurrency, Cron, CronShops, CustomAdminNavigationItem,
-    ErrorContext, FlowContext, FunctionConfig, JsonMap, McpConfig, McpContext, McpPermission, McpResourceContent,
-    McpRiskLevel, ProviderConfig, ProxyAuthKind, ProxyContext, RetryPolicy, RouteAuthContext, RouteAuthOutcome,
-    RouteContext, RouteRequest, RouteShopContext, RouteShopInput, ShopScope, ShopifyAppConfig, ShopifyConfig,
-    StepOptions, WebhookContext, WorkerConfig,
+    AdminMenuItem, AdminPageId, AdminPageMode, AdminPagesConfig, Concurrency, Cron, CronShops, ErrorContext,
+    FlowContext, FunctionConfig, JsonMap, McpConfig, McpContext, McpPermission, McpResourceContent, McpRiskLevel,
+    ProviderConfig, ProxyAuthKind, ProxyContext, RetryPolicy, RouteAuthContext, RouteAuthOutcome, RouteContext,
+    RouteRequest, RouteShopContext, RouteShopInput, ShopScope, ShopifyAppConfig, ShopifyConfig, StepOptions,
+    WebhookContext, WorkerConfig,
 };
 
 /// What the code of an application uses, in one import.
@@ -369,7 +369,7 @@ pub use openshop_macros::graphql;
 ///
 /// Every other entry is a setting, written `name: value` and passed to the
 /// method of that name of [`OpenShopBuilder`](builder::OpenShopBuilder): `crons`, `on_error`, `mcp`,
-/// `shopify`, `worker`, `retry_policy`, `builtin_pages`, `custom_pages`, `admin_ui`,
+/// `shopify`, `worker`, `retry_policy`, `builtin_pages`, `admin_menu`, `admin_ui`,
 /// `max_request_body_bytes`… A value can fail with `?`, such as one read from
 /// the environment (`shopify: shopify_apps()?`): the error is the one
 /// `APP.config()` and `APP.main()` return.
