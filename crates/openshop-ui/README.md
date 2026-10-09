@@ -4,8 +4,8 @@ The embedded Shopify admin UI of OpenShop, written in Rust with [Leptos](https:/
 compiled to WebAssembly. It renders Shopify's Polaris web components (`s-page`, `s-table`, …) and
 talks to the Admin API of the OpenShop server with App Bridge session tokens.
 
-The crate is a library plus a default binary. The binary is the stock UI; the library lets an
-application build its own bundle with custom admin pages.
+The crate is a library plus a default binary. The binary is the stock UI; the library is what
+the views of custom admin pages are written with, re-exported as `openshop::ui`.
 
 ## Build
 
@@ -40,10 +40,15 @@ reason.
 
 ## Custom admin pages
 
-A custom page has two halves: loaders and actions declared on the server, in an `impl` block
-marked `#[admin_page("/reviews", nav = "Reviews")]` and listed in the `admin_pages` of `app!`, and a
-view compiled into the UI bundle. To add views, create a binary crate next to your app (see
-`apps/demo/ui` for a complete one):
+An application writes a custom page in one place: an `impl` block marked
+`#[admin_page("/reviews", nav = "Reviews")]`, with its loaders, its actions, and its view, a
+function marked `#[view]`. The `ui` feature of `openshop` re-exports this library as
+`openshop::ui` for that, and the `openshop` command builds the bundle of the application from
+its pages. See "Custom admin pages" in the OpenShop documentation, and `apps/demo` for a
+complete page.
+
+The library can also be used on its own, for a bundle built by hand in a binary crate that
+targets `wasm32-unknown-unknown`:
 
 ```toml
 [dependencies]
@@ -140,7 +145,9 @@ Build it with `trunk build --release` and start the server with `OPENSHOP_UI_DIR
 - **Functions** are called by name: the name of the server function in camel case (`list_reviews`
   is `listReviews`), or the name given to `#[loader]` or `#[action]`. An input the server declares
   with `#[input]` reads its fields in camel case too (`product_id` is `productId`): give the type
-  the UI sends `#[serde(rename_all = "camelCase")]` when a field has several words.
+  the UI sends `#[serde(rename_all = "camelCase")]` when a field has several words. A `#[view]`
+  needs neither: the page gives it a typed constant per function, and the view sends the
+  `#[input]` type itself.
 - **`use_loader(reference, input)`** calls a loader when the page mounts and again whenever the
   input closure yields a different JSON value or the loader is revalidated. It exposes `data`,
   `error` and `loading` signals and `revalidate()`, and discards responses of superseded calls.

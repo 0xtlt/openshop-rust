@@ -48,40 +48,29 @@ const TEMPLATE: &[(&str, &str)] = &[
     ("README.md", include_str!("../templates/minimal/README.md")),
 ];
 
-/// Files of the custom admin UI bundle created by `openshop init-ui`.
-const UI_TEMPLATE: &[(&str, &str)] = &[
-    ("Cargo.toml", include_str!("../templates/ui/Cargo.toml.tmpl")),
-    ("Trunk.toml", include_str!("../templates/ui/Trunk.toml")),
-    ("index.html", include_str!("../templates/ui/index.html")),
-    ("src/main.rs", include_str!("../templates/ui/src/main.rs")),
-    (".gitignore", include_str!("../templates/ui/_gitignore")),
-];
+/// The page `openshop init-ui` creates, with its view.
+const UI_PAGE: (&str, &str) = ("src/admin/hello.rs", include_str!("../templates/ui/src/admin/hello.rs"));
 
-/// What to add to the application so that it serves the example page.
+/// The version of Leptos the views are written with: the one of `openshop-ui`.
+const LEPTOS_VERSION: &str = "0.8";
+
+/// What to write in the application so that it serves the example page.
 const UI_NEXT_STEPS: &str = r#"
-Declare the server side of the page, and list it with the bundle in your application:
+In `src/main.rs`, declare the module and list the page:
 
-    pub struct HelloPage;
+    mod admin;
 
-    #[admin_page("/hello", nav = "Hello")]
-    impl HelloPage {
-        #[loader]
-        async fn greeting(ctx: AdminContext) -> Result<Value> {
-            Ok(json!({ "message": format!("Hello {}", ctx.shop) }))
-        }
-    }
+    use admin::hello::HelloPage;
 
     static APP: App = app! {
         admin_pages: [HelloPage],
-        admin_ui: openshop::UiSource::Dir("ui/dist".into()),
+        admin_ui: openshop::UiSource::Dir("dist".into()),
         // …
     };
 
-Then build the bundle (once: `rustup target add wasm32-unknown-unknown` and `cargo install trunk`):
-
-    cd ui && trunk build --release
-
-`openshop dev` rebuilds it for you when `ui/` changes.
+Install the toolchain once: `rustup target add wasm32-unknown-unknown` and `cargo install trunk`.
+`openshop dev` builds the admin UI bundle from the pages and rebuilds it when they change;
+`openshop build` builds it for production, into `dist/`.
 "#;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -134,79 +123,100 @@ fn openshop_source(openshop_path: Option<&Path>) -> String {
     }
 }
 
-/// The package name declared in a `Cargo.toml`, if any.
-fn package_name(manifest: &str) -> Option<String> {
-    let mut in_package = false;
-    for line in manifest.lines().map(str::trim) {
-        if line.starts_with('[') {
-            in_package = line == "[package]";
-        } else if in_package
-            && let Some(value) = line.strip_prefix("name")
-            && let Some(value) = value.trim_start().strip_prefix('=')
-        {
-            return Some(value.trim().trim_matches('"').to_string());
+/// The manifest of an application whose pages have a view: `openshop` with its
+/// `ui` feature, and `leptos`. `None` when `openshop` is not declared on one
+/// line of `[dependencies]`, the way `openshop init` writes it.
+fn manifest_with_views(manifest: &str) -> Option<String> {
+    let mut lines: Vec<String> = Vec::new();
+    let mut in_dependencies = false;
+    let mut declared = false;
+    let has_leptos = manifest.lines().any(|line| line.trim_start().starts_with("leptos"));
+    for line in manifest.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') {
+            in_dependencies = trimmed == "[dependencies]";
         }
+        let is_openshop = in_dependencies
+            && trimmed
+                .strip_prefix("openshop")
+                .is_some_and(|rest| rest.trim_start().starts_with('='));
+        if !is_openshop {
+            lines.push(line.to_string());
+            continue;
+        }
+        let table = trimmed.strip_suffix('}')?.trim_end();
+        lines.push(if trimmed.contains("\"ui\"") {
+            line.to_string()
+        } else if let Some((before, after)) = table.split_once("features = [") {
+            format!("{before}features = [\"ui\", {after} }}")
+        } else {
+            format!("{table}, features = [\"ui\"] }}")
+        });
+        if !has_leptos {
+            lines.push("# The views of the admin pages.".to_string());
+            lines.push(format!("leptos = \"{LEPTOS_VERSION}\""));
+        }
+        declared = true;
     }
-    None
+    declared.then(|| lines.join("\n") + "\n")
 }
 
-/// `openshop init-ui [dir]`: scaffolds the admin UI bundle of a project with
-/// custom admin pages (default directory: `ui`).
-pub fn run_init_ui(cwd: &Path, args: &[String]) -> Result<PathBuf> {
-    let openshop_path = args
-        .iter()
-        .find_map(|arg| arg.strip_prefix("--openshop-path="))
-        .map(PathBuf::from);
-    let target = args
-        .iter()
-        .find(|arg| !arg.starts_with("--"))
-        .map(String::as_str)
-        .unwrap_or("ui");
-
-    let Ok(manifest) = std::fs::read_to_string(cwd.join("Cargo.toml")) else {
+/// `openshop init-ui`: gives a project a first page with a view,
+/// `src/admin/hello.rs`, and what views are compiled with.
+pub fn run_init_ui(cwd: &Path) -> Result<()> {
+    let manifest_path = cwd.join("Cargo.toml");
+    let Ok(manifest) = std::fs::read_to_string(&manifest_path) else {
         bail!("[openshop] No Cargo.toml here. Run `openshop init-ui` from the root of an OpenShop project.");
     };
-    let package = package_name(&manifest).unwrap_or_else(|| "openshop-app".to_string());
+    let (path, content) = UI_PAGE;
+    let page = cwd.join(path);
+    if page.exists() {
+        bail!("[openshop] {path} already exists.");
+    }
+    if let Some(parent) = page.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&page, content)?;
 
-    let target_dir = cwd.join(target);
-    if !is_empty_dir(&target_dir) {
-        bail!("[openshop] Target directory is not empty: {}", target_dir.display());
+    // The page is a module of `admin`, next to the pages the project already has.
+    let pages = cwd.join("src/admin/mod.rs");
+    let declared = std::fs::read_to_string(&pages).unwrap_or_default();
+    if !declared.lines().any(|line| line.trim().ends_with("mod hello;")) {
+        let separator = if declared.is_empty() || declared.ends_with('\n') {
+            ""
+        } else {
+            "\n"
+        };
+        std::fs::write(&pages, format!("{declared}{separator}pub mod hello;\n"))?;
     }
 
-    // The UI crate lives next to the framework crate in the repository.
-    let source = match openshop_path {
-        Some(path) => {
-            let ui = path
-                .join("../openshop-ui")
-                .canonicalize()
-                .context("[openshop] --openshop-path has no sibling openshop-ui crate")?;
-            format!("path = {}", toml_string(&ui.display().to_string()))
-        }
-        None => openshop_source(None),
-    };
-    let replacements = [("__PACKAGE_NAME__", package), ("__OPENSHOP_UI_SOURCE__", source)];
-
-    for (path, template) in UI_TEMPLATE {
-        let mut content = (*template).to_string();
-        for (placeholder, value) in &replacements {
-            content = content.replace(placeholder, value);
-        }
-        let file = target_dir.join(path);
-        if let Some(parent) = file.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        std::fs::write(&file, content)?;
+    let ignored_path = cwd.join(".gitignore");
+    let ignored = std::fs::read_to_string(&ignored_path).unwrap_or_default();
+    if !ignored.lines().any(|line| line.trim().trim_end_matches('/') == "dist") {
+        let separator = if ignored.is_empty() || ignored.ends_with('\n') {
+            ""
+        } else {
+            "\n"
+        };
+        std::fs::write(&ignored_path, format!("{ignored}{separator}dist/\n"))?;
     }
 
-    println!("[openshop] Created the admin UI bundle in {}", target_dir.display());
-    println!(
-        "{}",
-        UI_NEXT_STEPS
-            .replace("ui/dist", &format!("{target}/dist"))
-            .replace("cd ui", &format!("cd {target}"))
-            .replace("`ui/`", &format!("`{target}/`"))
-    );
-    Ok(target_dir)
+    println!("[openshop] Created {path}");
+    match manifest_with_views(&manifest) {
+        Some(manifest) => {
+            std::fs::write(&manifest_path, manifest)?;
+            println!("[openshop] Cargo.toml: enabled the `ui` feature of openshop, added leptos");
+        }
+        None => {
+            println!();
+            println!("In `Cargo.toml`, enable the `ui` feature of `openshop` and add `leptos`:");
+            println!();
+            println!("    openshop = {{ …, features = [\"ui\"] }}");
+            println!("    leptos = \"{LEPTOS_VERSION}\"");
+        }
+    }
+    println!("{UI_NEXT_STEPS}");
+    Ok(())
 }
 
 /// `args`: the target directory, optionally `--openshop-path=<dir>` to depend on
@@ -369,37 +379,64 @@ mod tests {
         let cwd = temp_dir("ui");
         let project = run_init(&cwd, &["my-app".to_string()]).unwrap().target_dir;
 
-        let ui = run_init_ui(&project, &[]).unwrap();
-        assert_eq!(ui, project.join("ui"));
-        let read = |path: &str| std::fs::read_to_string(ui.join(path)).unwrap();
+        run_init_ui(&project).unwrap();
+        let read = |path: &str| std::fs::read_to_string(project.join(path)).unwrap();
+        // The page is in the application, with its view: no other crate, and
+        // nothing of the bundle, which `openshop` builds from the pages.
+        assert!(!project.join("ui").exists());
+        assert!(!project.join("Trunk.toml").exists() && !project.join("index.html").exists());
+        let page = read("src/admin/hello.rs");
+        assert!(page.contains("#[admin_page(\"/hello\", nav = \"Hello\")]"));
+        assert!(page.contains("#[view]") && page.contains("use_loader(Self::GREETING, || ())"));
+        assert_eq!(read("src/admin/mod.rs"), "pub mod hello;\n");
+        assert_eq!(read(".gitignore"), "target/\n.env\n.shopify/\ndist/\n");
+
         let manifest = read("Cargo.toml");
-        assert!(manifest.contains("name = \"my-app-ui\""));
+        let source = format!("git = \"https://github.com/0xtlt/openshop-rust\", tag = \"v{OPENSHOP_VERSION}\"");
         assert!(manifest.contains(&format!(
-            "openshop-ui = {{ git = \"https://github.com/0xtlt/openshop-rust\", tag = \"v{OPENSHOP_VERSION}\" }}"
+            "[dependencies]\nopenshop = {{ {source}, features = [\"ui\"] }}\n# The views of the admin pages.\nleptos = \"0.8\"\n"
         )));
-        assert!(manifest.contains("[workspace]"));
-        assert!(read("index.html").contains("<meta name=\"shopify-api-key\" content=\"\" />"));
-        assert!(read("Trunk.toml").contains("dist = \"dist\""));
-        assert!(read("src/main.rs").contains("App::new().page(\"/hello\", HelloPage).mount();"));
-        assert!(read(".gitignore").contains("dist/"));
+        // The tests keep their own features.
+        assert!(manifest.contains(&format!("openshop = {{ {source}, features = [\"testing\"] }}")));
 
-        let error = run_init_ui(&project, &[]).unwrap_err().to_string();
-        assert!(error.contains("Target directory is not empty"), "{error}");
-        assert!(run_init_ui(&project, &["admin-ui".to_string()]).is_ok());
+        // The bundle of the project is made of that page.
+        let pages = crate::bundle::scan(&project).unwrap();
+        assert_eq!(format!("{pages:?}").matches("admin::hello::HelloPage").count(), 1);
 
-        let error = run_init_ui(&cwd, &[]).unwrap_err().to_string();
+        let error = run_init_ui(&project).unwrap_err().to_string();
+        assert_eq!(error, "[openshop] src/admin/hello.rs already exists.");
+
+        let error = run_init_ui(&cwd).unwrap_err().to_string();
         assert!(error.contains("No Cargo.toml here"), "{error}");
         std::fs::remove_dir_all(cwd).ok();
     }
 
     #[test]
-    fn reads_the_package_name_of_a_manifest() {
+    fn a_manifest_gains_what_a_view_needs() {
         assert_eq!(
-            package_name("[workspace]\nname = \"no\"\n\n[package]\nname = \"my-app\"\nversion = \"0.1.0\"\n")
-                .as_deref(),
-            Some("my-app")
+            manifest_with_views("[dependencies]\nopenshop = { path = \"../openshop\" }\nserde = \"1\"\n").as_deref(),
+            Some(
+                "[dependencies]\nopenshop = { path = \"../openshop\", features = [\"ui\"] }\n# The views of the admin pages.\nleptos = \"0.8\"\nserde = \"1\"\n"
+            )
         );
-        assert_eq!(package_name("[dependencies]\nname = \"x\"\n"), None);
+        // Features and a `leptos` the manifest already has are kept.
+        assert_eq!(
+            manifest_with_views(
+                "[dependencies]\nleptos = \"0.8\"\nopenshop = { version = \"1\", features = [\"testing\"] }\n"
+            )
+            .as_deref(),
+            Some(
+                "[dependencies]\nleptos = \"0.8\"\nopenshop = { version = \"1\", features = [\"ui\", \"testing\"] }\n"
+            )
+        );
+        let ready = "[dependencies]\nleptos = \"0.8\"\nopenshop = { version = \"1\", features = [\"ui\"] }\n";
+        assert_eq!(manifest_with_views(ready).as_deref(), Some(ready));
+        // Another shape is left to its author.
+        assert_eq!(manifest_with_views("[dependencies]\nopenshop.workspace = true\n"), None);
+        assert_eq!(
+            manifest_with_views("[dev-dependencies]\nopenshop = { version = \"1\" }\n"),
+            None
+        );
     }
 
     #[test]

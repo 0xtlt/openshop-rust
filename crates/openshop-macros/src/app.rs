@@ -26,7 +26,7 @@ enum Entry {
     /// `flows: [sync_orders, count_variants]`.
     Blocks { kind: &'static str, blocks: Vec<Type> },
     /// `on_error: report`: a setting of the builder.
-    Setting { key: Ident, value: Expr },
+    Setting { key: Ident, value: Box<Expr> },
 }
 
 pub struct Declaration(Vec<Entry>);

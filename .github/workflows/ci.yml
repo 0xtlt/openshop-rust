@@ -40,14 +40,9 @@ jobs:
 
   ui:
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        # The framework's admin UI, and the demo's bundle built on top of it.
-        workspace: [crates/openshop-ui, apps/demo/ui]
     defaults:
       run:
-        working-directory: ${{ matrix.workspace }}
+        working-directory: crates/openshop-ui
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -56,9 +51,23 @@ jobs:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: ${{ matrix.workspace }}
+          workspaces: crates/openshop-ui
       - run: cargo fmt --check
       - run: cargo clippy --target wasm32-unknown-unknown -- -D warnings
       - run: cargo test
       - uses: jetli/trunk-action@v0.5.0
       - run: trunk build --release --dist target/ui-dist
+
+  # The demo has an admin page with a view: `openshop build-ui` compiles its
+  # pages to WebAssembly, into its own admin UI bundle.
+  demo-ui:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - uses: jetli/trunk-action@v0.5.0
+      - run: cargo run -p openshop-cli -- build-ui
+        working-directory: apps/demo

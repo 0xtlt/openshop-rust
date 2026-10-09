@@ -163,8 +163,8 @@ robust; they are listed in [Differences](docs/src/reference/differences.md).
 | `crates/openshop-graphql` | Shopify's Admin schema, and the checks and code generation behind `graphql!` |
 | `crates/openshop-macros` | The macros: `app!`, the attributes and derives that declare building blocks, and `graphql!` |
 | `crates/openshop-ui` | The admin UI (Leptos, built with trunk into `crates/openshop/ui-dist`) |
-| `crates/openshop-cli` | The `openshop` command: `init`, `init-ui`, `dev` and `codegen` |
-| `apps/demo` | A demo app exercising every building block; `apps/demo/ui` is its admin UI bundle with a custom page |
+| `crates/openshop-cli` | The `openshop` command: `init`, `init-ui`, `dev`, `build`, `build-ui` and `codegen` |
+| `apps/demo` | A demo app exercising every building block, with a custom admin page and its view |
 | `docs` | Documentation (mdBook) |
 
 ## Contribute

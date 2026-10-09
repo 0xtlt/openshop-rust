@@ -5,8 +5,8 @@
 //!   cargo run -p openshop-demo --example preview
 //! ```
 //!
-//! Set `PREVIEW_UI_DIR=apps/demo/ui/dist` to preview the demo's own bundle with
-//! its custom `/reviews` page (build it first with `trunk build --release`).
+//! Set `PREVIEW_UI_DIR=apps/demo/dist` to preview the demo's own bundle with its
+//! custom `/reviews` page (build it first with `mise run demo:ui`).
 //!
 //! The demo app runs on `http://localhost:3999` against a throwaway database
 //! schema, with Shopify answered by fixtures and App Bridge replaced by a stub
@@ -54,7 +54,7 @@ fn copy_dir(from: &Path, to: &Path) -> std::io::Result<()> {
 
 /// A copy of the built UI whose shell loads the App Bridge stub.
 fn preview_ui_dir() -> Result<PathBuf> {
-    // `PREVIEW_UI_DIR` previews another bundle, e.g. `apps/demo/ui/dist`.
+    // `PREVIEW_UI_DIR` previews another bundle, e.g. `apps/demo/dist`.
     let built = match std::env::var_os("PREVIEW_UI_DIR") {
         Some(dir) => PathBuf::from(dir),
         None => Path::new(env!("CARGO_MANIFEST_DIR")).join("../../crates/openshop/ui-dist"),

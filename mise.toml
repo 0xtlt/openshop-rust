@@ -1,7 +1,7 @@
 # Toolchain + tasks for OpenShop. Run `mise install` once, then `mise run <task>`.
 [tools]
 rust = { version = "1.98.1", components = "clippy,rustfmt", targets = "wasm32-unknown-unknown" }
-# Builds the admin UI bundles (`crates/openshop-ui`, `apps/demo/ui`).
+# Builds the admin UI bundles (`crates/openshop-ui`, `apps/demo`).
 "github:trunk-rs/trunk" = "0.21.14"
 # Builds the documentation in `docs/`.
 mdbook = "0.5.4"
@@ -15,11 +15,10 @@ description = "Stop PostgreSQL (the data volume is kept)"
 run = "docker compose down"
 
 [tasks.fmt]
-description = "Format the workspace and both admin UI workspaces"
+description = "Format the workspace and the admin UI workspace"
 run = [
   "cargo fmt --all",
   "cargo fmt --manifest-path crates/openshop-ui/Cargo.toml",
-  "cargo fmt --manifest-path apps/demo/ui/Cargo.toml",
 ]
 
 [tasks.lint]
@@ -37,14 +36,12 @@ depends = ["lint", "test"]
 run = "cargo fmt --all -- --check"
 
 [tasks."ui:check"]
-description = "fmt check + clippy (wasm32) + tests of both admin UI workspaces"
-run = """
-for ui in crates/openshop-ui apps/demo/ui; do
-  cargo fmt --manifest-path "$ui/Cargo.toml" -- --check
-  cargo clippy --manifest-path "$ui/Cargo.toml" --target wasm32-unknown-unknown -- -D warnings
-  cargo test --manifest-path "$ui/Cargo.toml"
-done
-"""
+description = "fmt check + clippy (wasm32) + tests of the admin UI workspace"
+run = [
+  "cargo fmt --manifest-path crates/openshop-ui/Cargo.toml -- --check",
+  "cargo clippy --manifest-path crates/openshop-ui/Cargo.toml --target wasm32-unknown-unknown -- -D warnings",
+  "cargo test --manifest-path crates/openshop-ui/Cargo.toml",
+]
 
 [tasks."ui:build"]
 description = "Rebuild the embedded admin UI into crates/openshop/ui-dist (committed)"
@@ -52,9 +49,9 @@ dir = "crates/openshop-ui"
 run = "trunk build --release"
 
 [tasks."demo:ui"]
-description = "Build the demo's own admin UI bundle into apps/demo/ui/dist"
-dir = "apps/demo/ui"
-run = "trunk build --release"
+description = "Build the demo's own admin UI bundle, from its admin pages, into apps/demo/dist"
+dir = "apps/demo"
+run = "cargo run -p openshop-cli -- build-ui"
 
 [tasks.demo]
 description = "Run the demo app in development mode (needs apps/demo/.env)"

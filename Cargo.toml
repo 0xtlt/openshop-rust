@@ -8,7 +8,7 @@ members = [
   "crates/openshop-cli",
   "apps/demo",
 ]
-# The admin UI targets wasm32 and is built with trunk; it has its own lockfile.
+# The admin UI targets wasm32 and is built with trunk, with its own profile and lockfile.
 exclude = ["crates/openshop-ui"]
 
 [workspace.package]

@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+- A custom admin page is written in one place. The view of a page is the
+  function marked `#[view]` in its `#[admin_page]` block, next to the loaders
+  and the actions it calls, and no longer lives in a separate `ui/` crate. It
+  calls them through a constant the block gains per function,
+  `use_loader(Self::LIST_REVIEWS, || ())`, which carries the type the
+  function takes and the type it returns: the names and the types are no
+  longer written a second time. Views need the `ui` feature of `openshop`,
+  which re-exports `openshop-ui` as `openshop::ui`.
+- The admin UI bundle of an application is built by `openshop` from its
+  pages: `openshop dev` and `openshop build` compile to WebAssembly, on their
+  own, the modules that declare a page with a view, and write the bundle into
+  `dist/`. The application has no file of the bundle to keep, and the rest of
+  it is written as before. `openshop build-ui` builds the bundle alone.
+- `openshop init-ui` writes an example page, `src/admin/hello.rs`, and adds
+  the `ui` feature and `leptos` to the manifest. It no longer takes a
+  directory.
 - Every context of a shop gives the same three things: `ctx.db`, `ctx.shopify`
   and `ctx.connectors`, in a flow, a webhook, a proxy, an admin function, an
   MCP tool, and on the shop a route resolves with `ctx.for_shop(…)`. Nothing

@@ -96,7 +96,7 @@ pub fn derive(input: DeriveInput) -> syn::Result<TokenStream> {
                     )?;
                 }
                 Argument::Value(_, value) if option == "label" => set_once(&mut label, argument, text(value)?)?,
-                Argument::Value(_, value) if option == "title" => set_once(&mut title, argument, value.clone())?,
+                Argument::Value(_, value) if option == "title" => set_once(&mut title, argument, (**value).clone())?,
                 Argument::List(_, list) if option == "modes" => definition_options.push(modes(list.clone())?),
                 Argument::List(_, list) if option == "combines_with" => {
                     owner_options.push(combines_with(list.clone())?);

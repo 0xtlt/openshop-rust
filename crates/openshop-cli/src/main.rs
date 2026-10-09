@@ -1,5 +1,6 @@
 //! `openshop`: scaffold and develop OpenShop applications.
 
+mod bundle;
 mod codegen;
 mod dev;
 mod init;
@@ -15,7 +16,7 @@ const USAGE: &str = "
 
   Commands:
     init <dir>                  Scaffold a new OpenShop project
-    init-ui [dir]               Scaffold the admin UI bundle for custom admin pages (default: ui)
+    init-ui                     Scaffold a custom admin page with its view
     dev                         Start the app in dev mode and restart it when sources change
     codegen                     Download the Shopify Admin GraphQL schema of another API version
                                 for graphql! (--api-version=YYYY-MM, --out=<file>)
@@ -24,7 +25,8 @@ const USAGE: &str = "
     migrate generate            Generate a new client-owned migration
     migrate check               Check generated migration history
     migrate status              Show client migration status
-    build                       Build for production
+    build                       Build for production: the admin UI bundle, if any, then the app
+    build-ui                    Build the admin UI bundle alone, into dist/
     start                       Start production server (API + UI, no worker)
     test [args]                 Run tests
 
@@ -39,8 +41,8 @@ const USAGE: &str = "
     openshop test
     openshop build && openshop start
 
-  Everything except `init`, `init-ui`, `dev` and `codegen` runs the application
-  binary through cargo in the current project.
+  Everything except `init`, `init-ui`, `dev`, `build-ui` and `codegen` runs the
+  application binary through cargo in the current project.
 ";
 
 /// Runs cargo in the current directory and forwards its exit status.
@@ -59,13 +61,19 @@ async fn run(args: &[String]) -> Result<()> {
             init::run_init(&std::env::current_dir()?, rest)?;
             Ok(())
         }
-        Some("init-ui") => {
-            init::run_init_ui(&std::env::current_dir()?, rest)?;
-            Ok(())
-        }
+        Some("init-ui") => init::run_init_ui(&std::env::current_dir()?),
         Some("dev") => dev::start_dev(rest).await,
         Some("codegen") => codegen::run_codegen(&std::env::current_dir()?, rest).await,
-        Some("build") => cargo(&["build", "--release"], rest).await,
+        Some("build") => {
+            bundle::build(&std::env::current_dir()?).await?;
+            cargo(&["build", "--release"], rest).await
+        }
+        Some("build-ui") => {
+            if !bundle::build(&std::env::current_dir()?).await? {
+                println!("[openshop] No admin page has a view: the admin UI is the one built into openshop.");
+            }
+            Ok(())
+        }
         Some("test") => cargo(&["test"], rest).await,
         Some("migrate") => cargo(&["run", "--", "migrate"], rest).await,
         Some(command @ ("start" | "worker")) => cargo(&["run", "--release", "--", command], rest).await,

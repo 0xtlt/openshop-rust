@@ -31,8 +31,7 @@ a non-production environment before changing production.
    cargo update -p openshop
    ```
 
-   If the project has its own admin UI bundle, set the same tag on its
-   `openshop-ui` dependency and rebuild the bundle.
+   If the project has its own admin UI bundle, rebuild it.
 
 3. Compare the current project with
    `crates/openshop-cli/templates/minimal/` in the matching release. Generated

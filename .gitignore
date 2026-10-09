@@ -7,5 +7,4 @@ shopify.app.*.toml
 docs/book/
 crates/openshop-ui/target/
 crates/openshop-ui/dist/
-apps/demo/ui/target/
-apps/demo/ui/dist/
+apps/demo/dist/

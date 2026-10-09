@@ -11,10 +11,11 @@ An OpenShop app has two command lines:
 | `openshop` command | What it runs | Purpose |
 | --- | --- | --- |
 | `openshop init <dir>` | — | Scaffold a new project. |
-| `openshop init-ui [dir]` | — | Scaffold the admin UI bundle for custom admin pages. |
+| `openshop init-ui` | — | Scaffold a custom admin page with its view. |
 | `openshop dev [cargo args]` | `cargo run [cargo args] -- dev`, restarted on changes | Start the development server. |
 | `openshop codegen [--api-version=YYYY-MM] [--out=<file>]` | — | Download the Shopify Admin GraphQL schema of another API version for [`graphql!`](graphql.md#schema-and-api-version). |
-| `openshop build [args]` | `cargo build --release [args]` | Build the app for production. |
+| `openshop build [args]` | `openshop build-ui`, then `cargo build --release [args]` | Build the app for production. |
+| `openshop build-ui` | `trunk build --release` on the crate of the bundle | Build the admin UI bundle of an app whose admin pages have a view, into `dist/`. |
 | `openshop start [args]` | `cargo run --release -- start [args]` | Start the production web process. |
 | `openshop worker [args]` | `cargo run --release -- worker [args]` | Start the worker process. |
 | `openshop migrate [args]` | `cargo run -- migrate [args]` | Apply, generate, check, or inspect migrations. |
@@ -30,7 +31,7 @@ cargo install --git https://github.com/0xtlt/openshop-rust openshop-cli
 ```
 
 The CLI is a convenience. Every command except `init`, `init-ui`, `codegen`,
-and the file watcher of `dev` can be run with `cargo run -- <command>` or, in
+`build-ui`, and the file watcher of `dev` can be run with `cargo run -- <command>` or, in
 production, by executing the compiled binary directly (`./my-app start`).
 
 ## Scaffold a project
@@ -55,27 +56,48 @@ It does not update an existing app. See the
 A non-empty target fails with
 `[openshop] Target directory is not empty: <path>`.
 
-### Scaffold a custom admin UI
+### Scaffold a custom admin page
 
 ```bash
 openshop init-ui
 ```
 
-`init-ui [dir]` adds the WebAssembly UI crate that an app with
-[custom admin pages](custom-admin-pages.md) needs. Run it from the project
-root: without a `Cargo.toml` in the current directory it fails with
+`init-ui` gives an app a first [custom admin page](custom-admin-pages.md) with
+a view, and what views are compiled with. Run it from the project root:
+without a `Cargo.toml` in the current directory it fails with
 ``[openshop] No Cargo.toml here. Run `openshop init-ui` from the root of an OpenShop project.``
 
-| Argument | Behavior |
-| --- | --- |
-| `[dir]` | Target directory, `ui` by default. It must be empty or nonexistent. |
-| `--openshop-path=<dir>` | Depend on the `openshop-ui` crate next to a local checkout of the `openshop` crate instead of the tagged Git repository. |
+The command writes `src/admin/hello.rs`, an example `/hello` page with a
+loader and its view, declares it in `src/admin/mod.rs`, and adds `dist/`,
+where the bundle is built, to `.gitignore`. When the page already exists it
+fails with `[openshop] src/admin/hello.rs already exists.`
 
-The command writes `Cargo.toml` (package `<app>-ui`, its own cargo workspace,
-`openshop-ui` pinned to the CLI's tag), `Trunk.toml`, `index.html`,
-`src/main.rs` with an example `/hello` page, and `.gitignore`, then prints what
-to add to your application: an `#[admin_page("/hello", nav = "Hello")]` block
-listed in the `admin_pages` of `app!`, and the `admin_ui` setting.
+In `Cargo.toml`, it adds the `ui` feature to the `openshop` dependency and
+adds `leptos`. When `openshop` is not declared on one line of
+`[dependencies]`, the manifest is left as it is and the lines to add are
+printed.
+
+It then prints what to write in `src/main.rs`: `mod admin;`, the page in the
+`admin_pages` of `app!`, and the `admin_ui` setting.
+
+### Build the admin UI bundle
+
+```bash
+openshop build-ui
+```
+
+`build-ui` reads `src/` for the admin pages that have a `#[view]`. Without
+one, it prints
+`[openshop] No admin page has a view: the admin UI is the one built into openshop.`
+and builds nothing. Otherwise it writes the crate of the bundle under the
+`target` directory of the project, in `openshop-ui/<package>/`, and builds it
+with [trunk](https://trunkrs.dev) into `dist/`, optimized for size. The crate
+is made of the modules that declare the pages; see
+[What the bundle is made of](custom-admin-pages.md#what-the-bundle-is-made-of).
+
+A page with a view declared in `src/main.rs` or `src/lib.rs` is refused: the
+bundle is made of a module, such as `src/admin/`. `openshop build` runs the
+same build before `cargo build --release`.
 
 ## Command behavior
 
@@ -144,11 +166,12 @@ not start a second `dev` process alongside it.
 - changes that arrive during a restart are coalesced into one more restart;
 - arguments after `dev` are passed to `cargo run`, for example
   `openshop dev -p my-app` in a workspace;
-- when the project has a `ui/Trunk.toml`, it also runs `trunk watch` in `ui/`
-  to rebuild the custom admin UI bundle and, unless `OPENSHOP_UI_DIR` is
-  already set, starts the app with `OPENSHOP_UI_DIR` pointing at `ui/dist`. If
-  `trunk` cannot be started, a warning is printed and the bundle is not
-  rebuilt.
+- when an admin page has a view, it also writes the crate of the admin UI
+  bundle, as `build-ui` does, runs `trunk watch` on it to rebuild the bundle
+  when a page changes and, unless `OPENSHOP_UI_DIR` is already set, starts the
+  app with `OPENSHOP_UI_DIR` pointing at `dist`. A view added or removed while
+  `dev` runs is taken into account at the next change. If `trunk` cannot be
+  started, a warning is printed and the bundle is not rebuilt.
 
 Only `dev` loads the project-root `.env` file, before it builds the
 configuration. Set variables explicitly for build, migration, test, and

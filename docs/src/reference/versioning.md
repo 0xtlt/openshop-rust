@@ -25,8 +25,7 @@ openshop = { git = "https://github.com/0xtlt/openshop-rust", tag = "v<version>" 
 openshop = { git = "https://github.com/0xtlt/openshop-rust", tag = "v<version>", features = ["testing"] }
 ```
 
-Change both entries together when you upgrade, and keep the `openshop-ui`
-dependency of a custom admin UI bundle on the same tag. A generated project is
+Change both entries together when you upgrade. A generated project is
 app-owned after creation. Updating the dependency does not rewrite its
 `main.rs`, configuration, or deployment files.
 
@@ -38,7 +37,7 @@ app-owned after creation. Updating the dependency does not rewrite its
 | Generated template | Compare `Cargo.toml`, `src/main.rs`, Shopify TOML, Docker, and `Procfile` files with a freshly generated project. |
 | Configuration | Build the configuration, for example with `APP.config()` in a test, so validation checks registered names, paths, schedules, and positive numeric options. |
 | Database | Run `migrate generate`, review the SQL, and run `migrate check`; test forward migration and application rollback compatibility. |
-| Custom admin UI | Rebuild the bundle against the matching `openshop-ui` version. |
+| Custom admin UI | Rebuild the bundle: it is compiled from the application, with the same `openshop`. |
 | Web and worker | Deploy the exact same binary and configuration. |
 
 This implementation follows the behavior of OpenShop for TypeScript

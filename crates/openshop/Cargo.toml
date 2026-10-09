@@ -21,13 +21,24 @@ embedded-ui = ["dep:rust-embed"]
 schema = ["dep:schemars"]
 # Test harness: isolated databases, fake providers, signed requests.
 testing = []
+# The views of custom admin pages, written next to their loaders and actions
+# and compiled to WebAssembly: `#[view]` in an `#[admin_page]` block.
+ui = ["dep:openshop-ui"]
 
 [dependencies]
 openshop-macros.workspace = true
 openshop-shared.workspace = true
+openshop-ui = { path = "../openshop-ui", version = "0.0.12-beta.0", optional = true }
 
-aes-gcm.workspace = true
 anyhow.workspace = true
+schemars = { workspace = true, optional = true }
+serde.workspace = true
+serde_json.workspace = true
+
+# The server. An application with views is also compiled to WebAssembly, where
+# only the views of its admin pages are kept.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+aes-gcm.workspace = true
 axum.workspace = true
 base64.workspace = true
 chrono.workspace = true
@@ -41,10 +52,7 @@ rand.workspace = true
 regex.workspace = true
 reqwest.workspace = true
 rust-embed = { workspace = true, optional = true }
-schemars = { workspace = true, optional = true }
 scrypt.workspace = true
-serde.workspace = true
-serde_json.workspace = true
 serde_path_to_error.workspace = true
 serde_urlencoded.workspace = true
 sha2.workspace = true
@@ -60,8 +68,10 @@ url.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
-openshop = { path = ".", features = ["testing"] }
+openshop = { path = ".", features = ["testing", "ui"] }
 openshop-graphql.workspace = true
+# The views of `tests/admin_views.rs`.
+leptos = "0.8"
 tokio = { workspace = true, features = ["test-util"] }
 
 [lints.rust]

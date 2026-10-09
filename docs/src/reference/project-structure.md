@@ -40,10 +40,10 @@ lists it, in [`app!`](configuration.md).
 | `src/webhooks/` | Shopify event handlers | `webhooks` |
 | `src/functions/` | Shopify Function definitions | `functions` |
 | `src/models/` | Application-owned database tables | `models` |
-| `src/admin/` | Server side of experimental custom admin screens | `admin_pages` |
+| `src/admin/` | Experimental custom admin screens: what the server runs, and their views | `admin_pages` |
 | `src/mcp.rs` | MCP tools, resources, and their permissions | `mcp_tools` and `mcp_resources` |
 | `tests/` | Integration tests using `openshop::testing` | — |
-| `ui/` | WebAssembly admin UI bundle with the views of custom admin screens, created by `openshop init-ui` | `admin_ui`, or `OPENSHOP_UI_DIR` |
+| `dist/` | The admin UI bundle of the application, built by `openshop build` from the custom admin screens that have a view. Not committed | `admin_ui`, or `OPENSHOP_UI_DIR` |
 
 An application that uses every block is laid out like `apps/demo` in the
 OpenShop repository:

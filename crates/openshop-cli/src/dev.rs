@@ -9,6 +9,7 @@ use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use tokio::process::{Child, Command};
 use tokio::sync::{Mutex, mpsc};
 
+use crate::bundle;
 use crate::restart::{RestartCoordinator, Restartable};
 
 /// Directories watched recursively, including ones created after startup.
@@ -40,49 +41,71 @@ pub fn watched_source(cwd: &Path, path: &Path) -> Option<String> {
 
 struct DevProcess {
     cargo_args: Vec<String>,
-    /// Extra environment of the app process.
-    env: Vec<(&'static str, PathBuf)>,
+    /// The admin UI bundle the app serves, when the project builds its own.
+    ui_dir: std::sync::Mutex<Option<PathBuf>>,
     child: Mutex<Option<Child>>,
 }
 
-/// The custom admin UI bundle of the project (`ui/`, created by `openshop init-ui`), if any.
-pub fn custom_ui_dir(cwd: &Path) -> Option<PathBuf> {
-    let ui = cwd.join("ui");
-    ui.join("Trunk.toml").is_file().then_some(ui)
+/// The admin UI bundle of the project, rebuilt by trunk while `dev` runs.
+struct BundleWatch {
+    cwd: PathBuf,
+    trunk: Option<Child>,
+    /// trunk could not be started: said once, not at every change.
+    unavailable: bool,
 }
 
-/// Rebuilds the admin UI bundle whenever it changes.
-fn watch_custom_ui(ui: &Path) -> Option<Child> {
-    match Command::new("trunk")
-        .arg("watch")
-        .current_dir(ui)
-        .kill_on_drop(true)
-        .spawn()
-    {
-        Ok(child) => {
-            println!(
-                "[openshop] Building the admin UI bundle in {} (trunk watch)",
-                ui.display()
-            );
-            Some(child)
+impl BundleWatch {
+    /// Writes the crate of the bundle again, and starts or stops trunk to
+    /// match. Returns whether the project has a bundle of its own.
+    async fn refresh(&mut self) -> bool {
+        match bundle::prepare(&self.cwd).await {
+            Ok(Some(prepared)) => {
+                if prepared.watch_changed {
+                    self.stop().await;
+                }
+                if self.trunk.is_none() && !self.unavailable {
+                    self.trunk = bundle::watch(&prepared);
+                    self.unavailable = self.trunk.is_none();
+                }
+                true
+            }
+            Ok(None) => {
+                self.stop().await;
+                false
+            }
+            // The sources may be half written: what is running is kept.
+            Err(error) => {
+                eprintln!("{error:#}");
+                self.trunk.is_some()
+            }
         }
-        Err(error) => {
-            eprintln!(
-                "[openshop] Could not run trunk ({error}); the admin UI bundle in {} is not rebuilt. Install it with `cargo install trunk`.",
-                ui.display()
-            );
-            None
+    }
+
+    async fn stop(&mut self) {
+        if let Some(mut trunk) = self.trunk.take() {
+            let _ = trunk.kill().await;
         }
     }
 }
 
 impl DevProcess {
+    fn ui_dir(&self) -> Option<PathBuf> {
+        self.ui_dir
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    fn serve(&self, ui_dir: Option<PathBuf>) {
+        *self.ui_dir.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = ui_dir;
+    }
+
     fn spawn(&self) -> Result<Child> {
         Command::new("cargo")
             .args(["run"])
             .args(&self.cargo_args)
             .args(["--", "dev"])
-            .envs(self.env.iter().map(|(name, value)| (name, value)))
+            .envs(self.ui_dir().map(|directory| ("OPENSHOP_UI_DIR", directory)))
             .kill_on_drop(true)
             .spawn()
             .context("[openshop] Failed to run cargo")
@@ -171,19 +194,18 @@ pub async fn start_dev(cargo_args: &[String]) -> Result<()> {
     let cwd = std::env::current_dir()?.canonicalize()?;
     println!("[openshop] Starting dev server...");
 
-    // A project with custom admin pages serves its own bundle, rebuilt by trunk.
-    let custom_ui = custom_ui_dir(&cwd);
-    let mut ui_watcher = custom_ui.as_deref().and_then(watch_custom_ui);
-    let mut env = Vec::new();
-    if let Some(ui) = &custom_ui
-        && std::env::var_os("OPENSHOP_UI_DIR").is_none()
-    {
-        env.push(("OPENSHOP_UI_DIR", ui.join("dist")));
-    }
+    // A project whose admin pages have a view serves its own bundle, rebuilt by trunk.
+    let mut bundle = BundleWatch {
+        cwd: cwd.clone(),
+        trunk: None,
+        unavailable: false,
+    };
+    let chosen = std::env::var_os("OPENSHOP_UI_DIR").is_some();
+    let ui_dir = |built: bool| (built && !chosen).then(|| bundle::dist(&cwd));
 
     let process = Arc::new(DevProcess {
         cargo_args: cargo_args.to_vec(),
-        env,
+        ui_dir: std::sync::Mutex::new(ui_dir(bundle.refresh().await)),
         child: Mutex::new(None),
     });
     process.start().await;
@@ -231,6 +253,10 @@ pub async fn start_dev(cargo_args: &[String]) -> Result<()> {
             }
             _ = debounce => {
                 if let Some(source) = pending.take() {
+                    // A view may have been added, or the last one removed.
+                    if source.starts_with("src") || source.starts_with("Cargo.") {
+                        process.serve(ui_dir(bundle.refresh().await));
+                    }
                     let coordinator = coordinator.clone();
                     tokio::spawn(async move { coordinator.request_restart(source).await });
                 }
@@ -239,25 +265,13 @@ pub async fn start_dev(cargo_args: &[String]) -> Result<()> {
     }
 
     process.shutdown().await;
-    if let Some(watcher) = &mut ui_watcher {
-        let _ = watcher.kill().await;
-    }
+    bundle.stop().await;
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn detects_a_custom_ui_bundle_by_its_trunk_config() {
-        let dir = std::env::temp_dir().join(format!("openshop-dev-ui-{}", std::process::id()));
-        std::fs::create_dir_all(dir.join("ui")).unwrap();
-        assert_eq!(custom_ui_dir(&dir), None);
-        std::fs::write(dir.join("ui/Trunk.toml"), "[build]\n").unwrap();
-        assert_eq!(custom_ui_dir(&dir), Some(dir.join("ui")));
-        std::fs::remove_dir_all(dir).ok();
-    }
 
     #[test]
     fn reports_changes_in_watched_locations_only() {

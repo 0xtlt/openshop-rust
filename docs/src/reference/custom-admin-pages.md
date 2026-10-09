@@ -5,12 +5,10 @@ To build a screen, see [Add a custom admin page](../guides/add-admin-page.md).
 Custom admin pages let an OpenShop app add embedded screens without forking the
 framework UI. The API is experimental.
 
-A custom page has two halves:
-
-- a **server half**, the `impl` block of a type marked `#[admin_page("/path")]`,
-  which holds the page's access rule, loaders, and actions;
-- a **client half**, a Rust view compiled into your own WebAssembly admin UI
-  bundle with the `openshop-ui` crate.
+A custom page is one `impl` block, marked `#[admin_page("/path")]`. It holds
+what the server runs, the access rule, the loaders, and the actions of the
+page, and what the browser shows: the view of the page, compiled to
+WebAssembly into the admin UI bundle of the application.
 
 ```rust,ignore
 // src/main.rs
@@ -61,12 +59,12 @@ It replaces the entries the pages declare: with `admin_menu`, every `nav` is
 ignored, and `admin_menu: []` leaves the menu without any entry of the
 application. Each path must be a static path of a listed page.
 
-## Server pages
+## Server functions
 
-`#[admin_page(path)]` on the `impl` block of a type declares the server half of
-a page. The functions of the block marked `#[access]`, `#[loader]`, or
-`#[action]` are the page's access rule, loaders, and actions; the path is also
-the constant `PATH` of the type.
+`#[admin_page(path)]` on the `impl` block of a type declares a page. The
+functions of the block marked `#[access]`, `#[loader]`, or `#[action]` are the
+page's access rule, loaders, and actions; the path is also the constant `PATH`
+of the type. The function marked [`#[view]`](#views) is what the page shows.
 
 ```rust,ignore
 // src/admin/reviews.rs
@@ -140,10 +138,11 @@ built.
 ## Loaders and actions
 
 Loaders read and actions write. Both are functions of the page's `impl` block,
-marked `#[loader]` or `#[action]`. The page view calls them by name: the name
-of the function in camel case (`list_reviews` is `listReviews`), or the name
-given to the marker (`#[loader("list")]`). Two functions of a page cannot have
-the same name.
+marked `#[loader]` or `#[action]`. Each has a name: the name of the function
+in camel case (`list_reviews` is `listReviews`), or the name given to the
+marker (`#[loader("list")]`). Two functions of a page cannot have the same
+name. The view of the page calls them through a
+[constant of the page](#views), not by that name.
 
 | Function | Input |
 | --- | --- |
@@ -197,131 +196,202 @@ an ordinary server route or an OpenShop flow for long-running or retryable work.
 Loaders and actions are called over an internal
 `POST /api/pages/custom/<page path>/_rpc/<loader|action>/<name>` transport
 authenticated with a fresh Shopify App Bridge session token. Endpoint URLs are
-not a public API; use `use_loader` and `use_action` in the page view.
+not a public API; use `use_loader` and `use_action` in the view of the page.
 
-## Page views
+## Views
 
-Page views are written with [Leptos](https://leptos.dev) and Shopify's Polaris
-web components, in a separate binary crate that targets
-`wasm32-unknown-unknown` and is built with [trunk](https://trunkrs.dev). The
-crate depends on `openshop-ui`, which provides the built-in screens and the
-custom page API:
-
-```toml
-[dependencies]
-openshop-ui = { git = "https://github.com/0xtlt/openshop-rust", tag = "v<version>" }
-leptos = "0.8"
-serde = { version = "1", features = ["derive"] }
-```
-
-`openshop init-ui` creates this crate in `ui/` with an example page; see
-[CLI commands](cli.md#scaffold-a-custom-admin-ui). To set it up by hand, use
-the same source and version as your `openshop` dependency, keep the UI crate
-out of your server's cargo workspace (declare an empty `[workspace]` table in
-its `Cargo.toml`), and copy `index.html` and `Trunk.toml` from the
-`openshop-ui` crate with `dist = "dist"`. `apps/demo/ui` in the OpenShop
-repository is a complete example.
+The view of a page is the function of its block marked `#[view]`, in the same
+file as the loaders and the actions it calls. It is written with
+[Leptos](https://leptos.dev) and Shopify's Polaris web components:
 
 ```rust,ignore
-// ui/src/main.rs
-use leptos::{prelude::*, task::spawn_local};
-use openshop_ui::{
-    App, RouteParams,
-    admin::{AdminActionOptions, AdminFunctionRef, use_action, use_loader},
-    shopify,
-};
+// src/admin/reviews.rs
+use leptos::prelude::*;
+use leptos::task::spawn_local;
+use openshop::prelude::*;
+use openshop::ui::{AdminActionOptions, RouteParams, shopify, use_action, use_loader};
 use serde::{Deserialize, Serialize};
 
-#[derive(Clone, PartialEq, Deserialize)]
-struct Review {
-    id: String,
-    title: String,
+#[input]
+pub struct SaveReview {
+    pub title: String,
 }
 
-#[derive(Serialize)]
-struct SaveReview {
-    title: String,
+// What a loader or an action returns is written by the server and read by
+// the view.
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
+pub struct Review {
+    pub id: String,
+    pub title: String,
 }
 
-// Kind, name, input and output of the functions declared on the server.
-const LIST_REVIEWS: AdminFunctionRef<(), Vec<Review>> = AdminFunctionRef::loader("listReviews");
-const REVIEW: AdminFunctionRef<(), Review> = AdminFunctionRef::loader("review");
-const SAVE_REVIEW: AdminFunctionRef<SaveReview, Review> = AdminFunctionRef::action("saveReview");
+pub struct ReviewsPage;
 
-#[component]
-fn Reviews() -> impl IntoView {
-    let reviews = use_loader(LIST_REVIEWS, || ());
-    let save = use_action(SAVE_REVIEW);
-    let add = move |_| {
-        spawn_local(async move {
-            let input = SaveReview { title: "New review".to_string() };
-            let options = AdminActionOptions::new().revalidate(LIST_REVIEWS);
-            if let Ok(Some(review)) = save.invoke(input, options).await {
-                shopify::toast(&format!("Saved {}", review.title));
-            }
-        });
-    };
+#[admin_page("/reviews", nav = "Reviews")]
+impl ReviewsPage {
+    #[loader]
+    async fn list_reviews(ctx: AdminContext) -> Result<Vec<Review>> {
+        Ok(vec![Review { id: "1".to_string(), title: format!("First review of {}", ctx.shop) }])
+    }
 
-    view! {
-        <s-page heading="Reviews">
-            {move || reviews.error.get().map(|error| view! { <s-banner tone="critical">{error.message}</s-banner> })}
-            {move || {
-                reviews
-                    .data
-                    .get()
-                    .unwrap_or_default()
-                    .into_iter()
-                    .map(|review| view! { <s-link href=format!("/reviews/{}", review.id)>{review.title}</s-link> })
-                    .collect_view()
-            }}
-            <s-button variant="primary" loading=move || save.pending.get() on:click=add>
-                "Add review"
-            </s-button>
-        </s-page>
+    #[action]
+    async fn save_review(_ctx: AdminContext, input: SaveReview) -> Result<Review> {
+        Ok(Review { id: "2".to_string(), title: input.title })
+    }
+
+    #[view]
+    fn view() -> impl IntoView {
+        let reviews = use_loader(Self::LIST_REVIEWS, || ());
+        let save = use_action(Self::SAVE_REVIEW);
+        let add = move |_| {
+            spawn_local(async move {
+                let input = SaveReview { title: "New review".to_string() };
+                let options = AdminActionOptions::new().revalidate(Self::LIST_REVIEWS);
+                if let Ok(Some(review)) = save.invoke(input, options).await {
+                    shopify::toast(&format!("Saved {}", review.title));
+                }
+            });
+        };
+
+        view! {
+            <s-page heading="Reviews">
+                {move || reviews.error.get().map(|error| view! { <s-banner tone="critical">{error.message}</s-banner> })}
+                {move || {
+                    reviews
+                        .data
+                        .get()
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(|review| view! { <s-link href=format!("/reviews/{}", review.id)>{review.title}</s-link> })
+                        .collect_view()
+                }}
+                <s-button variant="primary" loading=move || save.pending.get() on:click=add>
+                    "Add review"
+                </s-button>
+            </s-page>
+        }
     }
 }
 
-// Pages with dynamic segments take the route params.
-fn review_details(params: RouteParams) -> impl IntoView {
-    let id = params.get("id").unwrap_or_default().to_string();
-    let review = use_loader(REVIEW, || ());
-    view! {
-        <s-page heading=move || review.data.get().map_or_else(|| format!("Review {id}"), |review| review.title)></s-page>
-    }
-}
+pub struct ReviewDetailPage;
 
-fn main() {
-    App::new()
-        .page("/reviews", Reviews)
-        .page("/reviews/:id", review_details)
-        .mount();
+#[admin_page("/reviews/:id")]
+impl ReviewDetailPage {
+    #[loader]
+    async fn review(ctx: AdminContext) -> Result<Review> {
+        let id = ctx.params.get("id").cloned().unwrap_or_default();
+        let title = format!("Review {id}");
+        Ok(Review { id, title })
+    }
+
+    // The view of a page with dynamic segments takes the route params.
+    #[view]
+    fn view(params: RouteParams) -> impl IntoView {
+        let id = params.get("id").unwrap_or_default().to_string();
+        let review = use_loader(Self::REVIEW, || ());
+        view! {
+            <s-page heading=move || review.data.get().map_or_else(|| format!("Review {id}"), |review| review.title)></s-page>
+        }
+    }
 }
 ```
+
+A page has at most one view: `fn() -> impl IntoView`, or
+`fn(params: RouteParams) -> impl IntoView`. Components it is made of are
+ordinary Leptos `#[component]` functions, written outside the block.
+
+With a view, the block gains a constant per loader and action, named after the
+function: `list_reviews` is `ReviewsPage::LIST_REVIEWS`. The constant is an
+`AdminFunctionRef<Input, Output>`: it carries the kind and the name of the
+function, the type it takes, and the type it returns. The function states
+what it returns as `Result<Output>`, and `Output` implements `Serialize`, for
+the server, and `Deserialize`, for the view.
 
 | Item | Contract |
 | --- | --- |
-| `App::new().page(pattern, view)` | Registers a view for a route pattern. `view` is a function without arguments, such as a `#[component]` without props, or a function taking `RouteParams`. |
-| `App::mount()` | Mounts the UI into `<div id="root">`. Panics when a route is reserved or malformed or when two routes have the same shape. |
-| `RouteParams::get(name)` | The percent-decoded value of a dynamic segment. |
-| `AdminFunctionRef::loader(name)` / `::action(name)` | Typed handle `AdminFunctionRef<I, O>` to a server function: `I` is the input sent as JSON, `O` the output. Use `()` for a function without input. |
+| `Page::FUNCTION` | The loader or the action `function` of the page: an `AdminFunctionRef<I, O>`, where `I` is the input sent as JSON, `()` for a function without input, and `O` the output. |
 | `use_loader(reference, input)` | Calls the loader when the page mounts, and again whenever the input closure yields a different JSON value or the loader is revalidated. Exposes the signals `data`, `error`, and `loading`, and `revalidate()`. Responses of superseded calls are discarded. |
 | `use_action(reference)` | Exposes the signals `data`, `error`, and `pending`, `invoke(input, options)`, and `reset()`. Never retries on its own. |
 | `AdminActionOptions` | `.revalidate(loader)` reloads mounted loaders after a success, `.idempotency_key(key)` sets the `Idempotency-Key` header, `.concurrency(ActionConcurrency::Allow)` permits overlapping calls. By default a call made while another one is in flight is skipped and `invoke` returns `Ok(None)`. |
 | `AdminRpcError` | Failure of a call: `message`, and the server's `code`, `request_id`, and `field_errors` when it answered with a structured error. |
-| `openshop_ui::navigate(path)` | Switches to another embedded page without reloading. |
-| `openshop_ui::shopify` | `toast`, `toast_error`, and `toast_with` for App Bridge toasts; `id_token` for a session token. |
+| `RouteParams::get(name)` | The percent-decoded value of a dynamic segment. |
+| `openshop::ui::navigate(path)` | Switches to another embedded page without reloading. |
+| `openshop::ui::shopify` | `toast`, `toast_error`, and `toast_with` for App Bridge toasts; `id_token` for a session token. |
 
 The UI asks the server before showing a custom page. A page whose access rule
-rejects the staff member shows "This page is disabled." A page the server knows
-but the bundle does not contain, and a view that renders an `Err`, show a "Page
-unavailable" fallback.
+rejects the staff member shows "This page is disabled." A page without a view,
+a page the server knows but the bundle being served does not contain, and a
+view that renders an `Err`, show a "Page unavailable" fallback.
+
+### Set up the application
+
+Views need the `ui` feature of `openshop`, and `leptos`, in `Cargo.toml`:
+
+```toml
+[dependencies]
+openshop = { git = "https://github.com/0xtlt/openshop-rust", tag = "v<version>", features = ["ui"] }
+leptos = "0.8"
+serde = { version = "1", features = ["derive"] }
+```
+
+`openshop init-ui` makes that change and writes an example page; see
+[CLI commands](cli.md#scaffold-a-custom-admin-page). Nothing else is added to
+the application: there is no second crate, and no file of the bundle to keep.
+
+### What the bundle is made of
+
+`openshop dev` and `openshop build` build the admin UI bundle of an
+application whose pages have a view. They compile to WebAssembly, on their
+own, the modules of the crate root that declare such pages: with pages in
+`src/admin/`, the bundle is the module `admin`. The rest of the application is
+the server, and is not compiled into the bundle: `src/main.rs`, flows,
+providers, and models are written as in an application without a view.
+
+From a module of pages, the bundle keeps:
+
+- the `#[view]` of each page, and the constants of its loaders and actions.
+  The access rule, the loaders, the actions, and the unmarked functions of the
+  block are the server's, with whatever their bodies name;
+- everything else the module declares: the inputs and the outputs of the
+  pages, components, other modules of views.
+
+So, outside the functions the server runs, a module of pages names itself
+(`super::components`, `crate::admin::…`) and crates, and nothing else of the
+application. What only the server functions need is imported inside them:
+
+```rust,ignore
+#[loader]
+async fn list_reviews(ctx: AdminContext) -> Result<Vec<Review>> {
+    use crate::models::review::ReviewRow;
+
+    let rows = ReviewRow::of(&ctx).all().await?;
+    Ok(rows.into_iter().map(Review::from).collect())
+}
+```
+
+What a view receives is a type of the module, here `Review`, not a model of
+the application.
+
+The bundle is compiled with `openshop`, `leptos`, and the dependencies of the
+application its modules of pages name outside the server functions, at the
+versions of the application's `Cargo.lock`. A crate that only the server
+functions use is not compiled for the browser.
+
+The view is also compiled with the server, where nothing calls it:
+`cargo check` and your editor report its errors. An error that only the build
+of the bundle reports names something the bundle does not have, such as an
+import of a server module at the top of the file of a page.
+
+The crate of the bundle is written under the `target` directory of the
+project, in `openshop-ui/<package>/`. It is rewritten from the application at
+every build: do not edit it.
 
 ## Serve the bundle
 
-Build the UI crate with `trunk build --release`, then tell the server where the
-bundle is. During development, `openshop dev` rebuilds a bundle in `ui/` with
-`trunk watch` and serves `ui/dist` for you. `dev` and `start` pick the first
-of:
+`openshop build` builds the bundle into `dist/`, optimized for size, then the
+application; `openshop build-ui` builds the bundle alone. Tell the server
+where the bundle is. During development, `openshop dev` rebuilds it when the
+pages change and serves `dist` for you. `dev` and `start` pick the first of:
 
 1. the directory named by the `OPENSHOP_UI_DIR` environment variable;
 2. the bundle given to the `admin_ui` setting of `app!`;
@@ -329,7 +399,7 @@ of:
 
 | `UiSource` | Serves |
 | --- | --- |
-| `UiSource::Dir(path)` | The files of a directory on disk, such as the UI crate's `dist`. |
+| `UiSource::Dir(path)` | The files of a directory on disk, such as `dist`. |
 | `UiSource::assets(lookup)` | A bundle compiled into your binary. `lookup` is a `fn(&str) -> Option<Cow<'static, [u8]>>` that receives an asset path such as `index.html`. |
 | `UiSource::Embedded` | The bundle built into the framework. |
 | `UiSource::None` | No UI: the server is API-only. |
@@ -341,7 +411,7 @@ use openshop::UiSource;
 use openshop::prelude::*;
 
 #[derive(rust_embed::RustEmbed)]
-#[folder = "ui/dist/"]
+#[folder = "dist/"]
 struct AdminUi;
 
 fn admin_ui(path: &str) -> Option<Cow<'static, [u8]>> {
@@ -353,12 +423,9 @@ static APP: App = app! {
 };
 ```
 
-Every path that is not an API route or a file is answered with `index.html`,
-after the server has injected the Shopify API key into
-`<meta name="shopify-api-key">` and the App Bridge `<script>` tag. Keep those
-two tags, App Bridge as the first script, and `<div id="root">` as they are in
-the `index.html` of `openshop-ui`, and keep HTML minification off in
-`Trunk.toml`.
+Every path that is not an API route or a file is answered with the
+`index.html` of the bundle, after the server has injected the Shopify API key
+into `<meta name="shopify-api-key">` and the App Bridge `<script>` tag.
 
 Assets whose file name carries a content hash are served with
 `Cache-Control: public, max-age=31536000, immutable`, other files with
@@ -429,7 +496,8 @@ pub fn reviews_page() -> AdminPage {
 ```
 
 Register it with `.admin_page(reviews_page())` on the builder:
-`APP.builder()?` is the builder of the declaration, to add to.
+`APP.builder()?` is the builder of the declaration, to add to. A page made by
+hand has no view: only an `#[admin_page]` block has one.
 
 `AdminPage::new(path)` starts a page. `.nav(label)` gives it its entry in the
 menu, and `.access(rule)` its access rule.

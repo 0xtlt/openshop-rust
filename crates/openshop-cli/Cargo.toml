@@ -23,6 +23,9 @@ openshop-graphql.workspace = true
 
 anyhow.workspace = true
 notify.workspace = true
+# Reads the sources of a project for the admin pages that have a view.
+proc-macro2 = { workspace = true, features = ["span-locations"] }
+syn = { workspace = true, features = ["visit"] }
 reqwest.workspace = true
 tokio.workspace = true
 

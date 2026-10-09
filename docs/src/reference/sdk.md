@@ -46,9 +46,10 @@ framework and its tests and can change without notice.
 | `openshop::shopify` | `SHOPIFY_API_VERSION`, and `IntoVariable`, the values a `graphql!` variable accepts | [Typed GraphQL](graphql.md) |
 | `openshop::testing` | Contexts, provider fakes, factories, and signing helpers (cargo feature `testing`) | [Testing](testing.md) |
 
-The client side of custom admin pages lives in a separate crate,
-`openshop-ui`, compiled to WebAssembly. See
-[Custom admin pages](custom-admin-pages.md).
+`openshop::ui` (cargo feature `ui`) is what the view of a custom admin page
+uses: `use_loader`, `use_action`, and the App Bridge helpers. The modules of
+such pages are also compiled to WebAssembly, into the admin UI bundle of the
+application. See [Custom admin pages](custom-admin-pages.md#views).
 
 ## The prelude
 

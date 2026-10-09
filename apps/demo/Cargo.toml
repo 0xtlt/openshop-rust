@@ -8,8 +8,10 @@ license.workspace = true
 publish = false
 
 [dependencies]
-openshop.workspace = true
+openshop = { workspace = true, features = ["ui"] }
 serde.workspace = true
+# The views of the admin pages.
+leptos = "0.8"
 
 [dev-dependencies]
 openshop = { workspace = true, features = ["testing"] }

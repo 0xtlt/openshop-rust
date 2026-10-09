@@ -63,6 +63,11 @@ trunk build --release
 `trunk build --release` writes `crates/openshop/ui-dist`. Commit that directory
 when the UI changes.
 
+The views of custom admin pages (`#[view]`, `openshop::ui`) are tested in
+`crates/openshop/tests/admin_views.rs`, and what the bundle of an application
+is made of in the unit tests of `crates/openshop-cli/src/bundle.rs`. The demo
+has a view: `mise run demo:ui` builds its bundle.
+
 ## Demo App
 
 For changes affecting app usage, flows, providers, app proxy, or demo conventions, check `apps/demo/tests` and run `cargo test -p openshop-demo`. `apps/demo/tests` shows the tests of an application in their recommended form, and `apps/demo/tests/common/mod.rs` how to answer Shopify GraphQL with fixtures (`answer_shopify(ctx)`).

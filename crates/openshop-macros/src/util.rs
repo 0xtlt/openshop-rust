@@ -102,7 +102,7 @@ pub enum Argument {
     /// `liquid`.
     Word(Ident),
     /// `timeout = Duration::from_secs(60)`.
-    Value(Ident, Expr),
+    Value(Ident, Box<Expr>),
     /// `modes(automatic, code)`.
     List(Ident, TokenStream),
 }
