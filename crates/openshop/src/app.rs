@@ -103,6 +103,9 @@ pub struct OpenShopBuilder {
     config: OpenShopConfig,
     /// What cannot be registered, reported by [`OpenShopBuilder::build`].
     problems: Vec<String>,
+    /// The last `sentry` setting, checked by [`OpenShopBuilder::build`].
+    #[cfg(feature = "sentry")]
+    sentry: Option<SentryConfig>,
 }
 
 /// Registers `value` under `key`, once: a second registration is a problem.
@@ -372,16 +375,20 @@ impl OpenShopBuilder {
     /// `sentry: std::env::var("SENTRY_DSN").ok()`.
     #[cfg(feature = "sentry")]
     pub fn sentry(mut self, sentry: impl Into<SentryConfig>) -> Self {
-        match sentry.into().resolve() {
-            Ok(sentry) => self.config.sentry = sentry,
-            Err(problem) => self.problems.push(problem),
-        }
+        self.sentry = Some(sentry.into());
         self
     }
 
-    pub fn build(self) -> Result<OpenShopConfig> {
+    #[cfg_attr(not(feature = "sentry"), allow(unused_mut))]
+    pub fn build(mut self) -> Result<OpenShopConfig> {
         if let Some(problem) = self.problems.first() {
             anyhow::bail!("[openshop] Invalid config: {problem}");
+        }
+        #[cfg(feature = "sentry")]
+        if let Some(sentry) = self.sentry.take() {
+            self.config.sentry = sentry
+                .resolve()
+                .map_err(|problem| anyhow::anyhow!("[openshop] Invalid config: {problem}"))?;
         }
         validate_openshop_config(&self.config)?;
         Ok(self.config)

@@ -5,9 +5,9 @@ use std::sync::Arc;
 use sentry::integrations::backtrace::{AttachStacktraceIntegration, ProcessStacktraceIntegration};
 use sentry::integrations::contexts::ContextIntegration;
 use sentry::integrations::debug_images::DebugImagesIntegration;
-use sentry::integrations::panic::PanicIntegration;
 use sentry::{Client, ClientOptions, Hub, Integration};
 
+use super::integration::Reports;
 use super::transport::HttpTransportFactory;
 
 /// The `sentry` setting of an application: where it reports its failures.
@@ -85,6 +85,38 @@ impl SentryConfig {
         }
     }
 
+    /// The options [`SentryConfig::init`] starts the client with: the ones of
+    /// the settings, the environment, the transport and the integrations. For
+    /// a process that binds the client itself, and for a test that keeps the
+    /// events instead of sending them.
+    pub fn client_options(&self, production: bool) -> ClientOptions {
+        let mut options = self.options.clone();
+        if options.environment.is_none() {
+            options.environment = Some(if production { "production" } else { "development" }.into());
+        }
+        if options.transport.is_none() {
+            options.transport = Some(Arc::new(HttpTransportFactory));
+        }
+
+        // The integrations of `sentry::init`, without reading an environment
+        // variable as it does, and with the panic hook of the framework in
+        // place of the one of the SDK. The ones the application adds come last.
+        let added = std::mem::take(&mut options.integrations);
+        if options.default_integrations {
+            options.integrations = vec![
+                Arc::new(AttachStacktraceIntegration) as Arc<dyn Integration>,
+                Arc::new(DebugImagesIntegration::default()),
+                Arc::new(ContextIntegration::default()),
+                Arc::new(ProcessStacktraceIntegration),
+            ];
+            // They are in place: `sentry::init` must not add them again.
+            options.default_integrations = false;
+        }
+        options.integrations.push(Arc::new(Reports));
+        options.integrations.extend(added);
+        options
+    }
+
     /// Starts reporting, for the whole process: the failures of the
     /// framework, the panics, and what the application captures itself with
     /// [`openshop::sentry`](sentry). `production` names the environment when
@@ -94,28 +126,7 @@ impl SentryConfig {
     /// process that starts the server or a worker itself calls it first, and
     /// keeps the guard for as long as it runs.
     pub fn init(&self, production: bool) -> SentryGuard {
-        let mut options = self.options.clone();
-        if options.environment.is_none() {
-            options.environment = Some(if production { "production" } else { "development" }.into());
-        }
-        if options.transport.is_none() {
-            options.transport = Some(Arc::new(HttpTransportFactory));
-        }
-        if options.default_integrations {
-            // The integrations of `sentry::init`, in its order, before the ones
-            // the application adds. Unlike it, no environment variable is read.
-            let mut integrations: Vec<Arc<dyn Integration>> = vec![
-                Arc::new(AttachStacktraceIntegration),
-                Arc::new(DebugImagesIntegration::default()),
-                Arc::new(ContextIntegration::default()),
-                Arc::new(PanicIntegration::default()),
-                Arc::new(ProcessStacktraceIntegration),
-            ];
-            integrations.append(&mut options.integrations);
-            options.integrations = integrations;
-        }
-
-        let client = Arc::new(Client::with_options(options));
+        let client = Arc::new(Client::with_options(self.client_options(production)));
         // The hub every thread starts from, whichever thread this is.
         Hub::main().bind_client(Some(client.clone()));
         SentryGuard(client)

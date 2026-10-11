@@ -11,9 +11,10 @@ use serde_json::Value;
 use tokio::task::JoinHandle;
 
 use super::dispatch::DispatchOptions;
+use super::errors::FlowConcurrencyError;
 use super::step::error_message;
 use crate::app::OpenShop;
-use crate::runtime::logger;
+use crate::runtime::{logger, report};
 use crate::server::shopify_apps::DEFAULT_SHOPIFY_APP_HANDLE;
 use crate::types::{Cron, CronShops};
 
@@ -94,6 +95,20 @@ pub fn parse_schedule(schedule: &str, flow: &str) -> Result<croner::Cron> {
         .map_err(|error| anyhow!("[openshop] Invalid cron schedule \"{schedule}\" for flow \"{flow}\": {error}"))
 }
 
+/// Reports a cron that queued nothing, for every shop or for one: no run
+/// exists to say that it is missing.
+fn report_missed(flow: &str, target: Option<(&str, &str)>, error: &anyhow::Error) {
+    report::detached(
+        |cron| {
+            cron.unit("cron", flow);
+            if let Some((shop, shopify_app)) = target {
+                cron.shop(shop, shopify_app);
+            }
+        },
+        error,
+    );
+}
+
 async fn run_entry(app: &OpenShop, entry: &Cron) {
     let flow = &entry.flow;
     let targets = match resolve_targets(app, entry).await {
@@ -103,6 +118,7 @@ async fn run_entry(app: &OpenShop, entry: &Cron) {
                 "[openshop] Cron \"{flow}\" could not resolve its shops: {}",
                 error_message(&error)
             ));
+            report_missed(flow, None, &error);
             return;
         }
     };
@@ -148,6 +164,10 @@ async fn run_entry(app: &OpenShop, entry: &Cron) {
                 format!("[openshop] Cron flow \"{flow}\" failed for {shop}"),
                 serde_json::json!({ "error": error_message(&error) }),
             );
+            // A flow that refuses a second run while one is active does what it declares.
+            if !error.is::<FlowConcurrencyError>() {
+                report_missed(flow, Some((&shop, &shopify_app)), &error);
+            }
         }
     }
 }

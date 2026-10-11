@@ -4,10 +4,10 @@
 use std::future::Future;
 use std::time::{Duration, Instant};
 
+use openshop::Cron;
 use openshop::builder::{AdminPage, Flow, Proxy, Route, Webhook};
-use openshop::engine::{RunFlowOptions, Worker, run_flow};
+use openshop::engine::{RunFlowOptions, Scheduler, Worker, run_flow};
 use openshop::response;
-use openshop::sentry::integrations::panic::PanicIntegration;
 use openshop::sentry::protocol::Event;
 use openshop::sentry::{ClientOptions, Level};
 use openshop::testing::{TestContext, TestOptions, sign_webhook_body};
@@ -21,11 +21,15 @@ use reqwest::Method;
 const FLOW: &str = "syncOrders";
 const DSN: &str = "https://public@sentry.invalid/42";
 
-/// Runs a test with a Sentry client that keeps what is reported instead of
-/// sending it. The client is bound to the thread of the test, where its
-/// server and its runs execute too: what they report is what comes back.
+/// Runs a test with the Sentry client an application starts, which here
+/// keeps what is reported instead of sending it. The client is bound to the
+/// thread of the test, where its server and its runs execute too: what they
+/// report is what comes back.
 fn captured<F: Future<Output = ()>>(test: F) -> Vec<Event<'static>> {
-    let options = ClientOptions::new().add_integration(PanicIntegration::default());
+    captured_with(SentryConfig::new(DSN.to_string()).client_options(false), test)
+}
+
+fn captured_with<F: Future<Output = ()>>(options: ClientOptions, test: F) -> Vec<Event<'static>> {
     openshop::sentry::test::with_captured_events_options(
         || {
             tokio::runtime::Builder::new_current_thread()
@@ -96,6 +100,11 @@ fn the_setting_takes_a_dsn_and_is_off_without_one() {
         error.starts_with("[openshop] Invalid config: sentry.dsn is not a valid DSN"),
         "{error}"
     );
+    // The setting given last is the one that counts, and the one that is checked.
+    assert!(sentry(builder().sentry("not a dsn").sentry(DSN).build().unwrap()));
+    assert!(!sentry(builder().sentry("not a dsn").sentry(None).build().unwrap()));
+    assert!(!sentry(builder().sentry(DSN).sentry(None).build().unwrap()));
+    assert!(builder().sentry(DSN).sentry("not a dsn").build().is_err());
 }
 
 #[test]
@@ -445,7 +454,8 @@ fn an_admin_function_that_fails_is_found_by_its_request_id() {
 }
 
 #[test]
-fn a_request_the_admin_api_cannot_answer_is_reported_by_its_path() {
+fn a_request_the_admin_api_cannot_answer_is_reported_by_its_route() {
+    let run_id = Uuid::new_v4();
     let events = captured(async {
         let ctx = context(OpenShopConfig::builder().build().unwrap()).await;
         sqlx::query("DROP TABLE flow_runs CASCADE")
@@ -453,13 +463,153 @@ fn a_request_the_admin_api_cannot_answer_is_reported_by_its_path() {
             .await
             .unwrap();
 
-        let response = ctx.get("/api/runs").send().await.unwrap();
-        assert_eq!(response.status(), 500);
+        for path in ["/api/runs".to_string(), format!("/api/runs/{run_id}")] {
+            let response = ctx.get(&path).send().await.unwrap();
+            assert_eq!(response.status(), 500, "{path}");
+        }
+        // A path no route matches has no name, and fails nothing here.
+        assert_eq!(ctx.get("/api/nothing/here").send().await.unwrap().status(), 404);
+        ctx.shutdown().await.unwrap();
+    });
+
+    assert_eq!(events.len(), 2, "{events:#?}");
+    assert!(message(&events[0]).contains("flow_runs"), "{}", message(&events[0]));
+    assert_eq!(events[0].transaction.as_deref(), Some("GET /api/runs"));
+    assert_eq!(tag(&events[0], "shop"), Some("test.myshopify.com"));
+    // The route as it is declared: the identifier in the path is not sent.
+    assert_eq!(events[1].transaction.as_deref(), Some("GET /api/runs/{id}"));
+    assert!(!format!("{:?}", events[1]).contains(&run_id.to_string()));
+}
+
+#[test]
+fn a_handler_that_panics_is_reported_once_where_it_happened() {
+    let events = captured(async {
+        let config = OpenShopConfig::builder()
+            .route(
+                "/ping",
+                Route::public().get(|ctx| async move {
+                    if ctx.params.is_empty() {
+                        panic!("the route gave up");
+                    }
+                    Ok(response::json(json!({})))
+                }),
+            )
+            .build()
+            .unwrap();
+        let ctx = context(config).await;
+        let pinged = ctx.http.get(ctx.url_for("/routes/ping")).send().await.unwrap();
+        assert_eq!(pinged.status(), 500);
         ctx.shutdown().await.unwrap();
     });
 
     let event = the_only(events);
-    assert!(message(&event).contains("flow_runs"), "{}", message(&event));
-    assert_eq!(event.transaction.as_deref(), Some("GET /api/runs"));
-    assert_eq!(tag(&event, "shop"), Some("test.myshopify.com"));
+    assert_eq!(message(&event), "the route gave up");
+    assert_eq!(event.level, Level::Fatal);
+    assert_eq!(tag(&event, "route"), Some("GET /ping"));
+}
+
+#[test]
+fn without_a_panic_hook_a_caught_panic_is_reported_as_the_failure_it_became() {
+    // A client the application built itself, with no integration at all.
+    let events = captured_with(ClientOptions::new(), async {
+        let config = OpenShopConfig::builder()
+            .flow(Flow::new(FLOW, |ctx: FlowContext| async move {
+                if ctx.shop.is_empty() {
+                    return Ok(());
+                }
+                panic!("the flow gave up")
+            }))
+            .webhook(
+                "orders/create",
+                Webhook::new(|ctx| async move {
+                    if ctx.shop.is_empty() {
+                        return Ok(());
+                    }
+                    panic!("the webhook gave up")
+                }),
+            )
+            .build()
+            .unwrap();
+        let ctx = context(config).await;
+
+        let outcome = ctx.run_flow(FLOW, json!({})).await.unwrap();
+        assert!(matches!(outcome, RunOutcome::Failed { .. }), "{outcome:?}");
+        let body = "{}";
+        let delivered = ctx
+            .http
+            .post(ctx.url_for("/webhooks"))
+            .header("x-shopify-hmac-sha256", sign_webhook_body(body, &ctx.secret))
+            .header("x-shopify-topic", "orders/create")
+            .header("x-shopify-shop-domain", "sender.myshopify.com")
+            .body(body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(delivered.status(), 200);
+        ctx.shutdown().await.unwrap();
+    });
+
+    assert_eq!(events.len(), 2, "{events:#?}");
+    assert_eq!(message(&events[0]), "Flow panicked: the flow gave up");
+    assert_eq!(events[0].level, Level::Error);
+    assert_eq!(tag(&events[0], "flow"), Some(FLOW));
+    assert_eq!(message(&events[1]), "handler panicked");
+    assert_eq!(tag(&events[1], "webhook"), Some("orders/create"));
+}
+
+#[test]
+fn a_cron_that_cannot_queue_its_run_is_reported() {
+    let events = captured(async {
+        let config = OpenShopConfig::builder()
+            .flow(Flow::new(FLOW, |_ctx: FlowContext| async { Ok(()) }))
+            .cron(Cron::new("* * * * * *", FLOW))
+            .build()
+            .unwrap();
+        let ctx = context(config).await;
+        sqlx::query("DROP TABLE flow_runs CASCADE")
+            .execute(&ctx.db)
+            .await
+            .unwrap();
+
+        // The cron fires every second: twice at least while the test waits.
+        let mut scheduler = Scheduler::start(&ctx.app).unwrap();
+        tokio::time::sleep(Duration::from_millis(2300)).await;
+        scheduler.stop();
+        ctx.shutdown().await.unwrap();
+    });
+
+    assert!(!events.is_empty());
+    for event in &events {
+        assert!(message(event).contains("flow_runs"), "{}", message(event));
+        assert_eq!(event.transaction.as_deref(), Some("cron syncOrders"));
+        assert_eq!(tag(event, "cron"), Some(FLOW));
+        assert_eq!(tag(event, "shop"), Some("__global__"));
+    }
+}
+
+#[test]
+fn what_a_url_carries_of_secrets_is_not_sent() {
+    let events = captured(async {
+        let flow = Flow::new(FLOW, |ctx: FlowContext| async move {
+            ctx.logger
+                .info("Calling https://warehouse:hunter2@api.example.com/orders");
+            bail!("error sending request for url (https://api.example.com/orders?api_key=SECRET)")
+        });
+        let ctx = context(flow_app(flow)).await;
+        ctx.run_flow(FLOW, json!({})).await.unwrap();
+        ctx.shutdown().await.unwrap();
+    });
+
+    let event = the_only(events);
+    assert_eq!(
+        message(&event),
+        "error sending request for url (https://api.example.com/orders?[redacted])"
+    );
+    let trail = trail(&event);
+    assert!(
+        trail.contains(&"Calling https://[redacted]@api.example.com/orders"),
+        "{trail:?}"
+    );
+    let sent = format!("{event:?}");
+    assert!(!sent.contains("SECRET") && !sent.contains("hunter2"), "{sent}");
 }

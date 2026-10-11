@@ -116,9 +116,10 @@ an event carries the message of an error and of its causes, the stack of a
 panic, the shop and the flow or the route it happened in, and the messages of
 the log lines of the run. It carries no request header, query string, or body,
 no input of a flow, and no payload of a log line. The path of a request is
-sent only for the Admin API; proxies, server routes, and admin pages are
-named by the pattern they are declared with. Error messages and log messages
-are sent as written: keep secrets and personal data out of them. See
+never sent: an event is named after the route as it is declared, such as
+`/orders/:id` or `/api/runs/{id}`. A URL in an error message or in a log
+message is sent without its credentials and its query string. The rest of a
+message is sent as written: keep secrets and personal data out of it. See
 [Sentry](sentry.md).
 
 ## Operator dashboard exposure
