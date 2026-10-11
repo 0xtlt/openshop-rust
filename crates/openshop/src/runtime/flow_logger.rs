@@ -1,4 +1,5 @@
-//! Per-run logger: every line goes to the process logger and to the `logs` table.
+//! Per-run logger: every line goes to the process logger and to the `logs` table,
+//! and is left on the trail of what the run reports.
 
 use std::time::Duration;
 
@@ -8,6 +9,7 @@ use sqlx::PgPool;
 use tokio::sync::{mpsc, oneshot};
 
 use super::logger::logger;
+use super::report::Trail;
 
 /// How long a line may wait for the next ones before it is written.
 const WRITE_DELAY: Duration = Duration::from_millis(50);
@@ -29,6 +31,7 @@ enum Message {
 #[derive(Clone)]
 pub struct FlowLogger {
     sender: mpsc::UnboundedSender<Message>,
+    trail: Trail,
 }
 
 impl FlowLogger {
@@ -71,7 +74,10 @@ impl FlowLogger {
             }
         });
 
-        Self { sender }
+        Self {
+            sender,
+            trail: Trail::current(),
+        }
     }
 
     fn log(&self, level: &'static str, payload: Value, message: &str) {
@@ -82,6 +88,7 @@ impl FlowLogger {
             "error" => logger.error(&line, Some(&payload)),
             _ => logger.info(&line, Some(&payload)),
         }
+        self.trail.leave(level, message);
 
         let _ = self.sender.send(Message::Line(Line {
             level,

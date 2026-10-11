@@ -145,6 +145,8 @@ impl Preview {
             runs,
             history,
         } = self;
+        // A preview reports to Sentry like the commands do, when the application gives a DSN.
+        let _sentry = config.sentry.as_ref().map(|sentry| sentry.init(false));
         // The operator dashboard, with a password of its own when the application gives none.
         let ops_password = config.ops_password.get_or_insert_with(|| "preview".to_string()).clone();
         // Only on request does the preview act as a shop: it then signs session

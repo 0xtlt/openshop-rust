@@ -55,6 +55,10 @@ provide pagination.
 The engine adds its own lines to each run: flow start, completion, sleep,
 cancellation, and failure, and step start, completion, failure, and cache hits.
 
+When the application reports to [Sentry](sentry.md), the lines of a run are
+also the breadcrumbs of the failure it reports: their level and their
+message, without their payload.
+
 Do not log access tokens, provider passwords, session tokens, OAuth state, or
 personal data that is not required for diagnosis.
 

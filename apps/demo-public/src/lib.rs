@@ -39,4 +39,7 @@ pub static APP: App = app! {
     // The operator dashboard, under `/ops`, when `OPS_PASSWORD` is set: what
     // happens in every shop, read from outside Shopify admin.
     ops_password: std::env::var("OPS_PASSWORD").ok(),
+    // Sentry, when `SENTRY_DSN` is set: the runs that fail, the handlers that
+    // fail and the panics, each with its flow and its shop.
+    sentry: std::env::var("SENTRY_DSN").ok(),
 };

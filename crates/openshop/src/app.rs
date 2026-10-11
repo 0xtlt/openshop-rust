@@ -12,6 +12,8 @@ use crate::config::validate::validate_openshop_config;
 use crate::db::Table;
 use crate::declare::Declared;
 use crate::engine::dispatch::{DispatchOptions, QueuedRun, dispatch_flow};
+#[cfg(feature = "sentry")]
+use crate::runtime::SentryConfig;
 use crate::runtime::{HttpTransport, ReqwestTransport, RuntimeEnv};
 use crate::server::connectors::Connectors;
 use crate::server::crypto::Crypto;
@@ -59,6 +61,9 @@ pub struct OpenShopConfig {
     pub max_request_body_bytes: Option<usize>,
     /// The password of the operator dashboard, served under `/ops` when set.
     pub ops_password: Option<String>,
+    /// Where failures are reported, when the application gives a Sentry DSN.
+    #[cfg(feature = "sentry")]
+    pub sentry: Option<SentryConfig>,
 }
 
 impl OpenShopConfig {
@@ -355,6 +360,22 @@ impl OpenShopBuilder {
     /// secrets: `ops_password: std::env::var("OPS_PASSWORD").ok()`.
     pub fn ops_password(mut self, password: impl Into<Option<String>>) -> Self {
         self.config.ops_password = password.into().filter(|password| !password.trim().is_empty());
+        self
+    }
+
+    /// Reports to Sentry the runs that fail, the handlers that fail and the
+    /// panics. A DSN is enough; [`SentryConfig`] also names the environment
+    /// and the release. Without a DSN, or with an empty one, nothing is
+    /// reported.
+    ///
+    /// The application gives the DSN, from wherever it keeps its settings:
+    /// `sentry: std::env::var("SENTRY_DSN").ok()`.
+    #[cfg(feature = "sentry")]
+    pub fn sentry(mut self, sentry: impl Into<SentryConfig>) -> Self {
+        match sentry.into().resolve() {
+            Ok(sentry) => self.config.sentry = sentry,
+            Err(problem) => self.problems.push(problem),
+        }
         self
     }
 

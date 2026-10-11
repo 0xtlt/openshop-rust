@@ -151,3 +151,7 @@ caught and ignored.
 
 The hook supplements stored logs. It does not replace returning errors from
 failed provider or Shopify operations.
+
+To report failures to Sentry, the hook is not needed: the `sentry` setting of
+`app!` reports the same failed attempts, and the handlers that fail and the
+panics as well. See [Sentry](sentry.md).

@@ -15,3 +15,7 @@ SHOPIFY_API_SECRET=
 # Shopify admin. Without it the dashboard does not exist. At least 16
 # characters in production.
 # OPS_PASSWORD=
+
+# DSN of the Sentry project the failures are reported to: runs that fail,
+# handlers that fail, panics. Without it nothing is reported.
+# SENTRY_DSN=

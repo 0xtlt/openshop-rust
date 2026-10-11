@@ -39,7 +39,7 @@
 //! - [`server`]: the HTTP server and its parts;
 //! - [`db`]: the pool, models, tables and migrations;
 //! - [`admin`]: the server side of custom admin pages;
-//! - [`runtime`]: the environment, the loggers and the outbound transport;
+//! - [`runtime`]: the environment, the loggers, the reports to Sentry and the outbound transport;
 //! - [`shopify`]: the Admin API client and typed operations;
 //! - [`testing`] (feature `testing`): the test harness;
 //! - `ui` (feature `ui`): what the view of a custom admin page is written with.
@@ -118,6 +118,11 @@ not_wasm! {
     pub use sqlx::{self, PgPool};
     pub use tokio_util::sync::CancellationToken;
     pub use uuid::Uuid;
+    /// The Sentry SDK the framework reports with. What an application
+    /// captures itself goes through it: another version of the crate would
+    /// have a client of its own, which nothing starts.
+    #[cfg(feature = "sentry")]
+    pub use ::sentry;
 }
 
 // The application, and what its handlers receive and return. What the engine
@@ -133,6 +138,8 @@ not_wasm! {
         StepTimeoutError,
     };
     pub use runtime::logger::{logger, set_logger};
+    #[cfg(feature = "sentry")]
+    pub use runtime::SentryConfig;
     pub use runtime::{FlowLogger, RuntimeLogger};
     pub use server::UiSource;
     pub use server::connectors::Connectors;
@@ -180,6 +187,8 @@ pub mod prelude {
             WorkerConfig, flow, graphql, liquid, mcp_resource, mcp_tool, provider, proxy, response, route,
             validators, webhook,
         };
+        #[cfg(feature = "sentry")]
+        pub use crate::SentryConfig;
     }
 }
 
@@ -423,7 +432,7 @@ pub use openshop_macros::graphql;
 /// Every other entry is a setting, written `name: value` and passed to the
 /// method of that name of [`OpenShopBuilder`](builder::OpenShopBuilder): `crons`, `on_error`, `mcp`,
 /// `shopify`, `worker`, `retry_policy`, `builtin_pages`, `admin_menu`, `admin_ui`,
-/// `max_request_body_bytes`, `ops_password`… A value can fail with `?`, such as one read from
+/// `max_request_body_bytes`, `ops_password`, `sentry`… A value can fail with `?`, such as one read from
 /// the environment (`shopify: shopify_apps()?`): the error is the one
 /// `APP.config()` and `APP.main()` return.
 ///

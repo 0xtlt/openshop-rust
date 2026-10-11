@@ -115,6 +115,7 @@ the environment (`shopify: shopify_apps()?`): the error is the one
 | `admin_ui` | `UiSource` | The admin UI bundle built into the framework; see [Custom admin pages](custom-admin-pages.md#serve-the-bundle) |
 | `max_request_body_bytes` | `usize` | `2 * 1024 * 1024` (2 MB); larger request bodies are answered with `413` |
 | `ops_password` | `Option<String>`, or a `String`: the password of the [operator dashboard](operator-dashboard.md) | No dashboard: `/ops` answers `404` |
+| `sentry` | `Option<String>`, or a `String`: the DSN of the project failures are reported to, or a `SentryConfig` that also names the environment and the release; see [Sentry](sentry.md) | Nothing is reported |
 
 ## Builder methods
 
@@ -177,6 +178,7 @@ configuration is built.
 | `.admin_ui(ui)` | `UiSource` | The admin UI bundle built into the framework; see [Custom admin pages](custom-admin-pages.md#serve-the-bundle) |
 | `.max_request_body_bytes(bytes)` | `usize` | `2 * 1024 * 1024` (2 MB); larger request bodies are answered with `413` |
 | `.ops_password(password)` | `Option<String>` or `String` | No [operator dashboard](operator-dashboard.md) |
+| `.sentry(sentry)` | `Option<String>`, `String`, `&str` or `SentryConfig`; needs the `sentry` feature, on by default | Nothing is reported to [Sentry](sentry.md) |
 | `.worker(config)` | `WorkerConfig` | See [Worker defaults](#worker-defaults) |
 | `.retry_policy(policy)` | `RetryPolicy` | See [Retry defaults](#retry-defaults) |
 | `.on_error(hook)` | `Fn(Arc<anyhow::Error>, ErrorContext) -> impl Future<Output = ()>` | No hook |
@@ -203,7 +205,8 @@ Calling the other methods again:
 - `.builtin_pages(…)` and `.builtin_page(…)` merge with earlier calls; later values win.
 - The remaining settings (`.shopify(…)`, `.worker(…)`, `.retry_policy(…)`,
   `.on_error(…)`, `.admin_menu(…)`, `.admin_ui(…)`,
-  `.max_request_body_bytes(…)`, `.ops_password(…)`) replace the earlier value.
+  `.max_request_body_bytes(…)`, `.ops_password(…)`, `.sentry(…)`) replace the
+  earlier value.
 
 The fields of `OpenShopConfig` are public. `OpenShop::new` validates the
 configuration again, so a configuration modified after `build()` is still

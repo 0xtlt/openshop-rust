@@ -31,6 +31,7 @@ contract. For a complete procedure, start with the [how-to guides](../guides/ind
 - [Shopify Functions](shopify-functions.md) — Function definitions and configuration.
 - [Custom admin pages](custom-admin-pages.md) — experimental pages, loaders, actions, and policies.
 - [Operator dashboard](operator-dashboard.md) — every shop under `/ops`, read-only, behind a password.
+- [Sentry](sentry.md) — failed runs, failed handlers, and panics reported with their flow and their shop.
 - [MCP](mcp.md) — tokens, permissions, tools, resources, and JSON-RPC errors.
 
 ## Security and compatibility

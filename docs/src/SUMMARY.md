@@ -39,6 +39,7 @@
   - [Database and migrations](reference/database.md)
   - [Logging](reference/logging.md)
   - [Errors](reference/errors.md)
+  - [Sentry](reference/sentry.md)
   - [Testing](reference/testing.md)
   - [Authentication](reference/authentication.md)
   - [Admin API](reference/admin-api.md)

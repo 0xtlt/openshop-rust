@@ -109,6 +109,18 @@ Request bodies are limited to 2 MB by default (`413` above that); change the
 limit with the `max_request_body_bytes` setting of `app!`. The MCP endpoint
 has its own limit of 1,000,000 bytes.
 
+## What Sentry receives
+
+Nothing is sent to Sentry unless the application sets `sentry`. With a DSN,
+an event carries the message of an error and of its causes, the stack of a
+panic, the shop and the flow or the route it happened in, and the messages of
+the log lines of the run. It carries no request header, query string, or body,
+no input of a flow, and no payload of a log line. The path of a request is
+sent only for the Admin API; proxies, server routes, and admin pages are
+named by the pattern they are declared with. Error messages and log messages
+are sent as written: keep secrets and personal data out of them. See
+[Sentry](sentry.md).
+
 ## Operator dashboard exposure
 
 `/ops` is off unless the application sets `ops_password`. One password

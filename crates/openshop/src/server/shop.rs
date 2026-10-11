@@ -12,7 +12,7 @@ use super::jwt::{customer_id_from_jwt_sub, read_jwt_audience, verify_session_tok
 use super::shopify_apps::ResolvedShopifyApp;
 use crate::admin::AdminActor;
 use crate::app::OpenShop;
-use crate::runtime::{OutboundRequest, logger};
+use crate::runtime::{OutboundRequest, logger, report};
 
 /// The authenticated shop of an Admin API request.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -53,6 +53,7 @@ pub(crate) async fn shop_middleware(State(app): State<OpenShop>, mut request: Re
         );
     }
 
+    report::shop(&verified.shop, &shopify_app.handle);
     // Installation is best-effort: a failed token exchange must not block the request.
     let _ = ensure_installation(&app, &shopify_app, &verified.shop, &session_token).await;
 

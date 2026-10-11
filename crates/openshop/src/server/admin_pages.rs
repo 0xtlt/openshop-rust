@@ -23,6 +23,7 @@ use crate::admin::{
 };
 use crate::app::OpenShop;
 use crate::engine::step::error_message;
+use crate::runtime::report::{self, Panicked};
 use crate::runtime::logger;
 use crate::types::{CustomAdminPageAccess, CustomAdminPagesResponse, JsonMap};
 use openshop_shared::match_custom_admin_path;
@@ -254,6 +255,7 @@ async fn execute_rpc(
         .get(&name)
         .filter(|definition| definition.kind == kind)
         .ok_or_else(rpc_not_found)?;
+    report::unit("admin", format_args!("{} {name}", page.route_pattern));
 
     let idempotency_key = header(headers, "idempotency-key").map(str::to_string);
     let context = create_context(app, session, params, request_id.to_string(), idempotency_key).await?;
@@ -303,13 +305,15 @@ async fn rpc(
     metadata.insert("shop".into(), Value::from(session.shop.clone()));
     metadata.insert("shopifyApp".into(), Value::from(session.shopify_app.clone()));
     metadata.insert("actorId".into(), Value::from(session.actor.id.clone()));
+    // The id the page shows with the error: what its event is found by.
+    report::tag("request_id", &request_id);
 
     // A panicking access rule or function is an internal error, not a dropped connection.
     let execution = execute_rpc(&app, &session, uri.path(), &headers, &body, &request_id, &mut metadata);
     let outcome = AssertUnwindSafe(execution)
         .catch_unwind()
         .await
-        .unwrap_or_else(|_| Err(anyhow::anyhow!("admin function panicked")));
+        .unwrap_or_else(|_| Err(Panicked("admin function panicked".to_string()).into()));
     metadata.insert(
         "durationMs".into(),
         Value::from(started_at.elapsed().as_millis() as u64),
@@ -339,6 +343,7 @@ async fn rpc(
             None => {
                 metadata.insert("error".into(), Value::from(error_message(&error)));
                 logger::error_with("[openshop] Custom admin function failed", Value::Object(metadata));
+                report::error(&error);
                 json_response(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     json!({ "error": "Internal server error", "code": "INTERNAL_ERROR", "requestId": request_id }),
