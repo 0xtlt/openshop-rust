@@ -160,5 +160,10 @@ pub struct SentryGuard(Arc<Client>);
 impl Drop for SentryGuard {
     fn drop(&mut self) {
         self.0.close(None);
+        // The process has no client any more, unless another one was started.
+        let process = Hub::main();
+        if process.client().is_some_and(|client| Arc::ptr_eq(&client, &self.0)) {
+            process.bind_client(None);
+        }
     }
 }

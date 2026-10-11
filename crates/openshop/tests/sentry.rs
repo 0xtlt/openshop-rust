@@ -2,6 +2,8 @@
 //! and panics, each with the scope of the unit of work it happened in.
 
 use std::future::Future;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use openshop::Cron;
@@ -235,7 +237,77 @@ fn a_panic_is_reported_once_where_it_happened() {
     assert_eq!(event.level, Level::Fatal);
     assert_eq!(tag(&event, "flow"), Some(FLOW));
     assert_eq!(tag(&event, "attempt"), Some("1"));
+    assert_eq!(tag(&event, "will_retry"), Some("false"));
     assert_eq!(event.transaction.as_deref(), Some("flow syncOrders"));
+}
+
+#[test]
+fn the_panic_of_an_attempt_that_will_be_made_again_is_a_warning() {
+    let events = captured(async {
+        let flow = Flow::new(FLOW, |ctx: FlowContext| async move {
+            ctx.logger.info("About to give up");
+            if !ctx.shop.is_empty() {
+                panic!("the flow gave up");
+            }
+            Ok(())
+        });
+        let ctx = context(flow_app(flow)).await;
+        let queued = ctx
+            .app
+            .dispatch_flow(DispatchOptions::new(FLOW, &ctx.shop))
+            .await
+            .unwrap();
+        for attempt in 1..=3 {
+            sqlx::query("UPDATE flow_runs SET status = 'running', attempts = $2 WHERE id = $1")
+                .bind(queued.run_id)
+                .bind(attempt)
+                .execute(&ctx.db)
+                .await
+                .unwrap();
+            run_flow(&ctx.app, RunFlowOptions::new(queued.run_id, FLOW, &ctx.shop))
+                .await
+                .unwrap();
+        }
+        ctx.shutdown().await.unwrap();
+    });
+
+    // One event per attempt: the panic itself, with what the attempt knew
+    // once it had failed.
+    assert_eq!(events.len(), 3, "{events:#?}");
+    for (index, event) in events.iter().enumerate() {
+        let last = index == 2;
+        assert_eq!(message(event), "the flow gave up");
+        let exception = event.exception.last().unwrap();
+        assert_eq!(
+            exception.mechanism.as_ref().map(|mechanism| mechanism.ty.as_str()),
+            Some("panic")
+        );
+        assert!(exception.stacktrace.is_some());
+        assert_eq!(event.level, if last { Level::Fatal } else { Level::Warning });
+        assert_eq!(tag(event, "will_retry"), Some(if last { "false" } else { "true" }));
+        assert_eq!(tag(event, "attempt"), Some((index + 1).to_string().as_str()));
+        assert!(trail(event).contains(&"About to give up"));
+    }
+}
+
+#[test]
+fn a_panic_a_flow_catches_itself_is_still_reported() {
+    let events = captured(async {
+        let flow = Flow::new(FLOW, |_ctx: FlowContext| async move {
+            let caught = std::panic::catch_unwind(|| panic!("a parser gave up"));
+            assert!(caught.is_err());
+            Ok(())
+        });
+        let ctx = context(flow_app(flow)).await;
+        assert_eq!(ctx.run_flow(FLOW, json!({})).await.unwrap(), RunOutcome::Completed);
+        ctx.shutdown().await.unwrap();
+    });
+
+    // Nothing failed for it to be the failure of: it is reported on its own.
+    let event = the_only(events);
+    assert_eq!(message(&event), "a parser gave up");
+    assert_eq!(event.level, Level::Fatal);
+    assert_eq!(tag(&event, "flow"), Some(FLOW));
 }
 
 #[test]
@@ -558,32 +630,64 @@ fn without_a_panic_hook_a_caught_panic_is_reported_as_the_failure_it_became() {
 }
 
 #[test]
-fn a_cron_that_cannot_queue_its_run_is_reported() {
-    let events = captured(async {
+fn a_cron_that_cannot_queue_its_runs_is_reported_once_per_firing() {
+    // Counts the events as they are reported, for the test to wait on them.
+    let reported = Arc::new(AtomicUsize::new(0));
+    let counter = reported.clone();
+    let options = SentryConfig::new(DSN.to_string())
+        .configure(move |options| {
+            options.before_send(move |event| {
+                counter.fetch_add(1, Ordering::SeqCst);
+                Some(event)
+            })
+        })
+        .client_options(false);
+
+    let events = captured_with(options, async {
         let config = OpenShopConfig::builder()
             .flow(Flow::new(FLOW, |_ctx: FlowContext| async { Ok(()) }))
+            .flow(Flow::new("restock", |_ctx: FlowContext| async { Ok(()) }))
             .cron(Cron::new("* * * * * *", FLOW))
+            .cron(Cron::new("* * * * * *", "restock").all_shops())
             .build()
             .unwrap();
         let ctx = context(config).await;
-        sqlx::query("DROP TABLE flow_runs CASCADE")
-            .execute(&ctx.db)
-            .await
-            .unwrap();
+        // Three shops have the application, and no run can be queued.
+        sqlx::raw_sql(
+            "INSERT INTO installations (shop, access_token, scopes) VALUES \
+               ('two.myshopify.com', 'token', 'read_orders'), ('three.myshopify.com', 'token', 'read_orders'); \
+             DROP TABLE flow_runs CASCADE",
+        )
+        .execute(&ctx.db)
+        .await
+        .unwrap();
 
-        // The cron fires every second: twice at least while the test waits.
         let mut scheduler = Scheduler::start(&ctx.app).unwrap();
-        tokio::time::sleep(Duration::from_millis(2300)).await;
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while reported.load(Ordering::SeqCst) < 2 {
+            assert!(Instant::now() < deadline, "the crons reported nothing");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
         scheduler.stop();
         ctx.shutdown().await.unwrap();
     });
 
-    assert!(!events.is_empty());
-    for event in &events {
+    let of = |cron: &str| {
+        let events: Vec<_> = events.iter().filter(|event| tag(event, "cron") == Some(cron)).collect();
+        assert!(!events.is_empty(), "nothing reported for {cron}");
+        events
+    };
+    for event in of(FLOW) {
         assert!(message(event).contains("flow_runs"), "{}", message(event));
         assert_eq!(event.transaction.as_deref(), Some("cron syncOrders"));
-        assert_eq!(tag(event, "cron"), Some(FLOW));
+        assert_eq!(tag(event, "shops_missed"), Some("1"));
         assert_eq!(tag(event, "shop"), Some("__global__"));
+    }
+    // One event for the three shops of a firing, which is nobody's in particular.
+    for event in of("restock") {
+        assert_eq!(tag(event, "shops_missed"), Some("3"));
+        assert_eq!(tag(event, "shop"), None);
+        assert!(event.user.is_none());
     }
 }
 
@@ -601,9 +705,10 @@ fn what_a_url_carries_of_secrets_is_not_sent() {
     });
 
     let event = the_only(events);
+    // What follows the `?` goes, up to the end of the word.
     assert_eq!(
         message(&event),
-        "error sending request for url (https://api.example.com/orders?[redacted])"
+        "error sending request for url (https://api.example.com/orders?[redacted]"
     );
     let trail = trail(&event);
     assert!(

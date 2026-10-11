@@ -118,9 +118,11 @@ the log lines of the run. It carries no request header, query string, or body,
 no input of a flow, and no payload of a log line. The path of a request is
 never sent: an event is named after the route as it is declared, such as
 `/orders/:id` or `/api/runs/{id}`. A URL in an error message or in a log
-message is sent without its credentials and its query string. The rest of a
-message is sent as written: keep secrets and personal data out of it. See
-[Sentry](sentry.md).
+message is sent without its credentials, its query string, and the parts of
+its path that look like a token; see
+[what an event carries](sentry.md#what-an-event-carries) for exactly what is
+removed. The rest of a message is sent as written: keep secrets and personal
+data out of it.
 
 ## Operator dashboard exposure
 

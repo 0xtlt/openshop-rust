@@ -41,14 +41,14 @@ queued, waiting up to two seconds.
 | The last attempt of a flow run fails | `error` | `flow <name>` | The same, with `will_retry` = `false` |
 | A run fails without an attempt: it passed its deadline, or its flow is not registered in the worker that claimed it | `error` | `flow <name>` | `flow`, `shop`, `shopify_app`, `run_id` |
 | An attempt cannot be made, or its outcome cannot be recorded, for example when the database fails | `error` | `flow <name>` | `flow`, `shop`, `shopify_app`, `run_id` |
-| A cron cannot queue the run of a shop, or cannot list the shops it runs for | `error` | `cron <flow>` | `cron`, and `shop`, `shopify_app` when one shop is concerned |
+| A cron cannot queue its runs, or cannot list the shops it runs for | `error`, once each time the cron fires | `cron <flow>` | `cron`, `shops_missed`, and `shop`, `shopify_app` when one shop got no run |
 | A webhook handler returns an error | `error` | `webhook <topic>` | `webhook`, `shop`, `shopify_app` |
 | A proxy handler returns an error | `error` | `proxy <METHOD> <path>` | `proxy`, `shop`, `shopify_app` |
 | The handler of a server route, or its authentication, returns an error | `error` | `route <METHOD> <path>` | `route` |
 | A loader or an action of a custom admin page fails with an error that is not an `AdminPublicError` | `error` | `admin <page> <function>` | `admin`, `shop`, `shopify_app`, `request_id` |
 | The Admin API or the operator dashboard answers `500 Internal Server Error` | `error` | `<METHOD> <route>`, such as `GET /api/runs/{id}` | `shop`, `shopify_app` for the Admin API |
 | The MCP endpoint cannot check a token and answers `500` | `error` | `POST /mcp` | — |
-| A panic, anywhere in the process | `fatal` | The unit of work it happened in | The tags of that unit of work |
+| A panic, anywhere in the process | `fatal`, or `warning` for an attempt of a flow run that will be retried | The unit of work it happened in | The tags of that unit of work |
 | `dev`, `start`, or `worker` stops with an error | `error` | — | — |
 
 Every event also carries the tag `process`, the command that reports it
@@ -65,12 +65,18 @@ failure a merchant describes.
 
 A panic is reported where it happens, with its stack, by a panic hook of the
 framework. OpenShop catches the panics of flows and handlers and records them
-as failures; that failure is not reported a second time. The hook does not
-wait for the event to be sent, so a handler that panics does not hold a
-thread of the server, except in a binary built with `panic = "abort"`, where
-the process stops with the panic. An application that adds the
-`PanicIntegration` of the SDK with `configure` gets the hook of the SDK
-instead, which waits.
+as failures; that failure is not reported a second time. The panic of an
+attempt of a flow run is its failure: it carries `attempt` and `will_retry`,
+and is a `warning` while the run will be retried, like an error is. The hook
+does not wait for the event to be sent, so a handler that panics does not
+hold a thread of the server, except in a binary built with
+`panic = "abort"`, where the process stops with the panic. An application
+that adds the `PanicIntegration` of the SDK with `configure` gets the hook of
+the SDK instead, which waits, and reports every panic as `fatal`.
+
+A cron that fires for many shops and can queue none of their runs is one
+event, not one per shop: `shops_missed` says how many, and the error is the
+one of the first.
 
 ## What is not reported
 
@@ -100,15 +106,27 @@ instead, which waits.
 - **The process.** The host name, the operating system, and the Rust version,
   which the SDK adds to every event.
 
-The message of an error is sent as it is, with one exception. A URL in a
-message, in the message of a cause, or in a log line loses its credentials and
-its query string: `https://api.example.com/orders?api_key=…` is sent as
-`https://api.example.com/orders?[redacted]`, and
-`postgresql://user:password@host/db` as `postgresql://[redacted]@host/db`.
-That is where the error of an HTTP client or of a database carries a secret.
-This also applies to what the application captures itself. For the rest,
-write errors the way you write log lines: without an access token, a
-password, or personal data.
+The message of an error is sent as it is, with one exception: the URLs in
+it. The error of an HTTP client or of a database names the URL it failed on,
+in a message nobody chose to write. In a message, in the message of a cause,
+and in a log line, a URL is sent without:
+
+| Part of a URL | Sent as |
+| --- | --- |
+| Its credentials, up to the last `@` | `postgresql://[redacted]@host/db` |
+| Its query string, up to the next space | `https://api.example.com/orders?[redacted]` |
+| A fragment that holds values, such as `#access_token=…` | `https://app.example.com/callback#[redacted]` |
+| A part of its path of 20 characters or more that mixes letters and digits, which is what the token of a webhook URL looks like; an identifier written as a UUID is kept | `https://hooks.slack.com/services/T024BE7LD/B08LX2K4P/[redacted]` |
+
+When in doubt, more is removed than less: what follows a `?` goes with it up
+to the next space, a closing parenthesis or quote included. This also applies
+to what the application captures itself.
+
+Nothing else is removed. A shorter secret in a path, a token quoted outside a
+URL, or a password in a message is sent as written: write errors the way you
+write log lines, without an access token, a password, or personal data, and
+drop or rewrite an event with `before_send` (see [Settings](#settings)) when a
+library does it for you.
 
 ## Settings
 
@@ -193,9 +211,12 @@ let production = openshop::runtime::RuntimeEnv::from_env().production;
 let _sentry = config.sentry.as_ref().map(|sentry| sentry.init(production));
 ```
 
-Dropping the guard sends what is queued, then reports nothing more. Start
-Sentry before the server and the workers: a thread that used the SDK before
-it was started stays without a client.
+Dropping the guard sends what is queued, then reports nothing more. What
+the framework reports always goes to the client the process has now, whatever
+thread it runs on, and whether Sentry was started before or after that
+thread. What the application captures itself with `openshop::sentry` outside
+a flow or a handler follows the SDK: a thread keeps the client it first saw.
+Start Sentry before the server and the workers.
 
 `sentry.client_options(production)` returns the options `init` starts the
 client with, for a process that binds the client itself. A test passes them
@@ -206,10 +227,17 @@ events instead of sending them.
 
 Events are sent with the HTTP client of the framework, from a thread of its
 own: a report is never awaited by what fails. When Sentry answers with a rate
-limit, events are dropped until the delay it gave has passed. When more than
-30 events wait to be sent, the next ones are dropped. A process that stops
-waits for what is queued for two seconds at most, however full the queue is.
+limit, what it limits is dropped until the delay it gave has passed: events,
+or the transactions of an application that turned tracing on, each on its
+own. When more than 30 envelopes wait to be sent, the next ones are dropped.
+A process that stops waits for what is queued for two seconds at most,
+however full the queue is.
 
 The integration is the `sentry` feature of `openshop`, on by default. An
 application that sets `default-features = false` compiles without the Sentry
 SDK, and without the `sentry` setting.
+
+With the feature, the server notes the route each request matched, to name
+its events, and looks for a client to report to: an extension of the request
+and a lookup, whether or not the application gives a DSN. With a DSN, each
+request also gets a scope of its own.

@@ -4,16 +4,23 @@
 //! their own. This one sends from a thread of its own, as they do: a report is
 //! never awaited by what fails, and what is queued can be sent while the
 //! runtime of the application is busy or shutting down.
+//!
+//! Unlike theirs, the thread waits for its next envelope on its runtime: the
+//! connection it keeps open is watched meanwhile, and one that Sentry closed
+//! is not the one the next report is written to.
 
 use std::sync::Arc;
-use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
+use std::sync::mpsc::{SyncSender, sync_channel};
 use std::time::{Duration, Instant};
 
 use reqwest::StatusCode;
 use reqwest::header::RETRY_AFTER;
 use sentry::client_report::Reason;
+use sentry::protocol::{EnvelopeFilterCallbacks, EnvelopeItem, ItemContainer};
 use sentry::transports::{RateLimiter, RateLimitingCategory};
 use sentry::{Envelope, Transport, TransportFactory, TransportOptions};
+use tokio::sync::mpsc::error::TrySendError;
+use tokio::sync::mpsc::{Receiver, Sender, channel};
 
 /// Envelopes waiting to be sent, when the settings do not say. One more is dropped.
 const DEFAULT_QUEUE: usize = 30;
@@ -36,7 +43,7 @@ enum Task {
 }
 
 struct HttpTransport {
-    queue: SyncSender<Task>,
+    queue: Sender<Task>,
     lost: sentry::client_report::Recorder,
 }
 
@@ -45,7 +52,7 @@ impl HttpTransport {
         let capacity = options
             .transport_channel_capacity
             .map_or(DEFAULT_QUEUE, |capacity| capacity.get());
-        let (queue, tasks) = sync_channel(capacity);
+        let (queue, tasks) = channel(capacity);
         let lost = options.client_report_recorder.clone();
         // Without the thread nothing is sent, and the application runs as it would.
         let _ = std::thread::Builder::new()
@@ -64,7 +71,7 @@ impl Transport for HttpTransport {
         // A full queue drops the envelope: reporting never waits.
         let (envelope, reason) = match self.queue.try_send(Task::Send(envelope)) {
             Err(TrySendError::Full(Task::Send(envelope))) => (envelope, Reason::QueueOverflow),
-            Err(TrySendError::Disconnected(Task::Send(envelope))) => (envelope, Reason::InternalError),
+            Err(TrySendError::Closed(Task::Send(envelope))) => (envelope, Reason::InternalError),
             _ => return,
         };
         self.lost.record_lost_data(&envelope, reason);
@@ -106,8 +113,21 @@ fn client(options: &TransportOptions) -> reqwest::Result<reqwest::Client> {
     builder.build()
 }
 
+/// What Sentry limits an item of an envelope with.
+fn category(item: &EnvelopeItem) -> RateLimitingCategory {
+    match item {
+        EnvelopeItem::Event(_) => RateLimitingCategory::Error,
+        EnvelopeItem::SessionUpdate(_) | EnvelopeItem::SessionAggregates(_) => RateLimitingCategory::Session,
+        EnvelopeItem::Transaction(_) => RateLimitingCategory::Transaction,
+        EnvelopeItem::Attachment(_) => RateLimitingCategory::Attachment,
+        EnvelopeItem::ItemContainer(ItemContainer::Logs(_)) => RateLimitingCategory::LogItem,
+        EnvelopeItem::ItemContainer(ItemContainer::Metrics(_)) => RateLimitingCategory::TraceMetric,
+        _ => RateLimitingCategory::Any,
+    }
+}
+
 /// Sends the envelopes in the order they were queued, until the client is closed.
-async fn send_all(tasks: Receiver<Task>, options: TransportOptions) {
+async fn send_all(mut tasks: Receiver<Task>, options: TransportOptions) {
     let client = match client(&options) {
         Ok(client) => client,
         Err(error) => {
@@ -120,7 +140,7 @@ async fn send_all(tasks: Receiver<Task>, options: TransportOptions) {
     let lost = &options.client_report_recorder;
     let mut limits = RateLimiter::new();
 
-    for task in tasks {
+    while let Some(task) = tasks.recv().await {
         let envelope = match task {
             Task::Send(envelope) => envelope,
             Task::Flush(done) => {
@@ -128,15 +148,16 @@ async fn send_all(tasks: Receiver<Task>, options: TransportOptions) {
                 continue;
             }
         };
-        // Sentry said to wait: for everything, or for events.
-        let category = match envelope.event() {
-            Some(_) => RateLimitingCategory::Error,
-            None => RateLimitingCategory::Any,
-        };
-        if !limits.is_enabled(category) {
+        // Sentry said to wait: for everything, or for what some items are.
+        if !limits.is_enabled(RateLimitingCategory::Any) {
             lost.record_lost_data(&envelope, Reason::RatelimitBackoff);
             continue;
         }
+        let allowed = envelope.filter(EnvelopeFilterCallbacks::new(
+            |item: &EnvelopeItem| limits.is_enabled(category(item)),
+            |item| lost.record_lost_data(&item, Reason::RatelimitBackoff),
+        ));
+        let Some(envelope) = allowed else { continue };
         let mut body = Vec::new();
         if envelope.to_writer(&mut body).is_err() {
             lost.record_lost_data(&envelope, Reason::InternalError);
@@ -171,11 +192,52 @@ async fn send_all(tasks: Receiver<Task>, options: TransportOptions) {
 #[cfg(test)]
 mod tests {
     use std::net::TcpListener;
+    use std::sync::Mutex;
 
+    use axum::body::Bytes;
+    use axum::http::HeaderMap;
+    use axum::routing::post;
     use sentry::ClientOptions;
-    use sentry::protocol::Event;
+    use sentry::protocol::{Event, Transaction};
 
     use super::*;
+
+    #[test]
+    fn a_limit_on_a_category_drops_the_items_of_that_category_only() {
+        // A Sentry that takes everything, and says to hold transactions for a minute.
+        let received = Arc::new(Mutex::new(Vec::<String>::new()));
+        let inbox = received.clone();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let listener = runtime
+            .block_on(tokio::net::TcpListener::bind(("127.0.0.1", 0)))
+            .unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = axum::Router::new().route(
+            "/api/1/envelope/",
+            post(move |body: Bytes| async move {
+                inbox.lock().unwrap().push(String::from_utf8_lossy(&body).into_owned());
+                let mut limits = HeaderMap::new();
+                limits.insert("x-sentry-rate-limits", "60:transaction:organization".parse().unwrap());
+                limits
+            }),
+        );
+        runtime.spawn(async move { axum::serve(listener, server).await });
+
+        let options = ClientOptions::new().dsn(&format!("http://key@127.0.0.1:{port}/1"));
+        let transport = HttpTransport::new(TransportOptions::try_from_client_options(&options).unwrap());
+        let sent = || {
+            assert!(transport.flush(Duration::from_secs(10)));
+            received.lock().unwrap().len()
+        };
+
+        transport.send_envelope(Event::default().into());
+        assert_eq!(sent(), 1);
+        transport.send_envelope(Transaction::default().into());
+        assert_eq!(sent(), 1);
+        transport.send_envelope(Event::default().into());
+        assert_eq!(sent(), 2);
+        assert!(received.lock().unwrap().iter().all(|body| body.contains(r#""type":"event""#)));
+    }
 
     #[test]
     fn a_flush_gives_up_when_its_time_is_up_even_with_a_full_queue() {

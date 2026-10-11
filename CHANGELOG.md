@@ -7,15 +7,17 @@
   (`sentry: std::env::var("SENTRY_DSN").ok()`), `dev`, `start` and `worker`
   report what fails: each failed attempt of a flow run, a warning while it
   will be retried and an error at the last one; the runs a worker fails
-  without an attempt; a cron that cannot queue its run; the webhook, proxy,
+  without an attempt; a cron that cannot queue its runs; the webhook, proxy,
   route and admin handlers that return an error; the `500` of the Admin API;
   and the panics, once each, where they happen, without a thread of the
   server waiting on Sentry. An event is named after its flow or its route, as
   the route is declared and never by the path of the request, carries the
   shop as a tag and as its user, and has the log lines of the run as
   breadcrumbs, without their payload. No header, query string, body or flow
-  input is sent, and a URL in a message loses its credentials and its query
-  string. `SentryConfig` names the environment (`production` or `development`
+  input is sent, and a URL in a message loses its credentials, its query
+  string and what looks like a token in its path. The panic of an attempt
+  that will be retried is a warning, like its error would be, and a cron that
+  fails for many shops is one event. `SentryConfig` names the environment (`production` or `development`
   by default, after `OPENSHOP_ENV`) and the release, and `.configure(…)`
   reaches the other options of the SDK. The SDK is re-exported as
   `openshop::sentry` for what the application captures itself, in the scope

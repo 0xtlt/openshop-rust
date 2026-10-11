@@ -209,7 +209,7 @@ pub(crate) fn describe_run(run: &mut Description<'_>, flow_name: &str, shop: &st
 
 pub async fn run_flow(app: &OpenShop, opts: RunFlowOptions) -> Result<RunOutcome> {
     // A run has a scope of its own: its failures carry its name and its log lines.
-    report::isolated(async {
+    report::isolated(report::holding_panics(async {
         let shopify_app = opts.shopify_app.as_deref().unwrap_or(DEFAULT_SHOPIFY_APP_HANDLE);
         report::describe(|run| describe_run(run, &opts.flow_name, &opts.shop, shopify_app, opts.run_id));
         let outcome = run_attempt(app, opts).await;
@@ -218,7 +218,7 @@ pub async fn run_flow(app: &OpenShop, opts: RunFlowOptions) -> Result<RunOutcome
             report::error(error);
         }
         outcome
-    })
+    }))
     .await
 }
 
@@ -325,7 +325,7 @@ async fn run_attempt(app: &OpenShop, opts: RunFlowOptions) -> Result<RunOutcome>
             },
             None => run.await,
         };
-        outcome.unwrap_or_else(|panic| Err(Panicked::error(format!("Flow panicked: {}", panic_message(panic)))))
+        outcome.unwrap_or_else(|panic| Err(Panicked::of_attempt(format!("Flow panicked: {}", panic_message(panic)))))
     };
 
     let outcome = execution.await;
