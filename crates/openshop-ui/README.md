@@ -139,7 +139,8 @@ Build it with `trunk build --release` and start the server with `OPENSHOP_UI_DIR
 `dist` directory.
 
 - **Routes** use the server's patterns: static segments and `:name` segments. Built-in prefixes
-  (`/flows`, `/runs`, `/api`, …) are reserved. Navigation entries and access rules come from the
+  (`/flows`, `/runs`, `/api`, `/ops`, …) are reserved. A page at `/` is the home of the admin, in
+  place of the built-in dashboard. Navigation entries and access rules come from the
   server; the UI asks it before showing a page. A page has an entry in the menu when its
   `#[admin_page]` gives it a `nav` label.
 - **Functions** are called by name: the name of the server function in camel case (`list_reviews`

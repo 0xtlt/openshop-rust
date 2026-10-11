@@ -7,8 +7,9 @@ pub mod pages;
 pub mod rpc;
 
 pub use custom_pages::{
-    AdminMenuItem, CUSTOM_ADMIN_RESERVED_PREFIXES, CustomAdminPageAccess, CustomAdminPagesResponse,
-    custom_admin_route_shape_key, is_reserved_custom_admin_path, is_safe_custom_admin_path, match_custom_admin_path,
+    ADMIN_HOME_PATH, AdminMenuItem, CUSTOM_ADMIN_RESERVED_PREFIXES, CustomAdminPageAccess, CustomAdminPagesResponse,
+    custom_admin_route_shape_key, is_custom_admin_page_pattern, is_reserved_custom_admin_path,
+    is_safe_custom_admin_path, match_custom_admin_path,
 };
 pub use pages::{
     ADMIN_PAGE_IDS, ADMIN_PAGE_MODES, AdminNavigationResources, AdminPageId, AdminPageMode, AdminPagesConfig,

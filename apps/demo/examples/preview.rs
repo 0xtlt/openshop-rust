@@ -1,16 +1,22 @@
-//! Previews the admin UI in a regular browser, without a Shopify store.
+//! Previews the demo app in a regular browser, without a Shopify store.
 //!
 //! ```bash
 //! DATABASE_URL=postgresql://openshop:openshop@localhost:5432/openshop \
 //!   cargo run -p openshop-demo --example preview
 //! ```
 //!
+//! The demo app runs on `http://localhost:3999` against a throwaway database
+//! schema, with Shopify answered by fixtures. It answers a browser as it does
+//! in production: without a shop, the admin is the page that says where the
+//! app opens from, and the Admin API answers `401`. The operator dashboard is
+//! at `/ops`. Its password is `preview`, or `OPS_PASSWORD` when it is set.
+//!
+//! Set `PREVIEW_AS_SHOP=1` to look at the admin UI itself, as the staff of a
+//! fake shop: App Bridge is then replaced by a stub that signs session tokens
+//! for it. Development only: never expose it.
+//!
 //! Set `PREVIEW_UI_DIR=apps/demo/dist` to preview the demo's own bundle with its
 //! custom `/reviews` page (build it first with `mise run demo:ui`).
-//!
-//! The demo app runs on `http://localhost:3999` against a throwaway database
-//! schema, with Shopify answered by fixtures and App Bridge replaced by a stub
-//! that signs session tokens for a fake shop. Development only: never expose it.
 
 #[path = "../tests/common/mod.rs"]
 mod common;
@@ -52,15 +58,18 @@ fn copy_dir(from: &Path, to: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-/// A copy of the built UI whose shell loads the App Bridge stub.
-fn preview_ui_dir() -> Result<PathBuf> {
-    // `PREVIEW_UI_DIR` previews another bundle, e.g. `apps/demo/dist`.
-    let built = match std::env::var_os("PREVIEW_UI_DIR") {
+/// The built UI. `PREVIEW_UI_DIR` previews another bundle, e.g. `apps/demo/dist`.
+fn built_ui_dir() -> PathBuf {
+    match std::env::var_os("PREVIEW_UI_DIR") {
         Some(dir) => PathBuf::from(dir),
         None => Path::new(env!("CARGO_MANIFEST_DIR")).join("../../crates/openshop/ui-dist"),
-    };
+    }
+}
+
+/// A copy of the built UI whose shell loads the App Bridge stub.
+fn stubbed_ui_dir(built: &Path) -> Result<PathBuf> {
     let dir = std::env::temp_dir().join(format!("openshop-preview-ui-{}", std::process::id()));
-    copy_dir(&built, &dir)?;
+    copy_dir(built, &dir)?;
 
     let index = std::fs::read_to_string(dir.join("index.html"))?;
     let app_bridge = r#"<script src="https://cdn.shopify.com/shopifycloud/app-bridge.js"></script>"#;
@@ -71,16 +80,107 @@ fn preview_ui_dir() -> Result<PathBuf> {
     Ok(dir)
 }
 
+/// A week of what an application with several shops leaves behind: fictitious
+/// installations, runs with their steps and their log lines, a provider whose
+/// check fails, a cron a shop turned off. Enough for the operator dashboard to
+/// have something to show.
+const HISTORY: &str = r#"
+INSERT INTO installations (shop, access_token, scopes, installed_at, uninstalled_at) VALUES
+  ('atelier-nord.myshopify.com', 'preview-token', 'read_products,read_orders', now() - interval '40 days', NULL),
+  ('maison-lune.myshopify.com', 'preview-token', 'read_products,read_orders', now() - interval '21 days', NULL),
+  ('kiosque-vert.myshopify.com', 'preview-token', 'read_products,read_orders', now() - interval '9 days', NULL),
+  ('la-fabrique.myshopify.com', 'preview-token', 'read_products,read_orders', now() - interval '3 days', NULL),
+  ('ancien-comptoir.myshopify.com', NULL, 'read_products', now() - interval '60 days', now() - interval '12 days'),
+  ('en-cours.myshopify.com', NULL, NULL, now() - interval '2 hours', NULL);
+
+INSERT INTO flow_runs (shop, flow_name, status, input, error, attempts, started_at, completed_at, created_at)
+SELECT shop, flow,
+       CASE WHEN failed THEN 'failed' ELSE 'completed' END,
+       CASE WHEN flow = 'syncOrders' THEN '{"limit":50}'::json ELSE '{"productId":"gid://shopify/Product/1"}'::json END,
+       CASE WHEN NOT failed THEN NULL
+            WHEN flow = 'syncOrders' THEN (ARRAY[
+              'Warehouse API answered 502 Bad Gateway',
+              'Warehouse API timed out after 30 s',
+              'Shopify throttled the request'
+            ])[1 + floor(pick * 3)::int]
+            ELSE 'Product not found' END,
+       CASE WHEN failed THEN 3 ELSE 1 END,
+       ts, ts + make_interval(secs => 0.4 + took * 6), ts
+FROM (
+  SELECT ts,
+         (ARRAY[
+           'atelier-nord.myshopify.com', 'atelier-nord.myshopify.com', 'atelier-nord.myshopify.com',
+           'maison-lune.myshopify.com', 'maison-lune.myshopify.com',
+           'kiosque-vert.myshopify.com', 'la-fabrique.myshopify.com'
+         ])[1 + floor(random() * 7)::int] AS shop,
+         CASE WHEN random() < 0.8 THEN 'syncOrders' ELSE 'countVariants' END AS flow,
+         random() AS pick, random() AS took, random() AS chance, random() AS keep
+  FROM generate_series(now() - interval '7 days', now() - interval '2 minutes', interval '90 seconds') AS ts
+) candidates
+CROSS JOIN LATERAL (
+  SELECT chance < CASE
+    WHEN ts BETWEEN now() - interval '30 hours' AND now() - interval '27 hours' THEN 0.55
+    WHEN shop = 'kiosque-vert.myshopify.com' THEN 0.18
+    ELSE 0.04
+  END AS failed
+) outcome
+WHERE keep < 0.2 + 0.8 * greatest(0, sin((extract(hour FROM ts) - 5) * pi() / 14));
+
+INSERT INTO step_results (flow_run_id, step_name, attempt, status, output, error, duration_ms, created_at)
+SELECT id::text, 'fetch-orders', 1, 'completed', '{"count":12}'::json, NULL, 180, created_at
+  FROM flow_runs WHERE flow_name = 'syncOrders' AND shop <> 'preview.myshopify.com'
+UNION ALL
+SELECT id::text, 'send-to-warehouse', attempts, status,
+       CASE WHEN status = 'completed' THEN '{"accepted":12}'::json END, error, 420, created_at + interval '1 second'
+  FROM flow_runs WHERE flow_name = 'syncOrders' AND shop <> 'preview.myshopify.com'
+UNION ALL
+SELECT id::text, 'count', attempts, status,
+       CASE WHEN status = 'completed' THEN '{"variants":4}'::json END, error, 90, created_at
+  FROM flow_runs WHERE flow_name = 'countVariants' AND shop <> 'preview.myshopify.com';
+
+INSERT INTO logs (flow_run_id, level, message, payload, created_at)
+SELECT id::text, 'info', 'Flow "' || flow_name || '" started', NULL::json, created_at
+  FROM flow_runs WHERE shop <> 'preview.myshopify.com'
+UNION ALL
+SELECT id::text, 'info', 'Fetched 12 orders', '{"count":12}'::json, created_at + interval '300 milliseconds'
+  FROM flow_runs WHERE flow_name = 'syncOrders' AND shop <> 'preview.myshopify.com'
+UNION ALL
+SELECT id::text, 'warn', 'Retrying: ' || error, NULL::json, created_at + interval '1 second'
+  FROM flow_runs WHERE status = 'failed' AND shop <> 'preview.myshopify.com'
+UNION ALL
+SELECT id::text, 'error', 'Flow "' || flow_name || '" failed: ' || error, NULL::json, completed_at
+  FROM flow_runs WHERE status = 'failed' AND shop <> 'preview.myshopify.com'
+UNION ALL
+SELECT id::text, 'info', 'Flow "' || flow_name || '" completed', NULL::json, completed_at
+  FROM flow_runs WHERE status = 'completed' AND shop <> 'preview.myshopify.com';
+
+INSERT INTO provider_configs (shop, provider_name, config, last_checked_at, last_check_ok) VALUES
+  ('atelier-nord.myshopify.com', 'warehouse', '{}', now() - interval '3 hours', true),
+  ('kiosque-vert.myshopify.com', 'warehouse', '{}', now() - interval '1 hour', false),
+  ('maison-lune.myshopify.com', 'warehouse', '{}', NULL, NULL);
+
+INSERT INTO cron_overrides (shop, cron_key, enabled) VALUES
+  ('la-fabrique.myshopify.com', 'syncOrders:0 2 * * *', false);
+"#;
+
 #[tokio::main]
 async fn main() -> Result<()> {
     openshop::cli::init_logging();
 
     let mut config = openshop_demo::APP.config()?;
-    config.routes.insert(
-        "/preview-token".to_string(),
-        Route::public()
-            .get(|_ctx| async move { Ok(response::text(session_token(SHOP, API_SECRET, API_KEY, "preview-user"))) }),
-    );
+    // The operator dashboard, with a password of its own when `OPS_PASSWORD` gives none.
+    let ops_password = config.ops_password.get_or_insert_with(|| "preview".to_string()).clone();
+    // Only on request does the preview act as a shop: it then signs session
+    // tokens for anyone who asks.
+    let as_shop = std::env::var("PREVIEW_AS_SHOP").is_ok_and(|value| !matches!(value.as_str(), "" | "0" | "false"));
+    if as_shop {
+        config.routes.insert(
+            "/preview-token".to_string(),
+            Route::public().get(|_ctx| async move {
+                Ok(response::text(session_token(SHOP, API_SECRET, API_KEY, "preview-user")))
+            }),
+        );
+    }
 
     let database = TestDb::create_with_models(&config.models).await?;
     let transport = MockTransport::new();
@@ -110,26 +210,38 @@ async fn main() -> Result<()> {
         .await?;
     app.dispatch_flow(DispatchOptions::new("countVariants", SHOP).input(json!({})))
         .await?;
+    openshop::sqlx::raw_sql(HISTORY).execute(app.db()).await?;
 
-    let ui = preview_ui_dir()?;
+    let built = built_ui_dir();
+    let stubbed = if as_shop { Some(stubbed_ui_dir(&built)?) } else { None };
+    // As a shop, the shell is served without a signed launch, like `dev`.
+    // Otherwise the admin answers as in production: not without a shop.
     let options = ServerOptions {
-        ui: UiSource::Dir(ui.clone()),
-        dev: true,
+        ui: UiSource::Dir(stubbed.clone().unwrap_or(built)),
+        dev: as_shop,
     };
-    // Loopback only: this server hands out session tokens to anyone who asks.
+    // Loopback only: as a shop, this server hands out session tokens to anyone who asks.
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", PORT)).await?;
     let server = serve(listener, router(&app, options)?).await?;
     let worker = Worker::new(app.clone(), WorkerConfig::default());
     worker.start().await;
     let mut scheduler = Scheduler::start(&app)?;
 
-    println!("[preview] Admin UI: http://localhost:{PORT}/");
+    if as_shop {
+        println!("[preview] Admin UI, as the staff of {SHOP}: http://localhost:{PORT}/");
+    } else {
+        println!("[preview] Without a shop, as in production: http://localhost:{PORT}/");
+        println!("[preview] Set PREVIEW_AS_SHOP=1 to open the admin UI as the staff of a fake shop.");
+    }
+    println!("[preview] Operator dashboard: http://localhost:{PORT}/ops (password: {ops_password})");
     println!("[preview] Press Ctrl-C to stop.");
     tokio::signal::ctrl_c().await?;
 
     scheduler.stop();
     worker.stop().await;
     let _ = server.shutdown().await;
-    let _ = std::fs::remove_dir_all(ui);
+    if let Some(stubbed) = stubbed {
+        let _ = std::fs::remove_dir_all(stubbed);
+    }
     database.cleanup().await
 }

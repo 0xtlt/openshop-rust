@@ -9,8 +9,8 @@ use crate::{
 use leptos::{prelude::*, task::spawn_local};
 use leptos_router::hooks::use_location;
 use openshop_shared::{
-    CustomAdminPagesResponse, custom_admin_route_shape_key, is_safe_custom_admin_path, match_custom_admin_path,
-    rpc::encode_uri_component,
+    ADMIN_HOME_PATH, CustomAdminPagesResponse, custom_admin_route_shape_key, is_custom_admin_page_pattern,
+    match_custom_admin_path, rpc::encode_uri_component,
 };
 use serde::Deserialize;
 use std::{
@@ -174,7 +174,7 @@ impl CustomAdminPages {
         pages.sort_by(|left, right| compare_patterns(&left.route_pattern, &right.route_pattern));
         for (index, page) in pages.iter().enumerate() {
             assert!(
-                is_safe_custom_admin_path(&page.route_pattern, true),
+                is_custom_admin_page_pattern(&page.route_pattern),
                 "[openshop] Custom admin page path \"{}\" is reserved or invalid",
                 page.route_pattern
             );
@@ -194,6 +194,11 @@ impl CustomAdminPages {
 
     pub fn route_patterns(&self) -> Vec<String> {
         self.0.iter().map(|page| page.route_pattern.clone()).collect()
+    }
+
+    /// Whether the bundle has a page for the home of the admin.
+    fn has_home(&self) -> bool {
+        self.0.iter().any(|page| page.route_pattern == ADMIN_HOME_PATH)
     }
 
     fn find(&self, pathname: &str) -> Option<(usize, RouteParams)> {
@@ -266,6 +271,16 @@ pub fn CustomAdminPageOutlet() -> impl IntoView {
         }
         None => ().into_any(),
     }
+}
+
+/// Whether the home of the admin is a page of the application: one this
+/// bundle has, or one the server declares, which the outlet reports as missing.
+pub fn use_custom_home() -> Memo<bool> {
+    let bundled = expect_context::<CustomAdminPages>().has_home();
+    let declared = use_custom_admin_pages();
+    Memo::new(move |_| {
+        bundled || declared.with(|declared| declared.pages.iter().any(|page| page.path == ADMIN_HOME_PATH))
+    })
 }
 
 #[derive(Deserialize)]
@@ -381,6 +396,17 @@ mod tests {
         let (index, params) = pages.find("/reviews/42").unwrap();
         assert_eq!((index, params.get("id")), (2, Some("42")));
         assert!(pages.find("/orders").is_none());
+    }
+
+    #[test]
+    fn a_page_can_be_the_home_of_the_admin() {
+        let pages = CustomAdminPages::new(vec![page("/reviews"), page("/")]);
+        assert_eq!(pages.route_patterns(), ["/", "/reviews"]);
+        assert!(pages.has_home());
+        assert_eq!(pages.find("/").map(|(index, _)| index), Some(0));
+        assert_eq!(pages.find("/reviews").map(|(index, _)| index), Some(1));
+        assert!(!CustomAdminPages::new(vec![page("/reviews")]).has_home());
+        assert_eq!(page("/").id(), "");
     }
 
     #[test]

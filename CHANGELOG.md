@@ -2,6 +2,36 @@
 
 ## Unreleased
 
+- An admin can be made of the pages of the application only.
+  `builtin_pages: AdminPagesConfig::none()` disables every built-in page
+  (flows, runs, logs, providers, crons, functions, MCP) for the merchant; a
+  page is opened again by naming it. Such an application declares the home of
+  its admin, or its configuration is rejected.
+- A custom admin page can be declared at `/`: `#[admin_page("/")]` is the home
+  of the admin, in place of the built-in dashboard. It has no menu entry, and
+  its access rule is its own.
+- The operator dashboard, under `/ops`: what happens in every shop over a
+  period, read-only, outside Shopify admin. An overview with a chart of the
+  runs and the failures, the runs and the log lines with their filters, the
+  flows, the shops and each of them, the crons. It
+  is served when the application gives it a password,
+  `ops_password: std::env::var("OPS_PASSWORD").ok()`, and answers `404`
+  otherwise. Its pages are HTML rendered by the server, without script,
+  with charts drawn as SVG; the session is a signed cookie, with no table. Production refuses a password
+  shorter than 16 characters. `ops` is a reserved first segment for custom
+  admin pages.
+- A visitor who opens the application without a shop is told where the app
+  opens from, on a page written with Polaris web components: the `401` of
+  `start`, the `403` of `dev`, which was plain text, and what the admin UI
+  shows without a Shopify session. It shows nothing of the application.
+- The framework tables are read with typed columns: `FlowRun::of(&ctx)` for
+  the runs of a shop, `FlowRun::all_shops(&db)` and
+  `Installation::installed(&db)` across shops, `StepResult::of_run` and
+  `LogRow::of_run` for a run. These records are never written, and
+  `Installation` does not read the access token. `Record` is the part of
+  `Model` that reads: `TABLE` and `COLUMNS` moved to it, and
+  `openshop::db::schema::Installation`, the whole row, is now
+  `InstallationRow`.
 - A custom admin page is written in one place. The view of a page is the
   function marked `#[view]` in its `#[admin_page]` block, next to the loaders
   and the actions it calls, and no longer lives in a separate `ui/` crate. It

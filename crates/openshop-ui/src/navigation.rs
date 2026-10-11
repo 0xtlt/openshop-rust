@@ -3,7 +3,16 @@
 use crate::url;
 
 const NAVIGATION_SELECTOR: &str = "s-link[href], a[href], s-button[href]";
-const RESERVED_PREFIXES: [&str; 7] = ["/api", "/auth", "/webhooks", "/proxy", "/ext", "/routes", "/health"];
+const RESERVED_PREFIXES: [&str; 8] = [
+    "/api",
+    "/auth",
+    "/webhooks",
+    "/proxy",
+    "/ext",
+    "/routes",
+    "/health",
+    "/ops",
+];
 
 /// An entry of an event's composed path.
 pub trait NavigateTarget {

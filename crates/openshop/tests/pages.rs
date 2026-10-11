@@ -3,10 +3,10 @@
 mod common;
 
 use common::{create_config, noop_flow};
-use openshop::builder::{Field, Function, FunctionType, OpenShopBuilder, Provider};
+use openshop::builder::{AdminPage, Field, Function, FunctionType, OpenShopBuilder, Provider};
 use openshop::server::mcp::tokens::create_mcp_token;
 use openshop::testing::TestContext;
-use openshop::{AdminPageId, AdminPageMode, Cron, McpConfig, OpenShopConfig, Value, json};
+use openshop::{AdminPageId, AdminPageMode, AdminPagesConfig, Cron, McpConfig, OpenShopConfig, UiSource, Value, json};
 use reqwest::{Method, RequestBuilder, StatusCode};
 
 const CRON_KEY: &str = "test-flow:*/5 * * * *";
@@ -313,7 +313,9 @@ async fn disabled_pages_do_not_reveal_themselves_without_a_session() {
             .builtin_page(AdminPageId::Providers, AdminPageMode::Disabled)
             .builtin_page(AdminPageId::Crons, AdminPageMode::Disabled)
             .builtin_page(AdminPageId::Functions, AdminPageMode::Disabled)
-            .builtin_page(AdminPageId::Mcp, AdminPageMode::Disabled),
+            .builtin_page(AdminPageId::Mcp, AdminPageMode::Disabled)
+            // Without a built-in page, the admin opens on a page of the application.
+            .admin_page(AdminPage::new("/")),
     )
     .await;
 
@@ -341,6 +343,28 @@ async fn disabled_pages_do_not_reveal_themselves_without_a_session() {
     assert_eq!(status, StatusCode::OK);
     assert!(custom.is_object());
     ctx.shutdown().await.unwrap();
+}
+
+#[test]
+fn an_admin_without_built_in_pages_opens_on_a_page_of_the_application() {
+    let closed = || full_builder().builtin_pages(AdminPagesConfig::none());
+    let error = closed().build().err().unwrap().to_string();
+    assert_eq!(
+        error,
+        "[openshop] Invalid config: builtinPages disables every built-in page of the admin: \
+         declare its home, a page at `/` (`#[admin_page(\"/\")]`)"
+    );
+
+    assert!(closed().admin_page(AdminPage::new("/")).build().is_ok());
+    // One page opened again: the built-in Home has something to show.
+    assert!(
+        closed()
+            .builtin_page(AdminPageId::Providers, AdminPageMode::Visible)
+            .build()
+            .is_ok()
+    );
+    // Without an admin UI there is no home to open.
+    assert!(closed().admin_ui(UiSource::None).build().is_ok());
 }
 
 // ─── MCP protocol ────────────────────────────────────────────────────

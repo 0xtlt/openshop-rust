@@ -59,6 +59,41 @@ It replaces the entries the pages declare: with `admin_menu`, every `nav` is
 ignored, and `admin_menu: []` leaves the menu without any entry of the
 application. Each path must be a static path of a listed page.
 
+## The home of the admin
+
+A page declared at `/` is what the admin opens on, in place of the built-in
+dashboard:
+
+```rust,ignore
+pub struct HomePage;
+
+#[admin_page("/")]
+impl HomePage {
+    #[loader]
+    async fn summary(ctx: AdminContext) -> Result<Summary> {
+        Ok(Summary { shop: ctx.shop })
+    }
+
+    #[view]
+    fn view() -> impl IntoView {
+        let summary = use_loader(Self::SUMMARY, || ());
+        view! { <s-page heading="Welcome">{move || summary.data.get().map(|summary| summary.shop)}</s-page> }
+    }
+}
+```
+
+It is a page like the others, with its access rule, its loaders, its actions
+and its view. Two things set it apart:
+
+- it has no menu entry: the name of the app in the Shopify sidebar opens it.
+  A `nav` on it, or an `admin_menu` entry for `/`, is rejected when the
+  configuration is built;
+- it is not a parent of the other pages: its access rule is its own.
+
+An application that
+[disables every built-in page](configuration.md#an-admin-made-of-the-pages-of-the-application)
+declares one.
+
 ## Server functions
 
 `#[admin_page(path)]` on the `impl` block of a type declares a page. The
@@ -126,8 +161,9 @@ Path rules:
   `:name` (or `[name]`); its name starts with a letter and continues with
   letters, digits, and `_`;
 - the first segment must not be `api`, `auth`, `webhooks`, `proxy`, `ext`,
-  `routes`, `health`, `flows`, `runs`, `providers`, `crons`, `functions`, or
-  `mcp`, and a page cannot replace Home (`/`);
+  `routes`, `health`, `ops`, `flows`, `runs`, `providers`, `crons`,
+  `functions`, or `mcp`;
+- `/` alone is [the home of the admin](#the-home-of-the-admin);
 - two pages cannot have the same shape, such as `/reviews/:id` and
   `/reviews/:slug`. A static page takes precedence over a dynamic sibling:
   `/reviews/new` is served by its own page, not by `/reviews/:id`.
@@ -195,6 +231,7 @@ an ordinary server route or an OpenShop flow for long-running or retryable work.
 
 Loaders and actions are called over an internal
 `POST /api/pages/custom/<page path>/_rpc/<loader|action>/<name>` transport
+(`/api/pages/custom/_rpc/…` for the home)
 authenticated with a fresh Shopify App Bridge session token. Endpoint URLs are
 not a public API; use `use_loader` and `use_action` in the view of the page.
 

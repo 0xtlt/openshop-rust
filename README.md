@@ -120,6 +120,9 @@ The binary understands `dev`, `start`, `worker [--concurrency=N]` and
   public routes, Shopify Functions and MCP capabilities of the application,
   each declared where it is written, and sets its schedules. Shopify OAuth and
   the embedded admin are handled by the framework.
+- **The admin** shows a shop its flows, runs, logs and providers, or only the
+  pages you wrote for it. An optional dashboard under `/ops`, behind a
+  password, shows the operator every shop.
 
 In production, a web process (`start`) accepts requests and queues work; separate
 workers (`worker`) execute it. PostgreSQL stores installations, credentials, runs,

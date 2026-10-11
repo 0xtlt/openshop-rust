@@ -32,6 +32,9 @@ static APP: App = app! {
     // Remove this line to turn it on.
     mcp: McpConfig::disabled(),
     on_error: report_failure,
+    // The operator dashboard, under `/ops`, when `OPS_PASSWORD` is set: what
+    // happens in every shop, read from outside Shopify admin.
+    ops_password: std::env::var("OPS_PASSWORD").ok(),
 };
 
 fn main() -> Result<()> {

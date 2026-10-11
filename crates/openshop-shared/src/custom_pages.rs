@@ -2,7 +2,10 @@
 
 use serde::{Deserialize, Serialize};
 
-pub const CUSTOM_ADMIN_RESERVED_PREFIXES: [&str; 13] = [
+/// The path of the home of the admin. A page of the application can take it.
+pub const ADMIN_HOME_PATH: &str = "/";
+
+pub const CUSTOM_ADMIN_RESERVED_PREFIXES: [&str; 14] = [
     "api",
     "auth",
     "webhooks",
@@ -10,6 +13,7 @@ pub const CUSTOM_ADMIN_RESERVED_PREFIXES: [&str; 13] = [
     "ext",
     "routes",
     "health",
+    "ops",
     "flows",
     "runs",
     "providers",
@@ -83,6 +87,12 @@ pub fn is_safe_custom_admin_path(path: &str, allow_dynamic: bool) -> bool {
     segments(path).all(|segment| (allow_dynamic && is_dynamic_segment(segment)) || is_plain_segment(segment))
 }
 
+/// Whether a page of the application can be served at `pattern`: the home of
+/// the admin, or a safe path that may have dynamic segments.
+pub fn is_custom_admin_page_pattern(pattern: &str) -> bool {
+    pattern == ADMIN_HOME_PATH || is_safe_custom_admin_path(pattern, true)
+}
+
 pub fn match_custom_admin_path(pattern: &str, pathname: &str) -> bool {
     let pattern_segments: Vec<&str> = segments(pattern).collect();
     let path_segments: Vec<&str> = segments(pathname).collect();
@@ -143,7 +153,18 @@ mod tests {
     }
 
     #[test]
+    fn a_page_can_take_the_home_but_no_reserved_path() {
+        assert!(is_custom_admin_page_pattern("/"));
+        assert!(is_custom_admin_page_pattern("/reviews/:id"));
+        assert!(!is_custom_admin_page_pattern("/ops"));
+        assert!(!is_custom_admin_page_pattern("/flows"));
+        assert!(!is_custom_admin_page_pattern(""));
+    }
+
+    #[test]
     fn matches_patterns_segment_by_segment() {
+        assert!(match_custom_admin_path("/", "/"));
+        assert!(!match_custom_admin_path("/", "/reviews"));
         assert!(match_custom_admin_path("/reviews", "/reviews"));
         assert!(match_custom_admin_path("/reviews/:id", "/reviews/42"));
         assert!(match_custom_admin_path("/reviews/:id", "/reviews/42/"));

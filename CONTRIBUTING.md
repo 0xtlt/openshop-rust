@@ -58,13 +58,22 @@ admin iframe. To exercise the backend without a store, call the API with an
 HS256 session token signed with `SHOPIFY_API_SECRET` (`aud` = `SHOPIFY_API_KEY`,
 `iss` / `dest` = `https://<shop>.myshopify.com`), as the test harness does.
 
-To look at the admin UI without a store, run the preview. It serves the UI on
-`http://127.0.0.1:3999` with a stub in place of Shopify App Bridge and a
-session for a fixed test shop, in a throwaway schema of the database above. It
-only accepts loopback connections:
+To look at the application without a store, run the preview. It serves the
+demo on `http://127.0.0.1:3999`, in a throwaway schema of the database above,
+and only accepts loopback connections. It answers as in production: without a
+shop, the admin is the page that says where the app opens from, and the
+[operator dashboard](docs/src/reference/operator-dashboard.md) is at `/ops`
+(password `preview`):
 
 ```bash
 cargo run -p openshop-demo --example preview
+```
+
+To look at the admin UI itself, set `PREVIEW_AS_SHOP=1`: the preview then puts
+a stub in place of Shopify App Bridge, with a session for a fixed test shop:
+
+```bash
+PREVIEW_AS_SHOP=1 cargo run -p openshop-demo --example preview
 ```
 
 Set `PREVIEW_UI_DIR=apps/demo/dist` to preview the demo's own bundle after

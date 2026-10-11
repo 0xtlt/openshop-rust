@@ -399,7 +399,7 @@ pub fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
         let reference = field.options.references.as_ref()?;
         let column = &field.column;
         let table = match &reference.target {
-            Target::Model(model) => quote!(<#model as #krate::db::Model>::TABLE),
+            Target::Model(model) => quote!(<#model as #krate::db::Record>::TABLE),
             Target::Table(table) => quote!(#table),
         };
         let referenced = reference.column.as_ref().map(|column| quote!(.references(#column)));
@@ -570,11 +570,14 @@ pub fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
             }
         }
 
+        impl #krate::db::Record for #name {
+            const TABLE: &'static str = #table;
+            const COLUMNS: &'static [&'static str] = &[#(#column_names),*];
+        }
+
         impl #krate::db::Model for #name {
             type New = #new_name;
 
-            const TABLE: &'static str = #table;
-            const COLUMNS: &'static [&'static str] = &[#(#column_names),*];
             const HAS_SHOP: bool = #has_shop;
 
             fn table() -> #krate::db::Table {
@@ -690,8 +693,8 @@ mod tests {
         .to_string();
 
         for expected in [
-            "ForeignKeyDef :: new (\"review_id\" , < Review as :: openshop :: db :: Model > :: TABLE) . on_delete (\"cascade\")",
-            "ForeignKeyDef :: new (\"author_code\" , < crate :: models :: Author as :: openshop :: db :: Model > :: TABLE) . references (\"code\") . on_delete (\"Set  Null\")",
+            "ForeignKeyDef :: new (\"review_id\" , < Review as :: openshop :: db :: Record > :: TABLE) . on_delete (\"cascade\")",
+            "ForeignKeyDef :: new (\"author_code\" , < crate :: models :: Author as :: openshop :: db :: Record > :: TABLE) . references (\"code\") . on_delete (\"Set  Null\")",
             "ForeignKeyDef :: new (\"order_id\" , \"legacy_orders\")",
         ] {
             assert!(generated.contains(expected), "missing `{expected}` in:\n{generated}");

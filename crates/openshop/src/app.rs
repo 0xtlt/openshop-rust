@@ -57,6 +57,8 @@ pub struct OpenShopConfig {
     pub admin_ui: Option<UiSource>,
     /// Maximum size of a request body. Defaults to 2 MB.
     pub max_request_body_bytes: Option<usize>,
+    /// The password of the operator dashboard, served under `/ops` when set.
+    pub ops_password: Option<String>,
 }
 
 impl OpenShopConfig {
@@ -345,6 +347,17 @@ impl OpenShopBuilder {
         self
     }
 
+    /// Serves the operator dashboard under `/ops`, behind this password: what
+    /// happens in every shop, read-only, outside Shopify admin. Without a
+    /// password, or with an empty one, `/ops` does not exist.
+    ///
+    /// The application gives the password, from wherever it keeps its
+    /// secrets: `ops_password: std::env::var("OPS_PASSWORD").ok()`.
+    pub fn ops_password(mut self, password: impl Into<Option<String>>) -> Self {
+        self.config.ops_password = password.into().filter(|password| !password.trim().is_empty());
+        self
+    }
+
     pub fn build(self) -> Result<OpenShopConfig> {
         if let Some(problem) = self.problems.first() {
             anyhow::bail!("[openshop] Invalid config: {problem}");
@@ -385,6 +398,7 @@ impl OpenShop {
         transport: Arc<dyn HttpTransport>,
     ) -> Result<Self> {
         validate_openshop_config(&config)?;
+        crate::server::ops::check_password(config.ops_password.as_deref(), env.production)?;
         let apps = ShopifyApps::resolve(config.shopify.as_ref(), &env)?;
         let crypto = Crypto::new(env.encryption_key.clone(), env.production);
         let custom_pages = config.resolved_admin_pages()?;

@@ -36,6 +36,12 @@ That limit is the only one. `ctx.db` itself is a plain `sqlx` connection pool:
 a query written with `sqlx`, and `Review::all_shops(..)`, see every shop, and
 application code must filter them.
 
+The rows of the framework are read the same way. `FlowRun::of(&ctx)` gives the
+runs of the shop and the app of the context; `FlowRun::all_shops(&db)` and
+`Installation::installed(&db)` see every shop, for the operator of the
+application. The [operator dashboard](../reference/operator-dashboard.md) is
+that second view: it belongs to no shop, and no merchant reaches it.
+
 For data that differs between apps installed on the same shop, add an
 app-handle column and include it in writes, reads, and uniqueness constraints.
 A `shop` filter alone cannot distinguish those installations.

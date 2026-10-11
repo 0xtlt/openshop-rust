@@ -439,9 +439,64 @@ Workers read `flow_runs` through two partial indexes limited to `pending`,
 `deadline_at` to fail the runs past their deadline. A claim costs the same
 whatever the number of runs waiting.
 
-The row types are exported from `openshop::db::schema` (`Installation`,
+The row types are exported from `openshop::db::schema` (`InstallationRow`,
 `FlowRun`, `StepResult`, `ProviderConfigRow`, `CronOverride`, `LogRow`,
 `McpToken`, `McpAuditLog`) and implement `sqlx::FromRow` and `Serialize`.
+
+### Read the framework tables
+
+Four of them are read with typed columns, like the rows of a model, and
+never written: `Installation`, `FlowRun`, `StepResult`, and `LogRow`,
+exported from the crate root. They are what a page of the application shows
+of its runs, and what a route of yours reads across shops.
+
+| Entry point | Rows |
+| --- | --- |
+| `FlowRun::of(&ctx)` | The runs of the shop and the Shopify app of a context. |
+| `FlowRun::all_shops(&db)` | The runs of every shop and every app. |
+| `Installation::installed(&db)` | The installations in place: the shop has the app, and the application holds its access token. |
+| `Installation::all_shops(&db)` | Every installation, with those a shop started without finishing and those it removed. |
+| `StepResult::of_run(&db, run_id)` | The step attempts of a run. |
+| `LogRow::of_run(&db, run_id)` | The log lines of a run. |
+
+Each returns a query: `filter`, `order_by`, `limit`, `offset`, then `all()`,
+`first()`, `count()`, or `find(id)`. There is no `insert`, `save`, or
+`delete`.
+
+```rust,ignore
+use openshop::prelude::*;
+use openshop::{FlowRun, LogRow};
+
+/// In a loader of a page: the last failures of the shop of the session.
+let failed = FlowRun::of(&ctx)
+    .filter(FlowRun::STATUS.eq("failed"))
+    .order_by(FlowRun::CREATED_AT.desc())
+    .limit(20)
+    .all()
+    .await?;
+
+/// In a route behind your own authentication: every shop.
+let waiting = FlowRun::all_shops(&ctx.db)
+    .filter(FlowRun::STATUS.is_in(["pending", "sleeping", "running"]))
+    .count()
+    .await?;
+```
+
+A record has one column constant per field a query filters or sorts on,
+such as `FlowRun::SHOP`, `FlowRun::FLOW_NAME`, `FlowRun::STATUS`, and
+`FlowRun::CREATED_AT`. The JSON columns (`input`, `retry_policy`, `output`,
+`payload`) are read with the row and have no constant. The status of a run
+is `pending`, `sleeping`, `running`, `completed`, `failed`, or `canceled`.
+
+`Installation` has neither the access token nor the OAuth nonce of the row:
+they are not columns it reads. `of_run` takes a run id as it is given: when
+the id comes from a request, find the run first with
+`FlowRun::of(&ctx).find(id)`, which does not find a run of another shop.
+
+These records implement the trait `openshop::Record`, the part of a model
+that reads; `Model` adds what writes. The
+[operator dashboard](operator-dashboard.md) shows the same tables, across
+shops.
 
 Migration history lives in a tenth table, `__openshop_migrations`, with the
 columns `tag` (primary key), `checksum`, and `applied_at`.

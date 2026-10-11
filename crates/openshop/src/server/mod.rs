@@ -1,5 +1,5 @@
 //! The HTTP server: OAuth, the Admin API, webhooks, app proxies, public routes,
-//! the MCP endpoint and the embedded admin UI.
+//! the MCP endpoint, the embedded admin UI and the operator dashboard.
 
 pub mod admin_pages;
 pub mod api;
@@ -16,6 +16,8 @@ pub mod http;
 pub mod jwt;
 pub mod log_query;
 pub mod mcp;
+pub mod ops;
+mod polaris;
 pub mod provider_config;
 pub mod proxy;
 pub mod routes;
@@ -213,6 +215,18 @@ pub(crate) fn create_router(app: &OpenShop, options: ServerOptions, log: bool) -
     // Public server routes define their own explicit authentication contract.
     if !app.config().routes.is_empty() {
         router = router.merge(routes::create_server_routes(app, log)?);
+    }
+
+    // The operator dashboard has its own session, behind the password the
+    // application gives. Without one, `/ops` is a path that does not exist.
+    // A browser keeps a `Secure` cookie only over HTTPS: development, and a
+    // server whose public URL is plain HTTP, do without the attribute.
+    let secure_cookie = !options.dev && !app.env().fallback_app_url().starts_with("http://");
+    if let Some(ops) = ops::create_ops_routes(app, secure_cookie) {
+        router = router.merge(ops);
+        if log {
+            logger::info("[openshop] Operator dashboard served under /ops");
+        }
     }
 
     if !app.config().proxies.is_empty() {

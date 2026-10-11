@@ -230,10 +230,8 @@ async fn execute_rpc(
         .map(|(_, suffix)| suffix)
         .unwrap_or_default();
     const MARKER: &str = "/_rpc/";
-    let marker_index = suffix
-        .rfind(MARKER)
-        .filter(|index| *index >= 1)
-        .ok_or_else(rpc_not_found)?;
+    let marker_index = suffix.rfind(MARKER).ok_or_else(rpc_not_found)?;
+    // Empty for the page at `/`, the home of the admin.
     let page_path = &suffix[..marker_index];
     let mut parts = suffix[marker_index + MARKER.len()..].split('/');
     let kind = match parts.next() {

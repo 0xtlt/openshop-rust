@@ -122,6 +122,10 @@ larger configurations easier to split:
 - With custom admin pages, a static page takes precedence over a dynamic
   sibling: `/reviews/new` is handled by its own page rather than rejected as
   ambiguous with `/reviews/:id`.
+- A custom admin page can be declared at `/`: it is the home of the admin,
+  in place of the built-in dashboard, and its functions are called at
+  `/api/pages/custom/_rpc/<kind>/<name>`. `AdminPagesConfig::none()` disables
+  every built-in page, and such an application must declare that home.
 - Turning MCP off, with `mcp: McpConfig::disabled()` or `.enabled(false)`,
   also disables the MCP page of the admin and `/api/mcp/*`, unless the
   application sets a mode for that page with the `builtin_pages` setting or
@@ -175,6 +179,15 @@ larger configurations easier to split:
   instead of `page.tsx` files compiled by Vite.
 - In `dev`, the shell is served by the application itself (there is no separate
   UI port) and without the signed-query check.
+- A visitor without a valid launch receives a page written with Polaris web
+  components, with the same `401` and the same sentence. `dev` answers its
+  `403` with that page instead of plain text, and the admin UI shows it to a
+  visitor without a session.
+- The [operator dashboard](operator-dashboard.md) under `/ops` has no
+  TypeScript counterpart: pages rendered by the server, without script, that
+  show every shop over a period (runs, log lines, flows, shops, crons),
+  read-only, behind the password the application gives with `ops_password`.
+  It adds no table. `ops` is a reserved first segment for custom admin pages.
 
 ## Database and migrations
 
@@ -185,6 +198,10 @@ larger configurations easier to split:
   deletion, limited to a shop; there is no general query builder, and other
   queries are SQL strings run with `sqlx`, which can check them at compile
   time with `sqlx::query!`.
+- `Installation`, `FlowRun`, `StepResult`, and `LogRow` are read with typed
+  columns, across shops or for the shop of a context, and never written
+  through them. See
+  [Read the framework tables](database.md#read-the-framework-tables).
 - `#[model(references(Other))]` declares a foreign key, like `.references()`
   in Drizzle. There are no relational queries: the other side of a reference
   is read with a filter or a join.

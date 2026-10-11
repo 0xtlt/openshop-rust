@@ -55,6 +55,15 @@ In the embedded admin UI:
 3. Select **Retry**, then **Resume** on a finished run to keep completed steps.
 4. Use **Restart** (the API's `reset` mode) only when completed steps are safe to execute again.
 
+The embedded admin shows one shop, to its staff. To see every shop at once,
+or when the application
+[keeps these pages from its merchants](../reference/configuration.md#an-admin-made-of-the-pages-of-the-application),
+set `OPS_PASSWORD` and open `https://your-app.example.com/ops`: the
+[operator dashboard](../reference/operator-dashboard.md) charts the runs and
+the failures of all shops over a period, and lists the runs, the log lines,
+the flows and the shops behind them. It only reads: retrying a run stays an
+action of the embedded admin.
+
 Operational signals:
 
 | Signal | Likely cause | Action |

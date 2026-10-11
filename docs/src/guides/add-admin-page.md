@@ -203,3 +203,20 @@ described in the
 When querying app-owned tables, read a model through the rows of the shop of
 the context, as in `Review::of(&ctx)`, and filter by the app identity where it
 matters; a query written with `sqlx` has no such filter.
+
+## Make the page the home of the admin
+
+Declare the page at `/` to have the admin open on it, in place of the
+built-in dashboard. It has no `nav`: the name of the app in the Shopify
+sidebar opens it.
+
+```rust,ignore
+#[admin_page("/")]
+impl StorePage {
+    // ... the loaders, the actions and the view of the page ...
+}
+```
+
+To leave merchants nothing but your pages, also disable the built-in ones
+with `builtin_pages: AdminPagesConfig::none()`. See
+[An admin made of the pages of the application](../reference/configuration.md#an-admin-made-of-the-pages-of-the-application).

@@ -78,7 +78,9 @@ When a page is `disabled`, its admin API group returns `404` with `{ "error": "N
 
 `GET /api/pages/custom` lists only navigation entries the staff member may
 open. In `pages`, `allowed` is always `false` for pages with dynamic segments;
-use the `access` endpoint for a concrete path.
+use the `access` endpoint for a concrete path. A page declared at `/`, the
+home of the admin, has the `id` `""` and the `path` `/`, and its functions are
+called at `/api/pages/custom/_rpc/<kind>/<name>`.
 
 Custom-page RPC paths are implementation details. Applications should
 use `use_loader` and `use_action`, not call them directly. Page and function

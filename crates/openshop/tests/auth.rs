@@ -5,7 +5,7 @@ mod common;
 
 use chrono::Utc;
 use common::noop_flow;
-use openshop::db::schema::Installation;
+use openshop::db::schema::InstallationRow;
 use openshop::testing::{
     MockTransport, TestContext, TestOptions, session_token, sign_query, sign_webhook_body, to_query_string,
 };
@@ -77,7 +77,7 @@ async fn seed_installation(
         .unwrap();
 }
 
-async fn find_installation(ctx: &TestContext, app_handle: &str, shop: &str) -> Option<Installation> {
+async fn find_installation(ctx: &TestContext, app_handle: &str, shop: &str) -> Option<InstallationRow> {
     sqlx::query_as("SELECT * FROM installations WHERE app_handle = $1 AND shop = $2")
         .bind(app_handle)
         .bind(shop)
@@ -86,7 +86,7 @@ async fn find_installation(ctx: &TestContext, app_handle: &str, shop: &str) -> O
         .unwrap()
 }
 
-async fn installation(ctx: &TestContext, app_handle: &str, shop: &str) -> Installation {
+async fn installation(ctx: &TestContext, app_handle: &str, shop: &str) -> InstallationRow {
     find_installation(ctx, app_handle, shop)
         .await
         .expect("installation row")
@@ -100,7 +100,7 @@ async fn installation_count(ctx: &TestContext) -> i64 {
     count
 }
 
-fn decrypted_token(ctx: &TestContext, row: &Installation) -> Option<String> {
+fn decrypted_token(ctx: &TestContext, row: &InstallationRow) -> Option<String> {
     ctx.app.crypto().decrypt_string(row.access_token.as_deref()).unwrap()
 }
 

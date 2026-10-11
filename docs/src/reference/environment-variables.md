@@ -44,6 +44,11 @@ Notes:
   with `[openshop] DATABASE_URL not set`.
 - `RUST_LOG` is read when the command starts. `dev` loads `.env` first, so the
   variable can be set there for development. See [Logging](logging.md).
+- `OPS_PASSWORD` is not in this table: OpenShop does not read it. It is the
+  variable the `openshop init` template reads in its own code to give the
+  [operator dashboard](operator-dashboard.md) its password
+  (`ops_password: std::env::var("OPS_PASSWORD").ok()`). `.env` is loaded
+  before the settings of `app!` are evaluated.
 
 ## Minimal single-app `.env`
 

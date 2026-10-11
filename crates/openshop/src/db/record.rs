@@ -1,8 +1,12 @@
-//! Typed rows of application tables.
+//! Typed rows of tables.
 //!
 //! `#[derive(Model)]` implements [`Model`] for a struct and gives it typed
 //! columns and an entry point, such as `Review::for_shop(&db, &shop)`. The
 //! [`Rows`] it returns insert, read, update and delete rows of that struct.
+//!
+//! A [`Record`] is the part that reads. The rows of the framework tables,
+//! such as [`FlowRun`](super::FlowRun), are records and not models: a
+//! [`Query`] filters, sorts and counts them, and nothing writes them.
 
 use std::marker::PhantomData;
 
@@ -85,16 +89,23 @@ impl<T> Bindable for T where T: for<'q> Encode<'q, Postgres> + Type<Postgres> + 
 /// The query under construction that generated code appends to.
 pub type SqlBuilder = QueryBuilder<'static, Postgres>;
 
+/// A struct read from the rows of a table, each known by its `id`.
+///
+/// Implemented by `#[derive(Model)]`, and by the rows of the framework
+/// tables, which are read and never written through it.
+pub trait Record: Sized + Send + Unpin + for<'r> FromRow<'r, PgRow> {
+    const TABLE: &'static str;
+    /// The columns read, in the order of the fields.
+    const COLUMNS: &'static [&'static str];
+}
+
 /// A struct mapped to an application table. Implemented by `#[derive(Model)]`.
-pub trait Model: Sized + Send + Unpin + for<'r> FromRow<'r, PgRow> {
+pub trait Model: Record {
     /// What an insertion takes: the fields, without those the database fills
     /// (`id`, `created_at`, `updated_at`) and without `shop`, which the rows
     /// of a shop fill.
     type New: Send;
 
-    const TABLE: &'static str;
-    /// The columns, in the order of the fields.
-    const COLUMNS: &'static [&'static str];
     /// Whether a row belongs to a shop.
     const HAS_SHOP: bool;
 
@@ -229,6 +240,18 @@ pub struct Condition<M> {
     marker: PhantomData<fn() -> M>,
 }
 
+impl<M> Condition<M> {
+    /// A test written in SQL, for what the columns of a record do not say.
+    pub(crate) fn sql(sql: &'static str) -> Self {
+        Self {
+            push: Box::new(move |query| {
+                query.push(sql);
+            }),
+            marker: PhantomData,
+        }
+    }
+}
+
 /// A sort key, built from a [`Column`]: `Review::CREATED_AT.desc()`.
 pub struct Order<M> {
     sql: String,
@@ -239,7 +262,7 @@ fn id_is<M>(id: Uuid) -> Condition<M> {
     Column::<M, Uuid>::new("id").eq(id)
 }
 
-fn column_list<M: Model>() -> String {
+fn column_list<M: Record>() -> String {
     M::COLUMNS
         .iter()
         .map(|column| quote(column))
@@ -270,14 +293,7 @@ impl<'a, M: Model> Rows<'a, M> {
 
     /// A query on these rows, to filter, sort and limit.
     pub fn query(&self) -> Query<'a, M> {
-        Query {
-            db: self.db,
-            shop: self.shop.clone(),
-            conditions: Vec::new(),
-            order: Vec::new(),
-            limit: None,
-            offset: None,
-        }
+        Query::new(self.db, self.shop.clone())
     }
 
     pub fn filter(&self, condition: Condition<M>) -> Query<'a, M> {
@@ -306,7 +322,7 @@ impl<'a, M: Model> Rows<'a, M> {
 
     /// The row with this id, when it is one of these rows.
     pub async fn find(&self, id: Uuid) -> Result<Option<M>> {
-        self.filter(id_is(id)).first().await
+        self.query().find(id).await
     }
 
     /// Inserts a row and returns it as stored, with the values the database filled.
@@ -340,8 +356,8 @@ impl<'a, M: Model> Rows<'a, M> {
     }
 }
 
-/// Rows of a model that match conditions, in an order, within limits.
-pub struct Query<'a, M: Model> {
+/// Rows of a table that match conditions, in an order, within limits.
+pub struct Query<'a, M: Record> {
     db: &'a PgPool,
     shop: Option<String>,
     conditions: Vec<Condition<M>>,
@@ -350,7 +366,20 @@ pub struct Query<'a, M: Model> {
     offset: Option<i64>,
 }
 
-impl<M: Model> Query<'_, M> {
+impl<'a, M: Record> Query<'a, M> {
+    /// Every row of the table, or the rows of one shop. Called by the entry
+    /// points of the records of the framework.
+    pub(crate) fn new(db: &'a PgPool, shop: Option<String>) -> Self {
+        Self {
+            db,
+            shop,
+            conditions: Vec::new(),
+            order: Vec::new(),
+            limit: None,
+            offset: None,
+        }
+    }
+
     /// Keeps the rows that also satisfy `condition`.
     pub fn filter(mut self, condition: Condition<M>) -> Self {
         self.conditions.push(condition);
@@ -425,6 +454,13 @@ impl<M: Model> Query<'_, M> {
         Ok(query.build_query_scalar::<i64>().fetch_one(self.db).await?)
     }
 
+    /// The row with this id, when it is one of these rows.
+    pub async fn find(self, id: Uuid) -> Result<Option<M>> {
+        self.filter(id_is(id)).first().await
+    }
+}
+
+impl<M: Model> Query<'_, M> {
     /// Deletes the rows that match the conditions and returns how many there were.
     pub async fn delete(self) -> Result<u64> {
         if self.limit.is_some() || self.offset.is_some() {

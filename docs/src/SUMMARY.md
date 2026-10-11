@@ -47,6 +47,7 @@
   - [Webhooks](reference/webhooks.md)
   - [Shopify Functions](reference/shopify-functions.md)
   - [Custom admin pages](reference/custom-admin-pages.md)
+  - [Operator dashboard](reference/operator-dashboard.md)
   - [MCP](reference/mcp.md)
   - [Security](reference/security.md)
   - [Versioning](reference/versioning.md)

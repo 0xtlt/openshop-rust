@@ -457,6 +457,11 @@ async fn five_star_reviews(db: &PgPool, shop: &str) -> Result<Vec<(String, i32)>
 
 The pool is created once per process. See [Database](database.md).
 
+The rows of the framework are read without SQL: `FlowRun::of(&ctx)` for the
+runs of a shop, `FlowRun::all_shops(&db)` and `Installation::installed(&db)`
+across shops, `StepResult::of_run(&db, id)` and `LogRow::of_run(&db, id)` for
+a run. See [Read the framework tables](database.md#read-the-framework-tables).
+
 ## `#[derive(Model)]` and `Table`
 
 `#[derive(Model)]` maps a struct to an application-owned PostgreSQL table: its
@@ -583,7 +588,8 @@ or migrate the database schema.
 The crate root exports what an application names: the contexts of the
 handlers, the settings of `app!` (crons, retry policy, workers, Shopify apps,
 MCP, admin pages), dispatch options and outcomes, the flow errors, the Shopify
-client, and runtime logging. [The prelude](#the-prelude) holds the ones most
+client, the records of the framework tables (`Installation`, `FlowRun`,
+`StepResult`, `LogRow`, and the trait `Record`), and runtime logging. [The prelude](#the-prelude) holds the ones most
 code uses.
 
 | What | Where |

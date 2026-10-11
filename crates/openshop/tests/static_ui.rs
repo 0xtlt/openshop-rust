@@ -205,12 +205,44 @@ async fn raw_get(port: u16, target: &str) -> (u16, String) {
     .unwrap()
 }
 
-fn assert_unauthorized_ui(reply: &Reply) {
-    assert_eq!(reply.status, StatusCode::UNAUTHORIZED);
+/// The page a visitor without a shop receives: where the app opens from, and
+/// nothing of the application.
+fn assert_welcome_page(reply: &Reply, status: StatusCode) {
+    assert_eq!(reply.status, status);
     assert_eq!(reply.header("x-robots-tag"), Some(ROBOTS));
     assert_eq!(reply.content_type(), "text/html; charset=utf-8");
-    assert!(reply.body.contains(UNAUTHORIZED_UI), "{}", reply.body);
+    assert_eq!(reply.header(CACHE_CONTROL), Some("no-store"));
+    assert_eq!(
+        reply.header(CONTENT_SECURITY_POLICY),
+        Some(
+            "default-src 'none'; script-src https://cdn.shopify.com/shopifycloud/polaris.js; \
+             style-src 'unsafe-inline' https://cdn.shopify.com/static/fonts/; \
+             font-src https://cdn.shopify.com/static/fonts/; connect-src https://cdn.shopify.com/shopifycloud/; \
+             form-action 'none'; base-uri 'none'"
+        )
+    );
+    assert!(
+        reply
+            .body
+            .contains(&format!("<s-heading>{UNAUTHORIZED_UI}</s-heading>")),
+        "{}",
+        reply.body
+    );
+    // Polaris is its only script, and it has nothing of the admin UI.
+    assert_eq!(reply.body.matches("<script").count(), 1, "{}", reply.body);
+    assert!(
+        reply
+            .body
+            .contains("<script src=\"https://cdn.shopify.com/shopifycloud/polaris.js\"></script>"),
+        "{}",
+        reply.body
+    );
     assert!(!reply.body.contains("spa-shell"));
+    assert!(!reply.body.contains("shopify-api-key"));
+}
+
+fn assert_unauthorized_ui(reply: &Reply) {
+    assert_welcome_page(reply, StatusCode::UNAUTHORIZED);
 }
 
 fn assert_shell(reply: &Reply, api_key: &str) {
@@ -607,14 +639,8 @@ async fn dev_mode_serves_the_shell_only_to_shopify_looking_requests() {
     let tunnel = |method: Method, path: &str| request(&ctx, method, path).header(HOST, "openshop-dev.example.dev");
 
     for path in ["/", "/flows", "/runs/550e8400-e29b-41d4-a716-446655440000"] {
-        let denied = fetch(tunnel(Method::GET, path)).await;
-        assert_eq!(denied.status, StatusCode::FORBIDDEN, "{path}");
-        assert_eq!(denied.content_type(), "text/plain");
-        assert_eq!(
-            denied.body,
-            "Access denied. This app must be accessed through the Shopify admin."
-        );
-        assert_eq!(denied.header("x-robots-tag"), Some(ROBOTS));
+        // A visitor of the tunnel is told where the app opens from, like one of production.
+        assert_welcome_page(&fetch(tunnel(Method::GET, path)).await, StatusCode::FORBIDDEN);
     }
 
     // No signature and no installation are required: a shop parameter is enough.

@@ -111,9 +111,10 @@ the environment (`shopify: shopify_apps()?`): the error is the one
 | `shopify` | [`ShopifyConfig`](#shopify) | Single app resolved from env and Shopify TOML |
 | `worker` | `WorkerConfig` | See [Worker defaults](#worker-defaults) |
 | `retry_policy` | `RetryPolicy` | See [Retry defaults](#retry-defaults) |
-| `builtin_pages` | [`AdminPagesConfig`](#admin-pages) | Every built-in page of the admin `visible` |
+| `builtin_pages` | [`AdminPagesConfig`](#admin-pages), or `AdminPagesConfig::none()` for an admin made of the pages of the application | Every built-in page of the admin `visible` |
 | `admin_ui` | `UiSource` | The admin UI bundle built into the framework; see [Custom admin pages](custom-admin-pages.md#serve-the-bundle) |
 | `max_request_body_bytes` | `usize` | `2 * 1024 * 1024` (2 MB); larger request bodies are answered with `413` |
+| `ops_password` | `Option<String>`, or a `String`: the password of the [operator dashboard](operator-dashboard.md) | No dashboard: `/ops` answers `404` |
 
 ## Builder methods
 
@@ -175,6 +176,7 @@ configuration is built.
 | `.model(table)` | `Table` | No app tables pushed in development |
 | `.admin_ui(ui)` | `UiSource` | The admin UI bundle built into the framework; see [Custom admin pages](custom-admin-pages.md#serve-the-bundle) |
 | `.max_request_body_bytes(bytes)` | `usize` | `2 * 1024 * 1024` (2 MB); larger request bodies are answered with `413` |
+| `.ops_password(password)` | `Option<String>` or `String` | No [operator dashboard](operator-dashboard.md) |
 | `.worker(config)` | `WorkerConfig` | See [Worker defaults](#worker-defaults) |
 | `.retry_policy(policy)` | `RetryPolicy` | See [Retry defaults](#retry-defaults) |
 | `.on_error(hook)` | `Fn(Arc<anyhow::Error>, ErrorContext) -> impl Future<Output = ()>` | No hook |
@@ -201,7 +203,7 @@ Calling the other methods again:
 - `.builtin_pages(…)` and `.builtin_page(…)` merge with earlier calls; later values win.
 - The remaining settings (`.shopify(…)`, `.worker(…)`, `.retry_policy(…)`,
   `.on_error(…)`, `.admin_menu(…)`, `.admin_ui(…)`,
-  `.max_request_body_bytes(…)`) replace the earlier value.
+  `.max_request_body_bytes(…)`, `.ops_password(…)`) replace the earlier value.
 
 The fields of `OpenShopConfig` are public. `OpenShop::new` validates the
 configuration again, so a configuration modified after `build()` is still
@@ -365,7 +367,9 @@ overrides. An `input` that is not a JSON object is ignored.
 ## Admin pages
 
 Page modes control which embedded admin screens appear in the Shopify sidebar
-and whether their admin API stays reachable. Home is always visible. Flows,
+and whether their admin API stays reachable. Home is always there: the
+built-in dashboard, or
+[the page the application declares at `/`](custom-admin-pages.md#the-home-of-the-admin). Flows,
 Providers, Crons, and Functions are automatically hidden from the sidebar when
 their corresponding collection is empty; their direct URLs and admin APIs
 remain available. MCP stays visible by default because OpenShop provides core
@@ -405,6 +409,50 @@ The fields of `AdminPagesConfig` are `flows`, `providers`, `crons`,
 `Hidden` is navigation-only and must not be used as an access-control boundary.
 Use `Disabled` when shop staff must not be able to open a page or call its
 admin API.
+
+### An admin made of the pages of the application
+
+`AdminPagesConfig::none()` disables every built-in page: the merchant
+reaches the pages the application declares, and nothing of the flows, the
+runs, the logs, the providers, the crons, the functions, or MCP.
+
+```rust,ignore
+use openshop::AdminPagesConfig;
+use openshop::prelude::*;
+
+pub static APP: App = app! {
+    flows: [flows::sync_orders::sync_orders],
+    admin_pages: [HomePage, SettingsPage],
+    builtin_pages: AdminPagesConfig::none(),
+};
+```
+
+The built-in Home is a summary of the built-in pages. With all of them
+disabled, the admin opens on a page of the application: one of
+`admin_pages` is declared at `/`, or the configuration is rejected:
+
+```text
+[openshop] Invalid config: builtinPages disables every built-in page of the admin: declare its home, a page at `/` (`#[admin_page("/")]`)
+```
+
+An application served without an admin UI (`admin_ui: UiSource::None`)
+needs no home.
+
+A page is opened again by naming it, for example the form where a merchant
+fills the credentials of a provider:
+
+```rust,ignore
+builtin_pages: AdminPagesConfig {
+    providers: Some(AdminPageMode::Visible),
+    ..AdminPagesConfig::none()
+},
+```
+
+What the merchant no longer sees stays available to the operator of the
+application: the [operator dashboard](operator-dashboard.md) shows the runs
+and the logs of every shop, and
+[the records of the framework](database.md#read-the-framework-tables) give
+them to the code of the application, for a page of its own.
 
 `McpConfig::disabled()` turns MCP off: `POST /mcp` is refused, and the MCP page
 of the admin is disabled with it, along with `/api/mcp/*`.
@@ -453,7 +501,9 @@ The checks are:
   at least one HTTP method;
 - custom admin page paths must be valid, unreserved, and unambiguous, and the
   entries of the admin menu, declared with `nav` or set with `admin_menu`,
-  must point to registered static pages;
+  must point to registered static pages other than the home;
+- an application that disables every built-in admin page must declare a
+  page at `/`;
 - MCP permissions, tools, and resources must be well formed. See
   [MCP](mcp.md).
 

@@ -7,7 +7,7 @@ use chrono::{DateTime, Utc};
 use common::{TempProject, empty_database};
 use openshop::db::migrate::{FRAMEWORK_MIGRATIONS, check_migrations, generate_migrations, migrate_schema};
 use openshop::testing::TestDb;
-use openshop::{Model, OpenShopConfig, PgPool, Value, json};
+use openshop::{Model, OpenShopConfig, PgPool, Record, Value, json};
 use uuid::Uuid;
 
 const SHOP: &str = "one.myshopify.com";

@@ -16,12 +16,9 @@ pub fn encode_uri_component(value: &str) -> String {
 
 /// `kind` is `"loader"` or `"action"`.
 pub fn build_admin_function_rpc_url(kind: &str, name: &str, pathname: &str) -> String {
-    let trimmed = pathname.strip_suffix('/').unwrap_or(pathname);
-    let normalized = if trimmed.is_empty() { "/" } else { trimmed };
-    format!(
-        "/api/pages/custom{normalized}/_rpc/{kind}/{}",
-        encode_uri_component(name)
-    )
+    // The home of the admin, `/`, has no segment of its own.
+    let page = pathname.strip_suffix('/').unwrap_or(pathname);
+    format!("/api/pages/custom{page}/_rpc/{kind}/{}", encode_uri_component(name))
 }
 
 #[cfg(test)]
@@ -37,6 +34,14 @@ mod tests {
         assert_eq!(
             build_admin_function_rpc_url("action", "save review", "/reviews/42/"),
             "/api/pages/custom/reviews/42/_rpc/action/save%20review"
+        );
+    }
+
+    #[test]
+    fn builds_the_rpc_url_of_the_home_page() {
+        assert_eq!(
+            build_admin_function_rpc_url("loader", "summary", "/"),
+            "/api/pages/custom/_rpc/loader/summary"
         );
     }
 

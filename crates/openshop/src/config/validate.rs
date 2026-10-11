@@ -15,8 +15,13 @@ use crate::runtime::time::millis;
 use crate::server::file_routes::resolve_route_paths;
 use crate::server::mcp::core::create_core_mcp_capabilities;
 use crate::server::mcp::registry::build_mcp_registry;
+use crate::server::UiSource;
+use crate::server::api::pages::resolved_admin_pages;
 use crate::server::routes::assert_route_definition;
-use crate::types::{Field, FieldType, FunctionType, RetryPolicy, ShopifyAppConfig, ShopifyConfig, WorkerConfig};
+use crate::types::{
+    AdminPageMode, Field, FieldType, FunctionType, RetryPolicy, ShopifyAppConfig, ShopifyConfig, WorkerConfig,
+};
+use openshop_shared::{ADMIN_HOME_PATH, ADMIN_PAGE_IDS};
 
 macro_rules! fail {
     ($($arg:tt)*) => {
@@ -206,6 +211,10 @@ pub fn validate_openshop_config(config: &OpenShopConfig) -> Result<()> {
                 page.path
             );
         }
+        // The home is what the name of the app opens in the Shopify sidebar.
+        if page.path.split('/').all(str::is_empty) {
+            fail!("adminPages./.nav: the page at `/` is the home of the admin and has no menu entry");
+        }
     }
     for (index, item) in config.resolved_admin_menu().iter().enumerate() {
         if item.label.trim().is_empty() {
@@ -218,6 +227,19 @@ pub fn validate_openshop_config(config: &OpenShopConfig) -> Result<()> {
     let admin_pages = config.resolved_admin_pages()?;
     if config.custom_pages_enabled() {
         validate_admin_menu(&config.resolved_admin_menu(), &admin_pages)?;
+    }
+
+    // The built-in Home is a summary of the built-in pages. Without any of
+    // them, the admin opens on a page of the application.
+    let builtin_pages = resolved_admin_pages(config);
+    let closed = ADMIN_PAGE_IDS
+        .into_iter()
+        .all(|id| builtin_pages.get(id) == AdminPageMode::Disabled);
+    let serves_no_ui = config.admin_ui == Some(UiSource::None);
+    if closed && !serves_no_ui && !admin_pages.iter().any(|page| page.route_pattern == ADMIN_HOME_PATH) {
+        fail!(
+            "builtinPages disables every built-in page of the admin: declare its home, a page at `/` (`#[admin_page(\"/\")]`)"
+        );
     }
 
     for (path, route) in resolve_route_paths("server", config.routes.keys().map(String::as_str))? {

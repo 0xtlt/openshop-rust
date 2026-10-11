@@ -10,6 +10,9 @@
    processes schema-generation privileges.
 5. Restrict logs, backups, and admin access because they may contain merchant
    and operational data.
+6. If you serve the [operator dashboard](operator-dashboard.md), give it a
+   long random password, kept with your other secrets. Production refuses
+   one shorter than 16 characters.
 
 Generate an encryption key once:
 
@@ -58,6 +61,9 @@ display fingerprint. See [MCP](mcp.md#tokens).
   route function declared without `auth` is public. Each method of a path
   declares its own.
 - `/mcp` accepts only OpenShop-issued MCP tokens and applies explicit grants.
+- `/ops/*` accepts only the session cookie of the operator dashboard, signed
+  by the server after the password of the application. It reads every shop
+  and writes nothing.
 
 Signatures and token hashes are compared in constant time. An app proxy
 signature must be exactly the hexadecimal digest; a valid signature followed by
@@ -72,6 +78,12 @@ of a model returned by `Review::of(&ctx)` or `Review::for_shop(&db, shop)` are
 limited to that shop in every operation. Everything else must apply its own
 tenant filter: a query written with `sqlx`, `Review::all_shops(&db)`, and the
 app handle when several apps share a table.
+
+The rows of the framework follow the same rule: `FlowRun::of(&ctx)` gives the
+runs of the shop and the app of a context, and `FlowRun::all_shops(&db)`
+those of every shop. Use the second behind an authentication of your own,
+never in what a merchant can call. See
+[Read the framework tables](database.md#read-the-framework-tables).
 
 ## MCP permissions
 
@@ -97,9 +109,20 @@ Request bodies are limited to 2 MB by default (`413` above that); change the
 limit with the `max_request_body_bytes` setting of `app!`. The MCP endpoint
 has its own limit of 1,000,000 bytes.
 
+## Operator dashboard exposure
+
+`/ops` is off unless the application sets `ops_password`. One password
+opens it for everyone who has it: nothing records who signed in. Its pages
+only read, are sent with `Cache-Control: no-store` and a
+`Content-Security-Policy` that allows no script and no framing, and write
+what comes from a shop as text. Wrong passwords are answered one at a time,
+after a growing delay. See [Operator dashboard](operator-dashboard.md).
+
 ## Embedded admin exposure
 
-The production UI shell requires a valid installed shop launch. It is sent with
+The production UI shell requires a valid installed shop launch. Any other
+visitor receives a page that says the app opens from Shopify admin, without
+anything of the application. The shell is sent with
 `Content-Security-Policy: frame-ancestors https://<shop> https://admin.shopify.com;`
 and `Cache-Control: no-store`. Every response carries
 `X-Robots-Tag: noindex, nofollow, noarchive, nosnippet`, and `/robots.txt`

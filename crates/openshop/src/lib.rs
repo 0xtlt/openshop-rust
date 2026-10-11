@@ -126,7 +126,7 @@ not_wasm! {
 not_wasm! {
     pub use admin::{AdminActor, AdminContext, AdminPublicError};
     pub use app::{OpenShop, OpenShopConfig};
-    pub use db::Model;
+    pub use db::{FlowRun, Installation, LogRow, Model, Record, StepResult};
     pub use declare::{App, InvalidInput};
     pub use engine::{
         DispatchOptions, FlowCanceledError, FlowConcurrencyError, FlowTimeoutError, QueuedRun, RunOutcome,
@@ -423,7 +423,7 @@ pub use openshop_macros::graphql;
 /// Every other entry is a setting, written `name: value` and passed to the
 /// method of that name of [`OpenShopBuilder`](builder::OpenShopBuilder): `crons`, `on_error`, `mcp`,
 /// `shopify`, `worker`, `retry_policy`, `builtin_pages`, `admin_menu`, `admin_ui`,
-/// `max_request_body_bytes`… A value can fail with `?`, such as one read from
+/// `max_request_body_bytes`, `ops_password`… A value can fail with `?`, such as one read from
 /// the environment (`shopify: shopify_apps()?`): the error is the one
 /// `APP.config()` and `APP.main()` return.
 ///

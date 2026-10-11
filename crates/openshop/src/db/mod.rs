@@ -14,7 +14,8 @@ use sqlx::postgres::PgPoolOptions;
 use sqlx::{Connection, PgPool};
 
 pub use model::{ColumnDef, ForeignKeyDef, IndexDef, Table};
-pub use record::{Bindable, Column, ColumnType, Condition, Model, Order, Query, Rows, SqlBuilder};
+pub use record::{Bindable, Column, ColumnType, Condition, Model, Order, Query, Record, Rows, SqlBuilder};
+pub use schema::{FlowRun, Installation, LogRow, StepResult};
 
 const DEFAULT_MAX: u32 = 10;
 

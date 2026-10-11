@@ -29,6 +29,9 @@ cargo run --release -- start      # web process: API, admin UI, scheduler
 cargo run --release -- worker     # one or more workers
 ```
 
+Set `OPS_PASSWORD` to serve the operator dashboard at `/ops`: the runs and
+the installations of every shop, read-only, outside Shopify admin.
+
 Set `OPENSHOP_ENV=production` and `ENCRYPTION_KEY` in production. Schema
 changes live in `./migrations`: run `cargo run -- migrate generate` after
 upgrading OpenShop, or `cargo run -- migrate generate --name=<name>` to add

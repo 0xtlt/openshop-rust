@@ -14,8 +14,11 @@ forward one surface's credential to another.
 | `/ext/*` | Customer Account session JWT | JWT signature and audience | shop, app, customer |
 | `/routes/*` | Route-defined | Authentication function named by `auth = …` in `#[route]`, or intentionally public without it | Route-defined; optional `for_shop()` context |
 | `/mcp` | OpenShop token in `Authorization: Bearer …` | Stored token hash, status, expiry, shop, and permissions | token, shop, app, grants |
+| `/ops/*` | Session cookie obtained with the password of the application | Signature and expiry of the cookie | The operator; no shop |
 
-`/health` and `/robots.txt` are public.
+`/health` and `/robots.txt` are public. `/ops` exists only when the
+application sets `ops_password`; see
+[Operator dashboard](operator-dashboard.md#session) for its session.
 
 ## Embedded admin API
 
@@ -91,12 +94,20 @@ the installation as uninstalled and deletes its access token. See
 In production (`start`), the page that hosts the admin UI is only served to a
 launch from Shopify admin: the request must carry a `shop` parameter and a
 query `hmac` that matches exactly one configured app. Otherwise the server
-answers `401` with a short HTML page. A valid launch for a shop without an
+answers `401` with a page that says the app opens from Shopify admin, and
+shows nothing of the application. A valid launch for a shop without an
 active installation is redirected to `/auth`.
 
 In development (`dev`), the signature is not checked. A request is still
-refused with `403` unless it comes from a local host, is loaded in an iframe,
-has a Shopify admin or shop referrer, or carries a `shop` parameter.
+refused with `403`, and the same page, unless it comes from a local host, is
+loaded in an iframe, has a Shopify admin or shop referrer, or carries a `shop`
+parameter. A local visitor without a Shopify session receives the admin UI,
+which shows that page too: the Admin API answers nothing without a session
+token.
+
+The page is written with Shopify's Polaris web components, loaded from
+Shopify's CDN, and sent with `Cache-Control: no-store` and a
+`Content-Security-Policy` that allows Polaris and nothing else.
 
 ## Webhook and proxy bodies
 

@@ -247,8 +247,22 @@ fn ambiguous_and_reserved_page_routes_are_rejected_when_the_config_is_built() {
     let error = error_of(OpenShopConfig::builder().admin_page(AdminPage::new("/flows/custom")));
     assert!(error.contains("is reserved or invalid"), "{error}");
 
-    let error = error_of(OpenShopConfig::builder().admin_page(AdminPage::new("/")));
-    assert!(error.contains("cannot replace the built-in Home page"), "{error}");
+    let error = error_of(OpenShopConfig::builder().admin_page(AdminPage::new("/ops")));
+    assert!(error.contains("is reserved or invalid"), "{error}");
+
+    // The home of the admin is a path a page can take, once.
+    assert!(
+        OpenShopConfig::builder()
+            .admin_page(AdminPage::new("/"))
+            .build()
+            .is_ok()
+    );
+    let error = error_of(
+        OpenShopConfig::builder()
+            .admin_page(AdminPage::new("/"))
+            .admin_page(AdminPage::new("/")),
+    );
+    assert!(error.contains("have the same route shape"), "{error}");
 }
 
 #[tokio::test]
@@ -452,6 +466,105 @@ async fn listing_a_page_serves_it_and_its_nav_label_is_its_menu_entry() {
     assert_eq!(
         error,
         "[openshop] Invalid config: adminPages./reviews/:id.nav: a page with a dynamic segment cannot have a menu entry"
+    );
+}
+
+/// The home of the admin, only for [`REVIEWER`], next to an unrestricted page.
+fn home_app() -> OpenShopBuilder {
+    OpenShopConfig::builder()
+        .admin_page(
+            AdminPage::new("/")
+                .access(|ctx| async move { Ok(ctx.actor.id == REVIEWER) })
+                .loader("summary", |ctx, _input| async move { Ok(json!({ "shop": ctx.shop })) }),
+        )
+        .admin_page(AdminPage::new("/tools"))
+}
+
+#[openshop::test(context(home_app().build().unwrap()))]
+async fn a_page_at_the_root_is_the_home_of_the_admin(ctx: &TestContext) {
+    assert_eq!(
+        build_admin_function_rpc_url("loader", "summary", "/"),
+        "/api/pages/custom/_rpc/loader/summary"
+    );
+    // A client that keeps the `/` of the page in the address is served too.
+    for url in [
+        "/api/pages/custom/_rpc/loader/summary",
+        "/api/pages/custom//_rpc/loader/summary",
+    ] {
+        let response = request_as(ctx, REVIEWER, Method::POST, url)
+            .json(&json!({ "input": null }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200, "{url}");
+        assert_eq!(json_body(response).await, json!({ "shop": TEST_SHOP }), "{url}");
+    }
+
+    let listed = request_as(ctx, REVIEWER, Method::GET, "/api/pages/custom")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        json_body(listed).await["pages"],
+        json!([
+            { "id": "", "path": "/", "allowed": true },
+            { "id": "tools", "path": "/tools", "allowed": true },
+        ])
+    );
+    assert_eq!(
+        json_body(access(ctx, REVIEWER, "?path=%2F").await).await,
+        json!({ "allowed": true })
+    );
+
+    // Its access rule is its own: the home is not a parent of the other pages.
+    let refused = rpc(ctx, OTHER_STAFF, "/", "loader", "summary", Value::Null)
+        .send()
+        .await
+        .unwrap();
+    assert_rpc_error(refused, 403, "FORBIDDEN", "Forbidden").await;
+    assert_eq!(
+        json_body(access(ctx, OTHER_STAFF, "?path=%2F").await).await,
+        json!({ "allowed": false })
+    );
+    assert_eq!(
+        json_body(access(ctx, OTHER_STAFF, "?path=%2Ftools").await).await,
+        json!({ "allowed": true })
+    );
+}
+
+#[openshop::test(context(reviews_app().build().unwrap()))]
+async fn an_application_without_a_home_page_has_no_function_at_the_root(ctx: &TestContext) {
+    let response = rpc(ctx, REVIEWER, "/", "loader", "summary", Value::Null)
+        .send()
+        .await
+        .unwrap();
+    assert_rpc_error(response, 404, "NOT_FOUND", "Not found").await;
+    assert_eq!(access(ctx, REVIEWER, "?path=%2F").await.status(), 404);
+}
+
+#[test]
+fn the_home_of_the_admin_has_no_menu_entry() {
+    let error = OpenShopConfig::builder()
+        .admin_page(AdminPage::new("/").nav("Home"))
+        .build()
+        .err()
+        .unwrap()
+        .to_string();
+    assert_eq!(
+        error,
+        "[openshop] Invalid config: adminPages./.nav: the page at `/` is the home of the admin and has no menu entry"
+    );
+
+    let error = OpenShopConfig::builder()
+        .admin_page(AdminPage::new("/"))
+        .admin_menu([AdminMenuItem::new("Home", "/")])
+        .build()
+        .err()
+        .unwrap()
+        .to_string();
+    assert_eq!(
+        error,
+        "[openshop] Invalid config: adminMenu[0].path must be a static custom page path"
     );
 }
 

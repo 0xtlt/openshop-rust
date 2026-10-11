@@ -1,8 +1,8 @@
 //! Serves the embedded admin UI: static assets and the single-page shell.
 //!
 //! The shell is only delivered to a shop that opens the app from Shopify admin
-//! (signed query) and has it installed; everyone else is sent to OAuth or
-//! gets a 401.
+//! (signed query) and has it installed; everyone else is sent to OAuth, or
+//! gets a page that says where the app opens from, with a 401.
 
 use std::borrow::Cow;
 use std::path::{Component, Path, PathBuf};
@@ -17,6 +17,7 @@ use regex::Regex;
 use super::auth::redirect;
 use super::connectors::is_installed_shop;
 use super::http::{header, not_found, parse_query};
+use super::polaris;
 use super::shop_domain::normalize_shop_domain;
 use super::shopify_apps::DEFAULT_SHOPIFY_APP_HANDLE;
 use super::{ROBOTS_HEADER, ServerOptions};
@@ -106,7 +107,16 @@ impl UiSource {
     }
 }
 
-const RESERVED_PREFIXES: [&str; 7] = ["/api", "/auth", "/webhooks", "/proxy", "/ext", "/routes", "/health"];
+const RESERVED_PREFIXES: [&str; 8] = [
+    "/api",
+    "/auth",
+    "/webhooks",
+    "/proxy",
+    "/ext",
+    "/routes",
+    "/health",
+    "/ops",
+];
 
 /// Whether a path is a page of the single-page app rather than a file or an API.
 pub fn is_ui_shell_path(pathname: &str) -> bool {
@@ -174,16 +184,40 @@ fn decode_asset_path(path: &str) -> Option<String> {
     String::from_utf8(decoded).ok()
 }
 
-fn unauthorized_ui() -> Response {
+/// Polaris, no form, and nothing else. The page can be framed: a shop whose
+/// launch is refused reads it inside Shopify admin.
+const WELCOME_POLICY: &str = polaris::content_security_policy!("form-action 'none'; base-uri 'none'");
+
+/// What a visitor is told when the admin is not opened for a shop: where the
+/// app opens from. It shows nothing of the application.
+fn open_from_shopify_admin(status: StatusCode) -> Response {
+    let html = format!(
+        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">\
+         <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\
+         <meta name=\"robots\" content=\"noindex,nofollow\">\
+         <title>Open this app from Shopify admin</title><style>{}</style><script src=\"{}\"></script>\
+         </head><body><s-page inlineSize=\"small\"><s-section><s-stack gap=\"base\">\
+         <s-heading>Open this app from Shopify admin</s-heading>\
+         <s-paragraph>This app works inside Shopify admin. Open it from the Apps section of your store.</s-paragraph>\
+         </s-stack></s-section></s-page></body></html>",
+        polaris::FALLBACK_STYLE,
+        polaris::SCRIPT,
+    );
     (
-        StatusCode::UNAUTHORIZED,
+        status,
         [
             (CONTENT_TYPE.as_str(), "text/html; charset=utf-8"),
+            (CACHE_CONTROL.as_str(), "no-store"),
+            (CONTENT_SECURITY_POLICY.as_str(), WELCOME_POLICY),
             ("x-robots-tag", ROBOTS_HEADER),
         ],
-        "<!doctype html><html><body><main><h1>Open this app from Shopify admin</h1></main></body></html>",
+        html,
     )
         .into_response()
+}
+
+fn unauthorized_ui() -> Response {
+    open_from_shopify_admin(StatusCode::UNAUTHORIZED)
 }
 
 fn shell_response(html: String, frame_ancestors: &str) -> Response {
@@ -252,12 +286,7 @@ pub(crate) async fn serve_ui(State(app): State<OpenShop>, options: ServerOptions
             || referer.contains("admin.shopify.com")
             || query.contains_key("shop");
         if !allowed {
-            return (
-                StatusCode::FORBIDDEN,
-                [(CONTENT_TYPE, "text/plain")],
-                "Access denied. This app must be accessed through the Shopify admin.",
-            )
-                .into_response();
+            return open_from_shopify_admin(StatusCode::FORBIDDEN);
         }
         let shopify_app = app
             .apps()

@@ -2,7 +2,7 @@ use crate::{
     admin_pages::{AdminPageGate, AdminPagesContext, use_admin_pages},
     custom_admin_pages::{
         CustomAdminPage, CustomAdminPageGate, CustomAdminPageOutlet, CustomAdminPages, CustomAdminPagesContext,
-        CustomPageView, use_custom_admin_pages,
+        CustomPageView, use_custom_admin_pages, use_custom_home,
     },
     dom::{self, every, hold_until_cleanup, listen},
     fetch::api_json,
@@ -245,18 +245,25 @@ fn AuthGate(children: ChildrenFn) -> impl IntoView {
 
     move || match status.get() {
         AuthStatus::Ready => children().into_any(),
+        // The page the server gives a visitor without a shop, for one without a session.
         status => view! {
-            <main style="max-width:560px;margin:80px auto;padding:0 24px;font-family:system-ui, sans-serif">
-                {if status == AuthStatus::Checking {
-                    view! { <p>"Loading..."</p> }.into_any()
-                } else {
-                    view! {
-                        <h1>"Open this app from Shopify admin"</h1>
-                        <p>"This interface is only available inside an authenticated Shopify admin session."</p>
-                    }
-                        .into_any()
-                }}
-            </main>
+            <s-page inlineSize="small">
+                <s-section>
+                    {if status == AuthStatus::Checking {
+                        view! { <s-paragraph>"Loading..."</s-paragraph> }.into_any()
+                    } else {
+                        view! {
+                            <s-stack gap="base">
+                                <s-heading>"Open this app from Shopify admin"</s-heading>
+                                <s-paragraph>
+                                    "This app works inside Shopify admin. Open it from the Apps section of your store."
+                                </s-paragraph>
+                            </s-stack>
+                        }
+                            .into_any()
+                    }}
+                </s-section>
+            </s-page>
         }
         .into_any(),
     }
@@ -327,6 +334,19 @@ fn ShopifyNavigateBridge() -> impl IntoView {
     }));
 }
 
+/// `/`: the page the application declares there, else the built-in dashboard.
+#[component]
+fn HomeRoute() -> impl IntoView {
+    let custom = use_custom_home();
+    move || {
+        if custom.get() {
+            view! { <CustomAdminPageOutlet /> }.into_any()
+        } else {
+            view! { <Home /> }.into_any()
+        }
+    }
+}
+
 #[component]
 fn Root(custom_pages: CustomAdminPages) -> impl IntoView {
     provide_context(custom_pages);
@@ -338,7 +358,7 @@ fn Root(custom_pages: CustomAdminPages) -> impl IntoView {
                 <AdminPageGate>
                     <CustomAdminPageGate>
                         <FlatRoutes fallback=|| view! { <CustomAdminPageOutlet /> }>
-                            <Route path=path!("/") view=Home />
+                            <Route path=path!("/") view=HomeRoute />
                             <Route path=path!("/flows/:name?") view=Flows />
                             <Route path=path!("/runs/:id") view=FlowRun />
                             <Route path=path!("/crons") view=Crons />

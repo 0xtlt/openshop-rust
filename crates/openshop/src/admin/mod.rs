@@ -17,7 +17,9 @@ use crate::app::OpenShop;
 use crate::server::connectors::Connectors;
 use crate::shopify::client::ShopifyClient;
 use crate::types::{AdminMenuItem, InputSchema, ShopScope};
-use openshop_shared::{custom_admin_route_shape_key, is_safe_custom_admin_path, match_custom_admin_path};
+use openshop_shared::{
+    custom_admin_route_shape_key, is_custom_admin_page_pattern, is_safe_custom_admin_path, match_custom_admin_path,
+};
 
 pub use crate::types::{CustomAdminPageAccess, CustomAdminPagesResponse, ResolvedAdminPages};
 
@@ -313,7 +315,8 @@ impl std::error::Error for AdminPublicError {}
 /// A registered page with its derived identifiers.
 #[derive(Clone)]
 pub struct CustomAdminPage {
-    /// Path segments joined by `/`, with dynamic ones written `[name]`.
+    /// Path segments joined by `/`, with dynamic ones written `[name]`. Empty
+    /// for the page at `/`, the home of the admin.
     pub id: String,
     /// `/` + id.
     pub path: String,
@@ -371,15 +374,13 @@ fn compare_patterns(left: &str, right: &str) -> Ordering {
 }
 
 /// Derives ids and route patterns, sorted by specificity. Fails on reserved
-/// paths and on routes that could match the same URL.
+/// paths and on routes that could match the same URL. A page at `/` is the
+/// home of the admin, in place of the built-in one.
 pub fn resolve_custom_admin_pages(pages: &[AdminPage]) -> Result<Vec<CustomAdminPage>> {
     let mut resolved = Vec::with_capacity(pages.len());
 
     for page in pages {
         let segments: Vec<&str> = page.path.split('/').filter(|segment| !segment.is_empty()).collect();
-        if segments.is_empty() {
-            bail!("[openshop] A custom admin page cannot replace the built-in Home page");
-        }
         let mapped = segments
             .iter()
             .map(|segment| route_segment(segment))
@@ -398,7 +399,7 @@ pub fn resolve_custom_admin_pages(pages: &[AdminPage]) -> Result<Vec<CustomAdmin
                 .collect::<Vec<_>>()
                 .join("/")
         );
-        if !is_safe_custom_admin_path(&route_pattern, true) {
+        if !is_custom_admin_page_pattern(&route_pattern) {
             bail!("[openshop] Custom admin page path \"{path}\" is reserved or invalid");
         }
         resolved.push(CustomAdminPage {
@@ -513,8 +514,26 @@ mod tests {
     }
 
     #[test]
-    fn rejects_home_reserved_and_invalid_paths() {
-        assert!(patterns(&["/"]).unwrap_err().to_string().contains("built-in Home page"));
+    fn a_page_can_be_the_home_of_the_admin() {
+        let pages = resolve_custom_admin_pages(&[AdminPage::new("/reviews"), AdminPage::new("/")]).unwrap();
+        let summary: Vec<(&str, &str, &str)> = pages
+            .iter()
+            .map(|page| (page.id.as_str(), page.path.as_str(), page.route_pattern.as_str()))
+            .collect();
+        assert_eq!(summary, vec![("", "/", "/"), ("reviews", "/reviews", "/reviews")]);
+
+        let error = patterns(&["/", "/"]).unwrap_err().to_string();
+        assert!(error.contains("have the same route shape"), "{error}");
+    }
+
+    #[test]
+    fn rejects_reserved_and_invalid_paths() {
+        assert!(
+            patterns(&["/ops"])
+                .unwrap_err()
+                .to_string()
+                .contains("is reserved or invalid")
+        );
         assert!(
             patterns(&["/flows/custom"])
                 .unwrap_err()

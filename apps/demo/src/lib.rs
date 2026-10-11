@@ -59,4 +59,7 @@ pub static APP: App = app! {
             .all_shops(),
     ],
     on_error: report_failure,
+    // The operator dashboard, under `/ops`, when `OPS_PASSWORD` is set: what
+    // happens in every shop, read from outside Shopify admin.
+    ops_password: std::env::var("OPS_PASSWORD").ok(),
 };

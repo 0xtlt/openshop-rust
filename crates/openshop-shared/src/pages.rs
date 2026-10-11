@@ -81,6 +81,20 @@ pub struct AdminPagesConfig {
 }
 
 impl AdminPagesConfig {
+    /// Every built-in page `disabled`: the merchant reaches the pages of the
+    /// application and nothing else. A page is opened again by naming it:
+    /// `AdminPagesConfig { providers: Some(AdminPageMode::Visible), ..AdminPagesConfig::none() }`.
+    pub const fn none() -> Self {
+        let disabled = Some(AdminPageMode::Disabled);
+        Self {
+            flows: disabled,
+            providers: disabled,
+            crons: disabled,
+            functions: disabled,
+            mcp: disabled,
+        }
+    }
+
     pub fn get(&self, id: AdminPageId) -> Option<AdminPageMode> {
         match id {
             AdminPageId::Flows => self.flows,
@@ -261,6 +275,22 @@ mod tests {
         assert_eq!(resolved.flows, AdminPageMode::Disabled);
         assert_eq!(resolved.providers, AdminPageMode::Hidden);
         assert_eq!(resolved.crons, AdminPageMode::Visible);
+    }
+
+    #[test]
+    fn none_disables_every_page_and_one_can_be_opened_again() {
+        let closed = resolve_admin_pages(Some(&AdminPagesConfig::none()), Some(&resources(2, 2, 2, 2)));
+        for id in ADMIN_PAGE_IDS {
+            assert_eq!(closed.get(id), AdminPageMode::Disabled);
+        }
+
+        let pages = AdminPagesConfig {
+            providers: Some(AdminPageMode::Visible),
+            ..AdminPagesConfig::none()
+        };
+        let resolved = resolve_admin_pages(Some(&pages), Some(&resources(2, 2, 2, 2)));
+        assert_eq!(resolved.providers, AdminPageMode::Visible);
+        assert_eq!(resolved.flows, AdminPageMode::Disabled);
     }
 
     #[test]
