@@ -95,18 +95,35 @@ pub fn parse_schedule(schedule: &str, flow: &str) -> Result<croner::Cron> {
         .map_err(|error| anyhow!("[openshop] Invalid cron schedule \"{schedule}\" for flow \"{flow}\": {error}"))
 }
 
-/// Reports a cron that queued nothing, for every shop or for one: no run
-/// exists to say that it is missing.
-fn report_missed(flow: &str, target: Option<(&str, &str)>, error: &anyhow::Error) {
-    report::detached(
-        |cron| {
-            cron.unit("cron", flow);
-            if let Some((shop, shopify_app)) = target {
-                cron.shop(shop, shopify_app);
-            }
-        },
-        error,
-    );
+/// The shops a firing of a cron queued no run for, and why the first one.
+#[derive(Default)]
+struct Missed {
+    shops: usize,
+    first: Option<(CronTarget, anyhow::Error)>,
+}
+
+impl Missed {
+    fn add(&mut self, target: CronTarget, error: anyhow::Error) {
+        self.shops += 1;
+        self.first.get_or_insert((target, error));
+    }
+
+    /// Reports the firing once, whatever the number of shops: no run exists
+    /// to say that it is missing, and a cron of every shop that fails for all
+    /// of them would otherwise crowd out everything else there is to report.
+    fn report(self, flow: &str) {
+        let Some((target, error)) = self.first else { return };
+        report::detached(
+            |cron| {
+                cron.unit("cron", flow).tag("shops_missed", self.shops);
+                // The shop is the user of an event: only when it is the one concerned.
+                if self.shops == 1 {
+                    cron.shop(&target.shop, &target.shopify_app);
+                }
+            },
+            &error,
+        );
+    }
 }
 
 async fn run_entry(app: &OpenShop, entry: &Cron) {
@@ -118,7 +135,12 @@ async fn run_entry(app: &OpenShop, entry: &Cron) {
                 "[openshop] Cron \"{flow}\" could not resolve its shops: {}",
                 error_message(&error)
             ));
-            report_missed(flow, None, &error);
+            report::detached(
+                |cron| {
+                    cron.unit("cron", flow);
+                },
+                &error,
+            );
             return;
         }
     };
@@ -133,6 +155,7 @@ async fn run_entry(app: &OpenShop, entry: &Cron) {
     ));
 
     let cron_key = entry.key();
+    let mut missed = Missed::default();
     for CronTarget { shopify_app, shop } in targets {
         let outcome: Result<()> = async {
             // Check if cron is disabled for this shop
@@ -166,10 +189,11 @@ async fn run_entry(app: &OpenShop, entry: &Cron) {
             );
             // A flow that refuses a second run while one is active does what it declares.
             if !error.is::<FlowConcurrencyError>() {
-                report_missed(flow, Some((&shop, &shopify_app)), &error);
+                missed.add(CronTarget { shopify_app, shop }, error);
             }
         }
     }
+    missed.report(flow);
 }
 
 /// Running cron jobs. Dropping the scheduler stops them.
