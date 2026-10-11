@@ -191,6 +191,9 @@ larger configurations easier to split:
   show every shop over a period (runs, log lines, flows, shops, crons),
   read-only, behind the password the application gives with `ops_password`.
   It adds no table. `ops` is a reserved first segment for custom admin pages.
+- [Sentry](sentry.md) reporting is part of the framework: with the `sentry`
+  setting, failed runs, failed handlers, and panics are reported with their
+  flow and their shop. It was not ported from the TypeScript version.
 
 ## Database and migrations
 

@@ -278,6 +278,8 @@ pub(crate) fn create_router(app: &OpenShop, options: ServerOptions, log: bool) -
             ),
             layer_fn(compression::CompressLarge),
             DefaultBodyLimit::max(body_limit),
+            #[cfg(feature = "sentry")]
+            layer_fn(crate::runtime::report::IsolateRequests),
         ))
         .with_state(app.clone()))
 }

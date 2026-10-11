@@ -64,6 +64,10 @@ the failures of all shops over a period, and lists the runs, the log lines,
 the flows and the shops behind them. It only reads: retrying a run stays an
 action of the embedded admin.
 
+To be told when something fails instead of looking for it, set `SENTRY_DSN`:
+the application reports its failed runs, its failing handlers, and its panics
+to [Sentry](../reference/sentry.md), each with its flow and its shop.
+
 Operational signals:
 
 | Signal | Likely cause | Action |

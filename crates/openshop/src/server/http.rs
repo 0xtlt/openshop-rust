@@ -7,7 +7,7 @@ use indexmap::IndexMap;
 use serde_json::{Value, json};
 
 use crate::engine::step::error_message;
-use crate::runtime::logger;
+use crate::runtime::{logger, report};
 use crate::types::JsonMap;
 
 pub(crate) fn json_response(status: StatusCode, body: Value) -> Response {
@@ -58,6 +58,7 @@ impl IntoResponse for ApiError {
             "[openshop] Unhandled request error",
             json!({ "error": error_message(&self.0) }),
         );
+        report::error(&self.0);
         (StatusCode::INTERNAL_SERVER_ERROR, "Internal Server Error").into_response()
     }
 }

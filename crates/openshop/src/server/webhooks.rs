@@ -14,7 +14,7 @@ use serde_json::{Value, json};
 use super::http::{header, json_error, json_response};
 use crate::app::OpenShop;
 use crate::engine::step::error_message;
-use crate::runtime::logger;
+use crate::runtime::{logger, report};
 use crate::server::connectors::Connectors;
 use crate::shopify::client::ShopifyClient;
 use crate::types::WebhookContext;
@@ -57,6 +57,8 @@ async fn handle(State(app): State<OpenShop>, headers: HeaderMap, body: Bytes) ->
     let Ok(payload) = serde_json::from_str::<Value>(&body) else {
         return json_error(StatusCode::BAD_REQUEST, "Invalid JSON body");
     };
+    report::unit("webhook", &topic);
+    report::shop(&shop, &shopify_app.handle);
 
     let context = WebhookContext {
         topic: topic.clone(),
@@ -72,7 +74,10 @@ async fn handle(State(app): State<OpenShop>, headers: HeaderMap, body: Bytes) ->
     // Still return 200 on handler errors — don't let Shopify retry them.
     let failure = match AssertUnwindSafe((handler.run)(context)).catch_unwind().await {
         Ok(Ok(())) => None,
-        Ok(Err(error)) => Some(error_message(&error)),
+        Ok(Err(error)) => {
+            report::error(&error);
+            Some(error_message(&error))
+        }
         Err(_) => Some("handler panicked".to_string()),
     };
     if let Some(error) = failure {

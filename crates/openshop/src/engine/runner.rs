@@ -18,8 +18,9 @@ use super::dispatch::unknown_flow;
 use super::errors::{FlowCanceledError, FlowTimeoutError, SleepSignal};
 use super::step::{StepExecutor, error_message};
 use crate::app::OpenShop;
-use crate::runtime::FlowLogger;
+use crate::runtime::report::{self, Panicked};
 use crate::runtime::time::to_iso;
+use crate::runtime::FlowLogger;
 use crate::server::connectors::Connectors;
 use crate::server::shopify_apps::DEFAULT_SHOPIFY_APP_HANDLE;
 use crate::shopify::client::ShopifyClient;
@@ -199,7 +200,29 @@ async fn finish_run(db: &PgPool, run_id: Uuid, worker_id: Option<&str>, update: 
     Ok(result.rows_affected() > 0)
 }
 
+/// Names a run for the failures reported about it.
+pub(crate) fn describe_run(flow_name: &str, shop: &str, shopify_app: &str, run_id: Uuid) {
+    report::unit("flow", flow_name);
+    report::shop(shop, shopify_app);
+    report::tag("run_id", run_id);
+}
+
 pub async fn run_flow(app: &OpenShop, opts: RunFlowOptions) -> Result<RunOutcome> {
+    // A run has a scope of its own: its failures carry its name and its log lines.
+    report::isolated(async {
+        let shopify_app = opts.shopify_app.as_deref().unwrap_or(DEFAULT_SHOPIFY_APP_HANDLE);
+        describe_run(&opts.flow_name, &opts.shop, shopify_app, opts.run_id);
+        let outcome = run_attempt(app, opts).await;
+        // The attempt could not be made, or its outcome could not be recorded.
+        if let Err(error) = &outcome {
+            report::error(error);
+        }
+        outcome
+    })
+    .await
+}
+
+async fn run_attempt(app: &OpenShop, opts: RunFlowOptions) -> Result<RunOutcome> {
     let db = app.db();
     let config = app.config();
     let flow_name = opts.flow_name.as_str();
@@ -243,6 +266,7 @@ pub async fn run_flow(app: &OpenShop, opts: RunFlowOptions) -> Result<RunOutcome
         Some(attempt) => attempt,
         None => resolve_run_attempt(db, run_id).await?,
     };
+    report::tag("attempt", attempt);
     let worker_id = opts.worker_id.as_deref();
     let step = StepExecutor::new(
         db.clone(),
@@ -299,7 +323,7 @@ pub async fn run_flow(app: &OpenShop, opts: RunFlowOptions) -> Result<RunOutcome
             },
             None => run.await,
         };
-        outcome.unwrap_or_else(|panic| Err(anyhow!("Flow panicked: {}", panic_message(panic))))
+        outcome.unwrap_or_else(|panic| Err(anyhow!(Panicked(format!("Flow panicked: {}", panic_message(panic))))))
     };
 
     let outcome = execution.await;
@@ -389,6 +413,14 @@ async fn record_failure(
         return Ok(RunOutcome::LeaseLost);
     }
 
+    // Reported before the line that says so is logged: the trail of the event
+    // is what led to the failure.
+    report::tag("will_retry", will_retry);
+    if will_retry {
+        report::warning(&error);
+    } else {
+        report::error(&error);
+    }
     logger.error_with(
         format!("Flow \"{flow_name}\" failed: {error_message}"),
         json!({ "flowName": flow_name, "error": error_message, "willRetry": will_retry }),

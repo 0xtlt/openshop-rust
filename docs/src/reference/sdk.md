@@ -78,6 +78,7 @@ this documentation import the prelude, then name what it lacks, such as
 | --- | --- | --- |
 | `embedded-ui` | Yes | Embeds the prebuilt admin UI bundle in the binary. Without it, `UiSource::Embedded` serves nothing. |
 | `schema` | Yes | Enables `#[input]` and typed inputs, which derive validation from `schemars`: the input argument of a `#[flow]`, of an `#[mcp_tool]`, and of the loaders and actions of an `#[admin_page]`; underneath, `Flow::input::<T>()`, `InputSchema::of::<T>()`, `AdminFunction::typed_loader` and `AdminFunction::typed_action`. |
+| `sentry` | Yes | Compiles the [Sentry](sentry.md) integration: the `sentry` setting of `app!`, `SentryConfig`, and the SDK re-exported as `openshop::sentry`. Without it the Sentry SDK is not a dependency. |
 | `testing` | No | Compiles `openshop::testing` and `#[openshop::test]`. Enable it under `[dev-dependencies]`. |
 
 ## Re-exports
@@ -97,6 +98,7 @@ app does not need to depend on them directly:
 | `chrono` | `chrono` |
 | `serde` | `serde` |
 | `JsonSchema`, `schemars` | `schemars` (feature `schema`) |
+| `sentry` | The Sentry SDK (feature `sentry`); see [Report from your own code](sentry.md#report-from-your-own-code) |
 
 [`#[input]`](flows.md#input) derives `Deserialize`, `Serialize` and
 `JsonSchema` through these re-exports, and `APP.main()` starts the runtime: an

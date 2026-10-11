@@ -15,10 +15,10 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use super::runner::{HEARTBEAT_INTERVAL, HeartbeatFn, RunFlowOptions, panic_message, run_flow};
+use super::runner::{HEARTBEAT_INTERVAL, HeartbeatFn, RunFlowOptions, describe_run, panic_message, run_flow};
 use super::step::error_message;
 use crate::app::OpenShop;
-use crate::runtime::logger;
+use crate::runtime::{logger, report};
 use crate::runtime::time::millis;
 use crate::types::{JsonMap, ResolvedWorkerConfig, WorkerConfig};
 
@@ -49,15 +49,36 @@ fn merge(mut config: ResolvedWorkerConfig, partial: &WorkerConfig) -> ResolvedWo
     config
 }
 
-/// Fails the unfinished runs that outlived their deadline. The `WHERE` clause
-/// repeats the predicate of `flow_runs_deadline_idx`.
+/// Fails the unfinished runs that outlived their deadline, and returns them.
+/// The `WHERE` clause repeats the predicate of `flow_runs_deadline_idx`.
 const EXPIRE_SQL: &str = "\
     UPDATE flow_runs SET \
       status = 'failed', \
       error = 'Flow timed out — exceeded maximum allowed duration', \
       worker_id = NULL, available_at = NULL, completed_at = $1 \
     WHERE status IN ('pending', 'sleeping', 'running') \
-      AND deadline_at IS NOT NULL AND deadline_at <= $1";
+      AND deadline_at IS NOT NULL AND deadline_at <= $1 \
+    RETURNING id, flow_name, app_handle, shop, error";
+
+/// A run failed without an attempt.
+#[derive(Debug, Clone, sqlx::FromRow)]
+struct FailedRun {
+    id: Uuid,
+    flow_name: String,
+    app_handle: String,
+    shop: String,
+    error: String,
+}
+
+/// Reports a run that failed without an attempt: the runner, which reports
+/// the others, never saw it.
+async fn report_failed_run(run: &FailedRun) {
+    report::isolated(async {
+        describe_run(&run.flow_name, &run.shop, &run.app_handle, run.id);
+        report::error(&anyhow::anyhow!("{}", run.error));
+    })
+    .await;
+}
 
 /// Leases up to `$4` runs in one statement and returns them oldest first.
 ///
@@ -226,11 +247,19 @@ impl Inner {
     /// not the worker has a free slot. Claiming skips them in the meantime.
     async fn expire_loop(&self, stop: &CancellationToken) {
         while self.running.load(Ordering::SeqCst) {
-            let expired = sqlx::query(EXPIRE_SQL).bind(Utc::now()).execute(self.app.db()).await;
-            if let Err(error) = expired {
-                logger::warn(format!(
+            let expired = sqlx::query_as::<_, FailedRun>(EXPIRE_SQL)
+                .bind(Utc::now())
+                .fetch_all(self.app.db())
+                .await;
+            match expired {
+                Ok(runs) => {
+                    for run in &runs {
+                        report_failed_run(run).await;
+                    }
+                }
+                Err(error) => logger::warn(format!(
                     "[openshop] Worker failed to expire runs past their deadline: {error:#}"
-                ));
+                )),
             }
             self.sleep(self.config.poll_interval_ms, stop).await;
         }
@@ -276,8 +305,15 @@ impl Inner {
 
     async fn execute(self: &Arc<Self>, claimed: ClaimedRun) {
         if !self.app.config().flows.contains_key(&claimed.flow_name) {
-            self.fail_run(claimed.id, format!("Flow \"{}\" not registered", claimed.flow_name))
-                .await;
+            let run = FailedRun {
+                id: claimed.id,
+                error: format!("Flow \"{}\" not registered", claimed.flow_name),
+                flow_name: claimed.flow_name,
+                app_handle: claimed.app_handle,
+                shop: claimed.shop,
+            };
+            self.fail_run(run.id, run.error.clone()).await;
+            report_failed_run(&run).await;
             return;
         }
 

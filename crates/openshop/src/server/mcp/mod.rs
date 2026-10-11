@@ -408,6 +408,7 @@ pub(crate) async fn handle(State(app): State<OpenShop>, request: Request) -> Res
                 "[openshop] MCP authentication failed",
                 json!({ "error": error_message(&error) }),
             );
+            crate::runtime::report::error(&error);
             return plain_error(500, "Internal Server Error");
         }
     };

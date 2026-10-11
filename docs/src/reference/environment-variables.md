@@ -49,6 +49,12 @@ Notes:
   [operator dashboard](operator-dashboard.md) its password
   (`ops_password: std::env::var("OPS_PASSWORD").ok()`). `.env` is loaded
   before the settings of `app!` are evaluated.
+- `SENTRY_DSN` is not in this table either, for the same reason: the
+  template reads it to turn [Sentry](sentry.md) on
+  (`sentry: std::env::var("SENTRY_DSN").ok()`). OpenShop does not read
+  `SENTRY_ENVIRONMENT` or `SENTRY_RELEASE`.
+- `RUST_BACKTRACE=1` makes errors carry a backtrace, which the events sent to
+  Sentry then include. Capturing one costs time each time an error is created.
 
 ## Minimal single-app `.env`
 

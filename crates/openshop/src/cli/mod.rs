@@ -20,6 +20,7 @@ use anyhow::Result;
 
 use crate::app::OpenShopConfig;
 use crate::runtime::env::DEFAULT_DATABASE_URL;
+use crate::runtime::report;
 
 pub const USAGE: &str = "
   openshop - Shopify integration framework
@@ -141,11 +142,24 @@ pub async fn run_with_args(config: impl ConfigSource, args: &[String]) -> Result
     init_logging();
 
     match command {
-        Some("dev") => dev::start_dev(config.load()?).await,
-        Some("start") => start::start_prod(config.load()?).await,
-        Some("worker") => {
-            let concurrency = parse_concurrency(args)?;
-            worker::start_worker(config.load()?, concurrency).await
+        Some(process @ ("dev" | "start" | "worker")) => {
+            let concurrency = match process {
+                "worker" => parse_concurrency(args)?,
+                _ => None,
+            };
+            let config = config.load()?;
+            // Reports to Sentry until the process stops, when the application gives a DSN.
+            let _reporting = report::start(&config, process);
+            let outcome = match process {
+                "dev" => dev::start_dev(config).await,
+                "start" => start::start_prod(config).await,
+                _ => worker::start_worker(config, concurrency).await,
+            };
+            // What stopped the process is reported before it exits.
+            if let Err(error) = &outcome {
+                report::error(error);
+            }
+            outcome
         }
         Some("migrate") => migrate::run_migrate(&config.load()?, &args[1..]).await,
         _ => {

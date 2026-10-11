@@ -19,7 +19,7 @@ use super::http::json_error;
 use crate::app::OpenShop;
 use crate::declare::InvalidInput;
 use crate::engine::step::error_message;
-use crate::runtime::logger;
+use crate::runtime::{logger, report};
 use crate::types::{
     Route, RouteAuth, RouteAuthContext, RouteAuthOutcome, RouteAuthValue, RouteContext, RouteMethod, RouteRequest,
 };
@@ -61,6 +61,7 @@ async fn handle(
         )
             .into_response();
     };
+    report::unit("route", format_args!("{method_name} {route_path}"));
 
     let params: IndexMap<String, String> = params
         .iter()
@@ -88,7 +89,10 @@ async fn handle(
             Ok(Ok(RouteAuthOutcome::Response(response))) => return response,
             outcome => {
                 let error = match outcome {
-                    Ok(Err(error)) => error_message(&error),
+                    Ok(Err(error)) => {
+                        report::error(&error);
+                        error_message(&error)
+                    }
                     _ => "authentication panicked".to_string(),
                 };
                 logger::error_with(
@@ -113,7 +117,10 @@ async fn handle(
         Ok(Err(error)) if error.is::<InvalidInput>() => json_error(StatusCode::UNPROCESSABLE_ENTITY, error.to_string()),
         outcome => {
             let error = match outcome {
-                Ok(Err(error)) => error_message(&error),
+                Ok(Err(error)) => {
+                    report::error(&error);
+                    error_message(&error)
+                }
                 _ => "handler panicked".to_string(),
             };
             logger::error_with(

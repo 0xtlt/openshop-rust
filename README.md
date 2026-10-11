@@ -124,6 +124,8 @@ The binary understands `dev`, `start`, `worker [--concurrency=N]` and
 - **The admin** shows a shop its flows, runs, logs and providers, or only the
   pages you wrote for it. An optional dashboard under `/ops`, behind a
   password, shows the operator every shop.
+- **Sentry** receives the runs that fail, the handlers that fail and the
+  panics, each with its flow and its shop, once the application gives a DSN.
 
 In production, a web process (`start`) accepts requests and queues work; separate
 workers (`worker`) execute it. PostgreSQL stores installations, credentials, runs,

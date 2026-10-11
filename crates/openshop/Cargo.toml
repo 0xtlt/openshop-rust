@@ -14,11 +14,13 @@ authors.workspace = true
 include = ["src/**", "migrations/**", "ui-dist/**", "build.rs", "Cargo.toml"]
 
 [features]
-default = ["embedded-ui", "schema"]
+default = ["embedded-ui", "schema", "sentry"]
 # Embed the prebuilt WebAssembly admin UI (`ui-dist/`) in the binary.
 embedded-ui = ["dep:rust-embed"]
 # Derive flow input validation and JSON Schema from Rust types (`Flow::input::<T>()`).
 schema = ["dep:schemars"]
+# Report failed runs, failed handlers and panics to Sentry: the `sentry` setting of `app!`.
+sentry = ["dep:sentry"]
 # Test harness: isolated databases, fake providers, signed requests.
 testing = []
 # The views of custom admin pages, written next to their loaders and actions
@@ -53,6 +55,7 @@ regex.workspace = true
 reqwest.workspace = true
 rust-embed = { workspace = true, optional = true }
 scrypt.workspace = true
+sentry = { workspace = true, optional = true }
 serde_path_to_error.workspace = true
 serde_urlencoded.workspace = true
 sha2.workspace = true
@@ -72,6 +75,8 @@ openshop = { path = ".", features = ["testing", "ui"] }
 openshop-graphql.workspace = true
 # The views of `tests/admin_views.rs`.
 leptos = "0.8"
+# The transport that keeps events, for `tests/sentry.rs`.
+sentry = { workspace = true, features = ["test"] }
 tokio = { workspace = true, features = ["test-util"] }
 
 [lints.rust]
