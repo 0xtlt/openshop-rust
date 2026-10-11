@@ -266,7 +266,11 @@ pub(crate) fn create_router(app: &OpenShop, options: ServerOptions, log: bool) -
         .with_state(app.clone()))
 }
 
-/// A listening server. Dropping the handle does not stop it; call [`ServerHandle::shutdown`].
+/// A listening server. Keep the handle for as long as the server should run:
+/// dropping it stops accepting connections and lets requests in flight finish.
+/// [`ServerHandle::shutdown`] does the same, then waits for those requests, up
+/// to five seconds, and returns an error if the server failed or the wait
+/// timed out.
 pub struct ServerHandle {
     pub addr: SocketAddr,
     shutdown: tokio::sync::oneshot::Sender<()>,
@@ -274,8 +278,9 @@ pub struct ServerHandle {
 }
 
 impl ServerHandle {
-    /// Stops accepting connections and waits for in-flight requests, up to five
-    /// seconds. Connections still open after that are dropped.
+    /// Stops accepting connections and waits for requests in flight, up to five
+    /// seconds. After that it stops waiting and returns an error: the requests
+    /// still in flight keep running until they finish or the process exits.
     pub async fn shutdown(mut self) -> Result<()> {
         let _ = self.shutdown.send(());
         match tokio::time::timeout(std::time::Duration::from_secs(5), &mut self.task).await {

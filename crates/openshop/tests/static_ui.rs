@@ -2,16 +2,21 @@
 
 mod common;
 
+use std::io::ErrorKind;
 use std::path::PathBuf;
-use std::time::Duration;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
+use axum::Router;
 use common::{TestApp, create_config, noop_flow};
 use openshop::server::ServerOptions;
-use openshop::server::listen;
+use openshop::server::{listen, serve};
 use openshop::testing::{TestContext, TestOptions, sign_query, to_query_string};
 use openshop::{IndexMap, OpenShopConfig, PgPool, ShopifyAppConfig, ShopifyConfig, UiSource, Value, json};
 use reqwest::header::{CACHE_CONTROL, CONTENT_SECURITY_POLICY, CONTENT_TYPE, HOST, HeaderMap, LOCATION, REFERER};
 use reqwest::{Method, RequestBuilder, StatusCode};
+use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::Notify;
 use uuid::Uuid;
 
 const SHOP: &str = "static-test.myshopify.com";
@@ -936,6 +941,70 @@ async fn start_api_server_returns_a_closable_server_handle_that_can_rebind_the_s
     }
     assert!(rebound, "the port is free again after shutdown");
     test.cleanup().await;
+}
+
+#[tokio::test]
+async fn start_api_server_stops_accepting_connections_when_the_handle_is_dropped() {
+    let test = TestApp::new(create_config([noop_flow("test-flow")])).await;
+
+    // Another process may grab the freed port in between, so one refused connection out of three
+    // cycles is enough: a server that kept listening would accept all of them.
+    let mut refused = false;
+    for _ in 0..3 {
+        let server = listen(&test.app, 0, ServerOptions::default()).await.unwrap();
+        let port = server.addr.port();
+        let health = reqwest::get(format!("http://127.0.0.1:{port}/health")).await.unwrap();
+        assert_eq!(health.status(), StatusCode::OK);
+        drop(health);
+
+        drop(server);
+
+        // The server task closes the listener shortly after the drop, not within it.
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !refused && Instant::now() < deadline {
+            match TcpStream::connect(("127.0.0.1", port)).await {
+                Err(error) if error.kind() == ErrorKind::ConnectionRefused => refused = true,
+                _ => tokio::time::sleep(Duration::from_millis(20)).await,
+            }
+        }
+        if refused {
+            break;
+        }
+    }
+    assert!(refused, "the port is closed after the handle is dropped");
+    test.cleanup().await;
+}
+
+#[tokio::test]
+async fn server_shutdown_stops_waiting_after_five_seconds_and_lets_the_request_in_flight_finish() {
+    // Longer than the five seconds `shutdown()` waits.
+    const HANDLER: Duration = Duration::from_millis(5500);
+    let entered = Arc::new(Notify::new());
+    let router = Router::new().route(
+        "/slow",
+        axum::routing::get({
+            let entered = entered.clone();
+            move || async move {
+                entered.notify_one();
+                tokio::time::sleep(HANDLER).await;
+                "done"
+            }
+        }),
+    );
+    let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let server = serve(listener, router).await.unwrap();
+    let slow = tokio::spawn(reqwest::get(format!("http://127.0.0.1:{}/slow", server.addr.port())));
+    tokio::time::timeout(Duration::from_secs(5), entered.notified())
+        .await
+        .expect("the request reached its handler");
+
+    let error = server.shutdown().await.expect_err("the request outlasts the wait");
+    assert_eq!(error.to_string(), "Timed out closing HTTP server after 5000ms");
+
+    // The request is not cut: it answers once its handler returns.
+    let reply = slow.await.unwrap().unwrap();
+    assert_eq!(reply.status(), StatusCode::OK);
+    assert_eq!(reply.text().await.unwrap(), "done");
 }
 
 #[tokio::test]
