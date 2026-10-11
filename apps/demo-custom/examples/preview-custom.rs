@@ -21,7 +21,8 @@ use openshop_demo_preview::Preview;
 /// A week of what an application with several shops leaves behind: fictitious
 /// installations, runs with their steps and their log lines, a provider whose
 /// check fails, a cron a shop turned off. Enough for the operator dashboard to
-/// have something to show.
+/// have something to show. The shop of the preview has saved its warehouse: its
+/// `syncOrders` run reaches the end.
 const HISTORY: &str = r#"
 INSERT INTO installations (shop, access_token, scopes, installed_at, uninstalled_at) VALUES
   ('atelier-nord.myshopify.com', 'preview-token', 'read_products,read_orders', now() - interval '40 days', NULL),
@@ -93,6 +94,9 @@ SELECT id::text, 'info', 'Flow "' || flow_name || '" completed', NULL::json, com
   FROM flow_runs WHERE status = 'completed' AND shop <> 'preview.myshopify.com';
 
 INSERT INTO provider_configs (shop, provider_name, config, last_checked_at, last_check_ok) VALUES
+  ('preview.myshopify.com', 'warehouse',
+   '{"apiUrl":"https://warehouse.example.com/api","apiKey":"wh_preview","batchSize":100}',
+   now() - interval '5 minutes', true),
   ('atelier-nord.myshopify.com', 'warehouse', '{}', now() - interval '3 hours', true),
   ('kiosque-vert.myshopify.com', 'warehouse', '{}', now() - interval '1 hour', false),
   ('maison-lune.myshopify.com', 'warehouse', '{}', NULL, NULL);
@@ -106,7 +110,7 @@ fn main() -> Result<()> {
         config: openshop_demo_custom::APP.config()?,
         port: 3999,
         shopify: common::graphql_fixture,
-        // Two runs to look at, with their steps and their logs.
+        // A completed run and a failed one.
         runs: vec![("syncOrders", json!({ "limit": 5 })), ("countVariants", json!({}))],
         history: HISTORY,
     }
