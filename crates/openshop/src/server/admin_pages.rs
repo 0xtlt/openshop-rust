@@ -255,7 +255,9 @@ async fn execute_rpc(
         .get(&name)
         .filter(|definition| definition.kind == kind)
         .ok_or_else(rpc_not_found)?;
-    report::unit("admin", format_args!("{} {name}", page.route_pattern));
+    report::describe(|request| {
+        request.unit("admin", format_args!("{} {name}", page.route_pattern));
+    });
 
     let idempotency_key = header(headers, "idempotency-key").map(str::to_string);
     let context = create_context(app, session, params, request_id.to_string(), idempotency_key).await?;
@@ -306,14 +308,16 @@ async fn rpc(
     metadata.insert("shopifyApp".into(), Value::from(session.shopify_app.clone()));
     metadata.insert("actorId".into(), Value::from(session.actor.id.clone()));
     // The id the page shows with the error: what its event is found by.
-    report::tag("request_id", &request_id);
+    report::describe(|request| {
+        request.tag("request_id", &request_id);
+    });
 
     // A panicking access rule or function is an internal error, not a dropped connection.
     let execution = execute_rpc(&app, &session, uri.path(), &headers, &body, &request_id, &mut metadata);
     let outcome = AssertUnwindSafe(execution)
         .catch_unwind()
         .await
-        .unwrap_or_else(|_| Err(Panicked("admin function panicked".to_string()).into()));
+        .unwrap_or_else(|_| Err(Panicked::error("admin function panicked")));
     metadata.insert(
         "durationMs".into(),
         Value::from(started_at.elapsed().as_millis() as u64),

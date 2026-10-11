@@ -25,7 +25,8 @@ use super::shopify_apps::ResolvedShopifyApp;
 use crate::app::OpenShop;
 use crate::declare::InvalidInput;
 use crate::engine::step::error_message;
-use crate::runtime::{logger, report};
+use crate::runtime::report::{self, Panicked};
+use crate::runtime::logger;
 use crate::server::connectors::Connectors;
 use crate::shopify::client::ShopifyClient;
 use crate::types::{ProxyAuthKind, ProxyContext, ProxyHandler, ProxyResponseType};
@@ -136,7 +137,6 @@ async fn handle(
     header_map: HeaderMap,
     body: Bytes,
 ) -> Response {
-    report::unit("proxy", format_args!("{} {}", route.method, route.route_path));
     if !app.apps().has_configured_secret() {
         return json_error(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -153,7 +153,11 @@ async fn handle(
         Ok(auth) => auth,
         Err(error) => return json_error(StatusCode::UNAUTHORIZED, error),
     };
-    report::shop(&auth.shop, &auth.shopify_app.handle);
+    report::describe(|request| {
+        request
+            .unit("proxy", format_args!("{} {}", route.method, route.route_path))
+            .shop(&auth.shop, &auth.shopify_app.handle);
+    });
 
     // Parse body for non-GET methods
     let parsed_body = if route.method == "GET" || body.is_empty() {
@@ -189,15 +193,13 @@ async fn handle(
         Ok(Err(error)) if error.is::<InvalidInput>() => {
             return json_error(StatusCode::UNPROCESSABLE_ENTITY, error.to_string());
         }
-        Ok(Err(error)) => {
-            report::error(&error);
-            error_message(&error)
-        }
-        Err(_) => "handler panicked".to_string(),
+        Ok(Err(error)) => error,
+        Err(_) => Panicked::error("handler panicked"),
     };
+    report::error(&failure);
     logger::error_with(
         format!("[openshop] Proxy {} {} error", route.method, route.route_path),
-        json!({ "error": failure }),
+        json!({ "error": error_message(&failure) }),
     );
     json_error(StatusCode::INTERNAL_SERVER_ERROR, "Internal proxy error")
 }

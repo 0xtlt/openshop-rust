@@ -7,6 +7,8 @@
 #[cfg(feature = "sentry")]
 mod client;
 #[cfg(feature = "sentry")]
+mod integration;
+#[cfg(feature = "sentry")]
 mod transport;
 
 use std::fmt;
@@ -18,7 +20,7 @@ use crate::app::OpenShopConfig;
 
 #[cfg(feature = "sentry")]
 use {
-    sentry::integrations::panic::PanicIntegration,
+    axum::extract::MatchedPath,
     sentry::protocol::Breadcrumb,
     sentry::{Hub, Level, SentryFuture, SentryFutureExt, User},
     std::sync::Arc,
@@ -30,6 +32,13 @@ use {
 /// the failure it became.
 #[derive(Debug)]
 pub(crate) struct Panicked(pub(crate) String);
+
+impl Panicked {
+    /// The error a caught panic becomes: `handler panicked`.
+    pub(crate) fn error(what: impl Into<String>) -> anyhow::Error {
+        Self(what.into()).into()
+    }
+}
 
 impl fmt::Display for Panicked {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -71,50 +80,69 @@ pub(crate) async fn isolated<F: Future>(future: F) -> F::Output {
     future.await
 }
 
-/// Names the unit of work that is running: `flow syncOrders`,
-/// `webhook orders/create`, `route GET /ping`. The kind is also a tag.
-pub(crate) fn unit(kind: &str, name: impl fmt::Display) {
+/// What the events of a unit of work say about it.
+pub(crate) struct Description<'a> {
     #[cfg(feature = "sentry")]
-    Hub::with_active(|hub| {
-        hub.configure_scope(|scope| {
-            let name = name.to_string();
-            scope.set_transaction(Some(&format!("{kind} {name}")));
-            scope.set_tag(kind, name);
-        })
-    });
+    scope: &'a mut sentry::Scope,
     #[cfg(not(feature = "sentry"))]
-    let _ = (kind, name);
+    scope: std::marker::PhantomData<&'a ()>,
 }
 
-/// The shop the unit of work runs for. It is the user of its events: an
-/// issue counts the shops it reaches.
-pub(crate) fn shop(shop: &str, shopify_app: &str) {
-    #[cfg(feature = "sentry")]
-    Hub::with_active(|hub| {
-        hub.configure_scope(|scope| {
-            scope.set_tag("shop", shop);
-            scope.set_tag("shopify_app", shopify_app);
-            scope.set_user(Some(User {
+impl Description<'_> {
+    /// The name of the unit of work: `flow syncOrders`,
+    /// `webhook orders/create`, `route GET /ping`. The kind is also a tag.
+    pub(crate) fn unit(&mut self, kind: &str, name: impl fmt::Display) -> &mut Self {
+        #[cfg(feature = "sentry")]
+        {
+            let name = name.to_string();
+            self.scope.set_transaction(Some(&format!("{kind} {name}")));
+            self.scope.set_tag(kind, name);
+        }
+        #[cfg(not(feature = "sentry"))]
+        let _ = (kind, name, &self.scope);
+        self
+    }
+
+    /// The shop the unit of work runs for. It is the user of its events: an
+    /// issue counts the shops it reaches.
+    pub(crate) fn shop(&mut self, shop: &str, shopify_app: &str) -> &mut Self {
+        #[cfg(feature = "sentry")]
+        {
+            self.scope.set_tag("shop", shop);
+            self.scope.set_tag("shopify_app", shopify_app);
+            self.scope.set_user(Some(User {
                 id: Some(shop.to_string()),
                 ..Default::default()
             }));
-        })
-    });
-    #[cfg(not(feature = "sentry"))]
-    let _ = (shop, shopify_app);
+        }
+        #[cfg(not(feature = "sentry"))]
+        let _ = (shop, shopify_app);
+        self
+    }
+
+    pub(crate) fn tag(&mut self, key: &str, value: impl fmt::Display) -> &mut Self {
+        #[cfg(feature = "sentry")]
+        self.scope.set_tag(key, value);
+        #[cfg(not(feature = "sentry"))]
+        let _ = (key, value);
+        self
+    }
 }
 
-pub(crate) fn tag(key: &str, value: impl fmt::Display) {
+/// Describes the unit of work that is running, in one write of its scope.
+pub(crate) fn describe(describe: impl FnOnce(&mut Description<'_>)) {
     #[cfg(feature = "sentry")]
-    Hub::with_active(|hub| hub.configure_scope(|scope| scope.set_tag(key, value)));
+    Hub::with_active(|hub| hub.configure_scope(|scope| describe(&mut Description { scope })));
     #[cfg(not(feature = "sentry"))]
-    let _ = (key, value);
+    describe(&mut Description {
+        scope: std::marker::PhantomData,
+    });
 }
 
 /// Reports a failure the framework answered or recorded.
 pub(crate) fn error(error: &anyhow::Error) {
     #[cfg(feature = "sentry")]
-    capture(error, Level::Error);
+    Hub::with_active(|hub| capture(hub, error, Level::Error));
     #[cfg(not(feature = "sentry"))]
     let _ = error;
 }
@@ -123,21 +151,31 @@ pub(crate) fn error(error: &anyhow::Error) {
 /// made again.
 pub(crate) fn warning(error: &anyhow::Error) {
     #[cfg(feature = "sentry")]
-    capture(error, Level::Warning);
+    Hub::with_active(|hub| capture(hub, error, Level::Warning));
     #[cfg(not(feature = "sentry"))]
     let _ = error;
 }
 
+/// Reports the failure of something that is not running: a run nobody
+/// attempted, a cron that queued nothing. The event has a scope of its own.
+pub(crate) fn detached(describe: impl FnOnce(&mut Description<'_>), error: &anyhow::Error) {
+    #[cfg(feature = "sentry")]
+    if let Some(hub) = unit_hub() {
+        hub.configure_scope(|scope| describe(&mut Description { scope }));
+        capture(&hub, error, Level::Error);
+    }
+    #[cfg(not(feature = "sentry"))]
+    let _ = (describe, error);
+}
+
 #[cfg(feature = "sentry")]
-fn capture(error: &anyhow::Error, level: Level) {
-    Hub::with_active(|hub| {
-        if error.is::<Panicked>() && hub.with_integration(|_: &PanicIntegration| true) {
-            return;
-        }
-        let mut event = sentry::integrations::anyhow::event_from_error(error);
-        event.level = level;
-        hub.capture_event(event);
-    });
+fn capture(hub: &Hub, error: &anyhow::Error, level: Level) {
+    if error.is::<Panicked>() && integration::reports_panics(hub) {
+        return;
+    }
+    let mut event = sentry::integrations::anyhow::event_from_error(error);
+    event.level = level;
+    hub.capture_event(event);
 }
 
 /// Where the log lines of a run are left: the breadcrumbs of the events it
@@ -179,15 +217,12 @@ impl Trail {
     }
 }
 
-/// Gives each request a scope of its own, named after its method and path.
+/// Gives each request a scope of its own, named after its method and the
+/// route it matched, as the route is declared: the path of a request, which
+/// can carry an identifier or a secret, is never sent.
 #[cfg(feature = "sentry")]
 #[derive(Clone)]
 pub(crate) struct IsolateRequests<S>(pub(crate) S);
-
-/// The paths the application defines. One of them can carry a secret, such as
-/// the token of a callback: its handler names the unit by its pattern.
-#[cfg(feature = "sentry")]
-const APPLICATION_PATHS: [&str; 3] = ["/routes", "/proxy", "/ext"];
 
 #[cfg(feature = "sentry")]
 impl<S, B> tower::Service<axum::http::Request<B>> for IsolateRequests<S>
@@ -206,9 +241,8 @@ where
         let Some(hub) = unit_hub() else {
             return futures::future::Either::Left(self.0.call(request));
         };
-        let path = request.uri().path();
-        if !APPLICATION_PATHS.iter().any(|prefix| path.starts_with(prefix)) {
-            let name = format!("{} {path}", request.method());
+        if let Some(route) = request.extensions().get::<MatchedPath>() {
+            let name = format!("{} {}", request.method(), route.as_str());
             hub.configure_scope(|scope| scope.set_transaction(Some(&name)));
         }
         futures::future::Either::Right(self.0.call(request).bind_hub(hub))

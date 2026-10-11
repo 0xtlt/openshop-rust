@@ -53,7 +53,9 @@ pub(crate) async fn shop_middleware(State(app): State<OpenShop>, mut request: Re
         );
     }
 
-    report::shop(&verified.shop, &shopify_app.handle);
+    report::describe(|request| {
+        request.shop(&verified.shop, &shopify_app.handle);
+    });
     // Installation is best-effort: a failed token exchange must not block the request.
     let _ = ensure_installation(&app, &shopify_app, &verified.shop, &session_token).await;
 

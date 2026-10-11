@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use reqwest::StatusCode;
 use reqwest::header::RETRY_AFTER;
@@ -17,6 +17,8 @@ use sentry::{Envelope, Transport, TransportFactory, TransportOptions};
 
 /// Envelopes waiting to be sent, when the settings do not say. One more is dropped.
 const DEFAULT_QUEUE: usize = 30;
+/// How long a flush waits before asking a full queue again.
+const FULL_QUEUE_RETRY: Duration = Duration::from_millis(10);
 
 pub(super) struct HttpTransportFactory;
 
@@ -69,8 +71,23 @@ impl Transport for HttpTransport {
     }
 
     fn flush(&self, timeout: Duration) -> bool {
+        let deadline = Instant::now() + timeout;
         let (done, wait) = sync_channel(1);
-        self.queue.send(Task::Flush(done)).is_ok() && wait.recv_timeout(timeout).is_ok()
+        // A full queue has no room for the request either: it is asked again
+        // until the time is up, so that closing never waits longer than that.
+        let mut request = Task::Flush(done);
+        loop {
+            match self.queue.try_send(request) {
+                Ok(()) => break,
+                Err(TrySendError::Full(refused)) if Instant::now() < deadline => {
+                    request = refused;
+                    std::thread::sleep(FULL_QUEUE_RETRY);
+                }
+                Err(_) => return false,
+            }
+        }
+        wait.recv_timeout(deadline.saturating_duration_since(Instant::now()))
+            .is_ok()
     }
 }
 
@@ -148,5 +165,34 @@ async fn send_all(tasks: Receiver<Task>, options: TransportOptions) {
                 lost.record_lost_data(&envelope, Reason::NetworkError);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::net::TcpListener;
+
+    use sentry::ClientOptions;
+    use sentry::protocol::Event;
+
+    use super::*;
+
+    #[test]
+    fn a_flush_gives_up_when_its_time_is_up_even_with_a_full_queue() {
+        // A server that accepts connections and never answers.
+        let silent = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = silent.local_addr().unwrap().port();
+        let options = ClientOptions::new()
+            .dsn(&format!("http://key@127.0.0.1:{port}/1"))
+            .transport_channel_capacity(1);
+        let transport = HttpTransport::new(TransportOptions::try_from_client_options(&options).unwrap());
+
+        // One envelope is being sent, one waits, the others are dropped.
+        for _ in 0..4 {
+            transport.send_envelope(Event::default().into());
+        }
+        let started = Instant::now();
+        assert!(!transport.flush(Duration::from_millis(200)));
+        assert!(started.elapsed() < Duration::from_secs(2), "{:?}", started.elapsed());
     }
 }

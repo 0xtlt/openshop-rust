@@ -41,11 +41,12 @@ queued, waiting up to two seconds.
 | The last attempt of a flow run fails | `error` | `flow <name>` | The same, with `will_retry` = `false` |
 | A run fails without an attempt: it passed its deadline, or its flow is not registered in the worker that claimed it | `error` | `flow <name>` | `flow`, `shop`, `shopify_app`, `run_id` |
 | An attempt cannot be made, or its outcome cannot be recorded, for example when the database fails | `error` | `flow <name>` | `flow`, `shop`, `shopify_app`, `run_id` |
+| A cron cannot queue the run of a shop, or cannot list the shops it runs for | `error` | `cron <flow>` | `cron`, and `shop`, `shopify_app` when one shop is concerned |
 | A webhook handler returns an error | `error` | `webhook <topic>` | `webhook`, `shop`, `shopify_app` |
 | A proxy handler returns an error | `error` | `proxy <METHOD> <path>` | `proxy`, `shop`, `shopify_app` |
 | The handler of a server route, or its authentication, returns an error | `error` | `route <METHOD> <path>` | `route` |
 | A loader or an action of a custom admin page fails with an error that is not an `AdminPublicError` | `error` | `admin <page> <function>` | `admin`, `shop`, `shopify_app`, `request_id` |
-| The Admin API answers `500 Internal Server Error` | `error` | `<METHOD> <path>` | `shop`, `shopify_app` |
+| The Admin API or the operator dashboard answers `500 Internal Server Error` | `error` | `<METHOD> <route>`, such as `GET /api/runs/{id}` | `shop`, `shopify_app` for the Admin API |
 | The MCP endpoint cannot check a token and answers `500` | `error` | `POST /mcp` | — |
 | A panic, anywhere in the process | `fatal` | The unit of work it happened in | The tags of that unit of work |
 | `dev`, `start`, or `worker` stops with an error | `error` | — | — |
@@ -55,17 +56,21 @@ Every event also carries the tag `process`, the command that reports it
 [settings](#settings).
 
 A flow run is reported once per failed attempt, like the
-[`on_error` hook](errors.md#application-error-hook) is called. The paths of
-proxies, server routes, and admin pages are the ones they are declared with,
-such as `/orders/:id`: the path of the request, which can carry a token, is
-not sent. `request_id` is the `requestId` of the error a custom admin page
-shows: it finds the event of a failure a merchant describes.
+[`on_error` hook](errors.md#application-error-hook) is called. An event is
+named after a route as it is declared, such as `/orders/:id` for a server
+route or `/api/runs/{id}` for the Admin API: the path of a request, which can
+carry an identifier or a token, is never sent. `request_id` is the
+`requestId` of the error a custom admin page shows: it finds the event of a
+failure a merchant describes.
 
-A panic is reported where it happens, with its stack, by the panic hook of the
-Sentry SDK. OpenShop catches the panics of flows and handlers and records them
-as failures; that failure is not reported a second time. The hook waits for
-the event of a panic to be sent, for up to two seconds, before the thread goes
-on: a process that panics and exits still reports why.
+A panic is reported where it happens, with its stack, by a panic hook of the
+framework. OpenShop catches the panics of flows and handlers and records them
+as failures; that failure is not reported a second time. The hook does not
+wait for the event to be sent, so a handler that panics does not hold a
+thread of the server, except in a binary built with `panic = "abort"`, where
+the process stops with the panic. An application that adds the
+`PanicIntegration` of the SDK with `configure` gets the hook of the SDK
+instead, which waits.
 
 ## What is not reported
 
@@ -75,6 +80,8 @@ on: a process that panics and exits still reports why.
 - An error returned by an MCP tool or resource. It is answered to the client
   and kept in the MCP audit log.
 - A provider check that fails in the admin.
+- A cron whose flow refuses a second run while one is active
+  (`concurrency = reject`): the flow does what it declares.
 - The warnings of the [runtime logger](logging.md#runtime-logger), such as a
   worker that cannot reach the database to claim runs.
 - A line logged with `ctx.logger.error(…)`. It is part of the trail of its
@@ -93,8 +100,15 @@ on: a process that panics and exits still reports why.
 - **The process.** The host name, the operating system, and the Rust version,
   which the SDK adds to every event.
 
-The message of an error is sent as it is. Write errors the way you write log
-lines: without an access token, a password, or personal data.
+The message of an error is sent as it is, with one exception. A URL in a
+message, in the message of a cause, or in a log line loses its credentials and
+its query string: `https://api.example.com/orders?api_key=…` is sent as
+`https://api.example.com/orders?[redacted]`, and
+`postgresql://user:password@host/db` as `postgresql://[redacted]@host/db`.
+That is where the error of an HTTP client or of a database carries a secret.
+This also applies to what the application captures itself. For the rest,
+write errors the way you write log lines: without an access token, a
+password, or personal data.
 
 ## Settings
 
@@ -183,12 +197,18 @@ Dropping the guard sends what is queued, then reports nothing more. Start
 Sentry before the server and the workers: a thread that used the SDK before
 it was started stays without a client.
 
+`sentry.client_options(production)` returns the options `init` starts the
+client with, for a process that binds the client itself. A test passes them
+to `openshop::sentry::test::with_captured_events_options`, which keeps the
+events instead of sending them.
+
 ## Transport and Cargo feature
 
 Events are sent with the HTTP client of the framework, from a thread of its
 own: a report is never awaited by what fails. When Sentry answers with a rate
 limit, events are dropped until the delay it gave has passed. When more than
-30 events wait to be sent, the next ones are dropped.
+30 events wait to be sent, the next ones are dropped. A process that stops
+waits for what is queued for two seconds at most, however full the queue is.
 
 The integration is the `sentry` feature of `openshop`, on by default. An
 application that sets `default-features = false` compiles without the Sentry

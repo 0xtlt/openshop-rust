@@ -19,7 +19,8 @@ use super::http::json_error;
 use crate::app::OpenShop;
 use crate::declare::InvalidInput;
 use crate::engine::step::error_message;
-use crate::runtime::{logger, report};
+use crate::runtime::report::{self, Panicked};
+use crate::runtime::logger;
 use crate::types::{
     Route, RouteAuth, RouteAuthContext, RouteAuthOutcome, RouteAuthValue, RouteContext, RouteMethod, RouteRequest,
 };
@@ -61,7 +62,9 @@ async fn handle(
         )
             .into_response();
     };
-    report::unit("route", format_args!("{method_name} {route_path}"));
+    report::describe(|request| {
+        request.unit("route", format_args!("{method_name} {route_path}"));
+    });
 
     let params: IndexMap<String, String> = params
         .iter()
@@ -89,15 +92,13 @@ async fn handle(
             Ok(Ok(RouteAuthOutcome::Response(response))) => return response,
             outcome => {
                 let error = match outcome {
-                    Ok(Err(error)) => {
-                        report::error(&error);
-                        error_message(&error)
-                    }
-                    _ => "authentication panicked".to_string(),
+                    Ok(Err(error)) => error,
+                    _ => Panicked::error("authentication panicked"),
                 };
+                report::error(&error);
                 logger::error_with(
                     format!("[openshop] Server route authentication error for {method_name} {route_path}"),
-                    json!({ "error": error }),
+                    json!({ "error": error_message(&error) }),
                 );
                 return internal_error();
             }
@@ -117,15 +118,13 @@ async fn handle(
         Ok(Err(error)) if error.is::<InvalidInput>() => json_error(StatusCode::UNPROCESSABLE_ENTITY, error.to_string()),
         outcome => {
             let error = match outcome {
-                Ok(Err(error)) => {
-                    report::error(&error);
-                    error_message(&error)
-                }
-                _ => "handler panicked".to_string(),
+                Ok(Err(error)) => error,
+                _ => Panicked::error("handler panicked"),
             };
+            report::error(&error);
             logger::error_with(
                 format!("[openshop] Server route error for {method_name} {route_path}"),
-                json!({ "error": error }),
+                json!({ "error": error_message(&error) }),
             );
             internal_error()
         }

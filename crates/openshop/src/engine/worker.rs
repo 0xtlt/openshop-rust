@@ -72,12 +72,11 @@ struct FailedRun {
 
 /// Reports a run that failed without an attempt: the runner, which reports
 /// the others, never saw it.
-async fn report_failed_run(run: &FailedRun) {
-    report::isolated(async {
-        describe_run(&run.flow_name, &run.shop, &run.app_handle, run.id);
-        report::error(&anyhow::anyhow!("{}", run.error));
-    })
-    .await;
+fn report_failed_run(run: &FailedRun) {
+    report::detached(
+        |failed| describe_run(failed, &run.flow_name, &run.shop, &run.app_handle, run.id),
+        &anyhow::anyhow!("{}", run.error),
+    );
 }
 
 /// Leases up to `$4` runs in one statement and returns them oldest first.
@@ -254,7 +253,7 @@ impl Inner {
             match expired {
                 Ok(runs) => {
                     for run in &runs {
-                        report_failed_run(run).await;
+                        report_failed_run(run);
                     }
                 }
                 Err(error) => logger::warn(format!(
@@ -313,7 +312,7 @@ impl Inner {
                 shop: claimed.shop,
             };
             self.fail_run(run.id, run.error.clone()).await;
-            report_failed_run(&run).await;
+            report_failed_run(&run);
             return;
         }
 

@@ -19,8 +19,9 @@ default = ["embedded-ui", "schema", "sentry"]
 embedded-ui = ["dep:rust-embed"]
 # Derive flow input validation and JSON Schema from Rust types (`Flow::input::<T>()`).
 schema = ["dep:schemars"]
-# Report failed runs, failed handlers and panics to Sentry: the `sentry` setting of `app!`.
-sentry = ["dep:sentry"]
+# Report failed runs, failed handlers and panics to Sentry: the `sentry` setting
+# of `app!`. An event is named after the route its request matched.
+sentry = ["dep:sentry", "axum/matched-path"]
 # Test harness: isolated databases, fake providers, signed requests.
 testing = []
 # The views of custom admin pages, written next to their loaders and actions
