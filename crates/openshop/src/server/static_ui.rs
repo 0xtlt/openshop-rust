@@ -6,7 +6,7 @@
 
 use std::borrow::Cow;
 use std::path::{Component, Path, PathBuf};
-use std::sync::LazyLock;
+use std::sync::{Arc, LazyLock};
 
 use axum::extract::{Request, State};
 use axum::http::header::{CACHE_CONTROL, CONTENT_SECURITY_POLICY, CONTENT_TYPE, REFERER};
@@ -18,6 +18,7 @@ use super::auth::redirect;
 use super::connectors::is_installed_shop;
 use super::http::{header, not_found, parse_query};
 use super::polaris;
+use super::reload::Served;
 use super::shop_domain::normalize_shop_domain;
 use super::shopify_apps::DEFAULT_SHOPIFY_APP_HANDLE;
 use super::{ROBOTS_HEADER, ServerOptions};
@@ -258,7 +259,12 @@ fn asset_response(path: &str, data: Cow<'static, [u8]>) -> Response {
         .into_response()
 }
 
-pub(crate) async fn serve_ui(State(app): State<OpenShop>, options: ServerOptions, request: Request) -> Response {
+pub(crate) async fn serve_ui(
+    State(app): State<OpenShop>,
+    options: ServerOptions,
+    reload: Option<Arc<Served>>,
+    request: Request,
+) -> Response {
     let pathname = request.uri().path().to_string();
 
     if !is_ui_shell_path(&pathname) {
@@ -330,10 +336,11 @@ pub(crate) async fn serve_ui(State(app): State<OpenShop>, options: ServerOptions
     let Some(index) = options.ui.read("index.html") else {
         return not_found();
     };
-    shell_response(
-        inject_api_key(&String::from_utf8_lossy(&index), &api_key),
-        &frame_ancestors,
-    )
+    let mut shell = inject_api_key(&String::from_utf8_lossy(&index), &api_key);
+    if let Some(served) = reload {
+        shell = served.inject(&shell);
+    }
+    shell_response(shell, &frame_ancestors)
 }
 
 #[cfg(test)]

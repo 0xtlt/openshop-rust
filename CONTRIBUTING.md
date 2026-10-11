@@ -48,9 +48,25 @@ mise run demo:ui           # `openshop build-ui` in apps/demo
 
 ## Running the demo
 
+To work on the framework and look at the result in a browser, without a store:
+
+```bash
+mise run dev
+```
+
+It needs the PostgreSQL of the tests: `mise run db:up`, or `DATABASE_URL`.
+It serves the admin UI of the demo on `http://localhost:3999/`, as the staff
+of a fake shop, and the operator dashboard at `/ops` (password `preview`). It
+is the preview described below, as a shop and with the demo's own bundle, run
+by `openshop dev`: the demo is started again when a crate of the workspace
+changes, trunk builds its admin UI bundle again, and the page reloads by
+itself. The pages of `/ops` run no script: reload them by hand.
+
+To run the demo in a development store, with the same loop:
+
 ```bash
 cp .env.example apps/demo/.env     # add SHOPIFY_API_KEY and SHOPIFY_API_SECRET
-cargo run -p openshop-demo -- dev
+mise run demo                      # `openshop dev` in apps/demo
 ```
 
 The admin UI is an embedded Shopify app: it only starts inside the Shopify

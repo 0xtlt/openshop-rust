@@ -572,16 +572,23 @@ async fn serve(config: OpenShopConfig, shutdown: impl Future<Output = ()>) -> Re
 | `openshop::server::router(&app, options)` | Builds the `axum::Router` without listening. |
 | `openshop::server::listen(&app, port, options)` | Binds `0.0.0.0:<port>` (`0` picks a free port) and returns a handle with `addr` and `shutdown()`. Keep the handle for as long as the server should run: dropping it stops accepting connections and lets requests in flight finish. `shutdown()` also waits for those requests, up to five seconds. After that it returns an error, and the requests still in flight keep running until they finish or the process exits. |
 | `ServerOptions::production()` | Embedded UI behind the signed-launch check. |
-| `ServerOptions::development()` | Embedded UI without the signed-launch check, and CORS on `/api`. |
+| `ServerOptions::development()` | Embedded UI without the signed-launch check, and CORS on `/api`. The shell reloads the page when the server is started again or its bundle rebuilt: see [Development process](cli.md#development-process). |
 | `ServerOptions::default()` | API only: no UI is served, and CORS is enabled on `/api`. |
 | `.ui(UiSource)` | `UiSource::Embedded`, `UiSource::Dir(path)`, `UiSource::assets(lookup)`, or `UiSource::None`. See [Serve the bundle](custom-admin-pages.md#serve-the-bundle). |
 | `openshop::server::serve(listener, router)` | Serves a router built with `router` on an existing `tokio::net::TcpListener`. Returns the same handle as `listen`: keep it for as long as the server should run. |
+| `openshop::cli::shutdown_signal()` | Resolves when the process receives `SIGINT` or `SIGTERM`: the `shutdown` of the example above, for a process that stops as `dev` and `start` do. |
 | `Worker::new(app, overrides)` | Worker with `start()`, `stop()`, `is_running()`, `active_count()`, and `worker_id()`. `overrides` is a `WorkerConfig`: what it sets replaces the `worker` setting of the application. |
 | `Scheduler::start(&app)` | Registers every configured cron; `stop()` or dropping the value stops them. |
 
 `listen` and `serve` do not read `OPENSHOP_UI_DIR` or the
 configuration's `admin_ui`; pass the `UiSource` you want. None of these push
 or migrate the database schema.
+
+In development, a page of the admin UI keeps a request to
+`/__openshop/reload` open for as long as it is displayed. Dropping the handle
+or calling `shutdown()` ends those requests. A router you serve with a server
+of your own does not: stop that server without waiting for the requests in
+flight.
 
 ## Public type exports
 

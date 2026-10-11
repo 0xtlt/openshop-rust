@@ -130,7 +130,8 @@ when a path of that list does not match a listed page.
 Restart `openshop dev`. When a page has a view, it builds the admin UI bundle
 of the application from the module of the pages, here `admin`, rebuilds it
 when a page changes, and serves it. Open the app from Shopify admin and select
-**Store**. You should see the current shop domain. A **Page unavailable**
+**Store**. You should see the current shop domain. From then on, the page
+reloads by itself when you change it. A **Page unavailable**
 message means the server knows the page but the bundle being served does not
 contain it: check the `trunk` output in the terminal and the directory being
 served.

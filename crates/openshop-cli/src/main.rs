@@ -4,6 +4,7 @@ mod bundle;
 mod codegen;
 mod dev;
 mod init;
+mod metadata;
 mod restart;
 
 use std::process::ExitCode;

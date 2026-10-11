@@ -9,11 +9,13 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow, bail};
-use openshop::serde_json::{self, Value};
+use openshop::serde_json::Value;
 use proc_macro2::{Spacing, TokenStream, TokenTree};
 use syn::visit::{self, Visit};
 use syn::{ImplItem, Item, ItemImpl, ItemUse, Meta, UseTree};
 use tokio::process::{Child, Command};
+
+use crate::metadata;
 
 /// The shell of the admin UI, as the server expects it.
 const INDEX_HTML: &str = include_str!("../templates/ui/index.html");
@@ -288,6 +290,8 @@ struct Project {
     dependencies: Vec<(String, String)>,
     target_directory: PathBuf,
     workspace_root: PathBuf,
+    /// The crates on disk the project is compiled with, by their directory.
+    local_crates: Vec<PathBuf>,
 }
 
 fn toml_string(value: &str) -> String {
@@ -348,15 +352,9 @@ fn dependency(declared: &Value) -> Option<(String, String)> {
     Some((key.replace('-', "_"), format!("{key} = {{ {} }}", options.join(", "))))
 }
 
-/// The package of `manifest` in what `cargo metadata --no-deps` printed.
+/// The package of `manifest` in what `cargo metadata` printed.
 fn project(metadata: &Value, manifest: &Path) -> Result<Project> {
-    let same =
-        |path: &str| Path::new(path).canonicalize().is_ok_and(|path| path == manifest) || Path::new(path) == manifest;
-    let package = metadata["packages"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .find(|package| package["manifest_path"].as_str().is_some_and(same))
+    let package = metadata::package(metadata, manifest)
         .with_context(|| format!("[openshop] {} is not the manifest of a package", manifest.display()))?;
     let text = |value: &Value, what: &str| {
         value
@@ -375,6 +373,7 @@ fn project(metadata: &Value, manifest: &Path) -> Result<Project> {
             .collect(),
         target_directory: text(&metadata["target_directory"], "target directory")?.into(),
         workspace_root: text(&metadata["workspace_root"], "workspace root")?.into(),
+        local_crates: metadata::local_crates(metadata, manifest, None),
     })
 }
 
@@ -450,6 +449,10 @@ fn main() {{
             watched.push(file.display().to_string());
         }
     }
+    // A crate on disk may be part of the bundle: the framework itself, when it is one.
+    for directory in &project.local_crates {
+        watched.push(directory.join("src").display().to_string());
+    }
     let watched: Vec<String> = watched.iter().map(|path| toml_string(path)).collect();
     let trunk = format!(
         r#"# Written by `openshop` from the project. Do not edit.
@@ -496,19 +499,7 @@ pub async fn prepare(cwd: &Path) -> Result<Option<Prepared>> {
         return Ok(None);
     }
 
-    let output = Command::new("cargo")
-        .args(["metadata", "--no-deps", "--format-version", "1"])
-        .current_dir(cwd)
-        .output()
-        .await
-        .context("[openshop] Failed to run cargo")?;
-    if !output.status.success() {
-        bail!(
-            "[openshop] cargo metadata failed:\n{}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
-    }
-    let metadata: Value = serde_json::from_slice(&output.stdout).context("[openshop] Cannot read cargo metadata")?;
+    let metadata = metadata::read(cwd).await?;
     let manifest = cwd.join("Cargo.toml");
     let project = project(&metadata, &manifest.canonicalize().unwrap_or(manifest))?;
 
@@ -584,7 +575,7 @@ pub async fn build(cwd: &Path) -> Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
+    use openshop::serde_json::json;
 
     /// A project in an empty directory, removed when the test ends.
     struct Sources(PathBuf);
@@ -724,8 +715,10 @@ mod tests {
         json!({
             "packages": [
                 { "name": "other", "edition": "2021", "manifest_path": "/work/other/Cargo.toml", "dependencies": [] },
+                { "name": "my-charts", "id": "my-charts", "source": null, "manifest_path": "/work/charts/Cargo.toml" },
                 {
                     "name": "my-app",
+                    "id": "my-app",
                     "edition": "2024",
                     "manifest_path": "/work/my-app/Cargo.toml",
                     "dependencies": [
@@ -740,6 +733,10 @@ mod tests {
                     ]
                 }
             ],
+            "resolve": { "nodes": [
+                { "id": "my-app", "deps": [{ "name": "charts", "pkg": "my-charts", "dep_kinds": [{ "kind": null, "target": null }] }] },
+                { "id": "my-charts", "deps": [] }
+            ] },
             "target_directory": "/work/target",
             "workspace_root": "/work"
         })
@@ -751,6 +748,7 @@ mod tests {
         assert_eq!((project.name.as_str(), project.edition.as_str()), ("my-app", "2024"));
         assert_eq!(project.target_directory, Path::new("/work/target"));
         assert_eq!(project.workspace_root, Path::new("/work"));
+        assert_eq!(project.local_crates, [Path::new("/work/charts")]);
         let lines: Vec<&str> = project.dependencies.iter().map(|(_, line)| line.as_str()).collect();
         // Not the dependencies of tests, nor the ones of the server alone.
         assert_eq!(
@@ -811,7 +809,11 @@ mod tests {
 
         let trunk = file("Trunk.toml");
         assert!(trunk.contains("dist = \"/work/my-app/dist\""));
-        assert!(trunk.contains("watch = [\"src\", \"Cargo.toml\"]"), "{trunk}");
+        // The bundle is built again when a crate on disk it may be compiled with changes.
+        assert!(
+            trunk.contains("watch = [\"src\", \"Cargo.toml\", \"/work/charts/src\"]"),
+            "{trunk}"
+        );
         assert!(file("index.html").contains("<meta name=\"shopify-api-key\" content=\"\" />"));
     }
 

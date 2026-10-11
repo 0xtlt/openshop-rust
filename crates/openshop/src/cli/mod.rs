@@ -71,7 +71,7 @@ pub(crate) fn port(default: u16) -> u16 {
 }
 
 /// Resolves when the process receives SIGINT or SIGTERM.
-pub(crate) async fn shutdown_signal() {
+pub async fn shutdown_signal() {
     #[cfg(unix)]
     {
         use tokio::signal::unix::{SignalKind, signal};

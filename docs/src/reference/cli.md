@@ -12,7 +12,7 @@ An OpenShop app has two command lines:
 | --- | --- | --- |
 | `openshop init <dir>` | — | Scaffold a new project. |
 | `openshop init-ui` | — | Scaffold a custom admin page with its view. |
-| `openshop dev [cargo args]` | `cargo run [cargo args] -- dev`, restarted on changes | Start the development server. |
+| `openshop dev [cargo args]` | `cargo run [cargo args] -- dev`, restarted on changes | Start the development server. The admin UI reloads by itself. |
 | `openshop codegen [--api-version=YYYY-MM] [--out=<file>]` | — | Download the Shopify Admin GraphQL schema of another API version for [`graphql!`](graphql.md#schema-and-api-version). |
 | `openshop build [args]` | `openshop build-ui`, then `cargo build --release [args]` | Build the app for production. |
 | `openshop build-ui` | `trunk build --release` on the crate of the bundle | Build the admin UI bundle of an app whose admin pages have a view, into `dist/`. |
@@ -125,6 +125,12 @@ Details:
 - Every command builds the configuration before it runs, including `migrate`.
   Variables the configuration requires must be set for all of them.
 - `dev` and `start` listen on `0.0.0.0` at `PORT` (default `3000`).
+- In `dev`, a page of the admin UI reloads by itself when the app has been
+  started again, or when the bundle it is served from disk has been built
+  again. The shell is served with a script that listens to
+  `GET /__openshop/reload`, a `text/event-stream` that names the version being
+  served, and reloads the page when it is no longer the one it was served.
+  `start` serves neither the script nor the route.
 - `--concurrency=N` must be written with `=`. When the flag is absent, the
   worker uses `worker.concurrency` from the configuration, then the default of
   `5`. A value that is not a positive integer stops the command with
@@ -160,6 +166,12 @@ not start a second `dev` process alongside it.
 
 - it watches `src/` and `migrations/` recursively, and `Cargo.toml`,
   `Cargo.lock`, `.env`, and `shopify.app*.toml` in the project root;
+- it watches `src/`, `Cargo.toml`, and `build.rs` of every crate on disk the
+  project is compiled with: its path dependencies and theirs, members of its
+  workspace or not. `cargo metadata` gives the list at startup and each time a
+  manifest changes, and the startup output names the crates. With
+  `-p <package>`, they are the crates of that package, itself included; in the
+  root of a workspace that is not a package, the ones of its default members;
 - hidden files and directories and names ending in `~` are ignored;
 - changes are debounced for 500 ms, then the process receives `SIGTERM`, is
   killed if it has not exited after 35 seconds, and is started again;
@@ -168,10 +180,15 @@ not start a second `dev` process alongside it.
   `openshop dev -p my-app` in a workspace;
 - when an admin page has a view, it also writes the crate of the admin UI
   bundle, as `build-ui` does, runs `trunk watch` on it to rebuild the bundle
-  when a page changes and, unless `OPENSHOP_UI_DIR` is already set, starts the
-  app with `OPENSHOP_UI_DIR` pointing at `dist`. A view added or removed while
-  `dev` runs is taken into account at the next change. If `trunk` cannot be
-  started, a warning is printed and the bundle is not rebuilt.
+  when a page changes, or a crate on disk the project is compiled with, and,
+  unless `OPENSHOP_UI_DIR` is already set, starts the app with
+  `OPENSHOP_UI_DIR` pointing at `dist`. A view added or removed while `dev`
+  runs is taken into account at the next change. If `trunk` cannot be started,
+  a warning is printed and the bundle is not rebuilt.
+
+The page open in the browser follows: it reloads once the app is back, and
+again if the bundle is ready after it. A change that does not compile leaves
+the page as it is, and the error in the terminal.
 
 Only `dev` loads the project-root `.env` file, before it builds the
 configuration. Set variables explicitly for build, migration, test, and

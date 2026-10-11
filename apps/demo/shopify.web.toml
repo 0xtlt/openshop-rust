@@ -1,4 +1,4 @@
 roles = ["frontend", "backend"]
 
 [commands]
-dev = "cargo run -p openshop-demo -- dev"
+dev = "cargo run -p openshop-cli -- dev"

@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- In `dev`, the admin UI reloads by itself: when the app has been started
+  again, and when the bundle it is served from disk has been built again. The
+  shell is served with a script that listens to `GET /__openshop/reload`, an
+  event stream that names the version being served. Neither exists in `start`.
+  With `openshop dev`, a change to a page or to the server is on screen
+  without a restart or a reload by hand.
+- `openshop dev` also watches the crates on disk the project is compiled with,
+  its path dependencies and theirs: the app is started again, and its admin UI
+  bundle built again, when one of them changes. `openshop dev -p my-app` in a
+  workspace watches the crate of `my-app`, which it did not.
+- `openshop::cli::shutdown_signal()` is public: it resolves on `SIGINT` or
+  `SIGTERM`, for a process that embeds the server and stops as `dev` does.
 - An admin can be made of the pages of the application only.
   `builtin_pages: AdminPagesConfig::none()` disables every built-in page
   (flows, runs, logs, providers, crons, functions, MCP) for the merchant; a

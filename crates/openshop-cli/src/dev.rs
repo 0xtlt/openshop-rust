@@ -1,4 +1,5 @@
-//! `openshop dev`: runs `cargo run -- dev` and restarts it when the project changes.
+//! `openshop dev`: runs `cargo run -- dev` and restarts it when the project
+//! changes, or a crate on disk it is compiled with.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -9,8 +10,8 @@ use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use tokio::process::{Child, Command};
 use tokio::sync::{Mutex, mpsc};
 
-use crate::bundle;
 use crate::restart::{RestartCoordinator, Restartable};
+use crate::{bundle, metadata};
 
 /// Directories watched recursively, including ones created after startup.
 const WATCHED_DIRECTORIES: [&str; 2] = ["src", "migrations"];
@@ -23,20 +24,107 @@ fn is_watched_root_file(name: &str) -> bool {
     matches!(name, "Cargo.toml" | "Cargo.lock" | ".env") || (name.starts_with("shopify.app") && name.ends_with(".toml"))
 }
 
+fn slashed(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
+}
+
+/// Whether a file is one an editor writes beside the one being edited.
+fn hidden_or_temporary(source: &str) -> bool {
+    source
+        .split('/')
+        .any(|segment| segment.starts_with('.') || segment.ends_with('~'))
+}
+
 /// The project-relative path to report for a changed file, or `None` to ignore it.
 pub fn watched_source(cwd: &Path, path: &Path) -> Option<String> {
-    let relative = path.strip_prefix(cwd).ok()?;
-    let source = relative.to_string_lossy().replace('\\', "/");
+    let source = slashed(path.strip_prefix(cwd).ok()?);
     let mut segments = source.split('/');
     let first = segments.next()?;
 
     if segments.next().is_none() {
         return is_watched_root_file(first).then_some(source);
     }
-    let hidden_or_temporary = source
-        .split('/')
-        .any(|segment| segment.starts_with('.') || segment.ends_with('~'));
-    (WATCHED_DIRECTORIES.contains(&first) && !hidden_or_temporary).then_some(source)
+    (WATCHED_DIRECTORIES.contains(&first) && !hidden_or_temporary(&source)).then_some(source)
+}
+
+/// The crates on disk the project is compiled with: the other crates of its
+/// workspace, most of the time.
+#[derive(Default)]
+struct LocalCrates {
+    /// What their changes are named from: the root of the workspace.
+    root: PathBuf,
+    directories: Vec<PathBuf>,
+}
+
+impl LocalCrates {
+    /// `None` when cargo cannot say: the manifest may be half written.
+    async fn read(cwd: &Path, cargo_args: &[String]) -> Option<Self> {
+        let metadata = match metadata::read(cwd).await {
+            Ok(metadata) => metadata,
+            Err(error) => {
+                eprintln!("{error:#}");
+                return None;
+            }
+        };
+        // What the watcher reports is canonical, like `cwd`.
+        let canonical = |path: PathBuf| path.canonicalize().unwrap_or(path);
+        let manifest = cwd.join("Cargo.toml");
+        Some(Self {
+            root: canonical(
+                metadata["workspace_root"]
+                    .as_str()
+                    .map_or_else(|| cwd.to_path_buf(), PathBuf::from),
+            ),
+            directories: metadata::local_crates(&metadata, &manifest, requested_package(cargo_args))
+                .into_iter()
+                .map(canonical)
+                .collect(),
+        })
+    }
+
+    /// The path to report for a changed file of one of the crates, or `None` to ignore it.
+    fn source(&self, path: &Path) -> Option<String> {
+        let source = self
+            .directories
+            .iter()
+            .filter_map(|directory| path.strip_prefix(directory).ok())
+            .map(slashed)
+            .min_by_key(String::len)?;
+        let watched = matches!(source.as_str(), "Cargo.toml" | "build.rs")
+            || (source.starts_with("src/") && !hidden_or_temporary(&source));
+        watched.then(|| slashed(path.strip_prefix(&self.root).unwrap_or(path)))
+    }
+
+    /// The crates, as the startup message names them: from the root of the
+    /// workspace, and by the name of their directory when they are elsewhere.
+    fn names(&self) -> String {
+        let names: Vec<String> = self
+            .directories
+            .iter()
+            .map(|directory| match directory.strip_prefix(&self.root) {
+                Ok(relative) => slashed(relative),
+                Err(_) => slashed(directory.file_name().map_or(directory.as_path(), Path::new)),
+            })
+            .collect();
+        names.join(", ")
+    }
+}
+
+/// The package `cargo run` is asked for: `-p my-app`, `--package=my-app`.
+fn requested_package(cargo_args: &[String]) -> Option<&str> {
+    let mut args = cargo_args.iter().map(String::as_str);
+    while let Some(arg) = args.next() {
+        let package = match arg {
+            "-p" | "--package" => args.next(),
+            // The arguments of the app follow.
+            "--" => return None,
+            _ => arg.strip_prefix("--package=").or_else(|| arg.strip_prefix("-p")),
+        };
+        if let Some(package) = package {
+            return package.split('@').next();
+        }
+    }
+    None
 }
 
 struct DevProcess {
@@ -160,18 +248,32 @@ impl Restartable for DevProcess {
     }
 }
 
-/// Watches the project root and the source directories that exist; returns the
-/// directories being watched so that new ones can be added later.
-fn watch_existing(watcher: &mut RecommendedWatcher, cwd: &Path, watched: &mut Vec<PathBuf>) {
-    for name in WATCHED_DIRECTORIES {
-        let directory = cwd.join(name);
-        if directory.is_dir()
-            && !watched.contains(&directory)
-            && watcher.watch(&directory, RecursiveMode::Recursive).is_ok()
-        {
+/// Watches the source directories of the project that exist, and the ones of
+/// the crates on disk it is compiled with. `watched` is what is watched
+/// already, so that new directories can be added later.
+fn watch_existing(watcher: &mut RecommendedWatcher, cwd: &Path, local: &LocalCrates, watched: &mut Vec<PathBuf>) {
+    let sources = WATCHED_DIRECTORIES.map(|name| (cwd.join(name), RecursiveMode::Recursive));
+    let crates = local.directories.iter().flat_map(|directory| {
+        [
+            (directory.clone(), RecursiveMode::NonRecursive),
+            (directory.join("src"), RecursiveMode::Recursive),
+        ]
+    });
+    for (directory, mode) in sources.into_iter().chain(crates) {
+        if directory.is_dir() && !watched.contains(&directory) && watcher.watch(&directory, mode).is_ok() {
             watched.push(directory);
         }
     }
+}
+
+/// What changed since the app was last started.
+struct Change {
+    /// The last file that changed: the one the restart is reported for.
+    source: String,
+    /// A view may have been added to the project, or the last one removed.
+    pages: bool,
+    /// A manifest changed: the project may be compiled with other crates.
+    dependencies: bool,
 }
 
 async fn terminate_signal() {
@@ -208,6 +310,7 @@ pub async fn start_dev(cargo_args: &[String]) -> Result<()> {
         ui_dir: std::sync::Mutex::new(ui_dir(bundle.refresh().await)),
         child: Mutex::new(None),
     });
+    let mut local = LocalCrates::read(&cwd, cargo_args).await.unwrap_or_default();
     process.start().await;
     let coordinator = RestartCoordinator::new(process.clone());
 
@@ -223,12 +326,15 @@ pub async fn start_dev(cargo_args: &[String]) -> Result<()> {
     })?;
     watcher.watch(&cwd, RecursiveMode::NonRecursive)?;
     let mut watched = Vec::new();
-    watch_existing(&mut watcher, &cwd, &mut watched);
+    watch_existing(&mut watcher, &cwd, &local, &mut watched);
     println!("[openshop] Watching for changes (src, migrations, Cargo.toml, .env, shopify.app*.toml)");
+    if !local.directories.is_empty() {
+        println!("[openshop] Watching the crates it is compiled with ({})", local.names());
+    }
 
     let shutdown = terminate_signal();
     tokio::pin!(shutdown);
-    let mut pending: Option<String> = None;
+    let mut pending: Option<Change> = None;
 
     loop {
         let debounce = async {
@@ -242,23 +348,35 @@ pub async fn start_dev(cargo_args: &[String]) -> Result<()> {
             _ = &mut shutdown => break,
             Some(path) = changed.recv() => {
                 // A watched directory may have just been created.
-                watch_existing(&mut watcher, &cwd, &mut watched);
+                watch_existing(&mut watcher, &cwd, &local, &mut watched);
                 let created_directory = WATCHED_DIRECTORIES
                     .iter()
                     .find(|name| cwd.join(name) == path)
                     .map(|name| name.to_string());
-                if let Some(source) = watched_source(&cwd, &path).or(created_directory) {
-                    pending = Some(source);
+                let project = watched_source(&cwd, &path).or(created_directory);
+                let pages = project.as_ref().is_some_and(|source| source.starts_with("src"));
+                if let Some(source) = project.or_else(|| local.source(&path)) {
+                    let manifest = source.rsplit('/').next().is_some_and(|name| name.starts_with("Cargo."));
+                    pending = Some(Change {
+                        pages: pages || pending.as_ref().is_some_and(|change| change.pages),
+                        dependencies: manifest || pending.as_ref().is_some_and(|change| change.dependencies),
+                        source,
+                    });
                 }
             }
             _ = debounce => {
-                if let Some(source) = pending.take() {
-                    // A view may have been added, or the last one removed.
-                    if source.starts_with("src") || source.starts_with("Cargo.") {
+                if let Some(change) = pending.take() {
+                    if change.dependencies && let Some(read) = LocalCrates::read(&cwd, cargo_args).await {
+                        local = read;
+                        watch_existing(&mut watcher, &cwd, &local, &mut watched);
+                    }
+                    // A view may have been added, or the last one removed, and
+                    // trunk builds the bundle again when one of the crates changes.
+                    if change.pages || change.dependencies {
                         process.serve(ui_dir(bundle.refresh().await));
                     }
                     let coordinator = coordinator.clone();
-                    tokio::spawn(async move { coordinator.request_restart(source).await });
+                    tokio::spawn(async move { coordinator.request_restart(change.source).await });
                 }
             }
         }
@@ -299,5 +417,62 @@ mod tests {
         assert_eq!(source(".git/HEAD"), None);
         assert_eq!(source("docs/guide.md"), None);
         assert_eq!(watched_source(cwd, Path::new("/elsewhere/src/main.rs")), None);
+    }
+
+    #[test]
+    fn reports_changes_of_the_crates_the_project_is_compiled_with() {
+        let local = LocalCrates {
+            root: PathBuf::from("/work"),
+            directories: vec![
+                PathBuf::from("/work/crates/charts"),
+                PathBuf::from("/elsewhere/palette"),
+            ],
+        };
+        let source = |path: &str| local.source(Path::new(path));
+        assert_eq!(local.names(), "crates/charts, palette");
+
+        // Named from the root of the workspace, when they are in it.
+        assert_eq!(
+            source("/work/crates/charts/src/axis/mod.rs").as_deref(),
+            Some("crates/charts/src/axis/mod.rs")
+        );
+        assert_eq!(
+            source("/work/crates/charts/Cargo.toml").as_deref(),
+            Some("crates/charts/Cargo.toml")
+        );
+        assert_eq!(
+            source("/work/crates/charts/build.rs").as_deref(),
+            Some("crates/charts/build.rs")
+        );
+        assert_eq!(
+            source("/elsewhere/palette/src/lib.rs").as_deref(),
+            Some("/elsewhere/palette/src/lib.rs")
+        );
+
+        assert_eq!(source("/work/crates/charts/README.md"), None);
+        assert_eq!(source("/work/crates/charts/src/.lib.rs.swp"), None);
+        assert_eq!(source("/work/crates/charts/src/lib.rs~"), None);
+        assert_eq!(source("/work/crates/charts/tests/axis.rs"), None);
+        assert_eq!(source("/work/crates/charts/target/debug/build.rs"), None);
+        assert_eq!(source("/work/crates/other/src/lib.rs"), None);
+    }
+
+    #[test]
+    fn reads_the_package_cargo_run_is_asked_for() {
+        let requested = |args: &[&str]| {
+            let args: Vec<String> = args.iter().map(|arg| arg.to_string()).collect();
+            requested_package(&args).map(str::to_string)
+        };
+        assert_eq!(requested(&[]), None);
+        assert_eq!(requested(&["--release"]), None);
+        assert_eq!(requested(&["-p", "my-app"]).as_deref(), Some("my-app"));
+        assert_eq!(
+            requested(&["--release", "--package", "my-app"]).as_deref(),
+            Some("my-app")
+        );
+        assert_eq!(requested(&["--package=my-app"]).as_deref(), Some("my-app"));
+        assert_eq!(requested(&["-pmy-app@0.1.0"]).as_deref(), Some("my-app"));
+        // After `--`, the arguments are the ones of the app.
+        assert_eq!(requested(&["--", "-p", "my-app"]), None);
     }
 }

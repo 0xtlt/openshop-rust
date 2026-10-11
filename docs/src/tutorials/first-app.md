@@ -174,8 +174,9 @@ Follow Shopify CLI's prompts to select your development store. This command
 starts the tunnel and OpenShop together: it runs `openshop dev`, the `dev`
 command declared in `shopify.web.toml`. OpenShop compiles the project,
 synchronizes the local database schema, and starts the API, admin UI, scheduler,
-and worker. It rebuilds and restarts the app when a source file changes. Wait
-for `[openshop] Ready.` in the output and leave it running.
+and worker. It rebuilds and restarts the app when a source file changes, and
+the admin UI then reloads by itself. Wait for `[openshop] Ready.` in the output
+and leave it running.
 
 Open the preview URL printed by Shopify CLI (or press `p`) and install the app.
 You should see the OpenShop dashboard **inside Shopify admin**. Opening the

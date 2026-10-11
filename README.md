@@ -26,8 +26,9 @@ openshop dev
 ```
 
 `openshop dev` pushes the database schema, then serves the API, the admin UI,
-a worker and the cron scheduler on `http://localhost:3000`, restarting when
-sources change. Run it through `shopify app dev` to open the app in a store.
+a worker and the cron scheduler on `http://localhost:3000`. It restarts when
+sources change, and the admin UI reloads by itself. Run it through
+`shopify app dev` to open the app in a store.
 
 ## What an application looks like
 

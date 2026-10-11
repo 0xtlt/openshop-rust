@@ -11,7 +11,7 @@ This page lists every place where it intentionally differs.
 | `openshop.config.ts` loaded by the `openshop` CLI | Your binary declares an `App` with `app!` and runs it with `APP.main()` |
 | `defineFlow({ … })` and `defineProvider({ … })` returning a definition | An attribute on the function or the struct itself (`#[flow]`, `#[provider]`), which `app!` lists by name |
 | `proxy/`, `routes/` and `admin/pages/` discovered from files | `#[proxy(GET, "/path")]`, `#[route(GET, "/path")]` and `#[admin_page("/path")]` on the code, listed in `app!` |
-| Hot reload of the config module in `dev` | `openshop dev` rebuilds and restarts the process |
+| Hot reload of the config module in `dev` | `openshop dev` rebuilds and restarts the process, and the admin UI reloads by itself |
 | `process.env` read on each request | Environment captured once in `RuntimeEnv` at startup |
 | `getDb()` and other process globals | An `OpenShop` handle (`ctx.app`, `ctx.db`) passed to every handler |
 | `arktype` schemas | Types marked `#[input]`, read with `serde` and described by a `schemars` JSON Schema, and field validators |
@@ -178,7 +178,10 @@ larger configurations easier to split:
 - Custom admin pages are Rust components registered in your own UI bundle
   instead of `page.tsx` files compiled by Vite.
 - In `dev`, the shell is served by the application itself (there is no separate
-  UI port) and without the signed-query check.
+  UI port) and without the signed-query check. There is no Vite server and no
+  module replacement: the shell reloads the whole page when the app has been
+  started again or its bundle rebuilt, which `GET /__openshop/reload`, a route
+  of `dev` only, tells it.
 - A visitor without a valid launch receives a page written with Polaris web
   components, with the same `401` and the same sentence. `dev` answers its
   `403` with that page instead of plain text, and the admin UI shows it to a

@@ -20,6 +20,7 @@ pub mod ops;
 mod polaris;
 pub mod provider_config;
 pub mod proxy;
+mod reload;
 pub mod routes;
 pub mod shop;
 pub mod shop_domain;
@@ -28,10 +29,10 @@ pub mod static_ui;
 pub mod webhooks;
 
 use std::net::SocketAddr;
-use std::sync::LazyLock;
+use std::sync::{Arc, LazyLock};
 
 use anyhow::{Context, Result};
-use axum::Router;
+use axum::{Router, ServiceExt};
 use axum::extract::{DefaultBodyLimit, Request, State};
 use axum::http::{HeaderName, HeaderValue, Method, StatusCode};
 use axum::middleware::{self, Next};
@@ -40,6 +41,7 @@ use axum::routing::{get, post};
 use regex::Regex;
 use serde_json::json;
 use tokio::net::TcpListener;
+use tokio_util::sync::{CancellationToken, DropGuard};
 use tower::layer::layer_fn;
 use tower_http::cors::{AllowHeaders, AllowOrigin, CorsLayer};
 use tower_http::set_header::SetResponseHeaderLayer;
@@ -65,7 +67,8 @@ const ROBOTS_TXT: &str = "User-agent: *\nDisallow: /\n";
 pub struct ServerOptions {
     /// Admin UI to serve. Without one the server is API-only and enables CORS on `/api`.
     pub ui: UiSource,
-    /// Development mode: the UI shell is served without the signed-query gate.
+    /// Development mode: the UI shell is served without the signed-query gate,
+    /// and reloads when the server is started again or its bundle rebuilt.
     pub dev: bool,
 }
 
@@ -186,12 +189,18 @@ pub(crate) fn create_router(app: &OpenShop, options: ServerOptions, log: bool) -
         api = with_cors(api, &cors);
     }
 
+    // Development: a page of the admin UI reloads when the server is started
+    // again or its bundle rebuilt.
+    let reload = (options.dev && options.ui.is_enabled()).then(|| Arc::new(reload::Served::new(&options.ui)));
+
     let ui_options = options.clone();
+    let ui_reload = reload.clone();
     let fallback = move |state: State<OpenShop>, request: Request| {
         let options = ui_options.clone();
+        let reload = ui_reload.clone();
         async move {
             if options.ui.is_enabled() {
-                static_ui::serve_ui(state, options, request).await
+                static_ui::serve_ui(state, options, reload, request).await
             } else {
                 not_found()
             }
@@ -211,6 +220,13 @@ pub(crate) fn create_router(app: &OpenShop, options: ServerOptions, log: bool) -
         .merge(auth::create_auth_routes())
         .merge(webhooks::create_webhook_routes())
         .merge(api);
+
+    if let Some(served) = reload {
+        router = router.route(
+            reload::PATH,
+            get(move |closing| reload::listen(served.clone(), closing)),
+        );
+    }
 
     // Public server routes define their own explicit authentication contract.
     if !app.config().routes.is_empty() {
@@ -273,7 +289,7 @@ pub(crate) fn create_router(app: &OpenShop, options: ServerOptions, log: bool) -
 /// timed out.
 pub struct ServerHandle {
     pub addr: SocketAddr,
-    shutdown: tokio::sync::oneshot::Sender<()>,
+    closing: DropGuard,
     task: tokio::task::JoinHandle<std::io::Result<()>>,
 }
 
@@ -281,12 +297,13 @@ impl ServerHandle {
     /// Stops accepting connections and waits for requests in flight, up to five
     /// seconds. After that it stops waiting and returns an error: the requests
     /// still in flight keep running until they finish or the process exits.
-    pub async fn shutdown(mut self) -> Result<()> {
-        let _ = self.shutdown.send(());
-        match tokio::time::timeout(std::time::Duration::from_secs(5), &mut self.task).await {
+    pub async fn shutdown(self) -> Result<()> {
+        let Self { closing, mut task, .. } = self;
+        drop(closing);
+        match tokio::time::timeout(std::time::Duration::from_secs(5), &mut task).await {
             Ok(joined) => Ok(joined??),
             Err(_) => {
-                self.task.abort();
+                task.abort();
                 anyhow::bail!("Timed out closing HTTP server after 5000ms")
             }
         }
@@ -305,21 +322,29 @@ pub async fn listen(app: &OpenShop, port: u16, options: ServerOptions) -> Result
 /// Serves a router built with [`router`] on an existing listener.
 pub async fn serve(listener: TcpListener, router: Router) -> Result<ServerHandle> {
     let addr = listener.local_addr()?;
-    let (shutdown, stopped) = tokio::sync::oneshot::channel::<()>();
+    let closing = CancellationToken::new();
+    // In development a page of the admin UI listens for as long as it is open.
+    let service = reload::WithClosing {
+        inner: router,
+        closing: reload::Closing(Arc::new(closing.clone())),
+    };
+    let stopped = closing.clone().cancelled_owned();
     let task = tokio::spawn(async move {
         // Served as is, a router copies its whole route table for each
         // connection. The make-service hands every connection the same one.
-        axum::serve(listener, router.into_make_service())
-            .with_graceful_shutdown(async move {
-                let _ = stopped.await;
-            })
+        axum::serve(listener, ServiceExt::<Request>::into_make_service(service))
+            .with_graceful_shutdown(stopped)
             .await
     });
     logger::info(format!(
         "[openshop] API server running on http://localhost:{}",
         addr.port()
     ));
-    Ok(ServerHandle { addr, shutdown, task })
+    Ok(ServerHandle {
+        addr,
+        closing: closing.drop_guard(),
+        task,
+    })
 }
 
 #[cfg(test)]

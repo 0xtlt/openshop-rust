@@ -17,12 +17,17 @@
 //!
 //! Set `PREVIEW_UI_DIR=apps/demo/dist` to preview the demo's own bundle with its
 //! custom `/reviews` page (build it first with `mise run demo:ui`).
+//!
+//! `mise run dev` is the preview as a shop, run by `openshop dev`: started again
+//! when the workspace changes, with the demo's own bundle built again by trunk,
+//! and a page that reloads by itself.
 
 #[path = "../tests/common/mod.rs"]
 mod common;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use openshop::builder::Route;
 use openshop::engine::{Scheduler, Worker};
@@ -44,6 +49,7 @@ const APP_BRIDGE_STUB: &str = r#"<script>
       };
     </script>"#;
 
+/// Copies the files of a bundle, without its shell.
 fn copy_dir(from: &Path, to: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(to)?;
     for entry in std::fs::read_dir(from)? {
@@ -51,33 +57,68 @@ fn copy_dir(from: &Path, to: &Path) -> std::io::Result<()> {
         let target = to.join(entry.file_name());
         if entry.file_type()?.is_dir() {
             copy_dir(&entry.path(), &target)?;
-        } else {
+        } else if entry.file_name() != "index.html" {
             std::fs::copy(entry.path(), target)?;
         }
     }
     Ok(())
 }
 
-/// The built UI. `PREVIEW_UI_DIR` previews another bundle, e.g. `apps/demo/dist`.
+/// The built UI. `PREVIEW_UI_DIR` previews another bundle, e.g. `apps/demo/dist`,
+/// and `openshop dev` names the one it builds with `OPENSHOP_UI_DIR`.
 fn built_ui_dir() -> PathBuf {
-    match std::env::var_os("PREVIEW_UI_DIR") {
+    let named = ["PREVIEW_UI_DIR", "OPENSHOP_UI_DIR"]
+        .into_iter()
+        .find_map(std::env::var_os);
+    match named {
         Some(dir) => PathBuf::from(dir),
         None => Path::new(env!("CARGO_MANIFEST_DIR")).join("../../crates/openshop/ui-dist"),
     }
 }
 
-/// A copy of the built UI whose shell loads the App Bridge stub.
-fn stubbed_ui_dir(built: &Path) -> Result<PathBuf> {
-    let dir = std::env::temp_dir().join(format!("openshop-preview-ui-{}", std::process::id()));
-    copy_dir(built, &dir)?;
-
-    let index = std::fs::read_to_string(dir.join("index.html"))?;
+/// Copies the built UI, with a shell that loads the App Bridge stub.
+fn stub_ui(shell: &str, built: &Path, stubbed: &Path) -> Result<()> {
     let app_bridge = r#"<script src="https://cdn.shopify.com/shopifycloud/app-bridge.js"></script>"#;
-    if !index.contains(app_bridge) {
-        openshop::bail!("ui-dist/index.html does not load App Bridge the expected way");
+    if !shell.contains(app_bridge) {
+        openshop::bail!(
+            "{} does not load App Bridge the expected way",
+            built.join("index.html").display()
+        );
     }
-    std::fs::write(dir.join("index.html"), index.replace(app_bridge, APP_BRIDGE_STUB))?;
-    Ok(dir)
+    copy_dir(built, stubbed)?;
+    // The shell last: it names the files of the build.
+    std::fs::write(stubbed.join("index.html"), shell.replace(app_bridge, APP_BRIDGE_STUB))?;
+    Ok(())
+}
+
+/// A copy of the built UI whose shell loads the App Bridge stub, kept up to
+/// date: `openshop dev` builds the bundle again when a page changes, and may
+/// still be building the first one.
+fn stubbed_ui_dir(built: PathBuf) -> Result<PathBuf> {
+    let stubbed = std::env::temp_dir().join(format!("openshop-preview-ui-{}", std::process::id()));
+    std::fs::create_dir_all(&stubbed)?;
+    let shell = |built: &Path| std::fs::read_to_string(built.join("index.html")).ok();
+
+    let mut copied = shell(&built);
+    if let Some(shell) = &copied {
+        stub_ui(shell, &built, &stubbed)?;
+    }
+    let directory = stubbed.clone();
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_millis(250)).await;
+            let built_shell = shell(&built);
+            if built_shell.is_none() || built_shell == copied {
+                continue;
+            }
+            match stub_ui(built_shell.as_deref().unwrap_or_default(), &built, &directory) {
+                Ok(()) => copied = built_shell,
+                // The files of a build are moved into place one by one.
+                Err(error) => eprintln!("[preview] {error:#}"),
+            }
+        }
+    });
+    Ok(stubbed)
 }
 
 /// A week of what an application with several shops leaves behind: fictitious
@@ -213,7 +254,11 @@ async fn main() -> Result<()> {
     openshop::sqlx::raw_sql(HISTORY).execute(app.db()).await?;
 
     let built = built_ui_dir();
-    let stubbed = if as_shop { Some(stubbed_ui_dir(&built)?) } else { None };
+    let stubbed = if as_shop {
+        Some(stubbed_ui_dir(built.clone())?)
+    } else {
+        None
+    };
     // As a shop, the shell is served without a signed launch, like `dev`.
     // Otherwise the admin answers as in production: not without a shop.
     let options = ServerOptions {
@@ -235,7 +280,8 @@ async fn main() -> Result<()> {
     }
     println!("[preview] Operator dashboard: http://localhost:{PORT}/ops (password: {ops_password})");
     println!("[preview] Press Ctrl-C to stop.");
-    tokio::signal::ctrl_c().await?;
+    // `openshop dev` stops the preview to start it again: the schema is dropped then too.
+    openshop::cli::shutdown_signal().await;
 
     scheduler.stop();
     worker.stop().await;

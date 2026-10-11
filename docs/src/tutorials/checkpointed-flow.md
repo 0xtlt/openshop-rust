@@ -101,8 +101,8 @@ Leave the rest of the file unchanged.
 Wait for the development server to reload. In the terminal running
 `shopify app dev`, `openshop dev` reports the changed file, recompiles the
 project, and restarts the app. Each saved file triggers a rebuild; wait for the
-`[openshop] Ready.` that follows your last edit, then refresh **Flows**. You
-should see `prepareReport` alongside `syncOrders`.
+`[openshop] Ready.` that follows your last edit: the admin UI reloads by itself.
+Open **Flows**. You should see `prepareReport` alongside `syncOrders`.
 
 ## 3. Observe the pause
 

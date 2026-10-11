@@ -53,10 +53,17 @@ description = "Build the demo's own admin UI bundle, from its admin pages, into 
 dir = "apps/demo"
 run = "cargo run -p openshop-cli -- build-ui"
 
-[tasks.demo]
-description = "Run the demo app in development mode (needs apps/demo/.env)"
+[tasks.dev]
+description = "Work on the framework: the demo's admin UI on http://localhost:3999 without a Shopify store, restarted and reloaded when the workspace changes (needs PostgreSQL: `mise run db:up`, or set DATABASE_URL)"
 dir = "apps/demo"
-run = "cargo run -p openshop-demo -- dev"
+env = { PREVIEW_AS_SHOP = "1" }
+# The preview as a shop, run by `openshop dev`, which builds the demo's own bundle with trunk.
+run = "cargo run -p openshop-cli -- dev --example preview"
+
+[tasks.demo]
+description = "Run the demo app in development mode, restarted and reloaded when the workspace changes (needs apps/demo/.env)"
+dir = "apps/demo"
+run = "cargo run -p openshop-cli -- dev"
 
 [tasks.preview]
 description = "Preview the admin UI on http://localhost:3999 without a Shopify store"

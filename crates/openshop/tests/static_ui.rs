@@ -706,6 +706,69 @@ async fn dev_mode_injects_the_api_key_of_the_signing_app() {
     ctx.shutdown().await.unwrap();
 }
 
+/// The next version an event stream of `/__openshop/reload` names. `None` once it has ended.
+async fn told(events: &mut reqwest::Response) -> Option<String> {
+    loop {
+        let chunk = tokio::time::timeout(Duration::from_secs(10), events.chunk())
+            .await
+            .expect("an event in time")
+            .expect("event stream")?;
+        let text = String::from_utf8_lossy(&chunk);
+        if let Some(version) = text.lines().find_map(|line| line.strip_prefix("data: ")) {
+            return Some(version.to_string());
+        }
+    }
+}
+
+#[tokio::test]
+async fn dev_mode_reloads_the_page_when_the_bundle_is_rebuilt_and_lets_the_server_close() {
+    let ui = UiDir::new();
+    let ctx = context_with(static_config(), ui.server(true)).await;
+    let local = |path: &str| request(&ctx, Method::GET, path).header(HOST, format!("localhost:{}", ctx.port));
+    let listens_for = |version: &str| format!(r#"if (event.data !== "{version}") location.reload();"#);
+
+    let mut events = local("/__openshop/reload").send().await.expect("event stream");
+    assert_eq!(events.status(), StatusCode::OK);
+    let content_type = events.headers()[CONTENT_TYPE].to_str().unwrap().to_string();
+    assert!(content_type.starts_with("text/event-stream"), "{content_type}");
+
+    // The shell is served with the version being served, and listens for another one.
+    let version = told(&mut events).await.expect("the version being served");
+    let shell = fetch(local("/")).await;
+    assert_shell(&shell, "test-app");
+    assert!(
+        shell.body.contains(r#"new EventSource("/__openshop/reload")"#),
+        "{}",
+        shell.body
+    );
+    assert!(shell.body.contains(&listens_for(&version)), "{}", shell.body);
+
+    // A build writes another bundle: the page is told, and the shell is another version.
+    ui.write("index.html", &SHELL.replace("spa-shell", "spa-shell rebuilt"));
+    let rebuilt = told(&mut events).await.expect("the version of the new build");
+    assert_ne!(rebuilt, version);
+    assert!(fetch(local("/")).await.body.contains(&listens_for(&rebuilt)));
+
+    // A server that closes does not wait for the pages that listen to it.
+    let closing = std::time::Instant::now();
+    ctx.shutdown().await.unwrap();
+    assert!(closing.elapsed() < Duration::from_secs(4), "{:?}", closing.elapsed());
+    assert_eq!(told(&mut events).await, None);
+}
+
+#[tokio::test]
+async fn only_dev_mode_reloads_pages() {
+    let ui = UiDir::new();
+    let ctx = ui_context(&ui).await;
+
+    let shell = get(&ctx, &signed_launch("/", SHOP, SECRET)).await;
+    assert_shell(&shell, "test-app");
+    assert!(!shell.body.contains("EventSource"), "{}", shell.body);
+    // The event stream is a path like another: a page of the admin UI, behind its gate.
+    assert_unauthorized_ui(&get(&ctx, "/__openshop/reload").await);
+    ctx.shutdown().await.unwrap();
+}
+
 // ─── Routing around the UI ───────────────────────────────────────────
 
 #[tokio::test]
