@@ -12,6 +12,11 @@ env:
 jobs:
   check:
     runs-on: ubuntu-latest
+    env:
+      # Each test binary is linked with its own copy of the debug info of what
+      # it depends on: `target/` reaches 21 GB with it, and the runner has 14 GB
+      # free. A failed test names its file and line without it.
+      CARGO_PROFILE_DEV_DEBUG: 0
     services:
       postgres:
         image: postgres:17-alpine
