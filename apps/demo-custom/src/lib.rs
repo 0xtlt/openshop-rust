@@ -1,6 +1,10 @@
-//! OpenShop demo application: a warehouse provider, two flows, a Shopify
-//! Function, webhooks, crons, app proxy routes, a public route, MCP
-//! capabilities and a custom admin page.
+//! OpenShop demo of a custom app, built for the merchant who runs it: a
+//! warehouse provider, two flows, a Shopify Function, webhooks, crons, app
+//! proxy routes, a public route, MCP capabilities and a custom admin page.
+//!
+//! The built-in admin is open to the merchant: the flows, the runs, the logs,
+//! the providers and the crons, next to the page of the application.
+//! `apps/demo-public` is the other case, an app many shops install.
 
 pub mod admin;
 pub mod flows;

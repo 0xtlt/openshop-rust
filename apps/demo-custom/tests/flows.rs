@@ -2,10 +2,10 @@ mod common;
 
 use openshop::testing::TestContext;
 use openshop::{RunOutcome, Value, json};
-use openshop_demo::APP;
-use openshop_demo::flows::count_variants::count_variants;
-use openshop_demo::flows::sync_orders::sync_orders;
-use openshop_demo::providers::warehouse::Warehouse;
+use openshop_demo_custom::APP;
+use openshop_demo_custom::flows::count_variants::count_variants;
+use openshop_demo_custom::flows::sync_orders::sync_orders;
+use openshop_demo_custom::providers::warehouse::Warehouse;
 
 #[openshop::test(APP)]
 async fn lists_flows(ctx: &TestContext) {

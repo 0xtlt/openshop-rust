@@ -45,8 +45,8 @@ lists it, in [`app!`](configuration.md).
 | `tests/` | Integration tests using `openshop::testing` | — |
 | `dist/` | The admin UI bundle of the application, built by `openshop build` from the custom admin screens that have a view. Not committed | `admin_ui`, or `OPENSHOP_UI_DIR` |
 
-An application that uses every block is laid out like `apps/demo` in the
-OpenShop repository:
+An application that uses every block is laid out like `apps/demo-custom` in
+the OpenShop repository:
 
 ```text
 src/

@@ -1,7 +1,7 @@
 use openshop::testing::TestContext;
 use openshop::{Value, json};
-use openshop_demo::APP;
-use openshop_demo::admin::reviews::ReviewsPage;
+use openshop_demo_custom::APP;
+use openshop_demo_custom::admin::reviews::ReviewsPage;
 
 #[openshop::test(APP)]
 async fn lists_the_reviews_page_in_navigation(ctx: &TestContext) {

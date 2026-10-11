@@ -168,7 +168,9 @@ robust; they are listed in [Differences](docs/src/reference/differences.md).
 | `crates/openshop-macros` | The macros: `app!`, the attributes and derives that declare building blocks, and `graphql!` |
 | `crates/openshop-ui` | The admin UI (Leptos, built with trunk into `crates/openshop/ui-dist`) |
 | `crates/openshop-cli` | The `openshop` command: `init`, `init-ui`, `dev`, `build`, `build-ui` and `codegen` |
-| `apps/demo` | A demo app exercising every building block, with a custom admin page and its view |
+| `apps/demo-custom` | The demo of a custom app: every building block, with the built-in admin open to the merchant and a custom admin page |
+| `apps/demo-public` | The demo of a public app: an admin made of its own pages for the merchants, the operator dashboard for whoever runs it |
+| `apps/preview` | What serves either demo in a browser without a Shopify store |
 | `docs` | Documentation (mdBook) |
 
 ## Contribute

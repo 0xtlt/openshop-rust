@@ -1,3 +1,3 @@
 fn main() -> openshop::Result<()> {
-    openshop_demo::APP.main()
+    openshop_demo_public::APP.main()
 }

@@ -13,7 +13,7 @@ Before editing:
 - Inspect nearby source, tests, docs, and templates before choosing an implementation.
 - Prefer existing helpers and boundaries in `crates/openshop/src` over new abstractions.
 - Keep public APIs stable unless the user explicitly asks for a breaking change.
-- Check whether a framework change also requires updates to `crates/openshop-cli/templates/minimal`, `apps/demo`, or `docs/src`.
+- Check whether a framework change also requires updates to `crates/openshop-cli/templates/minimal`, the demos (`apps/demo-custom`, `apps/demo-public`), or `docs/src`.
 
 ## Reference Routing
 

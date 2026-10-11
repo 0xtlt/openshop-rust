@@ -1,7 +1,7 @@
 use openshop::testing::TestContext;
 use openshop::{Value, json};
-use openshop_demo::APP;
-use openshop_demo::providers::warehouse::Warehouse;
+use openshop_demo_custom::APP;
+use openshop_demo_custom::providers::warehouse::Warehouse;
 
 #[openshop::test(APP)]
 async fn lists_providers_with_their_fields(ctx: &TestContext) {

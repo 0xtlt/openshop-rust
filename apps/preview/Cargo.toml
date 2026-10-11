@@ -1,0 +1,13 @@
+[package]
+name = "openshop-demo-preview"
+description = "What the previews of the demo apps share: an application served in a browser without a Shopify store."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+openshop = { workspace = true, features = ["testing"] }
+# The preview starts the server, a worker and the scheduler by hand.
+tokio.workspace = true

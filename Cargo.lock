@@ -2066,13 +2066,31 @@ dependencies = [
 ]
 
 [[package]]
-name = "openshop-demo"
+name = "openshop-demo-custom"
 version = "0.0.12-beta.0"
 dependencies = [
  "leptos",
  "openshop",
+ "openshop-demo-preview",
  "serde",
+]
+
+[[package]]
+name = "openshop-demo-preview"
+version = "0.0.12-beta.0"
+dependencies = [
+ "openshop",
  "tokio",
+]
+
+[[package]]
+name = "openshop-demo-public"
+version = "0.0.12-beta.0"
+dependencies = [
+ "leptos",
+ "openshop",
+ "openshop-demo-preview",
+ "serde",
 ]
 
 [[package]]

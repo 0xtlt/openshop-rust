@@ -1,6 +1,6 @@
 [package]
-name = "openshop-demo"
-description = "Demo application exercising every OpenShop building block."
+name = "openshop-demo-public"
+description = "Demo of a public app: an admin made of its own pages for the merchants, the operator dashboard for whoever runs it."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -15,5 +15,5 @@ leptos = "0.8"
 
 [dev-dependencies]
 openshop = { workspace = true, features = ["testing"] }
-# For `examples/preview.rs`, which starts the server, a worker and the scheduler by hand.
-tokio.workspace = true
+# What `examples/preview-public.rs` runs.
+openshop-demo-preview = { path = "../preview" }

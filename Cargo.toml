@@ -6,7 +6,9 @@ members = [
   "crates/openshop-graphql",
   "crates/openshop-macros",
   "crates/openshop-cli",
-  "apps/demo",
+  "apps/demo-custom",
+  "apps/demo-public",
+  "apps/preview",
 ]
 # The admin UI targets wasm32 and is built with trunk, with its own profile and lockfile.
 exclude = ["crates/openshop-ui"]

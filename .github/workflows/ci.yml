@@ -58,8 +58,8 @@ jobs:
       - uses: jetli/trunk-action@v0.5.0
       - run: trunk build --release --dist target/ui-dist
 
-  # The demo has an admin page with a view: `openshop build-ui` compiles its
-  # pages to WebAssembly, into its own admin UI bundle.
+  # Each demo has admin pages with a view: `openshop build-ui` compiles them
+  # to WebAssembly, into its own admin UI bundle.
   demo-ui:
     runs-on: ubuntu-latest
     steps:
@@ -70,4 +70,6 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - uses: jetli/trunk-action@v0.5.0
       - run: cargo run -p openshop-cli -- build-ui
-        working-directory: apps/demo
+        working-directory: apps/demo-custom
+      - run: cargo run -p openshop-cli -- build-ui
+        working-directory: apps/demo-public

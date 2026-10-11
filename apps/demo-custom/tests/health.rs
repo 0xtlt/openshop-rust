@@ -1,6 +1,6 @@
 use openshop::testing::TestContext;
 use openshop::{Value, json};
-use openshop_demo::APP;
+use openshop_demo_custom::APP;
 
 #[openshop::test(APP)]
 async fn health_returns_ok(ctx: &TestContext) {

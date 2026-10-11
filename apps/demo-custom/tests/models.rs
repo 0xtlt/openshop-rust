@@ -1,7 +1,7 @@
 use openshop::Model;
 use openshop::testing::TestContext;
-use openshop_demo::APP;
-use openshop_demo::models::review::{NewReview, Review};
+use openshop_demo_custom::APP;
+use openshop_demo_custom::models::review::{NewReview, Review};
 
 #[test]
 fn the_review_struct_is_the_reviews_table() {

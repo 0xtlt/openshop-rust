@@ -1,6 +1,6 @@
 use openshop::json;
 use openshop::testing::TestContext;
-use openshop_demo::APP;
+use openshop_demo_custom::APP;
 
 #[openshop::test(APP)]
 async fn reviews_returns_the_liquid_template_with_its_variables(ctx: &TestContext) {

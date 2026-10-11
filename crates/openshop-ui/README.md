@@ -44,8 +44,8 @@ An application writes a custom page in one place: an `impl` block marked
 `#[admin_page("/reviews", nav = "Reviews")]`, with its loaders, its actions, and its view, a
 function marked `#[view]`. The `ui` feature of `openshop` re-exports this library as
 `openshop::ui` for that, and the `openshop` command builds the bundle of the application from
-its pages. See "Custom admin pages" in the OpenShop documentation, and `apps/demo` for a
-complete page.
+its pages. See "Custom admin pages" in the OpenShop documentation, and `apps/demo-custom` for a
+complete page, or `apps/demo-public` for an admin made of such pages only.
 
 The library can also be used on its own, for a bundle built by hand in a binary crate that
 targets `wasm32-unknown-unknown`:
