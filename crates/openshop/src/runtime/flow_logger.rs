@@ -140,13 +140,16 @@ async fn write(db: &PgPool, flow_run_id: &str, lines: &[Line]) {
     }
     let levels: Vec<&str> = lines.iter().map(|line| line.level).collect();
     let messages: Vec<&str> = lines.iter().map(|line| line.message.as_str()).collect();
-    let payloads: Vec<sqlx::types::Json<&Value>> = lines.iter().map(|line| sqlx::types::Json(&line.payload)).collect();
+    // Sent as text: the `json` column keeps it as it is, where a `jsonb` parameter
+    // would come back with spaces and its keys in another order.
+    let payloads: Vec<String> = lines.iter().map(|line| line.payload.to_string()).collect();
     let dates: Vec<DateTime<Utc>> = lines.iter().map(|line| line.at).collect();
 
     // A failed log write must not crash the flow.
     let _ = sqlx::query(
         "INSERT INTO logs (flow_run_id, level, message, payload, created_at) \
-         SELECT $1, line.* FROM UNNEST($2::text[], $3::text[], $4::jsonb[], $5::timestamptz[]) AS line",
+         SELECT $1, line.level, line.message, line.payload::json, line.created_at \
+         FROM UNNEST($2::text[], $3::text[], $4::text[], $5::timestamptz[]) AS line (level, message, payload, created_at)",
     )
     .bind(flow_run_id)
     .bind(levels)

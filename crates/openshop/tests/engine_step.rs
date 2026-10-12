@@ -595,6 +595,29 @@ async fn writes_the_lines_logged_together_in_one_statement() {
     test.cleanup().await;
 }
 
+// `payload` is a `json` column: it keeps the text it is given. That text is the
+// one the TypeScript runtime writes, `JSON.stringify(payload)`.
+#[tokio::test]
+async fn stores_a_payload_as_compact_json_with_its_keys_in_order() {
+    let test = new_test().await;
+    let run_id = create_run(&test).await;
+    let logger = FlowLogger::new(test.db.clone(), run_id.to_string());
+
+    logger.info_with("summary", json!({ "revenueCents": 1200, "count": 3, "best": null }));
+    logger.info("bare");
+    logger.flush().await;
+
+    let payloads: Vec<(String,)> =
+        sqlx::query_as("SELECT payload::text FROM logs WHERE flow_run_id = $1 ORDER BY created_at, ctid")
+            .bind(run_id.to_string())
+            .fetch_all(&test.db)
+            .await
+            .unwrap();
+    let payloads: Vec<&str> = payloads.iter().map(|(payload,)| payload.as_str()).collect();
+    assert_eq!(payloads, [r#"{"revenueCents":1200,"count":3,"best":null}"#, "{}"]);
+    test.cleanup().await;
+}
+
 #[tokio::test]
 async fn writes_a_line_without_waiting_for_the_end_of_the_run() {
     let test = new_test().await;
