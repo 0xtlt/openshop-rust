@@ -78,7 +78,7 @@ openshop-graphql.workspace = true
 leptos = "0.8"
 # The transport that keeps events, for `tests/sentry.rs`.
 sentry = { workspace = true, features = ["test"] }
-tokio = { workspace = true, features = ["test-util"] }
+tokio = { workspace = true, features = ["io-util", "test-util"] }
 
 [lints.rust]
 unsafe_code = "deny"

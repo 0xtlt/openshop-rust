@@ -14,6 +14,7 @@ pub mod functions;
 pub mod hmac;
 pub mod http;
 pub mod jwt;
+mod linger;
 pub mod log_query;
 pub mod mcp;
 pub mod ops;
@@ -334,7 +335,7 @@ pub async fn serve(listener: TcpListener, router: Router) -> Result<ServerHandle
     let task = tokio::spawn(async move {
         // Served as is, a router copies its whole route table for each
         // connection. The make-service hands every connection the same one.
-        axum::serve(listener, ServiceExt::<Request>::into_make_service(service))
+        axum::serve(linger::LingeringListener(listener), ServiceExt::<Request>::into_make_service(service))
             .with_graceful_shutdown(stopped)
             .await
     });

@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- A caller that is still sending when its request is refused reads the answer.
+  A body over the request body limit is answered `413` as soon as the limit is
+  crossed, and the connection was closed there: cut off in the middle of its
+  upload, the caller saw a connection reset instead of the `413`. The server
+  now closes its side first and reads what the caller still sends until it
+  closes in turn, for five seconds at most.
+- The payload of a log line is stored as the TypeScript runtime stores it:
+  compact, with its keys in the order they were given. It went through `jsonb`
+  on its way to the `json` column, which spaced it and sorted its keys.
 - Sentry is supported natively. With the `sentry` setting of `app!`, which
   takes the DSN the application reads
   (`sentry: std::env::var("SENTRY_DSN").ok()`), `dev`, `start` and `worker`

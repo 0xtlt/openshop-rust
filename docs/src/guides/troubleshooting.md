@@ -126,6 +126,11 @@ routes, server routes, and the Admin API. Raise the limit with the
 `max_request_body_bytes` setting of `app!` if a caller legitimately sends more.
 The MCP endpoint keeps its own 1 MB limit.
 
+The `413` leaves as soon as the limit is crossed, before the rest of the body
+has arrived. The server then reads what the caller still sends for up to five
+seconds, so that a caller in the middle of its upload reads the answer instead
+of a connection reset.
+
 ## Provider secrets cannot be read back
 
 Password fields are intentionally write-only. An empty password submitted from

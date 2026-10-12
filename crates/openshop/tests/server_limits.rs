@@ -4,10 +4,12 @@ use std::borrow::Cow;
 
 use common::noop_flow;
 use openshop::builder::Route;
-use openshop::server::ServerOptions;
+use openshop::server::{DEFAULT_MAX_REQUEST_BODY_BYTES, ServerOptions};
 use openshop::testing::{TestContext, TestOptions, sign_query, to_query_string};
 use openshop::{OpenShopConfig, UiSource, Value, json, response};
 use reqwest::Method;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpStream;
 
 fn echo_size() -> Route {
     Route::public().post(|ctx| async move { Ok(response::json(json!({ "bytes": ctx.request.body.len() }))) })
@@ -60,6 +62,30 @@ async fn request_bodies_are_limited_to_two_megabytes_by_default() {
         .await
         .unwrap();
     assert_eq!(rejected.status(), 413);
+    ctx.shutdown().await.unwrap();
+}
+
+// A body over the limit is refused as soon as the limit is crossed, before the
+// rest of it has arrived. Closing the connection there resets it under a client
+// that is still sending: its write fails and it never reads the answer.
+#[tokio::test]
+async fn a_client_still_sending_when_it_is_refused_reads_the_answer() {
+    let config = OpenShopConfig::builder().route("/echo", echo_size()).build().unwrap();
+    let ctx = TestContext::new(config).await.unwrap();
+    let length = 3 * 1024 * 1024;
+    let crossing = DEFAULT_MAX_REQUEST_BODY_BYTES + 1;
+
+    let mut client = TcpStream::connect(("127.0.0.1", ctx.port)).await.unwrap();
+    let head = format!("POST /routes/echo HTTP/1.1\r\nhost: localhost\r\ncontent-length: {length}\r\n\r\n");
+    client.write_all(head.as_bytes()).await.unwrap();
+    client.write_all(&vec![b'a'; crossing]).await.unwrap();
+    let mut status = [0; 12];
+    client.read_exact(&mut status).await.unwrap();
+    assert_eq!(&status, b"HTTP/1.1 413");
+
+    // The megabyte still to come is taken, and the connection ends without a reset.
+    client.write_all(&vec![b'a'; length - crossing]).await.unwrap();
+    client.read_to_end(&mut Vec::new()).await.unwrap();
     ctx.shutdown().await.unwrap();
 }
 
