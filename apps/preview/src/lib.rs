@@ -1,4 +1,4 @@
-//! What the previews of the demos share: an application served in a regular
+//! What the previews of the templates share: an application served in a regular
 //! browser, without a Shopify store.
 //!
 //! The application runs on `http://localhost:<port>` against a throwaway
@@ -12,9 +12,9 @@
 //! fake shop: App Bridge is then replaced by a stub that signs session tokens
 //! for it. Development only: never expose it.
 //!
-//! Set `PREVIEW_UI_DIR` to the `dist` of a demo, e.g. `apps/demo-custom/dist`,
+//! Set `PREVIEW_UI_DIR` to the `dist` of a template, e.g. `templates/custom/dist`,
 //! to preview its own bundle with its custom pages (build it first with
-//! `mise run demo:ui`). `openshop dev` names the one it builds with
+//! `mise run templates:ui`). `openshop dev` names the one it builds with
 //! `OPENSHOP_UI_DIR`.
 
 use std::path::{Path, PathBuf};
@@ -56,7 +56,7 @@ fn copy_dir(from: &Path, to: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-/// The built UI. `PREVIEW_UI_DIR` previews another bundle, e.g. `apps/demo-custom/dist`,
+/// The built UI. `PREVIEW_UI_DIR` previews another bundle, e.g. `templates/custom/dist`,
 /// and `openshop dev` names the one it builds with `OPENSHOP_UI_DIR`.
 fn built_ui_dir() -> PathBuf {
     let named = ["PREVIEW_UI_DIR", "OPENSHOP_UI_DIR"]
