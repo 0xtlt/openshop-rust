@@ -1,0 +1,19 @@
+[package]
+name = "openshop-template-public"
+description = "Template of `openshop init --template=public`, a public app: an admin made of its own pages for the merchants, the operator dashboard for whoever runs it."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+openshop = { workspace = true, features = ["ui"] }
+serde.workspace = true
+# The views of the admin pages.
+leptos = "0.8"
+
+[dev-dependencies]
+openshop = { workspace = true, features = ["testing"] }
+# What `examples/preview-public.rs` runs.
+openshop-preview = { path = "../../apps/preview" }

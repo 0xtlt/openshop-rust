@@ -13,7 +13,7 @@ cargo test --workspace
 ```
 
 These are the checks CI runs for the main workspace: the framework, the shared
-crate, the CLI, and the demo apps.
+crate, the CLI, and the templates of `openshop init`.
 
 ## Database
 
@@ -31,8 +31,8 @@ From the repo root:
 ```bash
 cargo test -p openshop --lib
 cargo test -p openshop --test engine_runner
-cargo test -p openshop-demo-custom
-cargo test -p openshop-demo-public
+cargo test -p openshop-template-custom
+cargo test -p openshop-template-public
 cargo test -p openshop-cli
 ```
 
@@ -66,14 +66,14 @@ when the UI changes.
 
 The views of custom admin pages (`#[view]`, `openshop::ui`) are tested in
 `crates/openshop/tests/admin_views.rs`, and what the bundle of an application
-is made of in the unit tests of `crates/openshop-cli/src/bundle.rs`. Each demo
-has views: `mise run demo:ui` builds their bundles.
+is made of in the unit tests of `crates/openshop-cli/src/bundle.rs`. The custom and public
+templates have views: `mise run templates:ui` builds their bundles.
 
 ## Demo Apps
 
-For changes affecting app usage, flows, providers, app proxy, or demo conventions, check `apps/demo-custom/tests` and run `cargo test -p openshop-demo-custom`. `apps/demo-custom/tests` shows the tests of an application in their recommended form, and `apps/demo-custom/tests/common/mod.rs` how to answer Shopify GraphQL with fixtures (`answer_shopify(ctx)`).
+For changes affecting app usage, flows, providers, app proxy, or template conventions, check `templates/custom/tests` and run `cargo test -p openshop-template-custom`. `templates/custom/tests` shows the tests of an application in their recommended form, and `templates/custom/tests/common/mod.rs` how to answer Shopify GraphQL with fixtures (`answer_shopify(ctx)`).
 
-For changes affecting what a merchant reaches in an admin closed to the built-in pages, the home of the admin, the records a page reads, or the uninstall webhook, check `apps/demo-public/tests` and run `cargo test -p openshop-demo-public`.
+For changes affecting what a merchant reaches in an admin closed to the built-in pages, the home of the admin, the records a page reads, or the uninstall webhook, check `templates/public/tests` and run `cargo test -p openshop-template-public`.
 
 ## Test Style
 

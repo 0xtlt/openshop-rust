@@ -38,20 +38,43 @@ trunk build --release      # writes crates/openshop/ui-dist
 framework get the admin UI without installing trunk. Rebuild and commit it when
 you change `crates/openshop-ui`.
 
-Each demo has admin pages with a view, so it has an admin UI bundle of its
-own, compiled from its `admin` module. Build them into `apps/demo-custom/dist`
-and `apps/demo-public/dist`, which are not committed:
+The custom and public templates have admin pages with a view, so each has an
+admin UI bundle of its own, compiled from its `admin` module. Build them into
+`templates/custom/dist` and `templates/public/dist`, which are not committed:
 
 ```bash
-mise run demo:ui           # `openshop build-ui` in each demo
+mise run templates:ui      # `openshop build-ui` in each of them
 ```
 
-## The demos
+## The templates
 
-Two applications show the two ways an app is distributed. A change to the
-framework is tried on both:
+`openshop init` makes a project from one of the crates in `templates/`, which
+are members of the workspace: they are compiled, linted and tested with it.
+The CLI embeds them when it is built (`crates/openshop-cli/build.rs`). A
+project gets `src/`, `tests/`, `migrations/`, `README.md`, `shopify.app.toml`
+and its `Cargo.toml` with `workspace = true` replaced by the source of each
+dependency, plus the files of `templates/shared`: a dotfile is stored there as
+`_name`. The rest, `examples/` among it, serves the repository only.
 
-| | `apps/demo-custom` | `apps/demo-public` |
+| Template | What a project starts with |
+| --- | --- |
+| `minimal` | One provider and one flow, with the built-in admin |
+| `custom` | A custom app: every building block, the built-in admin and a page of its own |
+| `public` | A public app: an admin made of its own pages, the operator dashboard for whoever runs it |
+
+The migrations of a template are committed, and its tests check that they
+cover the framework schema and its models: after a change to either, run
+`cargo run -- migrate generate` in the template. To make a project from the
+templates of your checkout, depending on it:
+
+```bash
+mise run init -- ../my-app --template=public
+```
+
+The custom and public templates show the two ways an app is distributed. A
+change to the framework is tried on both:
+
+| | `templates/custom` | `templates/public` |
 | --- | --- | --- |
 | The app | Built for the merchant who runs it | Installed by many shops |
 | What a merchant sees | The built-in admin (flows, runs, logs, providers, crons, functions, MCP) and a page of the application | The pages of the application and nothing else: its home and its settings |
@@ -61,7 +84,7 @@ framework is tried on both:
 
 `apps/preview` is what serves either of them without a store.
 
-## Running a demo
+## Running a template
 
 To work on the framework and look at the result in a browser, without a store:
 
@@ -70,22 +93,22 @@ mise run dev:custom        # or dev:public
 ```
 
 It needs the PostgreSQL of the tests: `mise run db:up`, or `DATABASE_URL`.
-It serves the admin UI of the demo on `http://localhost:3999/`
+It serves the admin UI of the template on `http://localhost:3999/`
 (`http://localhost:3998/` for the public one), as the staff of a fake shop,
 and the operator dashboard at `/ops` (password `preview`). It is the preview
-described below, as a shop and with the demo's own bundle, run by
-`openshop dev`: the demo is started again when a crate of the workspace
+described below, as a shop and with the template's own bundle, run by
+`openshop dev`: the template is started again when a crate of the workspace
 changes, trunk builds its admin UI bundle again, and the page reloads by
 itself. The pages of `/ops` run no script: reload them by hand.
 
-To run a demo in a development store, with the same loop:
+To run a template in a development store, with the same loop:
 
 ```bash
-cp .env.example apps/demo-custom/.env     # add SHOPIFY_API_KEY and SHOPIFY_API_SECRET
-mise run demo:custom                      # `openshop dev` in apps/demo-custom
+cp .env.example templates/custom/.env     # add SHOPIFY_API_KEY and SHOPIFY_API_SECRET
+mise run store:custom                     # `openshop dev` in templates/custom
 ```
 
-`apps/demo-public` and `mise run demo:public` do the same for the public one.
+`templates/public` and `mise run store:public` do the same for the public one.
 
 The admin UI is an embedded Shopify app: it only starts inside the Shopify
 admin iframe. To exercise the backend without a store, call the API with an
@@ -93,7 +116,7 @@ HS256 session token signed with `SHOPIFY_API_SECRET` (`aud` = `SHOPIFY_API_KEY`,
 `iss` / `dest` = `https://<shop>.myshopify.com`), as the test harness does.
 
 To look at an application without a store, run its preview. It serves the
-demo on `http://127.0.0.1:3999` (`3998` for the public one), in a throwaway
+template on `http://127.0.0.1:3999` (`3998` for the public one), in a throwaway
 schema of the database above, and only accepts loopback connections. It
 answers as in production: without a shop, the admin is the page that says
 where the app opens from, and the
@@ -101,18 +124,18 @@ where the app opens from, and the
 (password `preview`):
 
 ```bash
-cargo run -p openshop-demo-custom --example preview-custom    # or openshop-demo-public, preview-public
+cargo run -p openshop-template-custom --example preview-custom    # or openshop-template-public, preview-public
 ```
 
 To look at the admin UI itself, set `PREVIEW_AS_SHOP=1`: the preview then puts
 a stub in place of Shopify App Bridge, with a session for a fixed test shop:
 
 ```bash
-PREVIEW_AS_SHOP=1 cargo run -p openshop-demo-custom --example preview-custom
+PREVIEW_AS_SHOP=1 cargo run -p openshop-template-custom --example preview-custom
 ```
 
-Set `PREVIEW_UI_DIR=apps/demo-custom/dist` to preview the demo's own bundle
-after building it with `mise run demo:ui`. The public demo needs its own, as
+Set `PREVIEW_UI_DIR=templates/custom/dist` to preview the template's own bundle
+after building it with `mise run templates:ui`. The public template needs its own, as
 its admin is made of its pages. The stub does not
 reproduce what Shopify admin renders itself (navigation menu, title bar,
 modals), so check those in a development store.

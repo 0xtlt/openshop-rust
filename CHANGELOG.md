@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+- `openshop init` makes a project from one of three templates: `minimal`, one
+  provider and one flow, as before; `custom`, a custom app with every building
+  block and a page of its own next to the built-in admin; `public`, a public
+  app whose admin is made of its own pages, with the operator dashboard for
+  whoever runs it. `--template=<name>` names it. In a terminal, `init` asks for
+  the directory and the template it was not given, the template chosen with
+  the arrow keys; elsewhere it fails with the list of templates. A project
+  gets the migrations of its template, the tables of its models included, and
+  a test that they cover its schema.
+- The demos are these templates: `apps/demo-custom` and `apps/demo-public`
+  are `templates/custom` and `templates/public`, next to `templates/minimal`
+  and `templates/shared`, the files every project gets. They are crates of the
+  workspace, compiled and tested with it, and the CLI embeds them when it is
+  built. The `demo:*` tasks of mise are `templates:ui`, `store:custom` and
+  `store:public`, and `mise run init` makes a project from the templates of a
+  checkout, depending on it. The MCP tool of the custom template is
+  `app.status`, behind the permission `status:read`.
 - A caller that is still sending when its request is refused reads the answer.
   A body over the request body limit is answered `413` as soon as the limit is
   crossed, and the connection was closed there: cut off in the middle of its

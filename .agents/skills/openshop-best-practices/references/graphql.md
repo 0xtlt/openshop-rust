@@ -201,7 +201,7 @@ async fn reads_a_product(ctx: &TestContext) {
 - The response body must have the Shopify envelope: `{ "data": … }` or `{ "errors": [{ "message": … }] }`.
 - A transport without a responder answers `404 not mocked`. `respond_json(body)` answers every request with the same body.
 - `ctx.transport.requests()` and `last_request()` return the recorded requests; `clear()` forgets them.
-- For a flow, script the transport and call `ctx.run_flow(sync_orders::NAME, json!({ … }))`. The flow's `ctx.shopify` uses the same transport. See `apps/demo-custom/tests/common/mod.rs` for fixtures selected by operation name.
+- For a flow, script the transport and call `ctx.run_flow(sync_orders::NAME, json!({ … }))`. The flow's `ctx.shopify` uses the same transport. See `templates/custom/tests/common/mod.rs` for fixtures selected by operation name.
 - Write fixtures with the same field casing and nullability Shopify returns, including a `null` case for nullable fields.
 
 ## Framework Code
@@ -211,4 +211,4 @@ When changing GraphQL support in `crates/openshop`:
 - The client lives in `crates/openshop/src/shopify/client.rs`. `SHOPIFY_API_VERSION` is the default Admin API version; `ShopifyClient::new(app, shop, shopify_app).with_api_version(version)` selects another one.
 - Send every Shopify request through the `HttpTransport` trait (`crates/openshop/src/runtime/transport.rs`) so tests can replace it with `MockTransport`.
 - The error messages of `graphql()` are the same as in the TypeScript implementation. Keep them, or document the change in `docs/src/reference/differences.md`.
-- Update `docs/src`, the demos (`apps/demo-custom`, `apps/demo-public`), and `crates/openshop-cli/templates/minimal` when user-facing usage changes.
+- Update `docs/src` and the templates (`templates/minimal`, `templates/custom`, `templates/public`) when user-facing usage changes.

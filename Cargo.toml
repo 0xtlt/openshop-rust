@@ -6,8 +6,9 @@ members = [
   "crates/openshop-graphql",
   "crates/openshop-macros",
   "crates/openshop-cli",
-  "apps/demo-custom",
-  "apps/demo-public",
+  "templates/minimal",
+  "templates/custom",
+  "templates/public",
   "apps/preview",
 ]
 # The admin UI targets wasm32 and is built with trunk, with its own profile and lockfile.
@@ -34,6 +35,8 @@ axum = { version = "0.8", default-features = false, features = ["http1", "json",
 base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde", "std"] }
 croner = "3"
+# Without its editor and password prompts.
+dialoguer = { version = "0.12", default-features = false }
 futures = { version = "0.3", default-features = false, features = ["std", "alloc"] }
 graphql-parser = "0.4"
 hex = "0.4"

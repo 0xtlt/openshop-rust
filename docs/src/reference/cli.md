@@ -10,7 +10,7 @@ An OpenShop app has two command lines:
 
 | `openshop` command | What it runs | Purpose |
 | --- | --- | --- |
-| `openshop init <dir>` | — | Scaffold a new project. |
+| `openshop init [<dir>]` | — | Scaffold a new project from a template. |
 | `openshop init-ui` | — | Scaffold a custom admin page with its view. |
 | `openshop dev [cargo args]` | `cargo run [cargo args] -- dev`, restarted on changes | Start the development server. The admin UI reloads by itself. |
 | `openshop codegen [--api-version=YYYY-MM] [--out=<file>]` | — | Download the Shopify Admin GraphQL schema of another API version for [`graphql!`](graphql.md#schema-and-api-version). |
@@ -37,24 +37,41 @@ production, by executing the compiled binary directly (`./my-app start`).
 ## Scaffold a project
 
 ```bash
-openshop init my-app
+openshop init                              # asks for the directory, then the template
+openshop init my-app --template=public     # asks for nothing
 ```
 
-`init <dir>` requires an empty or nonexistent target directory. It writes the
-embedded minimal template, derives the Cargo package name from the directory
-name, pins the `openshop` dependency to the Git tag of the CLI's own version
-(`tag = "v<version>"`), and generates the initial migration in `migrations/`.
-It does not update an existing app. See the
+`init` makes a project from one of the templates embedded in the CLI:
+
+| Template | What the project starts with |
+| --- | --- |
+| `minimal` | One provider and one flow, with the built-in admin. |
+| `custom` | A custom app, built for the merchant who runs it: every building block (a provider, flows, a Shopify Function, webhooks, crons, app proxy routes, a public route, MCP capabilities, a model) and a custom admin page next to the built-in pages. |
+| `public` | A public app, installed by many shops: an admin made of its own pages, a home and settings, and the operator dashboard for whoever runs it. |
+
+In a terminal, `init` asks for the directory and the template it was not
+given: type the name, choose the template with the arrow keys. Elsewhere, in
+a script or CI, it needs both, and fails with the list of templates.
+
+The target must be an empty or nonexistent directory. `init` derives the Cargo
+package name from the directory name, pins the `openshop` dependency to the
+Git tag of the CLI's own version (`tag = "v<version>"`), and writes the
+migrations of the template in `migrations/`: the framework schema, and the
+tables of its models. It does not update an existing app. See the
 [first-app tutorial](../tutorials/first-app.md) for the full setup and
 [Project structure](project-structure.md) for the generated files.
 
 | Argument | Behavior |
 | --- | --- |
-| `<dir>` | Target directory, relative to the current directory. Required: without it the command fails with `Usage: openshop init <dir>`. |
+| `<dir>` | Target directory, relative to the current directory. Asked for in a terminal; elsewhere the command fails with `Usage: openshop init [<dir>] [--template=<name>]`. |
+| `--template=<name>`, `--template <name>`, `-t <name>` | `minimal`, `custom` or `public`. Asked for in a terminal; elsewhere the command fails with ``[openshop] Name a template: openshop init <dir> --template=<name>`` and the list. An unknown name fails with `[openshop] Unknown template: <name>`. |
 | `--openshop-path=<dir>` | Make the generated `Cargo.toml` depend on a local checkout of the `openshop` crate (`path = "…"`) instead of the tagged Git repository. The directory must exist. |
 
 A non-empty target fails with
-`[openshop] Target directory is not empty: <path>`.
+`[openshop] Target directory is not empty: <path>`, before any question about
+the template. The `custom` and `public` templates have admin pages with a
+view, compiled to WebAssembly: install the toolchain once with
+`rustup target add wasm32-unknown-unknown` and `cargo install trunk`.
 
 ### Scaffold a custom admin page
 

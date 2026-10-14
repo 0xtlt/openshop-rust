@@ -30,9 +30,13 @@ cargo install --git https://github.com/0xtlt/openshop-rust openshop-cli
 Then create the project:
 
 ```bash
-openshop init my-app
+openshop init my-app --template=minimal
 cd my-app
 ```
+
+This tutorial starts from the `minimal` template. Without `--template`,
+`openshop init` asks which one to start from; the
+[CLI reference](../reference/cli.md#scaffold-a-project) describes the others.
 
 The CLI prints `[openshop] Created my-app in` followed by the project path. Keep
 this terminal in `my-app` for the remaining commands. The generated project pins

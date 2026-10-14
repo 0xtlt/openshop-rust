@@ -18,7 +18,7 @@ development store.
 
 ```bash
 cargo install --git https://github.com/0xtlt/openshop-rust openshop-cli
-openshop init my-app
+openshop init my-app       # asks for a template: minimal, custom or public
 cd my-app
 docker compose up -d
 cp .env.example .env
@@ -170,9 +170,11 @@ robust; they are listed in [Differences](docs/src/reference/differences.md).
 | `crates/openshop-macros` | The macros: `app!`, the attributes and derives that declare building blocks, and `graphql!` |
 | `crates/openshop-ui` | The admin UI (Leptos, built with trunk into `crates/openshop/ui-dist`) |
 | `crates/openshop-cli` | The `openshop` command: `init`, `init-ui`, `dev`, `build`, `build-ui` and `codegen` |
-| `apps/demo-custom` | The demo of a custom app: every building block, with the built-in admin open to the merchant and a custom admin page |
-| `apps/demo-public` | The demo of a public app: an admin made of its own pages for the merchants, the operator dashboard for whoever runs it |
-| `apps/preview` | What serves either demo in a browser without a Shopify store |
+| `templates/minimal` | The template of `openshop init --template=minimal`: one provider and one flow |
+| `templates/custom` | The template of a custom app: every building block, with the built-in admin open to the merchant and a custom admin page |
+| `templates/public` | The template of a public app: an admin made of its own pages for the merchants, the operator dashboard for whoever runs it |
+| `templates/shared` | The files every project gets: Dockerfile, Procfile, Docker Compose, `.env.example` |
+| `apps/preview` | What serves the custom or public template in a browser without a Shopify store |
 | `docs` | Documentation (mdBook) |
 
 ## Contribute
