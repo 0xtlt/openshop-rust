@@ -13,6 +13,8 @@ use super::shopify_apps::ResolvedShopifyApp;
 use crate::admin::AdminActor;
 use crate::app::OpenShop;
 use crate::runtime::{OutboundRequest, logger, report};
+use crate::shopify::client::ShopifyClient;
+use crate::shopify::client_credentials::Grant;
 
 /// The authenticated shop of an Admin API request.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -21,6 +23,16 @@ pub struct ShopSession {
     /// Handle of the Shopify app the session token was issued for.
     pub shopify_app: String,
     pub actor: AdminActor,
+}
+
+impl ShopSession {
+    /// The Admin API of the shop of the session. Shopify vouched for that shop
+    /// with the session token: a token the Admin API refuses may be renewed
+    /// with the client credentials grant.
+    pub(crate) fn shopify_client(&self, app: &OpenShop) -> ShopifyClient {
+        app.shopify_client(&self.shop, &self.shopify_app)
+            .granting(Some(Grant::Vouched))
+    }
 }
 
 pub(crate) async fn shop_middleware(State(app): State<OpenShop>, mut request: Request, next: Next) -> Response {
@@ -70,20 +82,21 @@ pub(crate) async fn shop_middleware(State(app): State<OpenShop>, mut request: Re
     next.run(request).await
 }
 
-/// Exchanges the session token for an offline access token when the shop has none yet.
+/// Gives the shop an offline access token when it has none yet. Shopify
+/// vouched for the shop with the session token: the client credentials grant
+/// is tried first, and the token exchange when Shopify refuses it. A token
+/// this process obtained with the grant is renewed before it expires.
 async fn ensure_installation(
     app: &OpenShop,
     shopify_app: &ResolvedShopifyApp,
     shop: &str,
     session_token: &str,
 ) -> anyhow::Result<()> {
-    let existing: Option<(Option<String>,)> =
-        sqlx::query_as("SELECT access_token FROM installations WHERE app_handle = $1 AND shop = $2 LIMIT 1")
-            .bind(&shopify_app.handle)
-            .bind(shop)
-            .fetch_optional(app.db())
-            .await?;
-    if existing.is_some_and(|(token,)| token.is_some_and(|token| !token.is_empty())) {
+    let existing = app
+        .client_credentials()
+        .token(app, &shopify_app.handle, shop, Some(Grant::Vouched), None)
+        .await?;
+    if existing.is_some() {
         return Ok(());
     }
     if shopify_app.api_key.is_empty() || shopify_app.api_secret.is_empty() {
@@ -119,8 +132,7 @@ async fn ensure_installation(
     sqlx::query(
         "INSERT INTO installations (app_handle, shop, access_token, scopes) VALUES ($1, $2, $3, $4) \
          ON CONFLICT (app_handle, shop) DO UPDATE SET \
-           access_token = EXCLUDED.access_token, access_token_expires_at = NULL, scopes = EXCLUDED.scopes, \
-           uninstalled_at = NULL",
+           access_token = EXCLUDED.access_token, scopes = EXCLUDED.scopes, uninstalled_at = NULL",
     )
     .bind(&shopify_app.handle)
     .bind(shop)

@@ -414,9 +414,15 @@ async fn product_title(ctx: &WebhookContext, id: &str) -> Result<Option<String>>
 
 `graphql()`:
 
+- fails with `[openshop] Invalid shop domain for app "<app>": expected <name>.myshopify.com`,
+  and sends nothing, when `client.shop` is not `<name>.myshopify.com` or a bare
+  `<name>` (case and blanks aside): no scheme, path, port or user;
 - fails when no installation access token exists, with
   `[openshop] No access token found for app "<app>" and shop "<shop>". Is the app installed?`.
-  Creating the client does not fail; the first call does;
+  Creating the client does not fail; the first call does. For the shop of
+  `SHOPIFY_CLIENT_CREDENTIALS_SHOP`, the client first asks Shopify for one with
+  the [client credentials grant](authentication.md#client-credentials-grant),
+  except in a webhook;
 - POSTs to `https://<shop>/admin/api/<version>/graphql.json` with the
   `X-Shopify-Access-Token` header;
 - fails on non-2xx HTTP responses with

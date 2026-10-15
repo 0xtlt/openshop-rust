@@ -52,8 +52,11 @@ A session token is accepted when:
 | `Unauthorized: session token was not issued to a staff user` | Empty or customer `sub`. |
 
 When the shop has no stored access token yet, the first authenticated request
-exchanges the session token for an offline access token and stores it
-encrypted. The exchange is best-effort: its failure does not fail the request.
+gets one and stores it encrypted: first with the
+[client credentials grant](#client-credentials-grant), which only a development
+store of the organization that owns the app obtains, then, when Shopify refuses
+it, by exchanging the session token for an offline access token. Both are
+best-effort: their failure does not fail the request.
 
 ## OAuth installation
 
@@ -85,49 +88,82 @@ when `ENCRYPTION_KEY` is configured.
 Only `*.myshopify.com` domains are accepted as shops, everywhere a shop is
 read from a request.
 
-## Client credentials mode
+## Client credentials grant
 
-A development store of the Shopify organization that owns the app can get its
+A development store of the Shopify organization that owns the app can get an
 access token without OAuth, a browser or a merchant, with Shopify's
-[client credentials grant](https://shopify.dev/docs/apps/build/authentication-authorization/client-credentials-grant).
-Set `SHOPIFY_CLIENT_CREDENTIALS_SHOP` to that store:
+[client credentials grant](https://shopify.dev/docs/apps/build/authentication-authorization/client-credentials-grant):
+OpenShop posts the API key and secret of the resolved app (the app of the
+handle in multi-app mode) to `https://<shop>/admin/oauth/access_token` with
+`grant_type=client_credentials`, as a form, and stores the token it receives
+encrypted in `installations`, like any other. Shopify only grants it when the
+app and the store belong to the same organization, and refuses anything else,
+for example with `shop_not_permitted`. A merchant's store keeps installing
+through OAuth or the token exchange.
+
+OpenShop only asks for a shop Shopify vouched for, and only when the app has
+no usable token for it (no row, no token, or a row marked uninstalled):
+
+| Where | Shop | When Shopify refuses |
+| --- | --- | --- |
+| A launch from Shopify admin (production shell) | The `shop` of the query, whose `hmac` covers it | Redirected to `/auth`, as before |
+| An Admin API request (`/api`) | The `dest` of the verified session token | The session token is exchanged, as before |
+
+A launch from Shopify admin for a development store with an empty database
+then renders the app instead of redirecting to `/auth`, which Shopify refuses
+to frame. A token obtained this way also brings back a shop marked
+uninstalled, since Shopify vouched for it.
+
+Nothing else asks for an arbitrary shop: not a webhook (its signature covers
+the body, not the `X-Shopify-Shop-Domain` header, and a delivery can be
+replayed), not `/auth?shop=`, not a route that calls `for_shop` with a shop of
+its request, not a flow, a cron or the MCP `openshop.admin.graphql` tool. They
+use the stored token, or, for work no request vouches for, the shop of
+`SHOPIFY_CLIENT_CREDENTIALS_SHOP`:
 
 ```dotenv
-SHOPIFY_CLIENT_CREDENTIALS_SHOP=my-dev-store.myshopify.com
+SHOPIFY_CLIENT_CREDENTIALS_SHOP=dev-store-1.myshopify.com
 ```
 
-The mode is off without the variable, and only ever serves that one shop:
-every other shop installs through OAuth or the token exchange as before. For
-that shop, when an access token is needed and none is stored (a flow, a
-webhook, a proxy or route handler, the MCP `openshop.admin.graphql` tool, or a
-launch from Shopify admin), OpenShop posts the API key and secret of the app to
-`https://<shop>/admin/oauth/access_token` with
-`grant_type=client_credentials`, and stores the token it receives encrypted
-like any other, with when it expires (`access_token_expires_at`).
+For that one shop, a flow, a cron, a route's `for_shop`, a proxy handler, an
+admin handler or the MCP `openshop.admin.graphql` tool asks for a token when
+the app has none, for example after the database was emptied, and a cron of
+every shop (`.all_shops()`) targets it even without an installation row, once
+Shopify gives a token for it. It never brings back a shop marked uninstalled,
+and a webhook does not ask for it either. Without the variable, only a signed
+launch or a session token asks.
 
-- The token lasts about 24 hours and comes without a refresh token. It is
-  reused until five minutes before it expires, then asked again.
-- When the Admin API answers `401`, the token is asked again once and the
-  request is sent again once.
-- One request at a time asks Shopify for a token in a process; the others wait
-  for it and use the one it stored.
-- A launch from Shopify admin for that shop gets the token instead of being
-  redirected to `/auth`, so the app renders inside the admin even with an
-  empty database. When Shopify refuses, the launch is redirected to `/auth`
-  as without the mode, and the refusal is logged.
-- A token stored by OAuth or by the token exchange, which does not expire, is
-  used as it is, until the Admin API refuses it.
+A token is used as it is stored, whoever stored it:
 
-Shopify only grants the token when the app and the store belong to the same
-organization, and the app is installed on the store; anything else is refused,
-for example with `shop_not_permitted`. The error names the HTTP status and
-Shopify's error code, never the client ID, the secret or the token:
+- A token this process obtained with the grant is asked again five minutes
+  before it expires, from the `expires_in` Shopify gave with it. That is kept
+  in memory only: another process, or the same one after a restart, uses the
+  stored token as it is.
+- When the Admin API answers `401` to a client that may ask for the shop (the
+  shop of the variable, or the shop of the session token of an admin
+  handler), it asks once and sends the request again once. When Shopify
+  refuses, or gives no other token, the `401` is the answer.
+- A token without `expires_in` is only asked again after a `401`. A token
+  without `scope` keeps the scopes stored before it.
+- One request at a time asks Shopify for an app and shop in a process; the
+  others wait for it, then use the token it stored.
+- A refusal, an answer that is not `2xx` or a request that fails, is
+  remembered by the process for one hour for that app and shop: nothing asks
+  again meanwhile, and every caller, the ones that waited included, falls back
+  at once to what it does without the grant. It is logged once, with the HTTP
+  status and Shopify's error code, never the client ID, the secret or the
+  token:
 
 ```text
-[openshop] Shopify refused the client credentials of app "default" for my-dev-store.myshopify.com (400: shop_not_permitted)
+[openshop] Shopify refused the client credentials of app "default" for dev-store-1.myshopify.com (400: shop_not_permitted)
 ```
 
-Use it for development stores only, never for a merchant's store.
+The shop the token goes to is always `<name>.myshopify.com`, read without a
+scheme, a path, a port or a user: a value such as
+`evil.example://dev-store-1.myshopify.com` or `dev-store-1.myshopify.com:8443`
+given to a `ShopifyClient` fails with `[openshop] Invalid shop domain` and
+sends nothing, and a webhook whose `X-Shopify-Shop-Domain` is not a shop domain
+is answered `400`.
 
 `POST /auth/webhooks/app-uninstalled` is authenticated like a webhook. It marks
 the installation as uninstalled and deletes its access token. See
@@ -140,8 +176,9 @@ launch from Shopify admin: the request must carry a `shop` parameter and a
 query `hmac` that matches exactly one configured app. Otherwise the server
 answers `401` with a page that says the app opens from Shopify admin, and
 shows nothing of the application. A valid launch for a shop without an
-active installation is redirected to `/auth`, unless it is the shop of the
-[client credentials mode](#client-credentials-mode).
+active installation first asks Shopify for a token with the
+[client credentials grant](#client-credentials-grant), and is redirected to
+`/auth` when Shopify refuses it.
 
 In development (`dev`), the signature is not checked. A request is still
 refused with `403`, and the same page, unless it comes from a local host, is

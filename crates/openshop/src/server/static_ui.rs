@@ -2,9 +2,11 @@
 //!
 //! The shell is only delivered to a shop that opens the app from Shopify admin
 //! (signed query) and has it installed; everyone else is sent to OAuth, or
-//! gets a page that says where the app opens from, with a 401. The shop of the
-//! client credentials mode is installed by the launch itself: its token is
-//! asked from Shopify, with no OAuth redirect inside the admin iframe.
+//! gets a page that says where the app opens from, with a 401. A launch for a
+//! shop without a token first asks Shopify for one with the client credentials
+//! grant, since the signed query vouches for the shop: a development store of
+//! the organization that owns the app opens with no OAuth redirect inside the
+//! admin iframe.
 
 use std::borrow::Cow;
 use std::path::{Component, Path, PathBuf};
@@ -25,6 +27,7 @@ use super::shop_domain::normalize_shop_domain;
 use super::shopify_apps::DEFAULT_SHOPIFY_APP_HANDLE;
 use super::{ROBOTS_HEADER, ServerOptions};
 use crate::app::OpenShop;
+use crate::shopify::client_credentials::Grant;
 use openshop_shared::rpc::encode_uri_component;
 
 /// Looks up an asset of a UI bundle compiled into the application binary.
@@ -314,7 +317,7 @@ pub(crate) async fn serve_ui(
         let Ok(shopify_app) = app.apps().by_signed_query(&query) else {
             return unauthorized_ui();
         };
-        match is_installed_shop(&app, &shopify_app.handle, &shop).await {
+        match is_installed_shop(&app, &shopify_app.handle, &shop, Grant::Vouched).await {
             Ok(true) => {}
             Ok(false) => {
                 let app_param = if shopify_app.handle == DEFAULT_SHOPIFY_APP_HANDLE {

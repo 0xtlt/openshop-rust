@@ -1096,10 +1096,23 @@ async fn session_token_exchange_installs_the_shop_once() {
     .await
     .unwrap();
 
-    // A failed exchange does not block the request.
+    // A failed exchange does not block the request. The client credentials
+    // grant is asked first; refused, it is not asked again within the hour.
     let (status, _) = send(ctx.get("/api/flows")).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(ctx.transport.requests().len(), 1);
+    let grant_types: Vec<Value> = ctx
+        .transport
+        .requests()
+        .iter()
+        .map(|request| request.body["grant_type"].clone())
+        .collect();
+    assert_eq!(
+        grant_types,
+        [
+            json!("client_credentials"),
+            json!("urn:ietf:params:oauth:grant-type:token-exchange")
+        ]
+    );
     ctx.transport.clear();
 
     ctx.transport

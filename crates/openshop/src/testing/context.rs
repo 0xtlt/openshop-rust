@@ -179,8 +179,8 @@ pub struct TestOptions {
     /// Marks the shop as installed with this access token.
     pub access_token: Option<String>,
     pub encryption_key: Option<String>,
-    /// `SHOPIFY_CLIENT_CREDENTIALS_SHOP`: the shop whose token is asked with
-    /// the client credentials grant.
+    /// `SHOPIFY_CLIENT_CREDENTIALS_SHOP`: the shop background work may ask a
+    /// token for with the client credentials grant, from the mock transport.
     pub client_credentials_shop: Option<String>,
     pub host: Option<String>,
     pub production: bool,

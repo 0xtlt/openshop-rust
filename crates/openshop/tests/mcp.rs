@@ -2055,7 +2055,7 @@ async fn openshop_admin_graphql_requires_its_explicit_permission(ctx: &TestConte
     assert_eq!(recorded[0].target_shop, None);
 }
 
-/// The client credentials mode on for `SHOP_B`, which has no installation.
+/// `SHOPIFY_CLIENT_CREDENTIALS_SHOP` names `SHOP_B`, which has no installation.
 async fn client_credentials_context() -> TestContext {
     let options = TestOptions {
         client_credentials_shop: Some(SHOP_B.to_string()),

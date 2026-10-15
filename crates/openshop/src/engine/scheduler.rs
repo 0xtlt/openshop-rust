@@ -16,6 +16,7 @@ use super::step::error_message;
 use crate::app::OpenShop;
 use crate::runtime::{logger, report};
 use crate::server::shopify_apps::DEFAULT_SHOPIFY_APP_HANDLE;
+use crate::shopify::client_credentials::Grant;
 use crate::types::{Cron, CronShops};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -61,6 +62,38 @@ async fn resolve_installed_targets(app: &OpenShop, shops: &[String]) -> Result<V
     Ok(targets)
 }
 
+/// The shop of `SHOPIFY_CLIENT_CREDENTIALS_SHOP`, for each Shopify app that
+/// has no installation row for it, such as after the database was emptied:
+/// targeted once Shopify gives the app a token for it, which stores the row.
+/// A row marked uninstalled is left as it is, and the shop untargeted.
+async fn configured_targets(app: &OpenShop) -> Result<Vec<CronTarget>> {
+    let credentials = app.client_credentials();
+    let Some(shop) = credentials.configured_shop() else {
+        return Ok(Vec::new());
+    };
+    let known: Vec<(String,)> = sqlx::query_as("SELECT app_handle FROM installations WHERE shop = $1")
+        .bind(shop)
+        .fetch_all(app.db())
+        .await?;
+
+    let mut targets = Vec::new();
+    for shopify_app in app.apps().all() {
+        if known.iter().any(|(handle,)| *handle == shopify_app.handle) {
+            continue;
+        }
+        let granted = credentials
+            .grant(app, &shopify_app.handle, shop, Grant::Configured, None)
+            .await?;
+        if granted.is_some() {
+            targets.push(CronTarget {
+                shopify_app: shopify_app.handle.clone(),
+                shop: shop.to_string(),
+            });
+        }
+    }
+    Ok(targets)
+}
+
 async fn resolve_targets(app: &OpenShop, entry: &Cron) -> Result<Vec<CronTarget>> {
     match entry.shops.clone().unwrap_or_default() {
         CronShops::Global => Ok(vec![default_target("__global__")]),
@@ -69,10 +102,12 @@ async fn resolve_targets(app: &OpenShop, entry: &Cron) -> Result<Vec<CronTarget>
                 sqlx::query_as("SELECT app_handle, shop FROM installations WHERE uninstalled_at IS NULL")
                     .fetch_all(app.db())
                     .await?;
-            Ok(rows
+            let mut targets: Vec<CronTarget> = rows
                 .into_iter()
                 .map(|(shopify_app, shop)| CronTarget { shopify_app, shop })
-                .collect())
+                .collect();
+            targets.extend(configured_targets(app).await?);
+            Ok(targets)
         }
         CronShops::Shop(shop) => resolve_installed_targets(app, &[shop]).await,
         CronShops::Shops(shops) => resolve_installed_targets(app, &shops).await,

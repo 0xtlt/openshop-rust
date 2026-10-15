@@ -13,9 +13,9 @@ use serde_json::Value;
 use tokio::sync::OnceCell;
 
 use crate::app::OpenShop;
-use crate::runtime::logger;
 use crate::server::shop_domain::normalize_shop_domain;
 use crate::shopify::client::ShopifyClient;
+use crate::shopify::client_credentials::Grant;
 use crate::types::{ProviderCall, RouteShopContext, RouteShopInput};
 
 pub type ConnectorMethod = Arc<dyn Fn(Value) -> BoxFuture<'static, Result<Value>> + Send + Sync>;
@@ -206,9 +206,10 @@ async fn load_connectors(app: &OpenShop, shop: &str, shopify_app: &str) -> Resul
 }
 
 /// Whether `shop` has the Shopify app `shopify_app` installed, with an access
-/// token. The shop of `SHOPIFY_CLIENT_CREDENTIALS_SHOP` without one is given
-/// one first; when Shopify refuses it, the shop is not installed.
-pub(crate) async fn is_installed_shop(app: &OpenShop, shopify_app: &str, shop: &str) -> Result<bool> {
+/// token. A shop without one that `grant` lets the caller ask a token for is
+/// given one with the client credentials grant first; when Shopify refuses,
+/// the shop is not installed.
+pub(crate) async fn is_installed_shop(app: &OpenShop, shopify_app: &str, shop: &str, grant: Grant) -> Result<bool> {
     let installation: Option<(uuid::Uuid,)> = sqlx::query_as(
         "SELECT id FROM installations \
          WHERE app_handle = $1 AND shop = $2 AND access_token IS NOT NULL AND uninstalled_at IS NULL \
@@ -222,27 +223,23 @@ pub(crate) async fn is_installed_shop(app: &OpenShop, shopify_app: &str, shop: &
         return Ok(true);
     }
 
-    // The shop of the client credentials mode is installed once it has a token.
-    let Some(mode) = app.client_credentials().filter(|mode| mode.covers(shop)) else {
-        return Ok(false);
-    };
-    match mode.token(app, shopify_app, None).await {
-        Ok(_) => Ok(true),
-        Err(error) => {
-            logger::warn(format!("{error:#}"));
-            Ok(false)
-        }
-    }
+    let granted = app
+        .client_credentials()
+        .grant(app, shopify_app, shop, grant, None)
+        .await?;
+    Ok(granted.is_some())
 }
 
-/// Resolves an actively installed shop and its connectors.
+/// Resolves an actively installed shop and its connectors. Nothing vouches
+/// for the shop of the input: only the shop of `SHOPIFY_CLIENT_CREDENTIALS_SHOP`
+/// may get a token with the client credentials grant here.
 pub async fn resolve_shop_context(app: &OpenShop, input: RouteShopInput) -> Result<RouteShopContext> {
     let Some(shop) = normalize_shop_domain(&input.shop) else {
         bail!("[openshop] Invalid shop domain");
     };
     let shopify_app = app.apps().by_handle(input.shopify_app.as_deref())?.handle.clone();
 
-    if !is_installed_shop(app, &shopify_app, &shop).await? {
+    if !is_installed_shop(app, &shopify_app, &shop, Grant::Configured).await? {
         bail!("[openshop] Shop is not actively installed");
     }
 

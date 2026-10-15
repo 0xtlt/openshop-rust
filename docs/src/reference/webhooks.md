@@ -72,7 +72,7 @@ Shopify sends all configured topics to `POST /webhooks`.
 | `WebhookContext` field | Type | Shopify source |
 | --- | --- | --- |
 | `topic` | `String` | `X-Shopify-Topic` |
-| `shop` | `String` | `X-Shopify-Shop-Domain` |
+| `shop` | `String` | `X-Shopify-Shop-Domain`, lowercased |
 | `shopify_app` | `String` | App selected by matching the body HMAC against its secret |
 | `payload` | `serde_json::Value` | Parsed JSON request body |
 | `api_version` | `String` | `X-Shopify-Api-Version` |
@@ -81,7 +81,11 @@ Shopify sends all configured topics to `POST /webhooks`.
 | `connectors` | `Connectors` | The providers of the shop |
 | `app` | `OpenShop` | The running application |
 
-A missing header yields an empty string.
+A missing header yields an empty string, except `X-Shopify-Shop-Domain`: a
+handler only runs for a `<name>.myshopify.com` shop. The signature covers the
+body and not that header, and a delivery can be replayed, so the `shopify`
+client of a webhook uses the stored access token and never asks Shopify for
+one with the [client credentials grant](authentication.md#client-credentials-grant).
 
 Nothing is read when the context is built: the access token of the shop is
 read at the first Shopify request, and the provider configuration at the first
@@ -135,6 +139,7 @@ Shopify version used by your app.
 | `200 { "ok": true }` | No handler matched; OpenShop logs a warning. |
 | `200 { "ok": true }` | Handler returned an error or panicked, or the payload could not be read into the type of its second argument; OpenShop logs the error. |
 | `400 { "error": "Invalid JSON body" }` | Authenticated body is not valid JSON and a handler matched. |
+| `400 { "error": "Invalid shop domain" }` | A handler matched and `X-Shopify-Shop-Domain` is not a `<name>.myshopify.com` shop. |
 | `401 { "error": "Invalid webhook HMAC" }` | HMAC did not match exactly one configured app. |
 | `413` | Request body is larger than the request body limit (2 MB unless the `max_request_body_bytes` setting of `app!` is set). |
 | `500 { "error": "SHOPIFY_API_SECRET is not configured" }` | No Shopify app secret is configured. A secret that is empty or only whitespace counts as not configured. |

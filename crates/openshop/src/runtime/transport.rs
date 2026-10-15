@@ -9,9 +9,11 @@ use serde_json::Value;
 /// The `Content-Type` that sends [`OutboundRequest::body`] as a URL-encoded form.
 pub const FORM_CONTENT_TYPE: &str = "application/x-www-form-urlencoded";
 
-/// A `POST` to Shopify. `body` is sent as JSON, or as a URL-encoded form when
-/// `headers` give the `Content-Type` [`FORM_CONTENT_TYPE`]: it is then an
-/// object of strings, one per field.
+/// A `POST` to Shopify. `body` is sent as JSON, or, by [`ReqwestTransport`],
+/// as a URL-encoded form when the media type of the `Content-Type` of
+/// `headers` is [`FORM_CONTENT_TYPE`] (parameters such as `charset` aside):
+/// it is then an object of strings, one per field. A custom [`HttpTransport`]
+/// that sends the client credentials request must do the same.
 #[derive(Debug, Clone, PartialEq)]
 pub struct OutboundRequest {
     pub url: String,
@@ -35,8 +37,8 @@ impl OutboundResponse {
     }
 }
 
-/// Sends `POST` requests, with a JSON or a form body. Shopify OAuth and Admin
-/// GraphQL only need that.
+/// Sends `POST` requests, with a JSON body, or a form body when the request's
+/// `Content-Type` says so. Shopify OAuth and Admin GraphQL only need that.
 pub trait HttpTransport: Send + Sync + 'static {
     fn post_json(&self, request: OutboundRequest) -> BoxFuture<'_, Result<OutboundResponse>>;
 }
@@ -63,13 +65,22 @@ impl Default for ReqwestTransport {
     }
 }
 
+/// Whether the `Content-Type` of `headers` is a URL-encoded form, whatever
+/// its parameters and its case.
+fn is_form(headers: &[(String, String)]) -> bool {
+    headers.iter().any(|(name, value)| {
+        name.eq_ignore_ascii_case("content-type")
+            && value
+                .split(';')
+                .next()
+                .is_some_and(|media_type| media_type.trim().eq_ignore_ascii_case(FORM_CONTENT_TYPE))
+    })
+}
+
 impl HttpTransport for ReqwestTransport {
     fn post_json(&self, request: OutboundRequest) -> BoxFuture<'_, Result<OutboundResponse>> {
         Box::pin(async move {
-            let form = request.headers.iter().any(|(name, value)| {
-                name.eq_ignore_ascii_case("content-type") && value.eq_ignore_ascii_case(FORM_CONTENT_TYPE)
-            });
-            let mut builder = if form {
+            let mut builder = if is_form(&request.headers) {
                 self.client.post(&request.url).body(serde_urlencoded::to_string(&request.body)?)
             } else {
                 self.client.post(&request.url).json(&request.body)
@@ -141,6 +152,31 @@ mod tests {
         .to_ascii_lowercase();
         assert!(request.contains("content-type: application/x-www-form-urlencoded\r\n"), "{request}");
         assert!(request.ends_with("\r\n\r\ngrant_type=client_credentials&client_id=a+b%26c"), "{request}");
+    }
+
+    #[tokio::test]
+    async fn sends_a_form_whatever_the_parameters_of_the_content_type() {
+        let request = received(
+            vec![(
+                "content-type".to_string(),
+                "Application/X-WWW-Form-URLEncoded; charset=utf-8".to_string(),
+            )],
+            json!({ "grant_type": "client_credentials" }),
+        )
+        .await;
+        assert!(request.ends_with("\r\n\r\ngrant_type=client_credentials"), "{request}");
+    }
+
+    #[test]
+    fn reads_the_media_type_of_the_content_type() {
+        let headers = |value: &str| vec![("Content-Type".to_string(), value.to_string())];
+        assert!(is_form(&headers(FORM_CONTENT_TYPE)));
+        assert!(is_form(&headers("application/x-www-form-urlencoded; charset=utf-8")));
+        assert!(is_form(&headers(" APPLICATION/X-WWW-FORM-URLENCODED ;charset=UTF-8")));
+        assert!(!is_form(&headers("application/json")));
+        assert!(!is_form(&headers("application/x-www-form-urlencoded-extra")));
+        assert!(!is_form(&headers("text/plain; application/x-www-form-urlencoded")));
+        assert!(!is_form(&[("Accept".to_string(), FORM_CONTENT_TYPE.to_string())]));
     }
 
     #[tokio::test]

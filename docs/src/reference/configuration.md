@@ -517,7 +517,7 @@ Cron entries support these shop modes:
 | `CronShops` | Set with | Behavior |
 | --- | --- | --- |
 | `Global` | None of the methods below | Run once without a shop context. The run uses the shop `__global__` and the app handle `default`. |
-| `All` | `.all_shops()` | Run once per installation that is not uninstalled, for every `(app handle, shop)` pair. |
+| `All` | `.all_shops()` | Run once per installation that is not uninstalled, for every `(app handle, shop)` pair. The shop of `SHOPIFY_CLIENT_CREDENTIALS_SHOP` is also targeted for each app that has no row for it, once Shopify gives that app a token for it with the [client credentials grant](authentication.md#client-credentials-grant); a row marked uninstalled keeps it out. |
 | `Shop(shop)` | `.shop("shop.myshopify.com")` | Run only for one shop. |
 | `Shops(shops)` | `.shops(["a.myshopify.com", "b.myshopify.com"])` | Run for selected shops. |
 

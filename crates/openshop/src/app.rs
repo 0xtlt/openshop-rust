@@ -403,7 +403,7 @@ struct Inner {
     crypto: Crypto,
     apps: ShopifyApps,
     transport: Arc<dyn HttpTransport>,
-    client_credentials: Option<ClientCredentials>,
+    client_credentials: ClientCredentials,
     custom_pages: Vec<CustomAdminPage>,
     mcp_registry: McpRegistry,
 }
@@ -478,9 +478,10 @@ impl OpenShop {
         &self.inner.transport
     }
 
-    /// The client credentials mode, when `SHOPIFY_CLIENT_CREDENTIALS_SHOP` sets it.
-    pub(crate) fn client_credentials(&self) -> Option<&ClientCredentials> {
-        self.inner.client_credentials.as_ref()
+    /// The client credentials grant, and the shop of
+    /// `SHOPIFY_CLIENT_CREDENTIALS_SHOP` background work may use it for.
+    pub(crate) fn client_credentials(&self) -> &ClientCredentials {
+        &self.inner.client_credentials
     }
 
     pub(crate) fn custom_pages(&self) -> &[CustomAdminPage] {

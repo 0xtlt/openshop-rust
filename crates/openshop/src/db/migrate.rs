@@ -47,11 +47,6 @@ pub const FRAMEWORK_MIGRATIONS: &[FrameworkMigration] = &[
         name: "openshop_queue_indexes",
         sql: include_str!("../../migrations/0002_openshop_queue_indexes.sql"),
     },
-    FrameworkMigration {
-        id: "0003_openshop_access_token_expiry",
-        name: "openshop_access_token_expiry",
-        sql: include_str!("../../migrations/0003_openshop_access_token_expiry.sql"),
-    },
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]

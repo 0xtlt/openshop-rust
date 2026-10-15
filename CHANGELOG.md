@@ -2,20 +2,33 @@
 
 ## Unreleased
 
-- A development store of the organization that owns the app gets its access
-  token with Shopify's client credentials grant, with no OAuth, once
-  `SHOPIFY_CLIENT_CREDENTIALS_SHOP` names it. When a token is needed and none
-  is stored, it is asked from Shopify and stored encrypted with when it
-  expires; it is asked again five minutes before it does, and once when the
-  Admin API answers `401`, the request being sent again. A launch from Shopify
-  admin for that shop gets the token instead of being redirected to `/auth`,
-  which Shopify refuses to frame. The mode is off without the variable and
-  only ever serves that shop. The framework schema has a third migration,
-  `openshop_access_token_expiry`, which adds `access_token_expires_at` to
-  `installations`: `migrate generate` adds it to an existing project, and
-  `migrate check` fails until it is there. `OutboundRequest` sends its body as
-  a URL-encoded form when its `Content-Type` is
-  `application/x-www-form-urlencoded`.
+- A development store of the organization that owns the app gets its Admin
+  API token with Shopify's client credentials grant, with no OAuth. A launch
+  from Shopify admin whose signed query names a shop, or an Admin API request
+  whose verified session token does, asks Shopify for a token when the app has
+  none for that shop, before redirecting to `/auth` or exchanging the session
+  token as before; a development store with an empty database then opens in the
+  admin, where Shopify refuses to frame `/auth`. `SHOPIFY_CLIENT_CREDENTIALS_SHOP`
+  names the one shop that flows, crons, routes and the MCP
+  `openshop.admin.graphql` tool may ask a token for, without ever bringing back
+  a shop marked uninstalled; a cron of every shop targets it even without an
+  installation row. Webhooks never ask. The token is stored encrypted in
+  `installations` like the others, with no schema change. A token this process
+  obtained is asked again five minutes before it expires; any token is asked
+  again once after a `401`, where the client may ask for its shop, and the
+  request sent again once. A refusal is remembered by the process for an hour
+  per app and shop.
+- A `ShopifyClient` whose `shop` is not `<name>.myshopify.com` or a bare
+  `<name>` fails with `[openshop] Invalid shop domain` and sends nothing; it
+  used to build the address of the Admin API from the value as it was given.
+  A webhook whose `X-Shopify-Shop-Domain` is not a shop domain is answered
+  `400` when a handler matches, and its `shop` is lowercased.
+- `ReqwestTransport` sends `OutboundRequest.body` as a URL-encoded form when
+  the media type of the request's `Content-Type` is
+  `application/x-www-form-urlencoded` (`runtime::FORM_CONTENT_TYPE`), whatever
+  its parameters. The `HttpTransport` trait is unchanged, but OpenShop now
+  sends such a request for the client credentials grant: a custom
+  `HttpTransport` must encode it as a form too.
 - A caller that is still sending when its request is refused reads the answer.
   A body over the request body limit is answered `413` as soon as the limit is
   crossed, and the connection was closed there: cut off in the middle of its

@@ -154,9 +154,19 @@ fn callback_path(shop: &str, code: &str, state: &str, secret: &str) -> String {
     )
 }
 
+/// Shopify as it answers for a merchant's store: the client credentials grant
+/// is refused, and any other token request answered with `body`.
+fn refuse_client_credentials(ctx: &TestContext, body: Value) {
+    ctx.transport.respond_with(move |request| {
+        if request.body["grant_type"] == "client_credentials" {
+            return Ok(MockTransport::json(400, json!({ "error": "shop_not_permitted" })));
+        }
+        Ok(MockTransport::json(200, body.clone()))
+    });
+}
+
 fn grant_access_token(ctx: &TestContext, access_token: &str) {
-    ctx.transport
-        .respond_json(json!({ "access_token": access_token, "scope": "read_products" }));
+    refuse_client_credentials(ctx, json!({ "access_token": access_token, "scope": "read_products" }));
 }
 
 /// Runs a GraphQL query as the shop and returns the access token sent to Shopify.
@@ -1024,17 +1034,21 @@ async fn unknown_api_paths_require_a_session_token_before_returning_404(ctx: &Te
 
 #[openshop::test(single_app())]
 async fn session_token_request_exchanges_the_token_and_stores_it_encrypted(ctx: &TestContext) {
-    ctx.transport
-        .respond_json(json!({ "access_token": "offline-token", "scope": "read_products,write_orders" }));
+    refuse_client_credentials(
+        ctx,
+        json!({ "access_token": "offline-token", "scope": "read_products,write_orders" }),
+    );
     let token = ctx.session_token();
 
     assert_eq!(api_get(ctx, "/api/flows", &token).await.status(), 200);
 
+    // The client credentials grant first, which Shopify refuses to a merchant's store.
     let requests = ctx.transport.requests();
-    assert_eq!(requests.len(), 1);
-    assert_eq!(requests[0].url, "https://test.myshopify.com/admin/oauth/access_token");
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0].body["grant_type"], "client_credentials");
+    assert_eq!(requests[1].url, "https://test.myshopify.com/admin/oauth/access_token");
     assert_eq!(
-        requests[0].body,
+        requests[1].body,
         json!({
             "client_id": "test-app",
             "client_secret": SECRET,
@@ -1055,7 +1069,7 @@ async fn session_token_request_exchanges_the_token_and_stores_it_encrypted(ctx: 
 
     // Once installed, later requests do not exchange again.
     assert_eq!(api_get(ctx, "/api/flows", &token).await.status(), 200);
-    assert_eq!(ctx.transport.requests().len(), 1);
+    assert_eq!(ctx.transport.requests().len(), 2);
 }
 
 #[tokio::test]
@@ -1089,7 +1103,16 @@ async fn session_token_request_survives_a_failed_token_exchange(ctx: &TestContex
         .respond_with(|_| Ok(MockTransport::json(200, json!("not an object"))));
     assert_eq!(ctx.get("/api/flows").send().await.unwrap().status(), 200);
 
-    assert_eq!(ctx.transport.requests().len(), 4);
+    // The client credentials grant refused at the first request is not asked
+    // again within the hour: four exchanges, one grant.
+    let requests = ctx.transport.requests();
+    assert_eq!(requests.len(), 5);
+    assert_eq!(requests[0].body["grant_type"], "client_credentials");
+    assert!(
+        requests[1..]
+            .iter()
+            .all(|request| request.body["grant_type"] == "urn:ietf:params:oauth:grant-type:token-exchange")
+    );
     assert_eq!(installation_count(ctx).await, 0);
 }
 
@@ -1125,7 +1148,8 @@ async fn token_exchange_reinstalls_a_shop_after_the_uninstall_webhook(ctx: &Test
     assert_eq!(reinstalled.id, first.id);
     assert_eq!(decrypted_token(ctx, &reinstalled).as_deref(), Some("second-token"));
     assert!(reinstalled.uninstalled_at.is_none());
-    assert_eq!(ctx.transport.requests().len(), 2);
+    // Two exchanges, and one client credentials grant, refused and then held back.
+    assert_eq!(ctx.transport.requests().len(), 3);
 }
 
 #[openshop::test(TestContext::new(config()))]
@@ -1153,7 +1177,8 @@ async fn token_exchange_in_production_without_an_encryption_key_never_writes_pla
     // The request itself is served: installation is best-effort.
     assert_eq!(ctx.get("/api/flows").send().await.unwrap().status(), 200);
 
-    assert_eq!(ctx.transport.requests().len(), 1);
+    // The client credentials grant, refused, then the exchange.
+    assert_eq!(ctx.transport.requests().len(), 2);
     let stored = find_installation(&ctx, "default", SHOP).await;
     assert!(stored.is_none_or(|row| row.access_token.is_none()));
     ctx.shutdown().await.unwrap();
@@ -1218,6 +1243,9 @@ async fn a_malformed_encryption_key_never_falls_back_to_plaintext() {
 async fn session_token_is_resolved_by_audience_in_multi_app_mode(ctx: &TestContext) {
     let shop = "same-shop.myshopify.com";
     ctx.transport.respond_with(|request| {
+        if request.body["grant_type"] == "client_credentials" {
+            return Ok(MockTransport::json(400, json!({ "error": "shop_not_permitted" })));
+        }
         let client_id = request.body["client_id"].as_str().unwrap_or_default();
         Ok(MockTransport::json(
             200,
@@ -1228,8 +1256,12 @@ async fn session_token_is_resolved_by_audience_in_multi_app_mode(ctx: &TestConte
     let token_b = session_token(shop, "client-b-secret", "client-b-key", "7");
     assert_eq!(api_get(ctx, "/api/flows", &token_b).await.status(), 200);
 
-    let requests = ctx.transport.requests();
-    assert_eq!(requests.len(), 1);
+    // The client credentials grant of app B, refused, then its token exchange.
+    let mut requests = ctx.transport.requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0].body["client_id"], "client-b-key");
+    assert_eq!(requests[0].body["grant_type"], "client_credentials");
+    requests.remove(0);
     assert_eq!(
         requests[0].url,
         "https://same-shop.myshopify.com/admin/oauth/access_token"
