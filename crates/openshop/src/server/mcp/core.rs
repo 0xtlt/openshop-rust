@@ -137,33 +137,48 @@ async fn run_admin_graphql(ctx: McpContext, input: JsonMap) -> Result<Value> {
     let variables = object_input(&input, "variables");
     let api_version = api_version_input(&input)?;
 
-    let installation: Option<(Option<String>,)> = sqlx::query_as(
-        "SELECT access_token FROM installations \
-         WHERE app_handle = $1 AND shop = $2 AND access_token IS NOT NULL AND uninstalled_at IS NULL \
-         LIMIT 1",
-    )
-    .bind(&ctx.shopify_app)
-    .bind(&shop)
-    .fetch_optional(&ctx.db)
-    .await?;
+    // In the client credentials mode, its shop gets a token when it has none,
+    // and a new one when the Admin API refuses it.
+    let client_credentials = ctx.app.client_credentials().filter(|mode| mode.covers(&shop));
+    let access_token = match client_credentials {
+        Some(mode) => mode.token(&ctx.app, &ctx.shopify_app, None).await?.value,
+        None => {
+            let installation: Option<(Option<String>,)> = sqlx::query_as(
+                "SELECT access_token FROM installations \
+                 WHERE app_handle = $1 AND shop = $2 AND access_token IS NOT NULL AND uninstalled_at IS NULL \
+                 LIMIT 1",
+            )
+            .bind(&ctx.shopify_app)
+            .bind(&shop)
+            .fetch_optional(&ctx.db)
+            .await?;
 
-    let stored = installation.and_then(|(token,)| token);
-    let Some(access_token) = ctx.app.crypto().decrypt_string(stored.as_deref())? else {
-        bail!("Shop \"{shop}\" is not installed for app \"{}\"", ctx.shopify_app);
+            let stored = installation.and_then(|(token,)| token);
+            let Some(access_token) = ctx.app.crypto().decrypt_string(stored.as_deref())? else {
+                bail!("Shop \"{shop}\" is not installed for app \"{}\"", ctx.shopify_app);
+            };
+            access_token
+        }
     };
 
-    let response = ctx
-        .app
-        .transport()
-        .post_json(OutboundRequest {
+    let body = json!({ "query": query, "variables": variables });
+    let send = |access_token: String| {
+        ctx.app.transport().post_json(OutboundRequest {
             url: format!("https://{shop}/admin/api/{api_version}/graphql.json"),
             headers: vec![
                 ("Content-Type".to_string(), "application/json".to_string()),
                 ("X-Shopify-Access-Token".to_string(), access_token),
             ],
-            body: json!({ "query": query, "variables": variables }),
+            body: body.clone(),
         })
-        .await?;
+    };
+    let mut response = send(access_token.clone()).await?;
+    if response.status == 401
+        && let Some(mode) = client_credentials
+    {
+        let renewed = mode.token(&ctx.app, &ctx.shopify_app, Some(&access_token)).await?;
+        response = send(renewed.value).await?;
+    }
 
     let mut result = JsonMap::new();
     result.insert("shop".into(), Value::from(shop));

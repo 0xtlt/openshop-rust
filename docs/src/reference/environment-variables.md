@@ -19,6 +19,7 @@ afterwards has no effect on a running process.
 | `HOST` | Production | Falls back to `SHOPIFY_APP_URL` | Public application URL and allowed CORS origin |
 | `SHOPIFY_APP_URL` | When `HOST` is absent | Empty | Legacy public application URL and allowed CORS origin |
 | `ENCRYPTION_KEY` | Production | Plaintext storage in development | Provider configuration and Shopify access-token encryption |
+| `SHOPIFY_CLIENT_CREDENTIALS_SHOP` | No | Off | The one `*.myshopify.com` development store whose access token is obtained with the [client credentials grant](authentication.md#client-credentials-mode) |
 | `OPENSHOP_ENV` | Production | Development mode | `production` enables production safety checks and encryption enforcement |
 | `NODE_ENV` | No | — | `production` is honored like `OPENSHOP_ENV=production` |
 | `PORT` | No | `3000` | HTTP port of `dev` and `start` |
@@ -33,7 +34,11 @@ afterwards has no effect on a running process.
 Notes:
 
 - An empty value counts as unset for `SHOPIFY_API_KEY`, `SHOPIFY_API_SECRET`,
-  `HOST`, `SHOPIFY_APP_URL`, `ENCRYPTION_KEY`, and `OPENSHOP_UI_DIR`.
+  `HOST`, `SHOPIFY_APP_URL`, `ENCRYPTION_KEY`, `SHOPIFY_CLIENT_CREDENTIALS_SHOP`,
+  and `OPENSHOP_UI_DIR`.
+- A `SHOPIFY_CLIENT_CREDENTIALS_SHOP` that is not a `*.myshopify.com` domain
+  stops the command at startup with
+  `[openshop] SHOPIFY_CLIENT_CREDENTIALS_SHOP must be a *.myshopify.com domain`.
 - A `PORT` that is not a number between 1 and 65535 falls back to `3000`.
 - A `PGPOOL_*` value that is not a non-negative integer falls back to its
   default. `0` disables a timeout and is the default size for `PGPOOL_MAX`:

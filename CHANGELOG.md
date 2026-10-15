@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+- A development store of the organization that owns the app gets its access
+  token with Shopify's client credentials grant, with no OAuth, once
+  `SHOPIFY_CLIENT_CREDENTIALS_SHOP` names it. When a token is needed and none
+  is stored, it is asked from Shopify and stored encrypted with when it
+  expires; it is asked again five minutes before it does, and once when the
+  Admin API answers `401`, the request being sent again. A launch from Shopify
+  admin for that shop gets the token instead of being redirected to `/auth`,
+  which Shopify refuses to frame. The mode is off without the variable and
+  only ever serves that shop. The framework schema has a third migration,
+  `openshop_access_token_expiry`, which adds `access_token_expires_at` to
+  `installations`: `migrate generate` adds it to an existing project, and
+  `migrate check` fails until it is there. `OutboundRequest` sends its body as
+  a URL-encoded form when its `Content-Type` is
+  `application/x-www-form-urlencoded`.
 - A caller that is still sending when its request is refused reads the answer.
   A body over the request body limit is answered `413` as soon as the limit is
   crossed, and the connection was closed there: cut off in the middle of its

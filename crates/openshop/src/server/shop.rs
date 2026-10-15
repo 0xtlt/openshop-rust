@@ -119,7 +119,8 @@ async fn ensure_installation(
     sqlx::query(
         "INSERT INTO installations (app_handle, shop, access_token, scopes) VALUES ($1, $2, $3, $4) \
          ON CONFLICT (app_handle, shop) DO UPDATE SET \
-           access_token = EXCLUDED.access_token, scopes = EXCLUDED.scopes, uninstalled_at = NULL",
+           access_token = EXCLUDED.access_token, access_token_expires_at = NULL, scopes = EXCLUDED.scopes, \
+           uninstalled_at = NULL",
     )
     .bind(&shopify_app.handle)
     .bind(shop)

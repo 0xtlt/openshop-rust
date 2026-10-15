@@ -85,6 +85,50 @@ when `ENCRYPTION_KEY` is configured.
 Only `*.myshopify.com` domains are accepted as shops, everywhere a shop is
 read from a request.
 
+## Client credentials mode
+
+A development store of the Shopify organization that owns the app can get its
+access token without OAuth, a browser or a merchant, with Shopify's
+[client credentials grant](https://shopify.dev/docs/apps/build/authentication-authorization/client-credentials-grant).
+Set `SHOPIFY_CLIENT_CREDENTIALS_SHOP` to that store:
+
+```dotenv
+SHOPIFY_CLIENT_CREDENTIALS_SHOP=my-dev-store.myshopify.com
+```
+
+The mode is off without the variable, and only ever serves that one shop:
+every other shop installs through OAuth or the token exchange as before. For
+that shop, when an access token is needed and none is stored (a flow, a
+webhook, a proxy or route handler, the MCP `openshop.admin.graphql` tool, or a
+launch from Shopify admin), OpenShop posts the API key and secret of the app to
+`https://<shop>/admin/oauth/access_token` with
+`grant_type=client_credentials`, and stores the token it receives encrypted
+like any other, with when it expires (`access_token_expires_at`).
+
+- The token lasts about 24 hours and comes without a refresh token. It is
+  reused until five minutes before it expires, then asked again.
+- When the Admin API answers `401`, the token is asked again once and the
+  request is sent again once.
+- One request at a time asks Shopify for a token in a process; the others wait
+  for it and use the one it stored.
+- A launch from Shopify admin for that shop gets the token instead of being
+  redirected to `/auth`, so the app renders inside the admin even with an
+  empty database. When Shopify refuses, the launch is redirected to `/auth`
+  as without the mode, and the refusal is logged.
+- A token stored by OAuth or by the token exchange, which does not expire, is
+  used as it is, until the Admin API refuses it.
+
+Shopify only grants the token when the app and the store belong to the same
+organization, and the app is installed on the store; anything else is refused,
+for example with `shop_not_permitted`. The error names the HTTP status and
+Shopify's error code, never the client ID, the secret or the token:
+
+```text
+[openshop] Shopify refused the client credentials of app "default" for my-dev-store.myshopify.com (400: shop_not_permitted)
+```
+
+Use it for development stores only, never for a merchant's store.
+
 `POST /auth/webhooks/app-uninstalled` is authenticated like a webhook. It marks
 the installation as uninstalled and deletes its access token. See
 [Webhooks](webhooks.md#http-endpoint-and-context).
@@ -96,7 +140,8 @@ launch from Shopify admin: the request must carry a `shop` parameter and a
 query `hmac` that matches exactly one configured app. Otherwise the server
 answers `401` with a page that says the app opens from Shopify admin, and
 shows nothing of the application. A valid launch for a shop without an
-active installation is redirected to `/auth`.
+active installation is redirected to `/auth`, unless it is the shop of the
+[client credentials mode](#client-credentials-mode).
 
 In development (`dev`), the signature is not checked. A request is still
 refused with `403`, and the same page, unless it comes from a local host, is

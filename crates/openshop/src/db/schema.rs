@@ -100,6 +100,10 @@ pub struct InstallationRow {
     pub app_handle: String,
     pub shop: String,
     pub access_token: Option<String>,
+    /// When the access token expires: set for a token of the client
+    /// credentials grant, empty for the tokens that do not expire.
+    #[serde(serialize_with = "iso_option::serialize")]
+    pub access_token_expires_at: Option<DateTime<Utc>>,
     pub scopes: Option<String>,
     pub nonce: Option<String>,
     #[serde(serialize_with = "iso::serialize")]

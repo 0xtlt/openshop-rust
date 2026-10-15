@@ -13,6 +13,7 @@ use serde_json::Value;
 use tokio::sync::OnceCell;
 
 use crate::app::OpenShop;
+use crate::runtime::logger;
 use crate::server::shop_domain::normalize_shop_domain;
 use crate::shopify::client::ShopifyClient;
 use crate::types::{ProviderCall, RouteShopContext, RouteShopInput};
@@ -204,6 +205,9 @@ async fn load_connectors(app: &OpenShop, shop: &str, shopify_app: &str) -> Resul
     Ok(connectors)
 }
 
+/// Whether `shop` has the Shopify app `shopify_app` installed, with an access
+/// token. The shop of `SHOPIFY_CLIENT_CREDENTIALS_SHOP` without one is given
+/// one first; when Shopify refuses it, the shop is not installed.
 pub(crate) async fn is_installed_shop(app: &OpenShop, shopify_app: &str, shop: &str) -> Result<bool> {
     let installation: Option<(uuid::Uuid,)> = sqlx::query_as(
         "SELECT id FROM installations \
@@ -214,7 +218,21 @@ pub(crate) async fn is_installed_shop(app: &OpenShop, shopify_app: &str, shop: &
     .bind(shop)
     .fetch_optional(app.db())
     .await?;
-    Ok(installation.is_some())
+    if installation.is_some() {
+        return Ok(true);
+    }
+
+    // The shop of the client credentials mode is installed once it has a token.
+    let Some(mode) = app.client_credentials().filter(|mode| mode.covers(shop)) else {
+        return Ok(false);
+    };
+    match mode.token(app, shopify_app, None).await {
+        Ok(_) => Ok(true),
+        Err(error) => {
+            logger::warn(format!("{error:#}"));
+            Ok(false)
+        }
+    }
 }
 
 /// Resolves an actively installed shop and its connectors.

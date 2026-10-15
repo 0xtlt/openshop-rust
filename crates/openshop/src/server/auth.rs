@@ -109,7 +109,8 @@ async fn callback(State(app): State<OpenShop>, RawQuery(raw): RawQuery) -> ApiRe
 
     sqlx::query(
         "UPDATE installations SET \
-           access_token = $1, scopes = $2, nonce = NULL, installed_at = now(), uninstalled_at = NULL \
+           access_token = $1, access_token_expires_at = NULL, scopes = $2, nonce = NULL, \
+           installed_at = now(), uninstalled_at = NULL \
          WHERE id = $3",
     )
     .bind(app.crypto().encrypt_string(access_token)?)
@@ -138,7 +139,8 @@ async fn app_uninstalled(State(app): State<OpenShop>, headers: HeaderMap, body: 
 
     if let Some(shop_domain) = shop_domain {
         sqlx::query(
-            "UPDATE installations SET uninstalled_at = now(), access_token = NULL WHERE app_handle = $1 AND shop = $2",
+            "UPDATE installations SET uninstalled_at = now(), access_token = NULL, access_token_expires_at = NULL \
+             WHERE app_handle = $1 AND shop = $2",
         )
         .bind(&shopify_app.handle)
         .bind(shop_domain)

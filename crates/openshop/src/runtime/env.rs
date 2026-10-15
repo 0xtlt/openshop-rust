@@ -18,6 +18,11 @@ pub struct RuntimeEnv {
     pub shopify_app_url: Option<String>,
     /// `ENCRYPTION_KEY`: 64 hex characters.
     pub encryption_key: Option<String>,
+    /// `SHOPIFY_CLIENT_CREDENTIALS_SHOP`: the one `*.myshopify.com` shop whose
+    /// access token is obtained with the client credentials grant, as it is
+    /// written. [`OpenShop`](crate::OpenShop) refuses to start when it is not
+    /// a shop domain.
+    pub client_credentials_shop: Option<String>,
     /// `OPENSHOP_ENV=production` (or `NODE_ENV=production`).
     pub production: bool,
     /// Project root used to resolve Shopify TOML files and migrations.
@@ -40,6 +45,7 @@ impl RuntimeEnv {
             host: non_empty("HOST"),
             shopify_app_url: non_empty("SHOPIFY_APP_URL"),
             encryption_key: non_empty("ENCRYPTION_KEY"),
+            client_credentials_shop: non_empty("SHOPIFY_CLIENT_CREDENTIALS_SHOP"),
             production,
             cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
         }

@@ -2055,6 +2055,73 @@ async fn openshop_admin_graphql_requires_its_explicit_permission(ctx: &TestConte
     assert_eq!(recorded[0].target_shop, None);
 }
 
+/// The client credentials mode on for `SHOP_B`, which has no installation.
+async fn client_credentials_context() -> TestContext {
+    let options = TestOptions {
+        client_credentials_shop: Some(SHOP_B.to_string()),
+        ..Default::default()
+    };
+    TestContext::with_options(config_with(demo_mcp()), options)
+        .await
+        .unwrap()
+}
+
+#[openshop::test(client_credentials_context())]
+async fn openshop_admin_graphql_gets_the_token_of_the_client_credentials_shop_and_renews_a_refused_one(
+    ctx: &TestContext,
+) {
+    let issued_tokens = Arc::new(AtomicUsize::new(0));
+    let issued = issued_tokens.clone();
+    ctx.transport.respond_with(move |request| {
+        if request.url == format!("https://{SHOP_B}/admin/oauth/access_token") {
+            let number = issued.fetch_add(1, Ordering::SeqCst) + 1;
+            return Ok(MockTransport::json(
+                200,
+                json!({ "access_token": format!("cc-token-{number}"), "scope": "read_products", "expires_in": 86399 }),
+            ));
+        }
+        if !request.url.ends_with("/graphql.json") {
+            return Ok(MockTransport::json(404, json!({})));
+        }
+        // The first token is refused, as one Shopify no longer takes.
+        match header(request, "X-Shopify-Access-Token") {
+            Some("cc-token-1") => Ok(MockTransport::json(401, json!({ "errors": "Invalid access token" }))),
+            _ => Ok(MockTransport::json(
+                200,
+                json!({ "data": { "shop": { "name": "Dev store" } } }),
+            )),
+        }
+    });
+    let mcp_token = create_token(ctx, &["shopify_admin_graphql"]).await;
+
+    let body = call_tool(
+        ctx,
+        &mcp_token.token,
+        "openshop.admin.graphql",
+        json!({ "shop": SHOP_B, "apiVersion": "2026-04", "query": "{ shop { name } }" }),
+    )
+    .await;
+    let result = &body["result"]["structuredContent"];
+    assert_eq!(result["status"], 200);
+    assert_eq!(result["data"]["shop"]["name"], "Dev store");
+    assert_eq!(issued_tokens.load(Ordering::SeqCst), 2);
+    let requests = graphql_requests(ctx);
+    assert_eq!(requests.len(), 2);
+    assert_eq!(header(&requests[0], "X-Shopify-Access-Token"), Some("cc-token-1"));
+    assert_eq!(header(&requests[1], "X-Shopify-Access-Token"), Some("cc-token-2"));
+
+    // Another shop of the application is not served by the mode.
+    let body = call_tool(
+        ctx,
+        &mcp_token.token,
+        "openshop.admin.graphql",
+        json!({ "shop": "mcp-third.myshopify.com", "query": "{ shop { name } }" }),
+    )
+    .await;
+    assert!(body.to_string().contains("is not installed"), "{body}");
+    assert_eq!(issued_tokens.load(Ordering::SeqCst), 2);
+}
+
 #[openshop::test(context())]
 async fn openshop_admin_graphql_defaults_omitted_api_version_to_the_latest_stable_version(ctx: &TestContext) {
     let shop = ctx.shop.clone();

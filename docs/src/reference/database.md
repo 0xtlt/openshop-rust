@@ -418,7 +418,7 @@ unless noted.
 
 | Table | Purpose | Other columns | Unique indexes |
 | --- | --- | --- | --- |
-| `installations` | Installed shops and their access tokens | `access_token`, `scopes`, `nonce`, `installed_at`, `uninstalled_at` | `(app_handle, shop)` |
+| `installations` | Installed shops and their access tokens | `access_token`, `access_token_expires_at`, `scopes`, `nonce`, `installed_at`, `uninstalled_at` | `(app_handle, shop)` |
 | `flow_runs` | Queue and history of flow runs | `flow_name`, `status`, `input`, `error`, `deadline_at`, `parent_run_id`, `attempts`, `available_at`, `worker_id`, `retry_policy`, `started_at`, `completed_at`, `created_at` | — |
 | `step_results` | Checkpoints; scoped by `flow_run_id` | `step_name`, `attempt`, `status`, `output`, `error`, `duration_ms`, `created_at` | `(flow_run_id, step_name, attempt)` |
 | `provider_configs` | Saved provider configuration | `provider_name`, `config`, `last_checked_at`, `last_check_ok`, `updated_at` | `(app_handle, shop, provider_name)` |

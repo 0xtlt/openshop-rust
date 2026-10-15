@@ -2,7 +2,9 @@
 //!
 //! The shell is only delivered to a shop that opens the app from Shopify admin
 //! (signed query) and has it installed; everyone else is sent to OAuth, or
-//! gets a page that says where the app opens from, with a 401.
+//! gets a page that says where the app opens from, with a 401. The shop of the
+//! client credentials mode is installed by the launch itself: its token is
+//! asked from Shopify, with no OAuth redirect inside the admin iframe.
 
 use std::borrow::Cow;
 use std::path::{Component, Path, PathBuf};
