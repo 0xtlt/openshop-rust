@@ -16,9 +16,26 @@ const WORKSPACE_MANIFEST: &str = include_str!("../../../Cargo.toml");
 
 /// The files of the templates in `templates/`, as `(path in the project,
 /// content)`: `MINIMAL`, `CUSTOM` and `PUBLIC`, and `SHARED`, which every
-/// project gets.
+/// project gets (see [`shared_files`]).
 mod files {
     include!(concat!(env!("OUT_DIR"), "/templates.rs"));
+}
+
+/// The shared files a project gets: `<name>.views` in place of `<name>` when
+/// the admin pages of its template have views, such as the `Dockerfile` that
+/// builds their bundle.
+fn shared_files(template: &Template) -> impl Iterator<Item = (&'static str, &'static str)> + '_ {
+    let has_variant = |path: &str| {
+        files::SHARED
+            .iter()
+            .any(|(other, _)| other.strip_suffix(".views") == Some(path))
+    };
+    files::SHARED
+        .iter()
+        .filter_map(move |&(path, content)| match path.strip_suffix(".views") {
+            Some(path) => template.views.then_some((path, content)),
+            None => (!(template.views && has_variant(path))).then_some((path, content)),
+        })
 }
 
 /// A project `openshop init` starts from.
@@ -293,7 +310,9 @@ fn project_file(path: &str, content: &str, template: &Template, project: &Projec
         "README.md" => rename_lines("# ", format!("# {}", project.app_name)),
         "shopify.app.toml" => rename_lines("name = ", format!("name = {}", toml_string(project.app_name))),
         _ if path.ends_with(".rs") => content.replace(&template.crate_name(), &project.package_name.replace('-', "_")),
-        _ => content.replace("__PACKAGE_NAME__", project.package_name),
+        _ => content
+            .replace("__PACKAGE_NAME__", project.package_name)
+            .replace("__OPENSHOP_VERSION__", OPENSHOP_VERSION),
     })
 }
 
@@ -506,7 +525,7 @@ pub fn init(cwd: &Path, target: &str, template: &Template, openshop_path: Option
         openshop: &openshop,
     };
 
-    for (path, content) in template.files.iter().chain(files::SHARED) {
+    for (path, content) in template.files.iter().copied().chain(shared_files(template)) {
         let file = target_dir.join(path);
         if let Some(parent) = file.parent() {
             std::fs::create_dir_all(parent)?;
@@ -668,18 +687,20 @@ mod tests {
         for template in TEMPLATES {
             let result = init(&cwd, &format!("shop-{}", template.name), template, None).unwrap();
             let paths: Vec<_> = template.files.iter().map(|(path, _)| *path).collect();
+            let shared: Vec<_> = shared_files(template).map(|(path, _)| path).collect();
             assert!(
-                files::SHARED.iter().all(|(path, _)| !paths.contains(path)),
+                shared.iter().all(|path| !paths.contains(path)),
                 "{} overrides a shared file",
                 template.name
             );
-            for path in paths.iter().chain(files::SHARED.iter().map(|(path, _)| path)) {
+            for path in paths.iter().chain(&shared) {
                 let content = std::fs::read_to_string(result.target_dir.join(path)).unwrap();
                 for repository_only in [
                     "openshop_template_",
                     "openshop-template-",
                     "workspace",
                     "__PACKAGE_NAME__",
+                    "__OPENSHOP_VERSION__",
                 ] {
                     assert!(
                         !content.contains(repository_only),
@@ -694,6 +715,24 @@ mod tests {
             assert_eq!(manifest.contains("leptos = \"0.8\""), template.views, "{manifest}");
             assert!(result.target_dir.join("migrations").is_dir());
             assert!(result.target_dir.join(".env.example").is_file());
+            // Only the Dockerfile of a project with views builds a bundle, and serves it.
+            assert!(!result.target_dir.join("Dockerfile.views").exists());
+            let dockerfile = std::fs::read_to_string(result.target_dir.join("Dockerfile")).unwrap();
+            assert_eq!(
+                dockerfile.contains("openshop build --locked"),
+                template.views,
+                "{dockerfile}"
+            );
+            assert_eq!(
+                dockerfile.contains("OPENSHOP_UI_DIR=/app/dist"),
+                template.views,
+                "{dockerfile}"
+            );
+            if template.views {
+                let cli = format!("--tag v{OPENSHOP_VERSION} openshop-cli");
+                assert!(dockerfile.contains(&cli), "{dockerfile}");
+                assert!(dockerfile.contains(&format!("target/release/shop-{}", template.name)));
+            }
         }
         let main = std::fs::read_to_string(cwd.join("shop-public/src/main.rs")).unwrap();
         assert!(main.contains("shop_public::APP.main()"), "{main}");

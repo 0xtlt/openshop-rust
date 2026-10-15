@@ -1,0 +1,28 @@
+FROM rust:1-bookworm AS build
+# What builds the admin UI bundle: the WebAssembly target, trunk, and the
+# openshop CLI of the release the project depends on.
+RUN rustup target add wasm32-unknown-unknown
+RUN curl -fsSL "https://github.com/trunk-rs/trunk/releases/download/v0.21.14/trunk-$(uname -m)-unknown-linux-gnu.tar.gz" \
+    | tar -xz -C /usr/local/bin trunk
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    cargo install --locked --git https://github.com/0xtlt/openshop-rust --tag v__OPENSHOP_VERSION__ openshop-cli
+WORKDIR /app
+COPY . .
+# The admin UI bundle into dist/, then the app.
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/app/target \
+    openshop build --locked && cp target/release/__PACKAGE_NAME__ /usr/local/bin/app
+
+FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/*
+WORKDIR /app
+COPY --from=build /usr/local/bin/app /usr/local/bin/app
+COPY --from=build /app/dist ./dist
+COPY migrations ./migrations
+COPY shopify.app*.toml ./
+ENV OPENSHOP_ENV=production PORT=3000 OPENSHOP_UI_DIR=/app/dist
+EXPOSE 3000
+
+# Web process. Run workers from the same image with `app worker`,
+# and apply migrations before each deploy with `app migrate`.
+CMD ["app", "start"]

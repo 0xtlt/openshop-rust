@@ -175,13 +175,16 @@ framework schema updates and your own tables. See
 - `shopify.web.toml` tells Shopify CLI how to start the app in development:
   `openshop dev`.
 
-The generated `.gitignore` excludes `target/`, `.env`, and `.shopify/`.
+The generated `.gitignore` excludes `target/`, `.env`, `.shopify/`, and `dist/`.
 
 ## Deployment files
 
 - `Dockerfile` builds the release binary and copies it, `migrations/`, and
   `shopify.app*.toml` into a slim image. It sets `OPENSHOP_ENV=production` and
-  `PORT=3000` and starts the web process with `app start`.
+  `PORT=3000` and starts the web process with `app start`. With the `custom`
+  and `public` templates, it also builds the admin UI bundle with
+  `openshop build`, copies `dist` into the image and sets
+  `OPENSHOP_UI_DIR=/app/dist`.
 - `Procfile` declares three processes: `release: app migrate`,
   `web: app start`, and `worker: app worker --concurrency=5`.
 - `docker-compose.yml` starts a local PostgreSQL 17 with the `openshop` role

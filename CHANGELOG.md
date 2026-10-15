@@ -11,6 +11,13 @@
   the arrow keys; elsewhere it fails with the list of templates. A project
   gets the migrations of its template, the tables of its models included, and
   a test that they cover its schema.
+- The `Dockerfile` of a project made from the `custom` or `public` template
+  builds its admin UI bundle: it installs the WebAssembly target, trunk and
+  the `openshop` CLI of the release the project depends on, runs
+  `openshop build`, copies `dist` into the image and sets
+  `OPENSHOP_UI_DIR=/app/dist`. Without it, the image served the admin built
+  into the framework, without the pages of the application. `dist/` is in the
+  generated `.gitignore` and `.dockerignore`.
 - The demos are these templates: `apps/demo-custom` and `apps/demo-public`
   are `templates/custom` and `templates/public`, next to `templates/minimal`
   and `templates/shared`, the files every project gets. They are crates of the

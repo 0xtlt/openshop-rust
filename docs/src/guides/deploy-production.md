@@ -61,7 +61,9 @@ UI bundle; see [Ship the bundle](add-admin-page.md#ship-the-bundle).
 
 The generated `Dockerfile` is a starting point: it builds the binary, installs
 it as `app`, copies `migrations/` and `shopify.app*.toml`, sets
-`OPENSHOP_ENV=production` and `PORT=3000`, and starts the web process.
+`OPENSHOP_ENV=production` and `PORT=3000`, and starts the web process. With
+the `custom` and `public` templates, it builds the admin UI bundle first and
+serves it from `/app/dist`.
 
 ```bash
 docker build -t my-app .

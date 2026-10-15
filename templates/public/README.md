@@ -54,9 +54,9 @@ cargo run --release -- worker     # one or more workers
 ```
 
 The server serves the bundle of the directory named by `OPENSHOP_UI_DIR`:
-deploy `dist` next to the binary. The `Dockerfile` does not build it yet; add
-the bundle to the image, or compile it into the binary (see "Ship the bundle"
-in the OpenShop documentation).
+deploy `dist` next to the binary. The `Dockerfile` does it: it builds the
+bundle with the `openshop` CLI, copies it into the image and sets
+`OPENSHOP_UI_DIR=/app/dist`.
 
 Set `OPS_PASSWORD` to serve the operator dashboard at `/ops`: the runs and
 the installations of every shop, read-only, outside Shopify admin.
