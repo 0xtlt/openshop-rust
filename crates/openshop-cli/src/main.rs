@@ -16,7 +16,8 @@ const USAGE: &str = "
   openshop - Shopify integration framework
 
   Commands:
-    init <dir>                  Scaffold a new OpenShop project
+    init [<dir>]                Scaffold a new OpenShop project from a template; asks for what
+                                it is not given (--template=minimal|custom|public)
     init-ui                     Scaffold a custom admin page with its view
     dev                         Start the app in dev mode and restart it when sources change
     codegen                     Download the Shopify Admin GraphQL schema of another API version
@@ -32,7 +33,8 @@ const USAGE: &str = "
     test [args]                 Run tests
 
   Usage:
-    openshop init my-app
+    openshop init
+    openshop init my-app --template=public
     openshop dev
     openshop worker --concurrency=10
     openshop migrate generate

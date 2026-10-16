@@ -1,7 +1,7 @@
 # Toolchain + tasks for OpenShop. Run `mise install` once, then `mise run <task>`.
 [tools]
 rust = { version = "1.98.1", components = "clippy,rustfmt", targets = "wasm32-unknown-unknown" }
-# Builds the admin UI bundles (`crates/openshop-ui`, the demos in `apps/`).
+# Builds the admin UI bundles (`crates/openshop-ui`, the templates in `templates/`).
 "github:trunk-rs/trunk" = "0.21.14"
 # Builds the documentation in `docs/`.
 mdbook = "0.5.4"
@@ -48,43 +48,47 @@ description = "Rebuild the embedded admin UI into crates/openshop/ui-dist (commi
 dir = "crates/openshop-ui"
 run = "trunk build --release"
 
-[tasks."demo:ui"]
-description = "Build the admin UI bundle of each demo, from its admin pages, into its dist"
+[tasks."templates:ui"]
+description = "Build the admin UI bundle of the custom and public templates, from their admin pages, into their dist"
 run = [
-  "cd apps/demo-custom && cargo run -p openshop-cli -- build-ui",
-  "cd apps/demo-public && cargo run -p openshop-cli -- build-ui",
+  "cd templates/custom && cargo run -p openshop-cli -- build-ui",
+  "cd templates/public && cargo run -p openshop-cli -- build-ui",
 ]
 
 [tasks."dev:custom"]
-description = "Work on the framework with the custom app demo: its admin UI on http://localhost:3999 without a Shopify store, restarted and reloaded when the workspace changes (needs PostgreSQL: `mise run db:up`, or set DATABASE_URL)"
-dir = "apps/demo-custom"
+description = "Work on the framework with the custom app template: its admin UI on http://localhost:3999 without a Shopify store, restarted and reloaded when the workspace changes (needs PostgreSQL: `mise run db:up`, or set DATABASE_URL)"
+dir = "templates/custom"
 env = { PREVIEW_AS_SHOP = "1" }
-# The preview as a shop, run by `openshop dev`, which builds the demo's own bundle with trunk.
+# The preview as a shop, run by `openshop dev`, which builds the template's own bundle with trunk.
 run = "cargo run -p openshop-cli -- dev --example preview-custom"
 
 [tasks."dev:public"]
-description = "The same with the public app demo, on http://localhost:3998: an admin made of its own pages, and the operator dashboard at /ops"
-dir = "apps/demo-public"
+description = "The same with the public app template, on http://localhost:3998: an admin made of its own pages, and the operator dashboard at /ops"
+dir = "templates/public"
 env = { PREVIEW_AS_SHOP = "1" }
 run = "cargo run -p openshop-cli -- dev --example preview-public"
 
-[tasks."demo:custom"]
-description = "Run the custom app demo in development mode, restarted and reloaded when the workspace changes (needs apps/demo-custom/.env)"
-dir = "apps/demo-custom"
+[tasks."store:custom"]
+description = "Run the custom app template in development mode in a development store, restarted and reloaded when the workspace changes (needs templates/custom/.env)"
+dir = "templates/custom"
 run = "cargo run -p openshop-cli -- dev"
 
-[tasks."demo:public"]
-description = "Run the public app demo in development mode, restarted and reloaded when the workspace changes (needs apps/demo-public/.env)"
-dir = "apps/demo-public"
+[tasks."store:public"]
+description = "Run the public app template in development mode in a development store, restarted and reloaded when the workspace changes (needs templates/public/.env)"
+dir = "templates/public"
 run = "cargo run -p openshop-cli -- dev"
 
 [tasks."preview:custom"]
-description = "Preview the custom app demo on http://localhost:3999 without a Shopify store"
-run = "cargo run -p openshop-demo-custom --example preview-custom"
+description = "Preview the custom app template on http://localhost:3999 without a Shopify store"
+run = "cargo run -p openshop-template-custom --example preview-custom"
 
 [tasks."preview:public"]
-description = "Preview the public app demo on http://localhost:3998 without a Shopify store"
-run = "cargo run -p openshop-demo-public --example preview-public"
+description = "Preview the public app template on http://localhost:3998 without a Shopify store"
+run = "cargo run -p openshop-template-public --example preview-public"
+
+[tasks.init]
+description = "Make a project from a template with the openshop CLI of the workspace, depending on this checkout: `mise run init -- <dir> [--template=<name>]`"
+run = "cargo run -q -p openshop-cli -- init --openshop-path=crates/openshop"
 
 [tasks."docs:build"]
 description = "Build the documentation into docs/book"

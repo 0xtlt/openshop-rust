@@ -1,0 +1,60 @@
+{
+  "version": 1,
+  "tables": [
+    {
+      "name": "reviews",
+      "columns": [
+        {
+          "name": "id",
+          "type": "uuid",
+          "nullable": false,
+          "default": "gen_random_uuid()",
+          "primaryKey": true
+        },
+        {
+          "name": "shop",
+          "type": "text",
+          "nullable": false
+        },
+        {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "nullable": false,
+          "default": "now()"
+        },
+        {
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "nullable": false,
+          "default": "now()"
+        },
+        {
+          "name": "product_id",
+          "type": "text",
+          "nullable": false
+        },
+        {
+          "name": "customer_id",
+          "type": "text",
+          "nullable": false
+        },
+        {
+          "name": "rating",
+          "type": "integer",
+          "nullable": false
+        },
+        {
+          "name": "text",
+          "type": "text",
+          "nullable": false
+        },
+        {
+          "name": "approved",
+          "type": "boolean",
+          "nullable": false,
+          "default": "false"
+        }
+      ]
+    }
+  ]
+}

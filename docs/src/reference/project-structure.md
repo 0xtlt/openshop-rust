@@ -1,8 +1,9 @@
 # Project structure
 
-`openshop init` creates a Cargo package with the app definition, a sample
-provider and flow, Shopify configuration, deployment files, and an initial
-migration. Add optional modules as your app needs them.
+`openshop init` creates a Cargo package with the app definition, Shopify
+configuration, deployment files, and the initial migrations. With the
+`minimal` template, the app is a sample provider and flow, laid out as below.
+Add optional modules as your app needs them.
 
 ```text
 my-app/
@@ -45,8 +46,8 @@ lists it, in [`app!`](configuration.md).
 | `tests/` | Integration tests using `openshop::testing` | — |
 | `dist/` | The admin UI bundle of the application, built by `openshop build` from the custom admin screens that have a view. Not committed | `admin_ui`, or `OPENSHOP_UI_DIR` |
 
-An application that uses every block is laid out like `apps/demo-custom` in
-the OpenShop repository:
+An application that uses every block is laid out like a project made from the
+`custom` template (`openshop init my-app --template=custom`):
 
 ```text
 src/
@@ -174,13 +175,16 @@ framework schema updates and your own tables. See
 - `shopify.web.toml` tells Shopify CLI how to start the app in development:
   `openshop dev`.
 
-The generated `.gitignore` excludes `target/`, `.env`, and `.shopify/`.
+The generated `.gitignore` excludes `target/`, `.env`, `.shopify/`, and `dist/`.
 
 ## Deployment files
 
 - `Dockerfile` builds the release binary and copies it, `migrations/`, and
   `shopify.app*.toml` into a slim image. It sets `OPENSHOP_ENV=production` and
-  `PORT=3000` and starts the web process with `app start`.
+  `PORT=3000` and starts the web process with `app start`. With the `custom`
+  and `public` templates, it also builds the admin UI bundle with
+  `openshop build`, copies `dist` into the image and sets
+  `OPENSHOP_UI_DIR=/app/dist`.
 - `Procfile` declares three processes: `release: app migrate`,
   `web: app start`, and `worker: app worker --concurrency=5`.
 - `docker-compose.yml` starts a local PostgreSQL 17 with the `openshop` role

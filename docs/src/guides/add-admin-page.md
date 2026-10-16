@@ -148,9 +148,17 @@ an action needs inside that function. See
 ## Ship the bundle
 
 `openshop build` builds the bundle into `dist/`, optimized for size, then the
-application. With `UiSource::Dir`, deploy `dist` next to the binary. The
-generated `Dockerfile` does not build or copy a UI bundle; add those steps to
-it.
+application. With `UiSource::Dir`, or `OPENSHOP_UI_DIR`, deploy `dist` next
+to the binary.
+
+The `Dockerfile` of a project made from the `custom` or `public` template
+builds the bundle too: it installs the WebAssembly target, trunk and the
+`openshop` CLI of the tag, branch or rev of `openshop` that `Cargo.toml`
+names, runs `openshop build`,
+copies `dist` into the image and names it with `OPENSHOP_UI_DIR`. The
+`Dockerfile` of the `minimal` template does not; after `openshop init-ui`, take
+those steps from the `# if views` blocks of `templates/shared/Dockerfile` in
+the OpenShop repository.
 
 To keep a single binary, compile the bundle into it instead. Add the
 `rust-embed` crate (`cargo add rust-embed`) and serve the embedded files:

@@ -33,8 +33,8 @@ a non-production environment before changing production.
 
    If the project has its own admin UI bundle, rebuild it.
 
-3. Compare the current project with
-   `crates/openshop-cli/templates/minimal/` in the matching release. Generated
+3. Compare the current project with the template it was made from,
+   `templates/<name>/` and `templates/shared/` in the matching release. Generated
    projects are not rewritten automatically. Review `Cargo.toml`, Shopify
    TOML, `Dockerfile`, `Procfile`, `docker-compose.yml`, and `.env.example`.
 

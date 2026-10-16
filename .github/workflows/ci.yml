@@ -63,9 +63,9 @@ jobs:
       - uses: jetli/trunk-action@v0.5.0
       - run: trunk build --release --dist target/ui-dist
 
-  # Each demo has admin pages with a view: `openshop build-ui` compiles them
-  # to WebAssembly, into its own admin UI bundle.
-  demo-ui:
+  # The custom and public templates have admin pages with a view: `openshop
+  # build-ui` compiles them to WebAssembly, into their own admin UI bundle.
+  templates-ui:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -75,6 +75,27 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - uses: jetli/trunk-action@v0.5.0
       - run: cargo run -p openshop-cli -- build-ui
-        working-directory: apps/demo-custom
+        working-directory: templates/custom
       - run: cargo run -p openshop-cli -- build-ui
-        working-directory: apps/demo-public
+        working-directory: templates/public
+
+  # `check` tests the templates as members of the workspace; this checks the
+  # projects `openshop init` makes of them, on their own.
+  init:
+    runs-on: ubuntu-latest
+    env:
+      CARGO_PROFILE_DEV_DEBUG: 0
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build -p openshop-cli
+      - name: Check a project made from each template
+        run: |
+          for template in minimal custom public; do
+            target/debug/openshop init "$RUNNER_TEMP/app-$template" --template=$template --openshop-path=crates/openshop
+            cp Cargo.lock "$RUNNER_TEMP/app-$template/"
+            (cd "$RUNNER_TEMP/app-$template" && cargo fmt --check && CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target" cargo check --all-targets)
+          done

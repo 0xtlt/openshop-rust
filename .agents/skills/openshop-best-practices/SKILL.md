@@ -1,6 +1,6 @@
 ---
 name: openshop-best-practices
-description: Use when working on OpenShop (Rust) framework or app code, including Rust APIs, Shopify GraphQL, flows, webhooks, providers, proxy routes, server routes, CLI commands, database code, tests, templates, documentation, or the demo app. Apply OpenShop repo conventions, keep Shopify GraphQL responses behind serde types, and choose the right verification commands.
+description: Use when working on OpenShop (Rust) framework or app code, including Rust APIs, Shopify GraphQL, flows, webhooks, providers, proxy routes, server routes, CLI commands, database code, tests, templates, documentation, or the templates of `openshop init`. Apply OpenShop repo conventions, keep Shopify GraphQL responses behind serde types, and choose the right verification commands.
 ---
 
 # OpenShop Best Practices
@@ -13,7 +13,7 @@ Before editing:
 - Inspect nearby source, tests, docs, and templates before choosing an implementation.
 - Prefer existing helpers and boundaries in `crates/openshop/src` over new abstractions.
 - Keep public APIs stable unless the user explicitly asks for a breaking change.
-- Check whether a framework change also requires updates to `crates/openshop-cli/templates/minimal`, the demos (`apps/demo-custom`, `apps/demo-public`), or `docs/src`.
+- Check whether a framework change also requires updates to the templates of `openshop init` (`templates/minimal`, `templates/custom`, `templates/public`, `templates/shared`), or `docs/src`.
 
 ## Reference Routing
 
