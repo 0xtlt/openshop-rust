@@ -2,6 +2,7 @@ mod common;
 
 use openshop::testing::TestContext;
 use openshop::{FlowRun, RunOutcome, Value, json};
+
 use openshop_template_public::APP;
 use openshop_template_public::admin::home::HomePage;
 use openshop_template_public::admin::settings::SettingsPage;

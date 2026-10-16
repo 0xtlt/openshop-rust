@@ -2,6 +2,7 @@ mod common;
 
 use openshop::testing::TestContext;
 use openshop::{RunOutcome, Value, json};
+
 use openshop_template_custom::APP;
 use openshop_template_custom::flows::count_variants::count_variants;
 use openshop_template_custom::flows::sync_orders::sync_orders;

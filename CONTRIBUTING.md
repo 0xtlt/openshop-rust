@@ -54,8 +54,10 @@ The CLI embeds them when it is built (`crates/openshop-cli/build.rs`). A
 project gets `src/`, `tests/`, `migrations/`, `README.md`, `shopify.app.toml`
 and its `Cargo.toml` with `workspace = true` replaced by the source of each
 dependency, plus the files of `templates/shared`: a dotfile is stored there as
-`_name`, and `<name>.views` replaces `<name>` for a template whose admin
-pages have views, such as the `Dockerfile` that builds their bundle. The rest, `examples/` among it, serves the repository only.
+`_name`, and the lines between `# if views`, `# else` and `# end` are kept
+or dropped depending on whether the admin pages of the template have views,
+as in the `Dockerfile`, which builds their bundle. `templates/shared/rustfmt.toml`
+is the repository's, so that a project is formatted as its template is. The rest, `examples/` among it, serves the repository only.
 
 | Template | What a project starts with |
 | --- | --- |

@@ -49,9 +49,16 @@ fn slice(name: &str, root: &Path, files: &[PathBuf]) -> String {
 
 fn main() {
     let templates = Path::new(&std::env::var("CARGO_MANIFEST_DIR").unwrap()).join("../../templates");
-    let templates = templates
-        .canonicalize()
-        .expect("templates/ at the root of the repository");
+    // The templates are crates of the workspace: the CLI is built from a checkout
+    // of the repository, as `cargo install --git` does, never from its package alone.
+    let Ok(templates) = templates.canonicalize() else {
+        panic!(
+            "openshop-cli embeds the templates of `templates/` at the root of the OpenShop repository, \
+             and {} does not exist: build it from a checkout, as \
+             `cargo install --git https://github.com/0xtlt/openshop-rust openshop-cli` does",
+            templates.display()
+        );
+    };
     let mut code = String::new();
 
     for template in TEMPLATES {

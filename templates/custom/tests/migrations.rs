@@ -1,6 +1,7 @@
 use std::path::Path;
 
 use openshop::db::migrate::check_migrations;
+
 use openshop_template_custom::APP;
 
 /// `./migrations` creates the framework schema and the tables of the models.

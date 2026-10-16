@@ -16,26 +16,32 @@ const WORKSPACE_MANIFEST: &str = include_str!("../../../Cargo.toml");
 
 /// The files of the templates in `templates/`, as `(path in the project,
 /// content)`: `MINIMAL`, `CUSTOM` and `PUBLIC`, and `SHARED`, which every
-/// project gets (see [`shared_files`]).
+/// project gets.
 mod files {
     include!(concat!(env!("OUT_DIR"), "/templates.rs"));
 }
 
-/// The shared files a project gets: `<name>.views` in place of `<name>` when
-/// the admin pages of its template have views, such as the `Dockerfile` that
-/// builds their bundle.
-fn shared_files(template: &Template) -> impl Iterator<Item = (&'static str, &'static str)> + '_ {
-    let has_variant = |path: &str| {
-        files::SHARED
-            .iter()
-            .any(|(other, _)| other.strip_suffix(".views") == Some(path))
-    };
-    files::SHARED
-        .iter()
-        .filter_map(move |&(path, content)| match path.strip_suffix(".views") {
-            Some(path) => template.views.then_some((path, content)),
-            None => (!(template.views && has_variant(path))).then_some((path, content)),
-        })
+/// A shared file for a project whose admin pages have views, or not: the
+/// lines between `# if views` and `# else` are kept for the first, the lines
+/// between `# else` and `# end` for the second, and the markers dropped.
+fn keep_lines_for(content: &str, views: bool) -> Result<String> {
+    // `None` outside a block; inside one, whether its current branch is kept.
+    let mut kept: Option<bool> = None;
+    let mut lines = Vec::new();
+    for line in content.lines() {
+        match (line.trim(), kept) {
+            ("# if views", None) => kept = Some(views),
+            ("# else", Some(_)) => kept = Some(!views),
+            ("# end", Some(_)) => kept = None,
+            ("# if views" | "# else" | "# end", _) => bail!("[openshop] Misplaced `{}` in a shared file", line.trim()),
+            (_, Some(false)) => {}
+            _ => lines.push(line),
+        }
+    }
+    if kept.is_some() {
+        bail!("[openshop] A `# if views` of a shared file has no `# end`");
+    }
+    Ok(lines.join("\n") + "\n")
 }
 
 /// A project `openshop init` starts from.
@@ -44,12 +50,39 @@ pub struct Template {
     pub name: &'static str,
     /// What it is, in the list `openshop init` offers.
     pub summary: &'static str,
-    /// Whether its admin pages have views, compiled to WebAssembly.
-    pub views: bool,
     files: &'static [(&'static str, &'static str)],
 }
 
 impl Template {
+    fn manifest(&self) -> &'static str {
+        self.files
+            .iter()
+            .find_map(|(path, content)| (*path == "Cargo.toml").then_some(*content))
+            .unwrap_or_default()
+    }
+
+    /// The dependencies its manifest declares, development ones included.
+    fn dependencies(&self) -> Vec<&'static str> {
+        sections(self.manifest())
+            .into_iter()
+            .filter(|(header, _)| matches!(*header, "[dependencies]" | "[dev-dependencies]"))
+            .flat_map(|(_, lines)| lines)
+            .filter(|line| !line.trim_start().starts_with(['#', '[']))
+            .filter_map(|line| line.split_once('='))
+            .map(|(name, _)| name.trim().trim_end_matches(".workspace"))
+            .collect()
+    }
+
+    /// Whether its admin pages have views, compiled to WebAssembly: its
+    /// `openshop` has the `ui` feature.
+    pub fn views(&self) -> bool {
+        sections(self.manifest())
+            .into_iter()
+            .filter(|(header, _)| *header == "[dependencies]")
+            .flat_map(|(_, lines)| lines)
+            .any(|line| line.trim_start().starts_with("openshop ") && line.contains("\"ui\""))
+    }
+
     /// How the sources of the template name its crate, `openshop-template-<name>`.
     fn crate_name(&self) -> String {
         format!("openshop_template_{}", self.name)
@@ -61,19 +94,16 @@ pub const TEMPLATES: &[Template] = &[
     Template {
         name: "minimal",
         summary: "One provider and one flow, with the built-in admin",
-        views: false,
         files: files::MINIMAL,
     },
     Template {
         name: "custom",
         summary: "A custom app: every building block, the built-in admin and a page of its own",
-        views: true,
         files: files::CUSTOM,
     },
     Template {
         name: "public",
         summary: "A public app: an admin made of its own pages, the operator dashboard for you",
-        views: true,
         files: files::PUBLIC,
     },
 ];
@@ -295,11 +325,16 @@ struct Project<'a> {
 
 /// A file of a template, as the project gets it.
 fn project_file(path: &str, content: &str, template: &Template, project: &Project) -> Result<String> {
-    let rename_lines = |prefix: &str, line: String| {
+    // The first line that starts with `prefix` becomes `line`.
+    let rename_line = |prefix: &str, line: String| {
+        let mut renamed = false;
         let lines: Vec<String> = content
             .lines()
-            .map(|current| match current.starts_with(prefix) {
-                true => line.clone(),
+            .map(|current| match !renamed && current.starts_with(prefix) {
+                true => {
+                    renamed = true;
+                    line.clone()
+                }
                 false => current.to_string(),
             })
             .collect();
@@ -307,12 +342,10 @@ fn project_file(path: &str, content: &str, template: &Template, project: &Projec
     };
     Ok(match path {
         "Cargo.toml" => project_manifest(content, project.package_name, project.openshop)?,
-        "README.md" => rename_lines("# ", format!("# {}", project.app_name)),
-        "shopify.app.toml" => rename_lines("name = ", format!("name = {}", toml_string(project.app_name))),
+        "README.md" => rename_line("# ", format!("# {}", project.app_name)),
+        "shopify.app.toml" => rename_line("name = ", format!("name = {}", toml_string(project.app_name))),
         _ if path.ends_with(".rs") => content.replace(&template.crate_name(), &project.package_name.replace('-', "_")),
-        _ => content
-            .replace("__PACKAGE_NAME__", project.package_name)
-            .replace("__OPENSHOP_VERSION__", OPENSHOP_VERSION),
+        _ => keep_lines_for(content, template.views())?.replace("__PACKAGE_NAME__", project.package_name),
     })
 }
 
@@ -456,36 +489,72 @@ fn check_target(target_dir: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Ctrl-C during a question: the terminal library raises `SIGINT`, which
+/// would stop the process with the cursor the list of templates hides still
+/// hidden. Once it is caught, the question ends with an error instead, which
+/// [`answered`] handles; a Ctrl-C between two questions stops the command.
+fn catch_interrupts() {
+    tokio::spawn(async {
+        if tokio::signal::ctrl_c().await.is_ok() {
+            eprint!("\x1b[?25h");
+            std::process::exit(130);
+        }
+    });
+}
+
+/// The answer to a question. Ctrl-C ends one with an error: the cursor is
+/// shown again, and the command stops there, as the signal would stop it.
+fn answered<T>(answer: dialoguer::Result<T>) -> Result<T> {
+    answer.map_err(|error| {
+        eprint!("\x1b[?25h");
+        match error {
+            dialoguer::Error::IO(error) if error.kind() == std::io::ErrorKind::Interrupted => std::process::exit(130),
+            error => anyhow::Error::from(error),
+        }
+    })
+}
+
 fn ask_target() -> Result<String> {
-    Ok(Input::<String>::with_theme(&ColorfulTheme::default())
-        .with_prompt("Project directory")
-        .default("my-app".to_string())
-        .validate_with(|name: &String| match name.trim().is_empty() {
-            true => Err("Name a directory"),
-            false => Ok(()),
-        })
-        .interact_text()?
-        .trim()
-        .to_string())
+    Ok(answered(
+        Input::<String>::with_theme(&ColorfulTheme::default())
+            .with_prompt("Project directory")
+            .default("my-app".to_string())
+            .validate_with(|name: &String| match name.trim().is_empty() {
+                true => Err("Name a directory"),
+                false => Ok(()),
+            })
+            .interact_text(),
+    )?
+    .trim()
+    .to_string())
 }
 
 fn ask_template() -> Result<&'static Template> {
     let items = TEMPLATES
         .iter()
         .map(|template| format!("{:<8} {}", template.name, template.summary));
-    let chosen = Select::with_theme(&ColorfulTheme::default())
-        .with_prompt("Template")
-        .items(items)
-        .default(0)
-        .interact()?;
+    let chosen = answered(
+        Select::with_theme(&ColorfulTheme::default())
+            .with_prompt("Template")
+            .items(items)
+            .default(0)
+            .interact(),
+    )?;
     Ok(&TEMPLATES[chosen])
 }
 
 /// `openshop init`: what it was not given, it asks for in a terminal.
 pub fn run_init(cwd: &Path, args: &[String]) -> Result<InitResult> {
+    let interactive = std::io::stdin().is_terminal() && std::io::stderr().is_terminal();
+    if interactive {
+        catch_interrupts();
+    }
+    init_from_args(cwd, args, interactive)
+}
+
+fn init_from_args(cwd: &Path, args: &[String], interactive: bool) -> Result<InitResult> {
     let args = parse_init_args(args)?;
     let template = args.template.as_deref().map(template_named).transpose()?;
-    let interactive = std::io::stdin().is_terminal() && std::io::stderr().is_terminal();
     let target = match args.target {
         Some(target) => target,
         None if interactive => ask_target()?,
@@ -510,6 +579,7 @@ pub fn init(cwd: &Path, target: &str, template: &Template, openshop_path: Option
     let openshop_path = openshop_path
         .map(|path| path.canonicalize().context("[openshop] --openshop-path does not exist"))
         .transpose()?;
+    let created = !target_dir.exists();
     std::fs::create_dir_all(&target_dir)?;
     let target_dir = target_dir.canonicalize()?;
 
@@ -518,6 +588,20 @@ pub fn init(cwd: &Path, target: &str, template: &Template, openshop_path: Option
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_else(|| "openshop-app".to_string());
     let package_name = to_package_name(&app_name);
+    // Cargo refuses a package that depends on a crate of its own name.
+    let ident = package_name.replace('-', "_");
+    if let Some(dependency) = template
+        .dependencies()
+        .into_iter()
+        .find(|dependency| dependency.replace('-', "_") == ident)
+    {
+        if created {
+            std::fs::remove_dir(&target_dir).ok();
+        }
+        bail!(
+            "[openshop] A project cannot be named `{package_name}`: it depends on `{dependency}`. Choose another directory name."
+        );
+    }
     let openshop = openshop_source(openshop_path.as_deref());
     let project = Project {
         app_name: &app_name,
@@ -525,7 +609,7 @@ pub fn init(cwd: &Path, target: &str, template: &Template, openshop_path: Option
         openshop: &openshop,
     };
 
-    for (path, content) in template.files.iter().copied().chain(shared_files(template)) {
+    for &(path, content) in template.files.iter().chain(files::SHARED) {
         let file = target_dir.join(path);
         if let Some(parent) = file.parent() {
             std::fs::create_dir_all(parent)?;
@@ -543,7 +627,7 @@ pub fn init(cwd: &Path, target: &str, template: &Template, openshop_path: Option
     println!("  cd {target}");
     println!("  docker compose up -d");
     println!("  cp .env.example .env");
-    if template.views {
+    if template.views() {
         println!("  rustup target add wasm32-unknown-unknown && cargo install trunk    # once, for the admin pages");
     }
     println!("  openshop dev");
@@ -687,7 +771,7 @@ mod tests {
         for template in TEMPLATES {
             let result = init(&cwd, &format!("shop-{}", template.name), template, None).unwrap();
             let paths: Vec<_> = template.files.iter().map(|(path, _)| *path).collect();
-            let shared: Vec<_> = shared_files(template).map(|(path, _)| path).collect();
+            let shared: Vec<_> = files::SHARED.iter().map(|(path, _)| *path).collect();
             assert!(
                 shared.iter().all(|path| !paths.contains(path)),
                 "{} overrides a shared file",
@@ -700,7 +784,8 @@ mod tests {
                     "openshop-template-",
                     "workspace",
                     "__PACKAGE_NAME__",
-                    "__OPENSHOP_VERSION__",
+                    "# if views",
+                    "# end",
                 ] {
                     assert!(
                         !content.contains(repository_only),
@@ -711,31 +796,118 @@ mod tests {
             }
             let manifest = std::fs::read_to_string(result.target_dir.join("Cargo.toml")).unwrap();
             assert!(!manifest.contains("path ="), "{manifest}");
-            assert_eq!(manifest.contains("features = [\"ui\"]"), template.views, "{manifest}");
-            assert_eq!(manifest.contains("leptos = \"0.8\""), template.views, "{manifest}");
+            assert_eq!(manifest.contains("features = [\"ui\"]"), template.views(), "{manifest}");
+            assert_eq!(manifest.contains("leptos = \"0.8\""), template.views(), "{manifest}");
             assert!(result.target_dir.join("migrations").is_dir());
             assert!(result.target_dir.join(".env.example").is_file());
             // Only the Dockerfile of a project with views builds a bundle, and serves it.
-            assert!(!result.target_dir.join("Dockerfile.views").exists());
             let dockerfile = std::fs::read_to_string(result.target_dir.join("Dockerfile")).unwrap();
+            let views = template.views();
+            assert_eq!(dockerfile.contains("openshop build $("), views, "{dockerfile}");
+            assert_eq!(dockerfile.contains("cargo install"), views, "{dockerfile}");
             assert_eq!(
-                dockerfile.contains("openshop build --locked"),
-                template.views,
+                dockerfile.contains("ENV OPENSHOP_UI_DIR=/app/dist"),
+                views,
                 "{dockerfile}"
             );
+            assert_eq!(dockerfile.contains("cargo build --release $("), !views, "{dockerfile}");
+            assert!(dockerfile.contains(&format!("target/release/shop-{}", template.name)));
+            assert_eq!(dockerfile.matches("cp target/release/").count(), 1, "{dockerfile}");
+            // Formatted as the templates are.
             assert_eq!(
-                dockerfile.contains("OPENSHOP_UI_DIR=/app/dist"),
-                template.views,
-                "{dockerfile}"
+                std::fs::read_to_string(result.target_dir.join("rustfmt.toml")).unwrap(),
+                "max_width = 120\n"
             );
-            if template.views {
-                let cli = format!("--tag v{OPENSHOP_VERSION} openshop-cli");
-                assert!(dockerfile.contains(&cli), "{dockerfile}");
-                assert!(dockerfile.contains(&format!("target/release/shop-{}", template.name)));
-            }
         }
+        assert_eq!(
+            TEMPLATES
+                .iter()
+                .map(|template| (template.name, template.views()))
+                .collect::<Vec<_>>(),
+            [("minimal", false), ("custom", true), ("public", true)]
+        );
         let main = std::fs::read_to_string(cwd.join("shop-public/src/main.rs")).unwrap();
         assert!(main.contains("shop_public::APP.main()"), "{main}");
+        std::fs::remove_dir_all(cwd).ok();
+    }
+
+    #[test]
+    fn keeps_the_lines_of_a_shared_file_for_its_project() {
+        let content = "FROM rust\n# if views\nRUN trunk\n# else\nRUN cargo\n# end\nCMD app\n";
+        assert_eq!(
+            keep_lines_for(content, true).unwrap(),
+            "FROM rust\nRUN trunk\nCMD app\n"
+        );
+        assert_eq!(
+            keep_lines_for(content, false).unwrap(),
+            "FROM rust\nRUN cargo\nCMD app\n"
+        );
+        assert_eq!(keep_lines_for("a\n# if views\nb\n# end\n", false).unwrap(), "a\n");
+        for broken in [
+            "# if views\na\n",
+            "# else\n",
+            "# end\n",
+            "# if views\n# if views\n# end\n",
+        ] {
+            assert!(keep_lines_for(broken, true).is_err(), "{broken:?}");
+        }
+    }
+
+    #[test]
+    fn renames_only_the_title_and_the_name() {
+        let cwd = temp_dir("rename");
+        let template = Template {
+            name: "x",
+            summary: "",
+            files: &[],
+        };
+        let project = Project {
+            app_name: "Shop",
+            package_name: "shop",
+            openshop: "",
+        };
+        let readme = project_file("README.md", "# T\n\n```bash\n# a comment\n```\n", &template, &project).unwrap();
+        assert_eq!(readme, "# Shop\n\n```bash\n# a comment\n```\n");
+        let toml = project_file(
+            "shopify.app.toml",
+            "name = \"t\"\n[x]\nname = \"y\"\n",
+            &template,
+            &project,
+        )
+        .unwrap();
+        assert_eq!(toml, "name = \"Shop\"\n[x]\nname = \"y\"\n");
+        std::fs::remove_dir_all(cwd).ok();
+    }
+
+    #[test]
+    fn refuses_a_project_named_after_a_dependency() {
+        let cwd = temp_dir("named");
+        let public = template_named("public").unwrap();
+        for name in ["leptos", "serde", "openshop"] {
+            let error = init(&cwd, name, public, None).unwrap_err().to_string();
+            assert!(error.contains(&format!("cannot be named `{name}`")), "{error}");
+            assert!(!cwd.join(name).exists(), "{name} was left behind");
+        }
+        assert!(init(&cwd, "leptos", minimal(), None).is_ok());
+        std::fs::remove_dir_all(cwd).ok();
+    }
+
+    #[test]
+    fn needs_a_target_and_a_template_outside_a_terminal() {
+        let cwd = temp_dir("batch");
+        let error = init_from_args(&cwd, &[], false).unwrap_err().to_string();
+        assert!(
+            error.starts_with("Usage: openshop init [<dir>] [--template=<name>]"),
+            "{error}"
+        );
+        assert!(error.contains("Templates:\n  minimal "), "{error}");
+        let error = init_from_args(&cwd, &args(&["app"]), false).unwrap_err().to_string();
+        assert!(
+            error.starts_with("[openshop] Name a template: openshop init app --template=<name>"),
+            "{error}"
+        );
+        assert!(!cwd.join("app").exists());
+        assert!(init_from_args(&cwd, &args(&["app", "--template=minimal"]), false).is_ok());
         std::fs::remove_dir_all(cwd).ok();
     }
 

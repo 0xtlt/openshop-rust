@@ -153,11 +153,12 @@ to the binary.
 
 The `Dockerfile` of a project made from the `custom` or `public` template
 builds the bundle too: it installs the WebAssembly target, trunk and the
-`openshop` CLI of the release the project depends on, runs `openshop build`,
+`openshop` CLI of the tag, branch or rev of `openshop` that `Cargo.toml`
+names, runs `openshop build`,
 copies `dist` into the image and names it with `OPENSHOP_UI_DIR`. The
 `Dockerfile` of the `minimal` template does not; after `openshop init-ui`, take
-those steps from the `Dockerfile.views` of `templates/shared` in the OpenShop
-repository.
+those steps from the `# if views` blocks of `templates/shared/Dockerfile` in
+the OpenShop repository.
 
 To keep a single binary, compile the bundle into it instead. Add the
 `rust-embed` crate (`cargo add rust-embed`) and serve the embedded files:

@@ -1,5 +1,6 @@
 use openshop::json;
 use openshop::testing::TestContext;
+
 use openshop_template_custom::APP;
 
 #[openshop::test(APP)]

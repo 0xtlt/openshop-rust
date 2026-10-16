@@ -2,6 +2,7 @@ mod common;
 
 use openshop::testing::TestContext;
 use openshop::{CronShops, RunOutcome, json};
+
 use openshop_template_public::APP;
 use openshop_template_public::flows::check_stock::check_stock;
 use openshop_template_public::models::stock_settings::{NewStockSettings, StockSettings};

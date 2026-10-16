@@ -88,6 +88,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
       - uses: Swatinem/rust-cache@v2
       - run: cargo build -p openshop-cli
       - name: Check a project made from each template
@@ -95,5 +97,5 @@ jobs:
           for template in minimal custom public; do
             target/debug/openshop init "$RUNNER_TEMP/app-$template" --template=$template --openshop-path=crates/openshop
             cp Cargo.lock "$RUNNER_TEMP/app-$template/"
-            (cd "$RUNNER_TEMP/app-$template" && CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target" cargo check --all-targets)
+            (cd "$RUNNER_TEMP/app-$template" && cargo fmt --check && CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target" cargo check --all-targets)
           done

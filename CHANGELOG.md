@@ -10,14 +10,20 @@
   the directory and the template it was not given, the template chosen with
   the arrow keys; elsewhere it fails with the list of templates. A project
   gets the migrations of its template, the tables of its models included, and
-  a test that they cover its schema.
+  a test that they cover its schema, and the `rustfmt.toml` its template is
+  formatted with. A directory named after a dependency of the template
+  (`serde`, `leptos`, `openshop`) is refused, since cargo would not build the
+  project. Ctrl-C during a question shows the cursor again.
 - The `Dockerfile` of a project made from the `custom` or `public` template
   builds its admin UI bundle: it installs the WebAssembly target, trunk and
-  the `openshop` CLI of the release the project depends on, runs
-  `openshop build`, copies `dist` into the image and sets
-  `OPENSHOP_UI_DIR=/app/dist`. Without it, the image served the admin built
-  into the framework, without the pages of the application. `dist/` is in the
-  generated `.gitignore` and `.dockerignore`.
+  the `openshop` CLI of the tag, branch or rev of `openshop` that
+  `Cargo.toml` names, runs `openshop build`, copies `dist` into the image and
+  sets `OPENSHOP_UI_DIR=/app/dist`. Without it, the image served the admin
+  built into the framework, without the pages of the application. `dist/` is
+  in the generated `.gitignore` and `.dockerignore`. The `Dockerfile` of every
+  template builds with `--locked` once the project has its `Cargo.lock`, and
+  without it before, which failed, and keeps the git checkouts of cargo
+  between builds.
 - The demos are these templates: `apps/demo-custom` and `apps/demo-public`
   are `templates/custom` and `templates/public`, next to `templates/minimal`
   and `templates/shared`, the files every project gets. They are crates of the
