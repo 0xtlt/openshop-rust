@@ -4,8 +4,9 @@ use std::sync::LazyLock;
 
 use regex::Regex;
 
+/// A shop's name is one DNS label: 63 characters at most.
 static SHOP_DOMAIN_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^[a-z0-9][a-z0-9-]*\.myshopify\.com$").expect("valid regex"));
+    LazyLock::new(|| Regex::new(r"^[a-z0-9][a-z0-9-]{0,62}\.myshopify\.com$").expect("valid regex"));
 
 /// Accepts a bare domain or a URL and returns the lowercase shop hostname.
 pub fn normalize_shop_domain(value: &str) -> Option<String> {
@@ -88,6 +89,17 @@ mod tests {
             ("DEV-STORE-1", "dev-store-1.myshopify.com"),
         ] {
             assert_eq!(strict_shop_domain(value).as_deref(), Some(expected), "{value}");
+        }
+        // A name is one DNS label, 63 characters at most.
+        let longest = "a".repeat(63);
+        assert_eq!(
+            strict_shop_domain(&longest),
+            Some(format!("{longest}.myshopify.com"))
+        );
+        for name in ["a".repeat(64), "a".repeat(10_000)] {
+            assert_eq!(strict_shop_domain(&name), None);
+            assert_eq!(strict_shop_domain(&format!("{name}.myshopify.com")), None);
+            assert_eq!(normalize_shop_domain(&format!("{name}.myshopify.com")), None);
         }
         for value in [
             "",

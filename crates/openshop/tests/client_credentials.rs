@@ -10,6 +10,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use common::noop_flow;
+use futures::StreamExt;
 use openshop::builder::{AdminPage, Flow, Route, Webhook};
 use openshop::engine::Scheduler;
 use openshop::runtime::{FORM_CONTENT_TYPE, OutboundRequest, OutboundResponse};
@@ -515,12 +516,54 @@ async fn a_definite_refusal_is_remembered_for_an_hour(ctx: &TestContext) {
     assert!(shop_name(ctx).await.is_err());
     wait(Duration::from_secs(58 * 60)).await;
     assert!(shop_name(ctx).await.is_err());
-    // Nor does a signed launch ask: Shopify said no for this app and shop.
-    assert_eq!(launch(ctx, SHOP).await.status(), StatusCode::FOUND);
     assert_eq!(grant_requests(ctx).len(), 1);
 
     wait(Duration::from_secs(2 * 60)).await;
     assert!(shop_name(ctx).await.is_err());
+    assert_eq!(grant_requests(ctx).len(), 2);
+}
+
+#[openshop::test(configured())]
+async fn a_refusal_in_background_work_does_not_hold_back_a_signed_launch(ctx: &TestContext) {
+    // A cron asks before the app is installed on the store: refused.
+    let shopify = Shopify::install(ctx);
+    shopify.refuse(400, json!({ "error": "shop_not_permitted" }));
+    assert!(shop_name(ctx).await.is_err());
+    assert_eq!(grant_requests(ctx).len(), 1);
+
+    // The developer installs the app, then opens it within the hour.
+    *shopify.refusal.lock().unwrap() = None;
+    wait(Duration::from_secs(10 * 60)).await;
+    // Background work is still held back...
+    assert!(shop_name(ctx).await.is_err());
+    assert_eq!(grant_requests(ctx).len(), 1);
+    // ...but the launch asks, gets a token and is served, not sent to `/auth`.
+    let reply = launch(ctx, SHOP).await;
+    assert_eq!(reply.status(), StatusCode::OK);
+    assert_eq!(grant_requests(ctx).len(), 2);
+    let row = stored(ctx, SHOP).await.unwrap();
+    assert_eq!(decrypted(ctx, &row).as_deref(), Some("cc-token-1"));
+
+    // The success clears the refusal: background work uses that token.
+    shop_name(ctx).await.unwrap();
+    assert_eq!(grant_requests(ctx).len(), 2);
+    assert_eq!(graphql_tokens(ctx), ["cc-token-1"]);
+}
+
+#[openshop::test(configured())]
+async fn a_refused_signed_launch_holds_back_launches_and_background_work_for_an_hour(ctx: &TestContext) {
+    let shopify = Shopify::install(ctx);
+    shopify.refuse(400, json!({ "error": "shop_not_permitted" }));
+
+    assert_eq!(launch(ctx, SHOP).await.status(), StatusCode::FOUND);
+    assert_eq!(grant_requests(ctx).len(), 1);
+    wait(Duration::from_secs(30 * 60)).await;
+    assert_eq!(launch(ctx, SHOP).await.status(), StatusCode::FOUND);
+    assert!(shop_name(ctx).await.is_err());
+    assert_eq!(grant_requests(ctx).len(), 1);
+
+    wait(Duration::from_secs(31 * 60)).await;
+    assert_eq!(launch(ctx, SHOP).await.status(), StatusCode::FOUND);
     assert_eq!(grant_requests(ctx).len(), 2);
 }
 
@@ -531,8 +574,8 @@ async fn an_outage_in_background_work_does_not_send_a_later_launch_to_oauth(ctx:
     assert!(shop_name(ctx).await.is_err());
     assert_eq!(grant_requests(ctx).len(), 1);
 
+    // A launch is not held back by it, even within the thirty seconds.
     *shopify.refusal.lock().unwrap() = None;
-    wait(Duration::from_secs(31)).await;
     let reply = launch(ctx, SHOP).await;
     assert_eq!(reply.status(), StatusCode::OK);
     assert_eq!(grant_requests(ctx).len(), 2);
@@ -848,7 +891,9 @@ async fn a_signed_launch_older_than_ninety_seconds_never_asks(ctx: &TestContext)
     let _shopify = Shopify::install(ctx);
     install(ctx, OTHER_SHOP, None, true).await;
 
-    for timestamp in [now() - 91, now() + 91, 1_770_000_000] {
+    // Margins the clock cannot flip while the launch is sent: stale by 120 s
+    // or more, fresh within 30 s.
+    for timestamp in [now() - 120, now() + 120, 1_770_000_000] {
         let reply = launch_at(ctx, SHOP, timestamp).await;
         assert_eq!(reply.status(), StatusCode::FOUND, "{timestamp}");
         assert_eq!(
@@ -867,7 +912,7 @@ async fn a_signed_launch_older_than_ninety_seconds_never_asks(ctx: &TestContext)
     assert_eq!(launch_at(ctx, SHOP, now() - 600).await.status(), StatusCode::OK);
 
     // A fresh one asks.
-    assert_eq!(launch_at(ctx, OTHER_SHOP, now() - 60).await.status(), StatusCode::OK);
+    assert_eq!(launch_at(ctx, OTHER_SHOP, now() - 30).await.status(), StatusCode::OK);
     assert_eq!(grant_requests(ctx).len(), 1);
 }
 
@@ -1054,7 +1099,13 @@ async fn a_clone_pointed_at_another_shop_sends_that_shop_its_own_token(ctx: &Tes
 
 #[openshop::test(unconfigured())]
 async fn unsigned_paths_never_ask(ctx: &TestContext) {
-    let _shopify = Shopify::install(ctx);
+    let shopify = Shopify::install(ctx);
+    // A shop installed without a token: a vouched grant would ask for it.
+    install(ctx, SHOP, None, false).await;
+    // A shop whose token the Admin API refuses: a background client would
+    // renew it.
+    install(ctx, OTHER_SHOP, Some("revoked-token"), false).await;
+    shopify.revoke("revoked-token");
 
     // OAuth start: redirected to Shopify, as before.
     let reply = ctx
@@ -1078,15 +1129,58 @@ async fn unsigned_paths_never_ask(ctx: &TestContext) {
         "{reply}"
     );
 
-    // A flow queued for the shop, and the client of background work.
-    ctx.dispatch_flow("dev-store-flow", json!({})).await.unwrap();
+    // A flow that calls the Admin API of the shop, and the client of
+    // background work: no token, and none asked.
+    let outcome = ctx.run_flow_for("shop-name-flow", json!({}), SHOP).await.unwrap();
+    assert!(
+        matches!(&outcome, openshop::RunOutcome::Failed { error, .. } if error.contains("No access token")),
+        "{outcome:?}"
+    );
     assert!(shop_name(ctx).await.is_err());
 
-    // A signed webhook: its shop header is not signed.
+    // Signed webhooks whose handler calls the Admin API: their shop header is
+    // not signed, so neither the shop without a token nor the refused token
+    // gets one.
     assert_eq!(webhook(ctx, SHOP).await.status(), StatusCode::OK);
+    assert_eq!(webhook(ctx, OTHER_SHOP).await.status(), StatusCode::OK);
 
+    assert!(grant_requests(ctx).is_empty());
+    // The webhook of the other shop called the Admin API with its token, once.
+    assert_eq!(graphql_tokens(ctx), ["revoked-token"]);
+    assert!(stored(ctx, SHOP).await.unwrap().0.is_none());
+}
+
+#[openshop::test(configured())]
+async fn unknown_shops_through_a_route_leave_nothing_behind(ctx: &TestContext) {
+    let _shopify = Shopify::install(ctx);
+
+    // Many shops, sixteen at a time.
+    let replies: Vec<Value> = futures::stream::iter(0..200)
+        .map(|index| async move { route(ctx, &format!("unknown-{index}-{}.myshopify.com", "x".repeat(40))).await })
+        .buffer_unordered(16)
+        .collect()
+        .await;
+    for reply in replies {
+        assert!(
+            reply["error"].as_str().unwrap().contains("not actively installed"),
+            "{reply}"
+        );
+    }
     assert!(ctx.transport.requests().is_empty());
-    assert!(stored(ctx, SHOP).await.is_none_or(|row| row.0.is_none()));
+    assert_eq!(ctx.app.client_credentials_remembered(), 0);
+
+    // A name longer than a DNS label is no shop.
+    let reply = route(ctx, &format!("{}.myshopify.com", "a".repeat(64))).await;
+    assert!(
+        reply["error"].as_str().unwrap().contains("Invalid shop domain"),
+        "{reply}"
+    );
+    assert_eq!(ctx.app.client_credentials_remembered(), 0);
+
+    // The configured shop is remembered once it has a token of this process.
+    route(ctx, SHOP).await;
+    assert_eq!(grant_requests(ctx).len(), 1);
+    assert_eq!(ctx.app.client_credentials_remembered(), 1);
 }
 
 #[openshop::test(configured())]
@@ -1281,6 +1375,9 @@ async fn each_app_asks_with_its_own_credentials(ctx: &TestContext) {
 
 // ─── What an error shows ─────────────────────────────────────────────
 
+/// The logger is the process's: the tests that read it take turns.
+static LOGGING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 /// Keeps every line logged while it is installed.
 #[derive(Default)]
 struct Lines(Mutex<Vec<String>>);
@@ -1299,6 +1396,7 @@ impl RuntimeLogger for Lines {
 
 #[openshop::test(configured())]
 async fn a_token_that_cannot_be_stored_shows_neither_itself_nor_its_ciphertext(ctx: &TestContext) {
+    let _logging = LOGGING.lock().await;
     let shopify = Shopify::install(ctx);
     install(ctx, OTHER_SHOP, Some("offline-token"), false).await;
     shopify.revoke("offline-token");
@@ -1367,4 +1465,40 @@ async fn a_token_that_cannot_be_stored_shows_neither_itself_nor_its_ciphertext(c
         assert!(!shown.contains("enc:aes-256-gcm"), "{shown}");
         assert!(!shown.contains("cannot store"), "{shown}");
     }
+}
+
+#[tokio::test]
+async fn without_encryption_key_a_cron_of_every_shop_says_so_once_per_app() {
+    let _logging = LOGGING.lock().await;
+    // A shop of its own, so that its lines are told from other tests'.
+    let shop = "dev-store-8.myshopify.com";
+    let crons = [Cron::new(EVERY_SECOND, "dev-store-flow").all_shops()];
+    let options = TestOptions {
+        encryption_key: None,
+        production: true,
+        ..options(Some(shop))
+    };
+    let ctx = TestContext::with_options(config(&crons), options).await.unwrap();
+    let _shopify = Shopify::install(&ctx);
+    let lines = Arc::new(Lines::default());
+    let previous = logger::set_logger(lines.clone());
+
+    let mut scheduler = Scheduler::start(&ctx.app).unwrap();
+    // Three ticks at least.
+    tokio::time::sleep(Duration::from_millis(3_300)).await;
+    scheduler.stop();
+    logger::set_logger(previous);
+
+    let said: Vec<String> = lines
+        .0
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|line| line.contains(shop) && line.contains("ENCRYPTION_KEY"))
+        .cloned()
+        .collect();
+    assert_eq!(said.len(), 1, "{said:#?}");
+    assert!(ctx.transport.requests().is_empty());
+    assert!(cron_runs(&ctx).await.is_empty());
+    ctx.shutdown().await.unwrap();
 }

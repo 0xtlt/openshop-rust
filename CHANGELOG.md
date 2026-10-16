@@ -24,8 +24,18 @@
   `installed_at`, as OAuth does. A token request has its own 5-second timeout.
   A definite refusal (a `4xx` with Shopify's error code, such as
   `shop_not_permitted`) is remembered by the process for an hour per app and
-  shop, any other failure for 30 seconds. In production without
-  `ENCRYPTION_KEY`, nothing is asked and the caller fails.
+  shop, any other failure for 30 seconds; the failure of background work
+  never holds back a launch or an Admin API request Shopify vouched for, and
+  a failure holds back the client ID and secret it was asked with only.
+  Nothing is remembered for a shop a caller may not ask a token of. In
+  production without `ENCRYPTION_KEY`, nothing is asked and the caller fails;
+  a cron of every shop says so once per app.
+- `ReqwestTransport` no longer follows redirections: a request to Shopify
+  carries a secret, a token or a code, which a `3xx` would send on to another
+  host. The `3xx` is the answer, and a custom `HttpTransport` must do the
+  same.
+- A shop name longer than 63 characters (one DNS label) is not a shop
+  domain.
 - `ShopifyClient` keeps the token it read per Shopify app and shop: a clone
   whose `shop` or `shopify_app` was changed used to send the token of the
   first shop to the second one, and now reads its own.

@@ -257,7 +257,7 @@ carries one as `ctx.app`.
 | --- | --- |
 | `OpenShop::connect(config).await` | Connects to `DATABASE_URL` and reads settings from the environment. |
 | `OpenShop::new(config, db, env)` | Uses an existing `PgPool` and `RuntimeEnv`. |
-| `OpenShop::with_transport(config, db, env, transport)` | Same, with a custom `HttpTransport` for Shopify HTTP calls. |
+| `OpenShop::with_transport(config, db, env, transport)` | Same, with a custom `HttpTransport` for Shopify HTTP calls. It must not follow redirections: every call carries a secret, a token or a code, and a `3xx` is returned as the answer, as the default `ReqwestTransport` does. |
 
 All three validate the configuration and resolve the Shopify apps, and fail
 when either is invalid. `APP.main()` and `APP.run()` create the handle for

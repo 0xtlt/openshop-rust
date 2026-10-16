@@ -108,7 +108,9 @@ is intentionally blocked, and so is the schema push of `dev`.
   [client credentials grant](../reference/authentication.md#client-credentials-grant);
   Shopify's refusal is logged with its status and error code, and the process
   does not ask again for that app and shop for an hour (30 seconds after a
-  `5xx`, a `429`, a timeout or a network error).
+  `5xx`, a `429`, a timeout or a network error). A refusal met by background
+  work does not hold back the next launch from Shopify admin, which asks
+  again.
 - `Shopify GraphQL error (<status>)` is an HTTP failure from Shopify. A 401 or
   403 usually points to a revoked token or a missing scope.
 - `GraphQL errors: …` lists the errors Shopify returned for the operation.

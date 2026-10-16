@@ -176,8 +176,16 @@ A token is used as it is stored, whoever stored it:
   - a definite refusal, a `4xx` other than `408` and `429` carrying Shopify's
     error code (`shop_not_permitted`, `invalid_client`, `invalid_request`…),
     for one hour;
-  - anything else (a `5xx`, a `429`, a timeout, a connection error, an answer
-    without a token), for 30 seconds.
+  - anything else (a `5xx`, a `429`, a timeout, a connection error, a
+    redirection, an answer without a token), for 30 seconds.
+
+  The failure of background work holds back background work only: a launch
+  or an Admin API request that Shopify vouched for still asks, so that a
+  store where the app was installed since is served at once. The failure of
+  a vouched request holds back both. A success clears both, and a failure
+  only holds back requests made with the same client ID and secret, so a
+  corrected secret is tried at once. The process keeps nothing for a shop a
+  caller may not ask a token of.
 
   It is logged once, with the HTTP status and Shopify's error code, never the
   client ID, the secret or the token:

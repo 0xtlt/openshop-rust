@@ -39,6 +39,10 @@ impl OutboundResponse {
 
 /// Sends `POST` requests, with a JSON body, or a form body when the request's
 /// `Content-Type` says so. Shopify OAuth and Admin GraphQL only need that.
+///
+/// A request carries a secret, a token or a code: an implementation must not
+/// follow a redirection, and returns the `3xx` as the answer, as
+/// [`ReqwestTransport`] does.
 pub trait HttpTransport: Send + Sync + 'static {
     fn post_json(&self, request: OutboundRequest) -> BoxFuture<'_, Result<OutboundResponse>>;
 }
@@ -53,6 +57,10 @@ impl ReqwestTransport {
             .user_agent(concat!("openshop-rust/", env!("CARGO_PKG_VERSION")))
             .connect_timeout(Duration::from_secs(10))
             .timeout(Duration::from_secs(60))
+            // Every request carries a secret, a token or a code, in its body
+            // or in `X-Shopify-Access-Token`, which a redirection would send
+            // on to another host: a `3xx` is the answer, followed by no one.
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .unwrap_or_default();
         Self { client }
@@ -177,6 +185,58 @@ mod tests {
         assert!(!is_form(&headers("application/x-www-form-urlencoded-extra")));
         assert!(!is_form(&headers("text/plain; application/x-www-form-urlencoded")));
         assert!(!is_form(&[("Accept".to_string(), FORM_CONTENT_TYPE.to_string())]));
+    }
+
+    /// Sends `request` to a local server that answers `307` towards another
+    /// local port; returns the answer, and whether that port was reached.
+    async fn redirected(headers: Vec<(String, String)>, body: Value) -> (OutboundResponse, bool) {
+        let elsewhere = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let location = format!("http://{}/elsewhere", elsewhere.local_addr().unwrap());
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let url = format!("http://{}/admin/oauth/access_token", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut buffer = [0u8; 4096];
+            let _ = stream.read(&mut buffer).await.unwrap();
+            let answer = format!(
+                "HTTP/1.1 307 Temporary Redirect\r\nlocation: {location}\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
+            );
+            stream.write_all(answer.as_bytes()).await.unwrap();
+        });
+        let response = ReqwestTransport::new()
+            .post_json(OutboundRequest { url, headers, body })
+            .await
+            .unwrap();
+        server.await.unwrap();
+        let reached = tokio::time::timeout(Duration::from_millis(300), elsewhere.accept())
+            .await
+            .is_ok();
+        (response, reached)
+    }
+
+    #[tokio::test]
+    async fn a_redirection_is_the_answer_and_is_never_followed() {
+        // A token request: its body holds the app's secret.
+        let (response, reached) = redirected(
+            vec![("Content-Type".to_string(), FORM_CONTENT_TYPE.to_string())],
+            json!({ "grant_type": "client_credentials", "client_secret": "dev-app-secret" }),
+        )
+        .await;
+        assert_eq!(response.status, 307);
+        assert!(!response.ok());
+        assert!(!reached, "the token request was sent on");
+
+        // An Admin API request: its header holds the shop's token.
+        let (response, reached) = redirected(
+            vec![
+                ("Content-Type".to_string(), "application/json".to_string()),
+                ("X-Shopify-Access-Token".to_string(), "offline-token".to_string()),
+            ],
+            json!({ "query": "{ shop { name } }" }),
+        )
+        .await;
+        assert_eq!(response.status, 307);
+        assert!(!reached, "the Admin API request was sent on");
     }
 
     #[tokio::test]
