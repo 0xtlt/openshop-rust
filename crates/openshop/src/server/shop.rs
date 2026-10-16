@@ -27,11 +27,11 @@ pub struct ShopSession {
 
 impl ShopSession {
     /// The Admin API of the shop of the session. Shopify vouched for that shop
-    /// with the session token: a token the Admin API refuses may be renewed
-    /// with the client credentials grant.
+    /// and app with the session token: a shop without a token, or a token the
+    /// Admin API refuses, gets one with the client credentials grant.
     pub(crate) fn shopify_client(&self, app: &OpenShop) -> ShopifyClient {
         app.shopify_client(&self.shop, &self.shopify_app)
-            .granting(Some(Grant::Vouched))
+            .granting(Grant::vouched(&self.shopify_app, &self.shop))
     }
 }
 
@@ -92,10 +92,20 @@ async fn ensure_installation(
     shop: &str,
     session_token: &str,
 ) -> anyhow::Result<()> {
-    let existing = app
+    let grant = Grant::vouched(&shopify_app.handle, shop);
+    let existing = match app
         .client_credentials()
-        .token(app, &shopify_app.handle, shop, Some(Grant::Vouched), None)
-        .await?;
+        .token(app, &shopify_app.handle, shop, grant.as_ref(), None)
+        .await
+    {
+        Ok(existing) => existing,
+        // The grant could not run (no `ENCRYPTION_KEY` in production, a token
+        // that could not be stored): the token exchange is tried as before.
+        Err(error) => {
+            logger::warn(format!("{error:#}"));
+            None
+        }
+    };
     if existing.is_some() {
         return Ok(());
     }

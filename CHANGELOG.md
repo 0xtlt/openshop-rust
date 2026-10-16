@@ -4,25 +4,39 @@
 
 - A development store of the organization that owns the app gets its Admin
   API token with Shopify's client credentials grant, with no OAuth. A launch
-  from Shopify admin whose signed query names a shop, or an Admin API request
-  whose verified session token does, asks Shopify for a token when the app has
-  none for that shop, before redirecting to `/auth` or exchanging the session
-  token as before; a development store with an empty database then opens in the
-  admin, where Shopify refuses to frame `/auth`. `SHOPIFY_CLIENT_CREDENTIALS_SHOP`
-  names the one shop that flows, crons, routes and the MCP
-  `openshop.admin.graphql` tool may ask a token for, without ever bringing back
-  a shop marked uninstalled; a cron of every shop targets it even without an
-  installation row. Webhooks never ask. The token is stored encrypted in
-  `installations` like the others, with no schema change. A token this process
-  obtained is asked again five minutes before it expires; any token is asked
-  again once after a `401`, where the client may ask for its shop, and the
-  request sent again once. A refusal is remembered by the process for an hour
-  per app and shop.
+  from Shopify admin whose signed query names a shop and is less than 90
+  seconds old, or an Admin API request whose verified session token names it,
+  asks Shopify for a token when the app has none for that shop, before
+  redirecting to `/auth` or exchanging the session token as before; a
+  development store with an empty database then opens in the admin, where
+  Shopify refuses to frame `/auth`. An older signed launch is served as before,
+  from the stored token alone. Unsigned input never starts a grant for a shop
+  of its choosing. Background work (flows, including the ones a webhook
+  dispatches, crons, routes, proxies and the MCP `openshop.admin.graphql`
+  tool) may ask in two cases only: for the one shop
+  `SHOPIFY_CLIENT_CREDENTIALS_SHOP` names, without ever bringing back a shop
+  marked uninstalled (a cron of every shop targets it even without an
+  installation row), and to renew the token a shop's installation row holds,
+  once after a `401` or before a token this process obtained expires. The
+  `shopify` client of a webhook handler never asks. The token is stored
+  encrypted in `installations` like the others, with no schema change; a
+  vouched grant that brings back a shop marked uninstalled sets its
+  `installed_at`, as OAuth does. A token request has its own 5-second timeout.
+  A definite refusal (a `4xx` with Shopify's error code, such as
+  `shop_not_permitted`) is remembered by the process for an hour per app and
+  shop, any other failure for 30 seconds. In production without
+  `ENCRYPTION_KEY`, nothing is asked and the caller fails.
+- `ShopifyClient` keeps the token it read per Shopify app and shop: a clone
+  whose `shop` or `shopify_app` was changed used to send the token of the
+  first shop to the second one, and now reads its own.
 - A `ShopifyClient` whose `shop` is not `<name>.myshopify.com` or a bare
   `<name>` fails with `[openshop] Invalid shop domain` and sends nothing; it
   used to build the address of the Admin API from the value as it was given.
-  A webhook whose `X-Shopify-Shop-Domain` is not a shop domain is answered
-  `400` when a handler matches, and its `shop` is lowercased.
+  A webhook whose `X-Shopify-Shop-Domain` is not a shop written in full as
+  `<name>.myshopify.com` is answered `400` when a handler matches, and its
+  `shop` is lowercased.
+- `testing::admin_context` gives the `AdminContext` the client of an admin
+  request, as in production: a token the Admin API refuses is renewed once.
 - `ReqwestTransport` sends `OutboundRequest.body` as a URL-encoded form when
   the media type of the request's `Content-Type` is
   `application/x-www-form-urlencoded` (`runtime::FORM_CONTENT_TYPE`), whatever

@@ -19,9 +19,9 @@ pub struct RuntimeEnv {
     /// `ENCRYPTION_KEY`: 64 hex characters.
     pub encryption_key: Option<String>,
     /// `SHOPIFY_CLIENT_CREDENTIALS_SHOP`: the one `*.myshopify.com` shop that
-    /// work no Shopify request vouches for (crons, flows, routes, the MCP
-    /// tool) may get an access token for with the client credentials grant,
-    /// as it is written. [`OpenShop`](crate::OpenShop) refuses to start when
+    /// work no Shopify request vouches for (crons, flows, routes, proxies, the
+    /// MCP tool) may get an access token for with the client credentials
+    /// grant without an installation row, as it is written. [`OpenShop`](crate::OpenShop) refuses to start when
     /// it is not a shop domain.
     pub client_credentials_shop: Option<String>,
     /// `OPENSHOP_ENV=production` (or `NODE_ENV=production`).

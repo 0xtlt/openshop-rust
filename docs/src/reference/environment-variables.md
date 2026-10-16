@@ -19,7 +19,7 @@ afterwards has no effect on a running process.
 | `HOST` | Production | Falls back to `SHOPIFY_APP_URL` | Public application URL and allowed CORS origin |
 | `SHOPIFY_APP_URL` | When `HOST` is absent | Empty | Legacy public application URL and allowed CORS origin |
 | `ENCRYPTION_KEY` | Production | Plaintext storage in development | Provider configuration and Shopify access-token encryption |
-| `SHOPIFY_CLIENT_CREDENTIALS_SHOP` | No | None | The one `*.myshopify.com` development store that work no Shopify request vouches for (flows, crons, routes, the MCP tool) may get an access token for with the [client credentials grant](authentication.md#client-credentials-grant). A signed admin launch or a session token asks for any shop without it. |
+| `SHOPIFY_CLIENT_CREDENTIALS_SHOP` | No | None | The one `*.myshopify.com` development store that work no Shopify request vouches for (flows, crons, routes, proxies, the MCP tool) may get an access token for with the [client credentials grant](authentication.md#client-credentials-grant) without an installation row. A recent signed admin launch or a session token asks for any shop without it, and background work renews the token a shop's row holds. |
 | `OPENSHOP_ENV` | Production | Development mode | `production` enables production safety checks and encryption enforcement |
 | `NODE_ENV` | No | — | `production` is honored like `OPENSHOP_ENV=production` |
 | `PORT` | No | `3000` | HTTP port of `dev` and `start` |

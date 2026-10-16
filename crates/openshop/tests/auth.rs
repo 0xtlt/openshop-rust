@@ -1177,8 +1177,13 @@ async fn token_exchange_in_production_without_an_encryption_key_never_writes_pla
     // The request itself is served: installation is best-effort.
     assert_eq!(ctx.get("/api/flows").send().await.unwrap().status(), 200);
 
-    // The client credentials grant, refused, then the exchange.
-    assert_eq!(ctx.transport.requests().len(), 2);
+    // No client credentials grant without a key to store its token: only the exchange.
+    let requests = ctx.transport.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        requests[0].body["grant_type"],
+        "urn:ietf:params:oauth:grant-type:token-exchange"
+    );
     let stored = find_installation(&ctx, "default", SHOP).await;
     assert!(stored.is_none_or(|row| row.access_token.is_none()));
     ctx.shutdown().await.unwrap();

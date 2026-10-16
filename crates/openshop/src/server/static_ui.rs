@@ -2,11 +2,11 @@
 //!
 //! The shell is only delivered to a shop that opens the app from Shopify admin
 //! (signed query) and has it installed; everyone else is sent to OAuth, or
-//! gets a page that says where the app opens from, with a 401. A launch for a
-//! shop without a token first asks Shopify for one with the client credentials
-//! grant, since the signed query vouches for the shop: a development store of
-//! the organization that owns the app opens with no OAuth redirect inside the
-//! admin iframe.
+//! gets a page that says where the app opens from, with a 401. A recent launch
+//! for a shop without a token first asks Shopify for one with the client
+//! credentials grant, since the signed query vouches for the shop: a
+//! development store of the organization that owns the app opens with no OAuth
+//! redirect inside the admin iframe.
 
 use std::borrow::Cow;
 use std::path::{Component, Path, PathBuf};
@@ -16,6 +16,8 @@ use axum::extract::{Request, State};
 use axum::http::header::{CACHE_CONTROL, CONTENT_SECURITY_POLICY, CONTENT_TYPE, REFERER};
 use axum::http::{HeaderValue, Method, StatusCode};
 use axum::response::{IntoResponse, Response};
+use chrono::Utc;
+use indexmap::IndexMap;
 use regex::Regex;
 
 use super::auth::redirect;
@@ -29,6 +31,22 @@ use super::{ROBOTS_HEADER, ServerOptions};
 use crate::app::OpenShop;
 use crate::shopify::client_credentials::Grant;
 use openshop_shared::rpc::encode_uri_component;
+
+/// How far, in seconds, the `timestamp` of a signed launch may be from now for
+/// the launch to vouch for its shop and ask Shopify for a token.
+pub(crate) const SIGNED_LAUNCH_FRESHNESS: i64 = 90;
+
+/// What a launch whose query has a verified signature vouches for: its shop,
+/// written as a shop domain, for the app that signed it, when its `timestamp`
+/// is within [`SIGNED_LAUNCH_FRESHNESS`] of `now`. Nothing otherwise.
+fn launch_grant(query: &IndexMap<String, String>, shopify_app: &str, shop: &str, now: i64) -> Option<Grant> {
+    let timestamp: i64 = query.get("timestamp")?.trim().parse().ok()?;
+    if now.abs_diff(timestamp) > SIGNED_LAUNCH_FRESHNESS.unsigned_abs() {
+        return None;
+    }
+    let grant = Grant::vouched(shopify_app, query.get("shop")?)?;
+    matches!(&grant, Grant::Vouched { shop: vouched, .. } if vouched == shop).then_some(grant)
+}
 
 /// Looks up an asset of a UI bundle compiled into the application binary.
 #[derive(Clone, Copy)]
@@ -317,7 +335,10 @@ pub(crate) async fn serve_ui(
         let Ok(shopify_app) = app.apps().by_signed_query(&query) else {
             return unauthorized_ui();
         };
-        match is_installed_shop(&app, &shopify_app.handle, &shop, Grant::Vouched).await {
+        // Only a recent launch vouches for its shop: an older one, replayed,
+        // is served as before, from the stored token alone.
+        let grant = launch_grant(&query, &shopify_app.handle, &shop, Utc::now().timestamp());
+        match is_installed_shop(&app, &shopify_app.handle, &shop, grant.as_ref()).await {
             Ok(true) => {}
             Ok(false) => {
                 let app_param = if shopify_app.handle == DEFAULT_SHOPIFY_APP_HANDLE {
@@ -351,6 +372,37 @@ pub(crate) async fn serve_ui(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_a_recent_signed_launch_vouches_for_its_shop() {
+        let now = 1_790_000_000;
+        let query = |shop: &str, timestamp: i64| -> IndexMap<String, String> {
+            [("shop", shop.to_string()), ("timestamp", timestamp.to_string())]
+                .into_iter()
+                .map(|(key, value)| (key.to_string(), value))
+                .collect()
+        };
+        let shop = "dev-store-1.myshopify.com";
+        let vouched = Some(Grant::Vouched {
+            shopify_app: "default".to_string(),
+            shop: shop.to_string(),
+        });
+        for timestamp in [now, now - SIGNED_LAUNCH_FRESHNESS, now + SIGNED_LAUNCH_FRESHNESS] {
+            assert_eq!(launch_grant(&query(shop, timestamp), "default", shop, now), vouched);
+        }
+        for timestamp in [now - SIGNED_LAUNCH_FRESHNESS - 1, now + SIGNED_LAUNCH_FRESHNESS + 1, 1_770_000_000] {
+            assert_eq!(launch_grant(&query(shop, timestamp), "default", shop, now), None);
+        }
+        let mut no_timestamp = query(shop, now);
+        no_timestamp.shift_remove("timestamp");
+        assert_eq!(launch_grant(&no_timestamp, "default", shop, now), None);
+        let mut garbled = query(shop, now);
+        garbled.insert("timestamp".to_string(), "soon".to_string());
+        assert_eq!(launch_grant(&garbled, "default", shop, now), None);
+        // A shop that is not written as a shop domain vouches for nothing.
+        let url = query("https://dev-store-1.myshopify.com/admin", now);
+        assert_eq!(launch_grant(&url, "default", shop, now), None);
+    }
 
     #[test]
     fn caches_only_content_hashed_assets_forever() {

@@ -106,64 +106,99 @@ no usable token for it (no row, no token, or a row marked uninstalled):
 
 | Where | Shop | When Shopify refuses |
 | --- | --- | --- |
-| A launch from Shopify admin (production shell) | The `shop` of the query, whose `hmac` covers it | Redirected to `/auth`, as before |
-| An Admin API request (`/api`) | The `dest` of the verified session token | The session token is exchanged, as before |
+| A launch from Shopify admin (production shell) | The `shop` of the query, whose `hmac` covers it, when its `timestamp` is within 90 seconds of the server's clock | Redirected to `/auth`, as before |
+| An Admin API request (`/api`) | The `dest` of the verified session token, which must not have expired | The session token is exchanged, as before |
 
 A launch from Shopify admin for a development store with an empty database
 then renders the app instead of redirecting to `/auth`, which Shopify refuses
 to frame. A token obtained this way also brings back a shop marked
-uninstalled, since Shopify vouched for it.
+uninstalled, since Shopify vouched for it, and sets its `installed_at` as OAuth
+does. A signed launch query older than 90 seconds, or one dated in the future
+by more, is still accepted as before, from the stored token alone: it never
+asks for a token and never brings a shop back, so that a launch URL replayed
+later starts nothing.
 
-Nothing else asks for an arbitrary shop: not a webhook (its signature covers
-the body, not the `X-Shopify-Shop-Domain` header, and a delivery can be
-replayed), not `/auth?shop=`, not a route that calls `for_shop` with a shop of
-its request, not a flow, a cron or the MCP `openshop.admin.graphql` tool. They
-use the stored token, or, for work no request vouches for, the shop of
-`SHOPIFY_CLIENT_CREDENTIALS_SHOP`:
+The client of an admin handler (`/api` functions, custom admin pages, and
+`testing::admin_context` in tests) carries the same right, for the shop and
+the app of its session only: a clone of it whose `shop` or `shopify_app` was
+changed asks for nothing it was not already allowed to.
 
-```dotenv
-SHOPIFY_CLIENT_CREDENTIALS_SHOP=dev-store-1.myshopify.com
-```
+Unsigned input never starts a grant for a shop of its choosing: not a webhook
+(its signature covers the body, not the `X-Shopify-Shop-Domain` header, and a
+delivery can be replayed), not `/auth?shop=`, not a route that calls `for_shop`
+with a shop of its request, not a flow, a cron, a proxy or the MCP
+`openshop.admin.graphql` tool. That background work uses the stored token, and
+may ask Shopify in two cases only:
 
-For that one shop, a flow, a cron, a route's `for_shop`, a proxy handler, an
-admin handler or the MCP `openshop.admin.graphql` tool asks for a token when
-the app has none, for example after the database was emptied, and a cron of
-every shop (`.all_shops()`) targets it even without an installation row, once
-Shopify gives a token for it. It never brings back a shop marked uninstalled,
-and a webhook does not ask for it either. Without the variable, only a signed
-launch or a session token asks.
+- For the shop of `SHOPIFY_CLIENT_CREDENTIALS_SHOP`, with or without an
+  installation row:
+
+  ```dotenv
+  SHOPIFY_CLIENT_CREDENTIALS_SHOP=dev-store-1.myshopify.com
+  ```
+
+  For that one shop, a flow (one a webhook dispatches included), a cron, a
+  route's `for_shop`, a proxy handler or the MCP `openshop.admin.graphql` tool
+  asks for a token when the app has none, for example after the database was
+  emptied, and a cron of every shop (`.all_shops()`) targets it even without an
+  installation row, once Shopify gives a token for it. It never brings back a
+  shop marked uninstalled.
+- To renew the token an installation row holds, for any shop: once after the
+  Admin API answers `401`, or before a token this process obtained expires.
+  The row proves that the shop installed the app earlier through a signed flow
+  (OAuth, the token exchange or a vouched grant), so a development store that
+  got its token from a launch keeps working in crons and flows after that token
+  expires. Only the token of a row that holds one and is not marked
+  uninstalled is replaced; no row is created this way.
+
+The `shopify` client a webhook handler receives is the exception: it uses the
+stored token and never asks. Without the variable, only a signed launch, a
+session token or the renewal of a stored token asks.
 
 A token is used as it is stored, whoever stored it:
 
 - A token this process obtained with the grant is asked again five minutes
   before it expires, from the `expires_in` Shopify gave with it. That is kept
   in memory only: another process, or the same one after a restart, uses the
-  stored token as it is.
-- When the Admin API answers `401` to a client that may ask for the shop (the
-  shop of the variable, or the shop of the session token of an admin
-  handler), it asks once and sends the request again once. When Shopify
-  refuses, or gives no other token, the `401` is the answer.
+  stored token as it is until the Admin API refuses it.
+- When the Admin API answers `401` to a client that may ask, it asks once and
+  sends the request again once. When Shopify refuses, or gives no other
+  token, the `401` is the answer.
 - A token without `expires_in` is only asked again after a `401`. A token
   without `scope` keeps the scopes stored before it.
 - One request at a time asks Shopify for an app and shop in a process; the
-  others wait for it, then use the token it stored.
-- A refusal, an answer that is not `2xx` or a request that fails, is
-  remembered by the process for one hour for that app and shop: nothing asks
-  again meanwhile, and every caller, the ones that waited included, falls back
-  at once to what it does without the grant. It is logged once, with the HTTP
-  status and Shopify's error code, never the client ID, the secret or the
-  token:
+  others wait for it, then use the token it stored. The token request has its
+  own 5-second timeout, whatever the transport allows, so that an admin page
+  waiting for it is not held for long.
+- A failure is remembered by the process for that app and shop, and every
+  caller, the ones that waited included, falls back at once to what it does
+  without the grant meanwhile:
+  - a definite refusal, a `4xx` other than `408` and `429` carrying Shopify's
+    error code (`shop_not_permitted`, `invalid_client`, `invalid_request`…),
+    for one hour;
+  - anything else (a `5xx`, a `429`, a timeout, a connection error, an answer
+    without a token), for 30 seconds.
+
+  It is logged once, with the HTTP status and Shopify's error code, never the
+  client ID, the secret or the token:
 
 ```text
 [openshop] Shopify refused the client credentials of app "default" for dev-store-1.myshopify.com (400: shop_not_permitted)
 ```
+
+In production without `ENCRYPTION_KEY`, nothing is asked: the caller fails
+with `ENCRYPTION_KEY must be set in production`, which is not remembered as a
+refusal, and no token is ever stored in plaintext. When the token cannot be
+written, the error is
+`[openshop] Could not store the client credentials token of app "<app>" for <shop>`,
+which quotes neither the token, its ciphertext nor the database's message.
 
 The shop the token goes to is always `<name>.myshopify.com`, read without a
 scheme, a path, a port or a user: a value such as
 `evil.example://dev-store-1.myshopify.com` or `dev-store-1.myshopify.com:8443`
 given to a `ShopifyClient` fails with `[openshop] Invalid shop domain` and
 sends nothing, and a webhook whose `X-Shopify-Shop-Domain` is not a shop domain
-is answered `400`.
+is answered `400`, like one that is a bare `<name>`.
 
 `POST /auth/webhooks/app-uninstalled` is authenticated like a webhook. It marks
 the installation as uninstalled and deletes its access token. See
@@ -177,8 +212,9 @@ query `hmac` that matches exactly one configured app. Otherwise the server
 answers `401` with a page that says the app opens from Shopify admin, and
 shows nothing of the application. A valid launch for a shop without an
 active installation first asks Shopify for a token with the
-[client credentials grant](#client-credentials-grant), and is redirected to
-`/auth` when Shopify refuses it.
+[client credentials grant](#client-credentials-grant) when its `timestamp` is
+within 90 seconds, and is redirected to `/auth` when Shopify refuses it or the
+launch is older.
 
 In development (`dev`), the signature is not checked. A request is still
 refused with `403`, and the same page, unless it comes from a local host, is

@@ -1,6 +1,7 @@
 //! Tokens obtained with Shopify's client credentials grant: for any shop
-//! Shopify vouched for (a signed admin launch, a verified session token), and
-//! for the shop of `SHOPIFY_CLIENT_CREDENTIALS_SHOP` in background work.
+//! Shopify vouched for (a recent signed admin launch, a verified session
+//! token), for the shop of `SHOPIFY_CLIENT_CREDENTIALS_SHOP` in background
+//! work, and to renew the token a shop's row holds.
 
 mod common;
 
@@ -9,14 +10,19 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use common::noop_flow;
-use openshop::builder::{AdminPage, Route, Webhook};
+use openshop::builder::{AdminPage, Flow, Route, Webhook};
 use openshop::engine::Scheduler;
 use openshop::runtime::{FORM_CONTENT_TYPE, OutboundRequest, OutboundResponse};
+use openshop::runtime::{RuntimeLogger, logger};
 use openshop::server::ServerOptions;
 use openshop::server::http::parse_query;
-use openshop::testing::{MockTransport, TestContext, TestOptions, sign_query, sign_webhook_body, to_query_string};
+use openshop::testing::{
+    AdminTestOptions, MockTransport, TestContext, TestOptions, admin_context, sign_query, sign_webhook_body,
+    to_query_string,
+};
 use openshop::{
-    AdminContext, Cron, OpenShopConfig, ShopifyAppConfig, ShopifyConfig, Value, WebhookContext, json, response,
+    AdminContext, Cron, FlowContext, OpenShopConfig, ShopifyAppConfig, ShopifyConfig, Value, WebhookContext, json,
+    response,
 };
 use openshop_shared::build_admin_function_rpc_url;
 use reqwest::StatusCode;
@@ -131,6 +137,10 @@ async fn admin_shop_name(ctx: AdminContext, _input: Value) -> openshop::Result<V
 fn config(crons: &[Cron]) -> OpenShopConfig {
     let builder = OpenShopConfig::builder()
         .flow(noop_flow("dev-store-flow"))
+        .flow(Flow::new("shop-name-flow", |ctx: FlowContext| async move {
+            ctx.shopify.graphql(QUERY, None).await?;
+            Ok(())
+        }))
         .admin_page(AdminPage::new("/tools").loader("shop", admin_shop_name))
         .route("/shop", shop_route())
         .webhook(
@@ -240,21 +250,42 @@ async fn install(ctx: &TestContext, shop: &str, token: Option<&str>, uninstalled
     .unwrap();
 }
 
-/// The path Shopify admin opens: launch parameters signed with the app secret.
-fn signed_launch(shop: &str) -> String {
+fn now() -> i64 {
+    chrono::Utc::now().timestamp()
+}
+
+/// The path Shopify admin opens: launch parameters signed with the app
+/// secret at `timestamp`.
+fn signed_launch(shop: &str, timestamp: i64) -> String {
     let query = sign_query(
         &[
             ("host", "YWRtaW4uc2hvcGlmeS5jb20vc3RvcmUvZGV2"),
             ("shop", shop),
-            ("timestamp", "1770000000"),
+            ("timestamp", &timestamp.to_string()),
         ],
         SECRET,
     );
     format!("/?{}", to_query_string(&query))
 }
 
+/// A launch from Shopify admin, signed now.
 async fn launch(ctx: &TestContext, shop: &str) -> reqwest::Response {
-    ctx.http.get(ctx.url_for(&signed_launch(shop))).send().await.unwrap()
+    launch_at(ctx, shop, now()).await
+}
+
+async fn launch_at(ctx: &TestContext, shop: &str, timestamp: i64) -> reqwest::Response {
+    ctx.http
+        .get(ctx.url_for(&signed_launch(shop, timestamp)))
+        .send()
+        .await
+        .unwrap()
+}
+
+/// Lets `duration` pass for the process, as a timer sees it.
+async fn wait(duration: Duration) {
+    tokio::time::pause();
+    tokio::time::advance(duration).await;
+    tokio::time::resume();
 }
 
 async fn webhook(ctx: &TestContext, shop: &str) -> reqwest::Response {
@@ -440,7 +471,7 @@ async fn a_refusal_falls_back_and_is_remembered(ctx: &TestContext) {
 }
 
 #[openshop::test(configured())]
-async fn a_failed_request_counts_as_a_refusal(ctx: &TestContext) {
+async fn a_failed_request_holds_back_for_thirty_seconds(ctx: &TestContext) {
     ctx.transport
         .respond_with(|_| Err(openshop::anyhow!("connection reset")));
 
@@ -449,6 +480,82 @@ async fn a_failed_request_counts_as_a_refusal(ctx: &TestContext) {
         assert!(error.contains("No access token found"), "{error}");
     }
     assert_eq!(grant_requests(ctx).len(), 1);
+
+    wait(Duration::from_secs(31)).await;
+    let _shopify = Shopify::install(ctx);
+    shop_name(ctx).await.unwrap();
+    assert_eq!(grant_requests(ctx).len(), 2);
+}
+
+#[openshop::test(configured())]
+async fn an_outage_holds_back_for_thirty_seconds_then_shopify_is_asked_again(ctx: &TestContext) {
+    let shopify = Shopify::install(ctx);
+    shopify.refuse(503, json!({ "errors": "Service Unavailable" }));
+
+    assert!(shop_name(ctx).await.is_err());
+    wait(Duration::from_secs(20)).await;
+    assert!(shop_name(ctx).await.is_err());
+    assert_eq!(grant_requests(ctx).len(), 1);
+
+    // Shopify is back: the next request after the backoff gets a token.
+    *shopify.refusal.lock().unwrap() = None;
+    wait(Duration::from_secs(11)).await;
+    let data = shop_name(ctx).await.unwrap();
+    assert_eq!(data["shop"]["name"], "Dev store 1");
+    assert_eq!(grant_requests(ctx).len(), 2);
+}
+
+#[openshop::test(configured())]
+async fn a_definite_refusal_is_remembered_for_an_hour(ctx: &TestContext) {
+    let shopify = Shopify::install(ctx);
+    shopify.refuse(400, json!({ "error": "shop_not_permitted" }));
+
+    assert!(shop_name(ctx).await.is_err());
+    wait(Duration::from_secs(31)).await;
+    assert!(shop_name(ctx).await.is_err());
+    wait(Duration::from_secs(58 * 60)).await;
+    assert!(shop_name(ctx).await.is_err());
+    // Nor does a signed launch ask: Shopify said no for this app and shop.
+    assert_eq!(launch(ctx, SHOP).await.status(), StatusCode::FOUND);
+    assert_eq!(grant_requests(ctx).len(), 1);
+
+    wait(Duration::from_secs(2 * 60)).await;
+    assert!(shop_name(ctx).await.is_err());
+    assert_eq!(grant_requests(ctx).len(), 2);
+}
+
+#[openshop::test(configured())]
+async fn an_outage_in_background_work_does_not_send_a_later_launch_to_oauth(ctx: &TestContext) {
+    let shopify = Shopify::install(ctx);
+    shopify.refuse(503, json!({}));
+    assert!(shop_name(ctx).await.is_err());
+    assert_eq!(grant_requests(ctx).len(), 1);
+
+    *shopify.refusal.lock().unwrap() = None;
+    wait(Duration::from_secs(31)).await;
+    let reply = launch(ctx, SHOP).await;
+    assert_eq!(reply.status(), StatusCode::OK);
+    assert_eq!(grant_requests(ctx).len(), 2);
+}
+
+#[tokio::test]
+async fn a_missing_encryption_key_fails_clearly_and_is_not_remembered() {
+    let options = TestOptions {
+        encryption_key: None,
+        production: true,
+        ..options(Some(SHOP))
+    };
+    let ctx = TestContext::with_options(config(&[]), options).await.unwrap();
+    let _shopify = Shopify::install(&ctx);
+
+    for _ in 0..2 {
+        let error = format!("{:#}", shop_name(&ctx).await.unwrap_err());
+        assert!(error.contains("ENCRYPTION_KEY must be set in production"), "{error}");
+    }
+    // Nothing was asked, nothing was stored in plaintext.
+    assert!(ctx.transport.requests().is_empty());
+    assert!(stored(&ctx, SHOP).await.is_none());
+    ctx.shutdown().await.unwrap();
 }
 
 #[openshop::test(configured())]
@@ -518,19 +625,68 @@ async fn background_work_serves_the_configured_shop_only(ctx: &TestContext) {
 }
 
 #[openshop::test(unconfigured())]
-async fn without_the_variable_background_work_never_asks(ctx: &TestContext) {
+async fn without_the_variable_background_work_only_renews_a_stored_token(ctx: &TestContext) {
     let shopify = Shopify::install(ctx);
 
     let error = shop_name(ctx).await.unwrap_err().to_string();
     assert!(error.contains("No access token found"), "{error}");
     assert!(ctx.transport.requests().is_empty());
 
-    // A stored token the Admin API refuses is not renewed.
+    // A stored token the Admin API refuses is renewed once: its row proves
+    // an earlier installation.
     install(ctx, SHOP, Some("offline-token"), false).await;
     shopify.revoke("offline-token");
-    let error = shop_name(ctx).await.unwrap_err().to_string();
+    shop_name(ctx).await.unwrap();
+    assert_eq!(grant_requests(ctx).len(), 1);
+    assert_eq!(graphql_tokens(ctx), ["offline-token", "cc-token-1"]);
+    let row = stored(ctx, SHOP).await.unwrap();
+    assert_eq!(decrypted(ctx, &row).as_deref(), Some("cc-token-1"));
+    assert_eq!(row.1.as_deref(), Some("read_products,write_products"));
+}
+
+#[openshop::test(unconfigured())]
+async fn a_row_marked_uninstalled_or_without_a_token_is_never_renewed_by_background_work(ctx: &TestContext) {
+    let shopify = Shopify::install(ctx);
+    // A row without a token, as `/auth` leaves before its callback.
+    install(ctx, SHOP, None, false).await;
+    // A row marked uninstalled whose token was kept.
+    install(ctx, OTHER_SHOP, Some("old-token"), true).await;
+    shopify.revoke("old-token");
+
+    assert!(shop_name(ctx).await.is_err());
+    let error = ctx
+        .app
+        .shopify_client(OTHER_SHOP, "default")
+        .graphql(QUERY, None)
+        .await
+        .unwrap_err()
+        .to_string();
     assert!(error.contains("Shopify GraphQL error (401)"), "{error}");
     assert!(grant_requests(ctx).is_empty());
+    assert!(stored(ctx, OTHER_SHOP).await.unwrap().2);
+}
+
+#[openshop::test(unconfigured())]
+async fn a_shop_granted_by_a_launch_keeps_working_in_background_once_its_token_expires(ctx: &TestContext) {
+    let shopify = Shopify::install(ctx);
+
+    // A launch vouched for the shop: it got a token and a row.
+    assert_eq!(launch(ctx, OTHER_SHOP).await.status(), StatusCode::OK);
+    assert_eq!(grant_requests(ctx).len(), 1);
+
+    // A day later, in another process, a flow of a cron uses the stored token.
+    shopify.revoke("cc-token-1");
+    ctx.run_flow_for("shop-name-flow", json!({}), OTHER_SHOP).await.unwrap();
+    let (status, error): (String, Option<String>) =
+        sqlx::query_as("SELECT status, error FROM flow_runs WHERE flow_name = 'shop-name-flow'")
+            .fetch_one(&ctx.db)
+            .await
+            .unwrap();
+    assert_eq!(status, "completed", "{error:?}");
+    assert_eq!(grant_requests(ctx).len(), 2);
+    assert_eq!(graphql_tokens(ctx), ["cc-token-1", "cc-token-2"]);
+    let row = stored(ctx, OTHER_SHOP).await.unwrap();
+    assert_eq!(decrypted(ctx, &row).as_deref(), Some("cc-token-2"));
 }
 
 #[tokio::test]
@@ -677,6 +833,42 @@ async fn a_signed_launch_reinstalls_a_shop_marked_uninstalled(ctx: &TestContext)
     assert!(!row.2, "a signed launch brings the shop back");
     // Shopify gave scopes: they replace the stored ones.
     assert_eq!(row.1.as_deref(), Some("read_products,write_products"));
+    // Installed again now, as OAuth does.
+    let (recent,): (bool,) =
+        sqlx::query_as("SELECT installed_at > now() - interval '1 minute' FROM installations WHERE shop = $1")
+            .bind(SHOP)
+            .fetch_one(&ctx.db)
+            .await
+            .unwrap();
+    assert!(recent);
+}
+
+#[openshop::test(unconfigured())]
+async fn a_signed_launch_older_than_ninety_seconds_never_asks(ctx: &TestContext) {
+    let _shopify = Shopify::install(ctx);
+    install(ctx, OTHER_SHOP, None, true).await;
+
+    for timestamp in [now() - 91, now() + 91, 1_770_000_000] {
+        let reply = launch_at(ctx, SHOP, timestamp).await;
+        assert_eq!(reply.status(), StatusCode::FOUND, "{timestamp}");
+        assert_eq!(
+            reply.headers()[LOCATION].to_str().unwrap(),
+            "/auth?shop=dev-store-1.myshopify.com"
+        );
+        // Nor brings back a shop marked uninstalled.
+        assert_eq!(launch_at(ctx, OTHER_SHOP, timestamp).await.status(), StatusCode::FOUND);
+    }
+    assert!(ctx.transport.requests().is_empty());
+    assert!(stored(ctx, SHOP).await.is_none());
+    assert!(stored(ctx, OTHER_SHOP).await.unwrap().2);
+
+    // A stale launch of an installed shop is served from its stored token, as before.
+    install(ctx, SHOP, Some("offline-token"), false).await;
+    assert_eq!(launch_at(ctx, SHOP, now() - 600).await.status(), StatusCode::OK);
+
+    // A fresh one asks.
+    assert_eq!(launch_at(ctx, OTHER_SHOP, now() - 60).await.status(), StatusCode::OK);
+    assert_eq!(grant_requests(ctx).len(), 1);
 }
 
 #[openshop::test(unconfigured())]
@@ -744,27 +936,118 @@ async fn a_session_token_falls_back_to_the_token_exchange(ctx: &TestContext) {
 async fn an_admin_handler_renews_a_token_the_admin_api_refuses(ctx: &TestContext) {
     let shopify = Shopify::install(ctx);
     install(ctx, SHOP, Some("offline-token"), false).await;
-    shopify.revoke("offline-token");
 
-    // Background work has no shop of a session: the 401 is the answer.
-    let error = shop_name(ctx).await.unwrap_err().to_string();
-    assert!(error.contains("Shopify GraphQL error (401)"), "{error}");
-    assert!(grant_requests(ctx).is_empty());
-
-    // The client of an admin handler serves the shop of the session token.
+    // The session's token was used, then refused.
     let url = build_admin_function_rpc_url("loader", "shop", "/tools");
-    let reply = ctx
-        .request_as(reqwest::Method::POST, &url, SHOP, "1")
-        .json(&json!({ "input": null }))
-        .send()
-        .await
-        .unwrap();
+    let call = || async {
+        ctx.request_as(reqwest::Method::POST, &url, SHOP, "1")
+            .json(&json!({ "input": null }))
+            .send()
+            .await
+            .unwrap()
+    };
+    assert_eq!(call().await.status(), StatusCode::OK);
+    shopify.revoke("offline-token");
+    let reply = call().await;
     assert_eq!(reply.status(), StatusCode::OK);
     assert_eq!(reply.json::<Value>().await.unwrap()["shop"]["name"], "Dev store 1");
     assert_eq!(grant_requests(ctx).len(), 1);
     assert_eq!(graphql_tokens(ctx), ["offline-token", "offline-token", "cc-token-1"]);
     let row = stored(ctx, SHOP).await.unwrap();
     assert_eq!(decrypted(ctx, &row).as_deref(), Some("cc-token-1"));
+}
+
+#[openshop::test(unconfigured())]
+async fn the_admin_context_of_tests_renews_a_refused_token_as_in_production(ctx: &TestContext) {
+    let shopify = Shopify::install(ctx);
+    install(ctx, SHOP, Some("offline-token"), false).await;
+    shopify.revoke("offline-token");
+
+    let admin = admin_context(
+        &ctx.app,
+        AdminTestOptions {
+            shop: SHOP.to_string(),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let data = admin_shop_name(admin, Value::Null).await.unwrap();
+    assert_eq!(data["shop"]["name"], "Dev store 1");
+    assert_eq!(graphql_tokens(ctx), ["offline-token", "cc-token-1"]);
+}
+
+#[openshop::test(unconfigured())]
+async fn a_vouched_client_pointed_at_another_shop_or_app_asks_nothing(ctx: &TestContext) {
+    let _shopify = Shopify::install(ctx);
+    let admin = admin_context(
+        &ctx.app,
+        AdminTestOptions {
+            shop: SHOP.to_string(),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    // Shopify vouched for `SHOP`: another shop gets no token from it.
+    let mut other_shop = admin.shopify.clone();
+    other_shop.shop = OTHER_SHOP.to_string();
+    let error = other_shop.graphql(QUERY, None).await.unwrap_err().to_string();
+    assert!(error.contains("No access token found"), "{error}");
+    let mut other_app = admin.shopify.clone();
+    other_app.shopify_app = "other".to_string();
+    assert!(other_app.graphql(QUERY, None).await.is_err());
+    assert!(ctx.transport.requests().is_empty());
+    assert!(stored(ctx, OTHER_SHOP).await.is_none());
+
+    // The client itself still does.
+    admin.shopify.graphql(QUERY, None).await.unwrap();
+    assert_eq!(grant_requests(ctx).len(), 1);
+    assert_only_shop_was_called(ctx);
+}
+
+#[openshop::test(unconfigured())]
+async fn a_clone_pointed_at_another_shop_sends_that_shop_its_own_token(ctx: &TestContext) {
+    let _shopify = Shopify::install(ctx);
+    install(ctx, SHOP, Some("first-shop-token"), false).await;
+    install(ctx, OTHER_SHOP, Some("other-shop-token"), false).await;
+
+    let client = ctx.app.shopify_client(SHOP, "default");
+    client.graphql(QUERY, None).await.unwrap();
+    let mut other = client.clone();
+    other.shop = OTHER_SHOP.to_string();
+    other.graphql(QUERY, None).await.unwrap();
+    client.graphql(QUERY, None).await.unwrap();
+
+    let sent: Vec<(String, String)> = ctx
+        .transport
+        .requests()
+        .iter()
+        .map(|request| {
+            (
+                request.url.clone(),
+                header(request, "X-Shopify-Access-Token")
+                    .unwrap_or_default()
+                    .to_string(),
+            )
+        })
+        .collect();
+    let graphql = |shop: &str| format!("https://{shop}/admin/api/2026-04/graphql.json");
+    assert_eq!(
+        sent,
+        [
+            (graphql(SHOP), "first-shop-token".to_string()),
+            (graphql(OTHER_SHOP), "other-shop-token".to_string()),
+            (graphql(SHOP), "first-shop-token".to_string()),
+        ]
+    );
+
+    // A shop without a token gets nothing sent at all.
+    let mut third = client.clone();
+    third.shop = "dev-store-3.myshopify.com".to_string();
+    assert!(third.graphql(QUERY, None).await.is_err());
+    assert_eq!(ctx.transport.requests().len(), 3);
 }
 
 // ─── Paths nothing vouches for ───────────────────────────────────────
@@ -827,8 +1110,21 @@ async fn a_webhook_never_asks_even_for_the_configured_shop(ctx: &TestContext) {
     let _shopify = Shopify::install(ctx);
 
     assert_eq!(webhook(ctx, SHOP).await.status(), StatusCode::OK);
+    // A shop without a row, from the header.
+    assert_eq!(webhook(ctx, OTHER_SHOP).await.status(), StatusCode::OK);
     assert!(ctx.transport.requests().is_empty());
     assert!(stored(ctx, SHOP).await.is_none());
+    assert!(stored(ctx, OTHER_SHOP).await.is_none());
+}
+
+#[openshop::test(configured())]
+async fn a_webhook_header_that_is_not_a_full_shop_domain_never_names_the_configured_shop(ctx: &TestContext) {
+    let _shopify = Shopify::install(ctx);
+
+    for shop in ["__global__", "dev-store-1", " dev-store-1 ", ""] {
+        assert_eq!(webhook(ctx, shop).await.status(), StatusCode::BAD_REQUEST, "{shop:?}");
+    }
+    assert!(ctx.transport.requests().is_empty());
 }
 
 // ─── Where a token goes ──────────────────────────────────────────────
@@ -939,7 +1235,8 @@ async fn each_app_asks_with_its_own_credentials(ctx: &TestContext) {
     let _shopify = Shopify::install(ctx);
 
     // A launch signed by the second app asks with the second app's credentials.
-    let query = sign_query(&[("shop", SHOP), ("timestamp", "1770000000")], "second-secret");
+    let timestamp = now().to_string();
+    let query = sign_query(&[("shop", SHOP), ("timestamp", &timestamp)], "second-secret");
     let reply = ctx
         .http
         .get(ctx.url_for(&format!("/?{}", to_query_string(&query))))
@@ -980,4 +1277,94 @@ async fn each_app_asks_with_its_own_credentials(ctx: &TestContext) {
         assert!(ctx.app.shopify_client(SHOP, handle).graphql(QUERY, None).await.is_err());
     }
     assert_eq!(grant_requests(ctx).len(), 2);
+}
+
+// ─── What an error shows ─────────────────────────────────────────────
+
+/// Keeps every line logged while it is installed.
+#[derive(Default)]
+struct Lines(Mutex<Vec<String>>);
+
+impl RuntimeLogger for Lines {
+    fn info(&self, message: &str, context: Option<&Value>) {
+        self.0.lock().unwrap().push(format!("{message} {context:?}"));
+    }
+    fn warn(&self, message: &str, context: Option<&Value>) {
+        self.info(message, context);
+    }
+    fn error(&self, message: &str, context: Option<&Value>) {
+        self.info(message, context);
+    }
+}
+
+#[openshop::test(configured())]
+async fn a_token_that_cannot_be_stored_shows_neither_itself_nor_its_ciphertext(ctx: &TestContext) {
+    let shopify = Shopify::install(ctx);
+    install(ctx, OTHER_SHOP, Some("offline-token"), false).await;
+    shopify.revoke("offline-token");
+    // The database refuses every token now, quoting it, as a constraint would.
+    sqlx::query(
+        "CREATE FUNCTION refuse_tokens() RETURNS trigger LANGUAGE plpgsql AS $$ \
+         BEGIN RAISE EXCEPTION 'cannot store %', NEW.access_token USING DETAIL = NEW.access_token; END $$",
+    )
+    .execute(&ctx.db)
+    .await
+    .unwrap();
+    sqlx::query(
+        "CREATE TRIGGER refuse_tokens BEFORE INSERT OR UPDATE ON installations \
+         FOR EACH ROW EXECUTE FUNCTION refuse_tokens()",
+    )
+    .execute(&ctx.db)
+    .await
+    .unwrap();
+    let lines = Arc::new(Lines::default());
+    let previous = logger::set_logger(lines.clone());
+
+    let mut shown = Vec::new();
+    // Background work for the configured shop.
+    let error = shop_name(ctx).await.unwrap_err();
+    shown.push(format!("{error:#} {error:?}"));
+    // A flow, whose run keeps its error.
+    let _ = ctx.run_flow_for("shop-name-flow", json!({}), SHOP).await;
+    let errors: Vec<(Option<String>,)> = sqlx::query_as("SELECT error FROM flow_runs")
+        .fetch_all(&ctx.db)
+        .await
+        .unwrap();
+    shown.extend(errors.into_iter().filter_map(|(error,)| error));
+    // The renewal of a stored token after a `401`.
+    let error = ctx
+        .app
+        .shopify_client(OTHER_SHOP, "default")
+        .graphql(QUERY, None)
+        .await
+        .unwrap_err();
+    shown.push(format!("{error:#} {error:?}"));
+    // A signed launch.
+    let reply = launch(ctx, "dev-store-3.myshopify.com").await;
+    assert_eq!(reply.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    shown.push(reply.text().await.unwrap());
+    let logs: Vec<(String, Option<String>)> = sqlx::query_as("SELECT coalesce(message, ''), payload::text FROM logs")
+        .fetch_all(&ctx.db)
+        .await
+        .unwrap();
+    shown.extend(
+        logs.into_iter()
+            .map(|(message, payload)| format!("{message} {payload:?}")),
+    );
+
+    logger::set_logger(previous);
+    shown.extend(lines.0.lock().unwrap().iter().cloned());
+
+    assert!(grant_requests(ctx).len() >= 3);
+    assert!(
+        shown
+            .iter()
+            .any(|shown| shown.contains("Could not store the client credentials token")),
+        "{shown:#?}"
+    );
+    for shown in &shown {
+        assert!(!shown.contains("cc-token-"), "{shown}");
+        assert!(!shown.contains("enc:aes-256-gcm"), "{shown}");
+        assert!(!shown.contains("cannot store"), "{shown}");
+    }
 }

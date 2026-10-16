@@ -675,6 +675,10 @@ actions, by the name the page view calls them with: `saveReview` for a function
 
 `admin_context(&app, options)` builds the `AdminContext` a function receives,
 with `ctx.db`, `ctx.shopify` and `ctx.connectors` for the shop of the options.
+`ctx.shopify` is the client of an admin request, as in production: for that
+shop and app, a token the Admin API refuses is renewed once with the
+[client credentials grant](authentication.md#client-credentials-grant), from
+the mock transport.
 `AdminTestOptions` has the fields `shop` (`test.myshopify.com`),
 `shopify_app` (`default`), `actor_id` (`test-actor`), `params` (empty), and
 `request_id` (`test-request`). `invoke_admin_function` applies the function's

@@ -209,7 +209,12 @@ async fn load_connectors(app: &OpenShop, shop: &str, shopify_app: &str) -> Resul
 /// token. A shop without one that `grant` lets the caller ask a token for is
 /// given one with the client credentials grant first; when Shopify refuses,
 /// the shop is not installed.
-pub(crate) async fn is_installed_shop(app: &OpenShop, shopify_app: &str, shop: &str, grant: Grant) -> Result<bool> {
+pub(crate) async fn is_installed_shop(
+    app: &OpenShop,
+    shopify_app: &str,
+    shop: &str,
+    grant: Option<&Grant>,
+) -> Result<bool> {
     let installation: Option<(uuid::Uuid,)> = sqlx::query_as(
         "SELECT id FROM installations \
          WHERE app_handle = $1 AND shop = $2 AND access_token IS NOT NULL AND uninstalled_at IS NULL \
@@ -222,6 +227,9 @@ pub(crate) async fn is_installed_shop(app: &OpenShop, shopify_app: &str, shop: &
     if installation.is_some() {
         return Ok(true);
     }
+    let Some(grant) = grant else {
+        return Ok(false);
+    };
 
     let granted = app
         .client_credentials()
@@ -239,7 +247,7 @@ pub async fn resolve_shop_context(app: &OpenShop, input: RouteShopInput) -> Resu
     };
     let shopify_app = app.apps().by_handle(input.shopify_app.as_deref())?.handle.clone();
 
-    if !is_installed_shop(app, &shopify_app, &shop, Grant::Configured).await? {
+    if !is_installed_shop(app, &shopify_app, &shop, Some(&Grant::Background)).await? {
         bail!("[openshop] Shop is not actively installed");
     }
 

@@ -1,5 +1,6 @@
 //! Shopify Admin GraphQL client for an installed shop.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::{Result, bail};
@@ -20,20 +21,28 @@ pub fn is_api_version(value: &str) -> bool {
     bytes.len() == 7 && bytes[4] == b'-' && bytes[..4].iter().chain(&bytes[5..]).all(u8::is_ascii_digit)
 }
 
+/// The access tokens a client and its clones read, per Shopify app and shop:
+/// `None` when the shop has none.
+type Tokens = Arc<Mutex<HashMap<(String, String), Option<String>>>>;
+
 /// The Shopify Admin API of one shop.
 ///
 /// Creating a client reads nothing: the access token of the installation is
-/// read from the database at the first request, then kept.
+/// read from the database at the first request, then kept for that Shopify
+/// app and shop. A clone whose `shop` or `shopify_app` was changed reads the
+/// token of its own app and shop.
 ///
 /// The shop is checked at each request: `<name>.myshopify.com` or `<name>`,
 /// nothing else, and the address the token goes to is built from it.
 ///
 /// For the shop of `SHOPIFY_CLIENT_CREDENTIALS_SHOP`, a shop without a token
-/// gets one with the client credentials grant; a token this process obtained
+/// gets one with the client credentials grant. A token this process obtained
 /// that way is renewed five minutes before it expires, and a token the Admin
-/// API refuses with a `401` is renewed once and the request sent again once.
-/// The client of an Admin API request does so for the shop of its verified
-/// session token, whatever it is.
+/// API refuses with a `401` is renewed once and the request sent again once,
+/// for any shop whose installation row holds it. The client of an Admin API
+/// request also asks for the shop and app of its verified session token when
+/// it has no token, and for those only: a clone pointed at another shop or
+/// app does not carry that right.
 #[derive(Clone)]
 pub struct ShopifyClient {
     pub shop: String,
@@ -42,8 +51,7 @@ pub struct ShopifyClient {
     app: OpenShop,
     /// What lets this client ask Shopify for a token: none in a webhook.
     grant: Option<Grant>,
-    /// `None` until the token is read; then the token, if the shop has one.
-    access_token: Arc<Mutex<Option<Option<String>>>>,
+    tokens: Tokens,
 }
 
 impl ShopifyClient {
@@ -54,8 +62,8 @@ impl ShopifyClient {
             shopify_app: shopify_app.into(),
             api_version: SHOPIFY_API_VERSION.to_string(),
             app: app.clone(),
-            grant: Some(Grant::Configured),
-            access_token: Arc::new(Mutex::new(None)),
+            grant: Some(Grant::Background),
+            tokens: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -72,26 +80,29 @@ impl ShopifyClient {
     }
 
     /// The access token of the installation, if there is one: read once and
-    /// kept, unless this client may ask Shopify for a token of the shop and
-    /// the shop has none, the token is about to expire, or it was `rejected`.
+    /// kept for this app and shop, unless this client may ask Shopify for a
+    /// token of the shop and the shop has none, the token is about to expire,
+    /// or it was `rejected`.
     async fn access_token(&self, shop: &str, rejected: Option<&str>) -> Result<Option<String>> {
         let credentials = self.app.client_credentials();
-        let may_grant = credentials.may_grant(self.grant, shop);
-        let mut cached = self.access_token.lock().await;
-        let reusable = match &*cached {
+        let grant = self.grant.as_ref();
+        let key = (self.shopify_app.clone(), shop.to_string());
+        let mut tokens = self.tokens.lock().await;
+        let reusable = match tokens.get(&key) {
             None => false,
-            Some(None) => !may_grant,
+            Some(None) => !credentials.may_ask_without_token(grant, &self.shopify_app, shop),
             Some(Some(token)) => {
-                rejected != Some(token.as_str()) && !(may_grant && credentials.expiring(&self.shopify_app, shop, token))
+                rejected != Some(token.as_str())
+                    && !(grant.is_some() && credentials.expiring(&self.shopify_app, shop, token))
             }
         };
         if !reusable {
             let token = credentials
-                .token(&self.app, &self.shopify_app, shop, self.grant, rejected)
+                .token(&self.app, &self.shopify_app, shop, grant, rejected)
                 .await?;
-            *cached = Some(token);
+            tokens.insert(key.clone(), token);
         }
-        Ok(cached.clone().flatten())
+        Ok(tokens.get(&key).cloned().flatten())
     }
 
     async fn post(&self, shop: &str, access_token: &str, body: &Value) -> Result<OutboundResponse> {
@@ -132,7 +143,7 @@ impl ShopifyClient {
         // A refused token is renewed once, where this client may ask for one;
         // when Shopify gives no other token, the `401` is the answer.
         if response.status == 401
-            && self.app.client_credentials().may_grant(self.grant, &shop)
+            && self.grant.is_some()
             && let Some(renewed) = self.access_token(&shop, Some(&access_token)).await?
             && renewed != access_token
         {

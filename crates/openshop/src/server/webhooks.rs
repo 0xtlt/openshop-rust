@@ -59,8 +59,9 @@ async fn handle(State(app): State<OpenShop>, headers: HeaderMap, body: Bytes) ->
     let Ok(payload) = serde_json::from_str::<Value>(&body) else {
         return json_error(StatusCode::BAD_REQUEST, "Invalid JSON body");
     };
-    // The signature covers the body, not this header: it is only taken as a shop domain.
-    let Some(shop) = strict_shop_domain(&shop) else {
+    // The signature covers the body, not this header: it is only taken as a
+    // shop domain written in full, never a bare name.
+    let Some(shop) = strict_shop_domain(&shop).filter(|domain| *domain == shop.trim().to_ascii_lowercase()) else {
         return json_error(StatusCode::BAD_REQUEST, "Invalid shop domain");
     };
     report::describe(|delivery| {

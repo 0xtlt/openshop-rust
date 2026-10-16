@@ -150,18 +150,17 @@ async fn run_admin_graphql(ctx: McpContext, input: JsonMap) -> Result<Value> {
     let stored = installation.and_then(|(token,)| token);
     let stored = ctx.app.crypto().decrypt_string(stored.as_deref())?;
 
-    // Nothing vouches for the shop of a tool call: only the shop of
-    // `SHOPIFY_CLIENT_CREDENTIALS_SHOP` may get a token with the client
-    // credentials grant, when it has none or this process's one expires.
+    // Nothing vouches for the shop of a tool call: it is background work. The
+    // shop of `SHOPIFY_CLIENT_CREDENTIALS_SHOP` may get a token with the
+    // client credentials grant when it has none, and a token this process
+    // obtained is renewed before it expires.
     let credentials = ctx.app.client_credentials();
-    let may_grant = credentials.may_grant(Some(Grant::Configured), &shop);
     let access_token = match stored {
-        Some(token) if !(may_grant && credentials.expiring(&ctx.shopify_app, &shop, &token)) => Some(token),
-        stored if may_grant => credentials
-            .grant(&ctx.app, &ctx.shopify_app, &shop, Grant::Configured, None)
+        Some(token) if !credentials.expiring(&ctx.shopify_app, &shop, &token) => Some(token),
+        stored => credentials
+            .grant(&ctx.app, &ctx.shopify_app, &shop, &Grant::Background, None)
             .await?
             .or(stored),
-        stored => stored,
     };
     let Some(access_token) = access_token else {
         bail!("Shop \"{shop}\" is not installed for app \"{}\"", ctx.shopify_app);
@@ -181,9 +180,8 @@ async fn run_admin_graphql(ctx: McpContext, input: JsonMap) -> Result<Value> {
     let mut response = send(access_token.clone()).await?;
     // A refused token is renewed once; without another token, the `401` is the answer.
     if response.status == 401
-        && may_grant
         && let Some(renewed) = credentials
-            .grant(&ctx.app, &ctx.shopify_app, &shop, Grant::Configured, Some(&access_token))
+            .grant(&ctx.app, &ctx.shopify_app, &shop, &Grant::Background, Some(&access_token))
             .await?
         && renewed != access_token
     {

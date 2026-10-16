@@ -81,9 +81,17 @@ async fn configured_targets(app: &OpenShop) -> Result<Vec<CronTarget>> {
         if known.iter().any(|(handle,)| *handle == shopify_app.handle) {
             continue;
         }
-        let granted = credentials
-            .grant(app, &shopify_app.handle, shop, Grant::Configured, None)
-            .await?;
+        // The shops of the other rows are served whatever happens here.
+        let granted = match credentials
+            .grant(app, &shopify_app.handle, shop, &Grant::Background, None)
+            .await
+        {
+            Ok(granted) => granted,
+            Err(error) => {
+                logger::warn(format!("{error:#}"));
+                None
+            }
+        };
         if granted.is_some() {
             targets.push(CronTarget {
                 shopify_app: shopify_app.handle.clone(),
