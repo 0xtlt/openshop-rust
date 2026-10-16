@@ -38,6 +38,9 @@ static APP: App = app! {
     // Sentry, when `SENTRY_DSN` is set: the runs that fail, the handlers that
     // fail and the panics, each with its flow and its shop.
     sentry: std::env::var("SENTRY_DSN").ok(),
+    // The development store whose token background work may get with the
+    // client credentials grant, when `SHOPIFY_CLIENT_CREDENTIALS_SHOP` is set.
+    client_credentials_shop: std::env::var("SHOPIFY_CLIENT_CREDENTIALS_SHOP").ok(),
 };
 
 fn main() -> Result<()> {

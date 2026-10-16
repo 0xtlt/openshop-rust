@@ -103,7 +103,8 @@ is intentionally blocked, and so is the schema push of `dev`.
 - `No access token found for app "<app>" and shop "<shop>"` means the shop has
   no active installation for that app. Open the app from Shopify admin, or
   reinstall it. For a development store of the organization that owns the app,
-  set `SHOPIFY_CLIENT_CREDENTIALS_SHOP` to it so that background work gets a
+  give it to the `client_credentials_shop` setting of `app!` (the templates
+  read `SHOPIFY_CLIENT_CREDENTIALS_SHOP`) so that background work gets a
   token with the
   [client credentials grant](../reference/authentication.md#client-credentials-grant);
   Shopify's refusal is logged with its status and error code, and the process

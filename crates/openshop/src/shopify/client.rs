@@ -10,7 +10,7 @@ use tokio::sync::Mutex;
 
 use super::client_credentials::Grant;
 use crate::app::OpenShop;
-use crate::runtime::{OutboundRequest, OutboundResponse};
+use crate::runtime::{OutboundRequest, OutboundResponse, logger};
 use crate::server::shop_domain::strict_shop_domain;
 
 pub const SHOPIFY_API_VERSION: &str = "2026-04";
@@ -35,14 +35,14 @@ type Tokens = Arc<Mutex<HashMap<(String, String), Option<String>>>>;
 /// The shop is checked at each request: `<name>.myshopify.com` or `<name>`,
 /// nothing else, and the address the token goes to is built from it.
 ///
-/// For the shop of `SHOPIFY_CLIENT_CREDENTIALS_SHOP`, a shop without a token
+/// For the shop of the `client_credentials_shop` setting, a shop without a token
 /// gets one with the client credentials grant. A token this process obtained
 /// that way is renewed five minutes before it expires, and a token the Admin
 /// API refuses with a `401` is renewed once and the request sent again once,
 /// for any shop whose installation row holds it. The client of an Admin API
 /// request also asks for the shop and app of its verified session token when
 /// it has no token, and for those only: a clone pointed at another shop or
-/// app does not carry that right.
+/// app may do what background work may.
 #[derive(Clone)]
 pub struct ShopifyClient {
     pub shop: String,
@@ -88,22 +88,24 @@ impl ShopifyClient {
         let credentials = self.app.client_credentials();
         let grant = self.grant.as_ref();
         let key = (self.shopify_app.clone(), shop.to_string());
-        let mut tokens = self.tokens.lock().await;
-        let reusable = match tokens.get(&key) {
-            None => false,
-            Some(None) => !credentials.may_ask_without_token(grant, &self.shopify_app, shop),
-            Some(Some(token)) => {
-                rejected != Some(token.as_str())
-                    && !(grant.is_some() && credentials.expiring(&self.shopify_app, shop, token))
+        // The tokens of every app and shop are not held while one is asked for.
+        if let Some(kept) = self.tokens.lock().await.get(&key) {
+            let reusable = match kept {
+                None => !credentials.may_ask_without_token(grant, &self.shopify_app, shop),
+                Some(token) => {
+                    rejected != Some(token.as_str())
+                        && !(grant.is_some() && credentials.expiring(&self.shopify_app, shop, token))
+                }
+            };
+            if reusable {
+                return Ok(kept.clone());
             }
-        };
-        if !reusable {
-            let token = credentials
-                .token(&self.app, &self.shopify_app, shop, grant, rejected)
-                .await?;
-            tokens.insert(key.clone(), token);
         }
-        Ok(tokens.get(&key).cloned().flatten())
+        let token = credentials
+            .token(&self.app, &self.shopify_app, shop, grant, rejected)
+            .await?;
+        self.tokens.lock().await.insert(key, token.clone());
+        Ok(token)
     }
 
     async fn post(&self, shop: &str, access_token: &str, body: &Value) -> Result<OutboundResponse> {
@@ -136,12 +138,13 @@ impl ShopifyClient {
             return Ok(None);
         };
         let mut response = self.post(&shop, &access_token, body).await?;
-        if response.status == 401
-            && self.grant.is_some()
-            && let Some(renewed) = self.access_token(&shop, Some(&access_token)).await?
-            && renewed != access_token
-        {
-            response = self.post(&shop, &renewed, body).await?;
+        if response.status == 401 && self.grant.is_some() {
+            // A renewal that fails leaves Shopify's answer as it is.
+            match self.access_token(&shop, Some(&access_token)).await {
+                Ok(Some(renewed)) if renewed != access_token => response = self.post(&shop, &renewed, body).await?,
+                Ok(_) => {}
+                Err(error) => logger::warn(format!("{error:#}")),
+            }
         }
         Ok(Some(response))
     }

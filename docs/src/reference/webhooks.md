@@ -88,7 +88,7 @@ the body and not that header, and a delivery can be replayed, so the `shopify`
 client of a webhook handler, like a flow the handler dispatches, is background
 work: with the
 [client credentials grant](authentication.md#client-credentials-grant), it may
-get a token for the shop of `SHOPIFY_CLIENT_CREDENTIALS_SHOP`, and renew once,
+get a token for the shop of the `client_credentials_shop` setting, and renew once,
 after a `401`, the token of a shop whose installation row holds one and is not
 marked uninstalled; it never gets a token for another shop, nor creates a row
 for it.

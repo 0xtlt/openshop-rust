@@ -42,31 +42,41 @@
   Admin API request whose verified session token names a shop without a token
   exchanges the session token first, as before, and asks for the grant only
   when Shopify refuses the exchange or it cannot run; a token this process
-  obtained with the grant is replaced by the exchange when it is about to
-  expire. Unsigned input never starts a grant for a shop of its choosing.
+  obtained with the grant, at a launch for example, is replaced by the
+  exchange at the first session after it, and when it is about to expire.
+  Unsigned input never starts a grant for a shop of its choosing.
   Background work (flows, including the ones a webhook dispatches, webhook
   handlers, crons, routes, proxies and the MCP `openshop.admin.graphql` tool)
-  may ask in two cases only: for the one shop
-  `SHOPIFY_CLIENT_CREDENTIALS_SHOP` names, without ever bringing back a shop
+  may ask in two cases only: for the one shop the new `client_credentials_shop`
+  setting of `app!` names (the templates read it from
+  `SHOPIFY_CLIENT_CREDENTIALS_SHOP`), without ever bringing back a shop
   marked uninstalled (a cron of every shop targets it even without an
   installation row), and to renew the token a shop's installation row holds,
   once after a `401` or before a token this process obtained expires. The
   token is stored
-  encrypted in `installations` like the others, with no schema change; a
-  vouched grant that brings back a shop marked uninstalled sets its
-  `installed_at`, as OAuth does. A token request has its own 5-second timeout.
+  encrypted in `installations` like the others, with no schema change, and
+  only where the row still holds what it held when Shopify was asked: a shop
+  uninstalled, or given a token by OAuth or the exchange, meanwhile keeps
+  what it has. A vouched grant that brings back a shop marked uninstalled
+  sets its `installed_at`, as OAuth does. The client of an admin session
+  pointed at another shop or app may do what background work may. A token request has its own 5-second timeout.
   A definite refusal (a `4xx` with Shopify's error code, such as
   `shop_not_permitted`) is remembered by the process for an hour per app and
   shop, any other failure (a token the database would not store included)
   for 30 seconds; the failure of background work never holds back a launch or
   an Admin API request Shopify vouched for. Nothing is remembered for a shop a
-  caller may not ask a token of, nor once a failure or a token is over. In
-  production without `ENCRYPTION_KEY`, nothing is asked and the caller fails;
-  a cron of every shop says so once per app.
-- Breaking for some users: `RuntimeEnv` has a new public field,
-  `client_credentials_shop`, and `testing::TestOptions` one of the same name;
-  a struct literal of either without `..Default::default()` no longer
-  compiles. `ReqwestTransport` no longer follows redirections: a request to
+  caller may not ask a token of, which is refused before it waits for the
+  turn of another, nor once a failure or a token is over. Shopify's refusal
+  of a merchant's store at its launch is logged as information. In
+  production without `ENCRYPTION_KEY`, nothing is asked: a launch is sent to
+  `/auth`, background work fails, and a cron of every shop says so once per
+  app. A renewal after a `401` that fails leaves the `401` as the answer, and
+  the clients of the application do not wait on each other while one of them
+  asks for a token.
+- Breaking for some users: `testing::TestOptions` has a new public field,
+  `client_credentials_shop`, which takes the place of the setting of the
+  application in a test; a struct literal of it without `..Default::default()`
+  no longer compiles. `ReqwestTransport` no longer follows redirections: a request to
   Shopify carries a secret, a token or a code, which a `3xx` would send on to
   another host. The `3xx` is the answer, and a custom `HttpTransport` must do
   the same.

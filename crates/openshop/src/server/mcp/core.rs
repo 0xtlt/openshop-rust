@@ -150,7 +150,7 @@ async fn run_admin_graphql(ctx: McpContext, input: JsonMap) -> Result<Value> {
     }
 
     // Nothing vouches for the shop of a tool call: it is background work. The
-    // shop of `SHOPIFY_CLIENT_CREDENTIALS_SHOP` may get a token with the
+    // shop of the `client_credentials_shop` setting may get a token with the
     // client credentials grant when it has none, and a stored token is
     // renewed as a flow's would be.
     let client = ctx

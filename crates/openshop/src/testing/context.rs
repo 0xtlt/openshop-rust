@@ -179,8 +179,9 @@ pub struct TestOptions {
     /// Marks the shop as installed with this access token.
     pub access_token: Option<String>,
     pub encryption_key: Option<String>,
-    /// `SHOPIFY_CLIENT_CREDENTIALS_SHOP`: the shop background work may ask a
-    /// token for with the client credentials grant, from the mock transport.
+    /// The `client_credentials_shop` of the application, in place of the one
+    /// its configuration gives: the shop background work may ask a token for
+    /// with the client credentials grant, from the mock transport.
     pub client_credentials_shop: Option<String>,
     pub host: Option<String>,
     pub production: bool,
@@ -314,7 +315,10 @@ impl TestContext {
         Self::with_options(app.config()?, TestOptions::installed()).await
     }
 
-    pub async fn with_options(config: OpenShopConfig, options: TestOptions) -> Result<Self> {
+    pub async fn with_options(mut config: OpenShopConfig, options: TestOptions) -> Result<Self> {
+        if options.client_credentials_shop.is_some() {
+            config.client_credentials_shop = options.client_credentials_shop.clone();
+        }
         let test_db = TestDb::create_with_models(&config.models).await?;
         let db = test_db.pool.clone();
         let transport = options.transport.clone().unwrap_or_default();
@@ -324,7 +328,6 @@ impl TestContext {
             host: options.host.clone(),
             shopify_app_url: None,
             encryption_key: options.encryption_key.clone(),
-            client_credentials_shop: options.client_credentials_shop.clone(),
             production: options.production,
             cwd: options
                 .cwd

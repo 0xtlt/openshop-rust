@@ -159,7 +159,7 @@ in a test that ends with `ctx.shutdown().await`.
 | `api_key` | `test-app` | Shopify API key of the single-app setup. Session-token audience. |
 | `access_token` | `None`; `test-access-token` with `TestOptions::installed()` | Inserts an installation so Shopify client calls and factories can run. |
 | `encryption_key` | `None` | `ENCRYPTION_KEY` of the application. |
-| `client_credentials_shop` | `None` | `SHOPIFY_CLIENT_CREDENTIALS_SHOP`: the shop background work may get a token for with the [client credentials grant](authentication.md#client-credentials-grant), from the mock transport. A token stored by `access_token` is used as it is. |
+| `client_credentials_shop` | `None` | The `client_credentials_shop` setting of the application, in place of the one its configuration gives: the shop background work may get a token for with the [client credentials grant](authentication.md#client-credentials-grant), from the mock transport. A token stored by `access_token` is used as it is. |
 | `host` | `None` | `HOST` of the application. |
 | `production` | `false` | Production mode, for example to test encryption enforcement. |
 | `cwd` | A directory without Shopify TOML files | Project root used to resolve Shopify TOML files. |

@@ -13,6 +13,7 @@ use serde_json::Value;
 use tokio::sync::OnceCell;
 
 use crate::app::OpenShop;
+use crate::runtime::logger;
 use crate::server::shop_domain::normalize_shop_domain;
 use crate::shopify::client::ShopifyClient;
 use crate::shopify::client_credentials::Grant;
@@ -208,7 +209,8 @@ async fn load_connectors(app: &OpenShop, shop: &str, shopify_app: &str) -> Resul
 /// Whether `shop` has the Shopify app `shopify_app` installed, with an access
 /// token. A shop without one that `grant` lets the caller ask a token for is
 /// given one with the client credentials grant first; when Shopify refuses,
-/// the shop is not installed.
+/// or the token cannot be stored, the shop is not installed, and the caller
+/// does what it did without the grant.
 pub(crate) async fn is_installed_shop(
     app: &OpenShop,
     shopify_app: &str,
@@ -231,15 +233,17 @@ pub(crate) async fn is_installed_shop(
         return Ok(false);
     };
 
-    let granted = app
-        .client_credentials()
-        .grant(app, shopify_app, shop, grant, None)
-        .await?;
-    Ok(granted.is_some())
+    match app.client_credentials().grant(app, shopify_app, shop, grant, None).await {
+        Ok(granted) => Ok(granted.is_some()),
+        Err(error) => {
+            logger::warn(format!("{error:#}"));
+            Ok(false)
+        }
+    }
 }
 
 /// Resolves an actively installed shop and its connectors. Nothing vouches
-/// for the shop of the input: only the shop of `SHOPIFY_CLIENT_CREDENTIALS_SHOP`
+/// for the shop of the input: only the shop of the `client_credentials_shop` setting
 /// may get a token with the client credentials grant here.
 pub async fn resolve_shop_context(app: &OpenShop, input: RouteShopInput) -> Result<RouteShopContext> {
     let Some(shop) = normalize_shop_domain(&input.shop) else {

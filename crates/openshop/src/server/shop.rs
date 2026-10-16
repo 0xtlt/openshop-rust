@@ -28,10 +28,11 @@ pub struct ShopSession {
 impl ShopSession {
     /// The Admin API of the shop of the session. Shopify vouched for that shop
     /// and app with the session token: a shop without a token, or a token the
-    /// Admin API refuses, gets one with the client credentials grant.
+    /// Admin API refuses, gets one with the client credentials grant. For any
+    /// other shop or app, the client may do what background work may.
     pub(crate) fn shopify_client(&self, app: &OpenShop) -> ShopifyClient {
-        app.shopify_client(&self.shop, &self.shopify_app)
-            .granting(Grant::vouched(&self.shopify_app, &self.shop))
+        let grant = Grant::vouched(&self.shopify_app, &self.shop).unwrap_or(Grant::Background);
+        app.shopify_client(&self.shop, &self.shopify_app).granting(Some(grant))
     }
 }
 
@@ -86,8 +87,9 @@ pub(crate) async fn shop_middleware(State(app): State<OpenShop>, mut request: Re
 /// token exchange. When Shopify refuses it, or it cannot run, Shopify still
 /// vouched for the shop with the session token: a development store of the
 /// organization that owns the app gets a token with the client credentials
-/// grant. A token this process obtained with the grant is replaced before it
-/// expires.
+/// grant. A token this process obtained with the grant, at a launch for
+/// example, is replaced by the exchange at the first session after it, and
+/// before it expires.
 async fn ensure_installation(
     app: &OpenShop,
     shopify_app: &ResolvedShopifyApp,
@@ -106,7 +108,11 @@ async fn ensure_installation(
             .decrypt_string(Some(&stored))
             .ok()
             .flatten()
-            .is_some_and(|token| app.client_credentials().expiring(&shopify_app.handle, shop, &token));
+            .is_some_and(|token| {
+                let credentials = app.client_credentials();
+                credentials.expiring(&shopify_app.handle, shop, &token)
+                    || credentials.exchange_due(&shopify_app.handle, shop, &token)
+            });
         if !expiring {
             return Ok(());
         }
@@ -121,12 +127,14 @@ async fn ensure_installation(
     let Some(grant) = Grant::vouched(&shopify_app.handle, shop) else {
         return Ok(());
     };
-    if let Err(error) = app
-        .client_credentials()
-        .grant(app, &shopify_app.handle, shop, &grant, None)
-        .await
-    {
-        logger::warn(format!("{error:#}"));
+    let credentials = app.client_credentials();
+    match credentials.grant(app, &shopify_app.handle, shop, &grant, None).await {
+        // The exchange was just refused: the next session does not try it again for this token.
+        Ok(Some(token)) => {
+            credentials.exchange_due(&shopify_app.handle, shop, &token);
+        }
+        Ok(None) => {}
+        Err(error) => logger::warn(format!("{error:#}")),
     }
     Ok(())
 }

@@ -62,6 +62,9 @@ pub struct OpenShopConfig {
     pub max_request_body_bytes: Option<usize>,
     /// The password of the operator dashboard, served under `/ops` when set.
     pub ops_password: Option<String>,
+    /// The development store whose token work no Shopify request vouches for
+    /// may get with the client credentials grant.
+    pub client_credentials_shop: Option<String>,
     /// Where failures are reported, when the application gives a Sentry DSN.
     #[cfg(feature = "sentry")]
     pub sentry: Option<SentryConfig>,
@@ -367,6 +370,22 @@ impl OpenShopBuilder {
         self
     }
 
+    /// Names the one development store of the organization that owns the app
+    /// for which work no Shopify request vouches for (flows, crons, routes,
+    /// proxies, webhook handlers, the MCP tool) may get an access token with
+    /// the client credentials grant, without an installation row. Without it,
+    /// or with an empty value, only a signed launch from Shopify admin or a
+    /// verified session token asks for a token, and background work only
+    /// renews the token a shop's row holds. The application refuses to start
+    /// when it is not a `*.myshopify.com` domain.
+    ///
+    /// The application gives the shop, from wherever it keeps its settings:
+    /// `client_credentials_shop: std::env::var("SHOPIFY_CLIENT_CREDENTIALS_SHOP").ok()`.
+    pub fn client_credentials_shop(mut self, shop: impl Into<Option<String>>) -> Self {
+        self.config.client_credentials_shop = shop.into().filter(|shop| !shop.trim().is_empty());
+        self
+    }
+
     /// Reports to Sentry the runs that fail, the handlers that fail and the
     /// panics. A DSN is enough; [`SentryConfig`] also names the environment
     /// and the release. Without a DSN, or with an empty one, nothing is
@@ -431,7 +450,7 @@ impl OpenShop {
         crate::server::ops::check_password(config.ops_password.as_deref(), env.production)?;
         let apps = ShopifyApps::resolve(config.shopify.as_ref(), &env)?;
         let crypto = Crypto::new(env.encryption_key.clone(), env.production);
-        let client_credentials = ClientCredentials::from_env(env.client_credentials_shop.as_deref())?;
+        let client_credentials = ClientCredentials::new(config.client_credentials_shop.as_deref())?;
         let custom_pages = config.resolved_admin_pages()?;
         let mcp_registry = build_mcp_registry(config.mcp.as_ref(), &create_core_mcp_capabilities())?;
         Ok(Self {
@@ -478,8 +497,8 @@ impl OpenShop {
         &self.inner.transport
     }
 
-    /// The client credentials grant, and the shop of
-    /// `SHOPIFY_CLIENT_CREDENTIALS_SHOP` background work may use it for.
+    /// The client credentials grant, and the shop of the
+    /// `client_credentials_shop` setting background work may use it for.
     pub(crate) fn client_credentials(&self) -> &ClientCredentials {
         &self.inner.client_credentials
     }

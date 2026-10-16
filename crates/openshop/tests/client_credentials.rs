@@ -1,6 +1,6 @@
 //! Tokens obtained with Shopify's client credentials grant: for any shop
 //! Shopify vouched for (a recent signed admin launch, a verified session
-//! token), for the shop of `SHOPIFY_CLIENT_CREDENTIALS_SHOP` in background
+//! token), for the shop of the `client_credentials_shop` setting in background
 //! work, and to renew the token a shop's row holds.
 
 mod common;
@@ -46,6 +46,8 @@ struct Shopify {
     revoked: Mutex<HashSet<String>>,
     refusal: Mutex<Option<(u16, Value)>>,
     exchange_refused: Mutex<bool>,
+    /// Runs once, while Shopify answers the next client credentials request.
+    during_grant: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 impl Default for Shopify {
@@ -56,6 +58,7 @@ impl Default for Shopify {
             revoked: Mutex::new(HashSet::new()),
             refusal: Mutex::new(None),
             exchange_refused: Mutex::new(false),
+            during_grant: Mutex::new(None),
         }
     }
 }
@@ -78,6 +81,9 @@ impl Shopify {
                     200,
                     json!({ "access_token": "exchange-token", "scope": "read_products" }),
                 );
+            }
+            if let Some(during_grant) = self.during_grant.lock().unwrap().take() {
+                during_grant();
             }
             if let Some((status, body)) = self.refusal.lock().unwrap().clone() {
                 return MockTransport::json(status, body);
@@ -114,6 +120,28 @@ impl Shopify {
 
     fn expire_in(&self, expires_in: Option<i64>) {
         *self.expires_in.lock().unwrap() = expires_in;
+    }
+
+    /// Runs `sql` on the database of the test while Shopify answers the next
+    /// client credentials request, as another request or a webhook would,
+    /// on a connection of its own.
+    fn write_during_grant(&self, ctx: &TestContext, sql: String) {
+        let options = ctx.db.connect_options();
+        *self.during_grant.lock().unwrap() = Some(Box::new(move || {
+            std::thread::spawn(move || {
+                tokio::runtime::Runtime::new().unwrap().block_on(async move {
+                    let pool = sqlx::postgres::PgPoolOptions::new()
+                        .max_connections(1)
+                        .connect_with((*options).clone())
+                        .await
+                        .unwrap();
+                    sqlx::query(&sql).execute(&pool).await.unwrap();
+                    pool.close().await;
+                });
+            })
+            .join()
+            .unwrap();
+        }));
     }
 }
 
@@ -181,14 +209,14 @@ fn options(client_credentials_shop: Option<&str>) -> TestOptions {
     }
 }
 
-/// `SHOPIFY_CLIENT_CREDENTIALS_SHOP` names `SHOP`, which has no installation yet.
+/// The `client_credentials_shop` setting names `SHOP`, which has no installation yet.
 async fn configured() -> TestContext {
     TestContext::with_options(config(&[]), options(Some(SHOP)))
         .await
         .unwrap()
 }
 
-/// No `SHOPIFY_CLIENT_CREDENTIALS_SHOP`.
+/// No `client_credentials_shop` setting.
 async fn unconfigured() -> TestContext {
     TestContext::with_options(config(&[]), options(None)).await.unwrap()
 }
@@ -757,7 +785,7 @@ async fn a_value_that_is_not_a_shop_domain_stops_the_application() {
             .to_string();
         assert_eq!(
             error,
-            "[openshop] SHOPIFY_CLIENT_CREDENTIALS_SHOP must be a *.myshopify.com domain"
+            "[openshop] client_credentials_shop must be a *.myshopify.com domain"
         );
     }
 }
@@ -1550,9 +1578,10 @@ async fn a_token_that_cannot_be_stored_shows_neither_itself_nor_its_ciphertext(c
         .await
         .unwrap_err();
     shown.push(format!("{error:#} {error:?}"));
-    // A signed launch.
+    // A signed launch, sent to OAuth as without the grant.
     let reply = launch(ctx, "dev-store-3.myshopify.com").await;
-    assert_eq!(reply.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(reply.status(), StatusCode::FOUND);
+    shown.push(format!("{:?}", reply.headers().get("location")));
     shown.push(reply.text().await.unwrap());
     let logs: Vec<(String, Option<String>)> = sqlx::query_as("SELECT coalesce(message, ''), payload::text FROM logs")
         .fetch_all(&ctx.db)
@@ -1614,4 +1643,157 @@ async fn without_encryption_key_a_cron_of_every_shop_says_so_once_per_app() {
     assert!(ctx.transport.requests().is_empty());
     assert!(cron_runs(&ctx).await.is_empty());
     ctx.shutdown().await.unwrap();
+}
+
+// ─── What a review of the grant found ────────────────────────────────
+
+#[openshop::test(unconfigured())]
+async fn the_first_session_after_a_launch_replaces_its_token_by_the_exchange(ctx: &TestContext) {
+    let _shopify = Shopify::install(ctx);
+
+    assert_eq!(launch(ctx, SHOP).await.status(), StatusCode::OK);
+    let row = stored(ctx, SHOP).await.unwrap();
+    assert_eq!(decrypted(ctx, &row).as_deref(), Some("cc-token-1"));
+
+    // The offline token of the exchange, which does not expire, takes its place.
+    api_request(ctx).await;
+    assert_eq!(
+        token_requests(ctx),
+        [json!("client_credentials"), json!(TOKEN_EXCHANGE)]
+    );
+    let row = stored(ctx, SHOP).await.unwrap();
+    assert_eq!(decrypted(ctx, &row).as_deref(), Some("exchange-token"));
+
+    // Then nothing more is asked.
+    api_request(ctx).await;
+    assert_eq!(token_requests(ctx).len(), 2);
+}
+
+#[openshop::test(unconfigured())]
+async fn a_launch_keeps_its_token_when_shopify_refuses_the_exchange(ctx: &TestContext) {
+    let shopify = Shopify::install(ctx);
+    shopify.refuse_exchange();
+
+    assert_eq!(launch(ctx, SHOP).await.status(), StatusCode::OK);
+    api_request(ctx).await;
+    api_request(ctx).await;
+    // The exchange is tried once in place of the token, then not again.
+    assert_eq!(
+        token_requests(ctx),
+        [json!("client_credentials"), json!(TOKEN_EXCHANGE)]
+    );
+    let row = stored(ctx, SHOP).await.unwrap();
+    assert_eq!(decrypted(ctx, &row).as_deref(), Some("cc-token-1"));
+}
+
+#[tokio::test]
+async fn a_launch_whose_token_cannot_be_stored_is_sent_to_oauth() {
+    // Production without `ENCRYPTION_KEY`: a token is never stored in plaintext.
+    let options = TestOptions {
+        encryption_key: None,
+        production: true,
+        ..options(None)
+    };
+    let mut ctx = TestContext::with_options(config(&[]), options).await.unwrap();
+    let _shopify = Shopify::install(&ctx);
+
+    let reply = launch(&ctx, SHOP).await;
+    assert_eq!(reply.status(), StatusCode::FOUND);
+    assert_eq!(
+        reply.headers()[LOCATION].to_str().unwrap(),
+        "/auth?shop=dev-store-1.myshopify.com"
+    );
+    assert!(grant_requests(&ctx).is_empty());
+    ctx.cleanup().await;
+}
+
+#[openshop::test(unconfigured())]
+async fn a_shop_uninstalled_while_a_launch_asks_for_a_token_stays_uninstalled(ctx: &TestContext) {
+    let shopify = Shopify::install(ctx);
+    install(ctx, SHOP, None, false).await;
+    // The `app/uninstalled` webhook, while Shopify answers the launch's request.
+    shopify.write_during_grant(
+        ctx,
+        format!("UPDATE installations SET uninstalled_at = now(), access_token = NULL WHERE shop = '{SHOP}'"),
+    );
+
+    let reply = launch(ctx, SHOP).await;
+    assert_eq!(reply.status(), StatusCode::FOUND);
+    assert_eq!(grant_requests(ctx).len(), 1);
+    let row = stored(ctx, SHOP).await.unwrap();
+    assert_eq!((row.0, row.2), (None, true));
+}
+
+#[openshop::test(configured())]
+async fn a_renewal_keeps_a_token_stored_while_it_asked(ctx: &TestContext) {
+    let shopify = Shopify::install(ctx);
+    install(ctx, OTHER_SHOP, Some("old-token"), false).await;
+    shopify.revoke("old-token");
+    // OAuth stores an offline token while Shopify answers the renewal.
+    let offline = ctx.app.crypto().encrypt_string("oauth-token").unwrap();
+    shopify.write_during_grant(
+        ctx,
+        format!("UPDATE installations SET access_token = '{offline}' WHERE shop = '{OTHER_SHOP}'"),
+    );
+
+    let data = ctx
+        .app
+        .shopify_client(OTHER_SHOP, "default")
+        .graphql(QUERY, None)
+        .await
+        .unwrap();
+    assert_eq!(data["shop"]["name"], "Dev store 1");
+    // The request was sent again with the token OAuth stored, which is kept.
+    assert_eq!(graphql_tokens(ctx), ["old-token", "oauth-token"]);
+    let row = stored(ctx, OTHER_SHOP).await.unwrap();
+    assert_eq!(decrypted(ctx, &row).as_deref(), Some("oauth-token"));
+}
+
+#[openshop::test(configured())]
+async fn a_renewal_that_fails_leaves_the_answer_of_shopify(ctx: &TestContext) {
+    let shopify = Shopify::install(ctx);
+    install(ctx, OTHER_SHOP, Some("old-token"), false).await;
+    shopify.revoke("old-token");
+    refuse_tokens(ctx).await;
+
+    let error = ctx
+        .app
+        .shopify_client(OTHER_SHOP, "default")
+        .graphql(QUERY, None)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(error.starts_with("[openshop] Shopify GraphQL error (401)"), "{error}");
+}
+
+/// The log lines with their level.
+#[derive(Default)]
+struct Levels(Mutex<Vec<(&'static str, String)>>);
+
+impl RuntimeLogger for Levels {
+    fn info(&self, message: &str, _context: Option<&Value>) {
+        self.0.lock().unwrap().push(("info", message.to_string()));
+    }
+    fn warn(&self, message: &str, _context: Option<&Value>) {
+        self.0.lock().unwrap().push(("warn", message.to_string()));
+    }
+    fn error(&self, message: &str, _context: Option<&Value>) {
+        self.0.lock().unwrap().push(("error", message.to_string()));
+    }
+}
+
+#[openshop::test(unconfigured())]
+async fn the_refusal_of_a_merchant_store_at_its_launch_is_no_warning(ctx: &TestContext) {
+    let _logging = LOGGING.lock().await;
+    let shopify = Shopify::install(ctx);
+    shopify.refuse(400, json!({ "error": "shop_not_permitted" }));
+    let levels = Arc::new(Levels::default());
+    let previous = logger::set_logger(levels.clone());
+
+    assert_eq!(launch(ctx, SHOP).await.status(), StatusCode::FOUND);
+    logger::set_logger(previous);
+    let lines = levels.0.lock().unwrap().clone();
+    let refusal: Vec<_> = lines.iter().filter(|(_, line)| line.contains("refused")).collect();
+    assert_eq!(refusal.len(), 1, "{lines:?}");
+    assert_eq!(refusal[0].0, "info");
 }
