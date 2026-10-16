@@ -484,14 +484,6 @@ impl OpenShop {
         &self.inner.client_credentials
     }
 
-    /// How many Shopify apps and shops the client credentials grant keeps
-    /// something of in this process, for tests that check it stays bounded.
-    #[cfg(feature = "testing")]
-    #[doc(hidden)]
-    pub fn client_credentials_remembered(&self) -> usize {
-        self.inner.client_credentials.remembered()
-    }
-
     pub(crate) fn custom_pages(&self) -> &[CustomAdminPage] {
         &self.inner.custom_pages
     }

@@ -76,8 +76,9 @@ async fn handle(State(app): State<OpenShop>, headers: HeaderMap, body: Bytes) ->
         api_version,
         db: app.db().clone(),
         // A delivery can be replayed and its shop header is not signed: the
-        // client uses the stored token and never asks Shopify for one.
-        shopify: ShopifyClient::new(&app, &shop, &shopify_app.handle).granting(None),
+        // client is the one of background work, which renews the token a
+        // shop's row holds and asks for no other shop than the configured one.
+        shopify: ShopifyClient::new(&app, &shop, &shopify_app.handle),
         connectors: Connectors::for_shop(&app, &shop, &shopify_app.handle),
         app: app.clone(),
     };

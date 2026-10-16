@@ -9,11 +9,9 @@ use serde_json::{Value, json};
 
 use super::registry::core_mcp_permissions;
 use crate::engine::dispatch::DispatchOptions;
-use crate::runtime::OutboundRequest;
 use crate::runtime::time::to_iso;
 use crate::server::api::run_logs::{RunLogOptions, get_filtered_run_logs};
 use crate::server::shop_domain::normalize_shop_domain;
-use crate::shopify::client_credentials::Grant;
 use crate::shopify::is_api_version;
 use crate::types::{JsonMap, McpContext, McpResource, McpResourceContent, McpRiskLevel, McpTool};
 
@@ -138,55 +136,31 @@ async fn run_admin_graphql(ctx: McpContext, input: JsonMap) -> Result<Value> {
     let variables = object_input(&input, "variables");
     let api_version = api_version_input(&input)?;
 
-    let installation: Option<(Option<String>,)> = sqlx::query_as(
-        "SELECT access_token FROM installations \
-         WHERE app_handle = $1 AND shop = $2 AND access_token IS NOT NULL AND uninstalled_at IS NULL \
-         LIMIT 1",
+    let not_installed = || anyhow!("Shop \"{shop}\" is not installed for app \"{}\"", ctx.shopify_app);
+    let uninstalled: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM installations \
+         WHERE app_handle = $1 AND shop = $2 AND uninstalled_at IS NOT NULL)",
     )
     .bind(&ctx.shopify_app)
     .bind(&shop)
-    .fetch_optional(&ctx.db)
+    .fetch_one(&ctx.db)
     .await?;
-    let stored = installation.and_then(|(token,)| token);
-    let stored = ctx.app.crypto().decrypt_string(stored.as_deref())?;
+    if uninstalled {
+        return Err(not_installed());
+    }
 
     // Nothing vouches for the shop of a tool call: it is background work. The
     // shop of `SHOPIFY_CLIENT_CREDENTIALS_SHOP` may get a token with the
-    // client credentials grant when it has none, and a token this process
-    // obtained is renewed before it expires.
-    let credentials = ctx.app.client_credentials();
-    let access_token = match stored {
-        Some(token) if !credentials.expiring(&ctx.shopify_app, &shop, &token) => Some(token),
-        stored => credentials
-            .grant(&ctx.app, &ctx.shopify_app, &shop, &Grant::Background, None)
-            .await?
-            .or(stored),
-    };
-    let Some(access_token) = access_token else {
-        bail!("Shop \"{shop}\" is not installed for app \"{}\"", ctx.shopify_app);
-    };
-
+    // client credentials grant when it has none, and a stored token is
+    // renewed as a flow's would be.
+    let client = ctx
+        .app
+        .shopify_client(&shop, &ctx.shopify_app)
+        .with_api_version(api_version.clone());
     let body = json!({ "query": query, "variables": variables });
-    let send = |access_token: String| {
-        ctx.app.transport().post_json(OutboundRequest {
-            url: format!("https://{shop}/admin/api/{api_version}/graphql.json"),
-            headers: vec![
-                ("Content-Type".to_string(), "application/json".to_string()),
-                ("X-Shopify-Access-Token".to_string(), access_token),
-            ],
-            body: body.clone(),
-        })
+    let Some(response) = client.send(&body).await? else {
+        return Err(not_installed());
     };
-    let mut response = send(access_token.clone()).await?;
-    // A refused token is renewed once; without another token, the `401` is the answer.
-    if response.status == 401
-        && let Some(renewed) = credentials
-            .grant(&ctx.app, &ctx.shopify_app, &shop, &Grant::Background, Some(&access_token))
-            .await?
-        && renewed != access_token
-    {
-        response = send(renewed).await?;
-    }
 
     let mut result = JsonMap::new();
     result.insert("shop".into(), Value::from(shop));

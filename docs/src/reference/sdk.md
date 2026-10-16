@@ -422,11 +422,10 @@ async fn product_title(ctx: &WebhookContext, id: &str) -> Result<Option<String>>
   Creating the client does not fail; the first call does. For the shop of
   `SHOPIFY_CLIENT_CREDENTIALS_SHOP`, and for the shop and app of an admin
   request's session, the client first asks Shopify for one with the
-  [client credentials grant](authentication.md#client-credentials-grant),
-  except in a webhook;
+  [client credentials grant](authentication.md#client-credentials-grant);
 - renews a token the Admin API refuses with `401` once, with the same grant,
   and sends the request again once, when the shop's installation row holds
-  that token (except in a webhook). The token is read and kept per Shopify app
+  that token. The token is read and kept per Shopify app
   and shop: a clone whose `shop` or `shopify_app` was changed reads the token
   of its own shop, and does not carry the right of an admin request's session
   to another shop or app;

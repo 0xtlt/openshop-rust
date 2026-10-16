@@ -10,40 +10,40 @@
 //!
 //! - [`Grant::Vouched`]: a launch from Shopify admin whose signed query
 //!   covers `shop` and is recent, or a verified session token (the shop of
-//!   its `dest`). It names the app and the shop it was given for, and serves
-//!   them only. Any shop without a usable token; a success reinstalls a shop
-//!   marked uninstalled.
+//!   its `dest`) whose token exchange Shopify refused. It names the app and
+//!   the shop it was given for, and serves them only. Any shop without a
+//!   usable token; a success reinstalls a shop marked uninstalled.
 //! - [`Grant::Background`]: anything else that may ask (flows, crons, routes,
-//!   proxies, the MCP tool). The shop of `SHOPIFY_CLIENT_CREDENTIALS_SHOP`,
-//!   with or without a row; any other shop only to renew the token its row
-//!   holds (after a `401`, or before a token this process obtained expires),
-//!   which proves an earlier installation through a signed flow. It never
-//!   creates a row for such a shop, and never writes on a row marked
-//!   uninstalled.
+//!   proxies, webhooks, the MCP tool). The shop of
+//!   `SHOPIFY_CLIENT_CREDENTIALS_SHOP`, with or without a row; any other shop
+//!   only to renew the token its row holds (after a `401`, or before a token
+//!   this process obtained expires), which proves an earlier installation
+//!   through a signed flow. It never creates a row for such a shop, and never
+//!   writes on a row marked uninstalled.
 //!
 //! A definite refusal (a `4xx` with Shopify's error code) is remembered in
 //! the process for an hour per app and shop; any other failure (a `5xx`, a
-//! `429`, a timeout, a network error) for thirty seconds. The failure of a
-//! background request holds back background requests only, so that a shop
-//! installed since is served at its next launch; the failure of a vouched
-//! request holds back both kinds. The caller falls back to what it did
-//! without the grant. Nothing of it is stored in the database but the token,
-//! encrypted, in `installations`.
+//! `429`, a timeout, a network error, a token the database would not store)
+//! for thirty seconds. The failure of a background request holds back
+//! background requests only, so that a shop installed since is served at its
+//! next launch; the failure of a vouched request holds back both kinds. The
+//! caller falls back to what it did without the grant. Nothing of it is
+//! stored in the database but the token, encrypted, in `installations`.
 //!
-//! The process only remembers an app and shop while a request asks for it, a
-//! failure holds back or it keeps the expiry of a token it obtained: a caller
-//! that may not ask leaves nothing behind.
+//! The process only remembers an app and shop once Shopify was asked for it,
+//! and only while a failure holds back or a token it obtained has not
+//! expired: a caller that may not ask leaves nothing behind.
 
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex as StdMutex, MutexGuard};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::hash::{BuildHasher, RandomState};
+use std::sync::{Mutex as StdMutex, MutexGuard};
 use std::time::Duration;
 
 use anyhow::{Result, anyhow, bail};
 use chrono::{DateTime, TimeDelta, Utc};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use tokio::sync::{Mutex, OwnedMutexGuard};
+use tokio::sync::Mutex;
 use tokio::time::Instant;
 
 use crate::app::OpenShop;
@@ -61,12 +61,16 @@ const RENEWAL_MARGIN: TimeDelta = TimeDelta::minutes(5);
 pub(crate) const GRANT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// How long a failure that may pass (a `5xx`, a `429`, a timeout, a network
-/// error) holds back another request for the same app and shop.
+/// error, a token that could not be stored) holds back another request for
+/// the same app and shop.
 pub(crate) const TRANSIENT_BACKOFF: Duration = Duration::from_secs(30);
 
 /// How long a definite refusal (a `4xx` with Shopify's error code, such as
 /// `shop_not_permitted`) holds back another request for the same app and shop.
 pub(crate) const REFUSAL_MEMORY: Duration = Duration::from_secs(60 * 60);
+
+/// How many locks share the turns of every app and shop.
+const TURNS: usize = 32;
 
 /// What lets a caller ask Shopify for a token.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -91,75 +95,42 @@ impl Grant {
     }
 }
 
-/// What the process knows of one app and shop.
-#[derive(Default)]
+/// What the process knows of one app and shop it asked Shopify for.
+#[derive(Default, Clone, Copy)]
 struct Entry {
-    /// Held while Shopify is asked, so that one request at a time does.
-    asking: Arc<Mutex<()>>,
     /// Until when the last failure of a background request holds back
-    /// background requests, and the digest of the credentials it was asked
-    /// with.
-    background_held: Option<(Instant, [u8; 32])>,
+    /// background requests.
+    background_held: Option<Instant>,
     /// Until when the last failure of a vouched request holds back every
-    /// request, and the digest of the credentials it was asked with.
-    vouched_held: Option<(Instant, [u8; 32])>,
+    /// request.
+    vouched_held: Option<Instant>,
     /// The token this process obtained, as a digest, and when it expires.
-    granted: Option<([u8; 32], Option<DateTime<Utc>>)>,
-}
-
-/// Whether a failure `held` with the credentials of digest `credentials`
-/// still holds back a request asked with them. Other credentials, such as a
-/// secret corrected since, are not held back.
-fn holds(held: Option<(Instant, [u8; 32])>, credentials: &[u8; 32]) -> bool {
-    held.is_some_and(|(held_until, held_with)| held_with == *credentials && held_back(Some(held_until)))
+    granted: Option<([u8; 32], DateTime<Utc>)>,
 }
 
 impl Entry {
-    /// Whether a failure still holds back a request of `grant`'s kind, asked
-    /// with the credentials of digest `credentials`.
-    fn holds_back(&self, grant: &Grant, credentials: &[u8; 32]) -> bool {
+    /// Whether a failure still holds back a request of `grant`'s kind.
+    fn holds_back(&self, grant: &Grant) -> bool {
         match grant {
-            Grant::Vouched { .. } => holds(self.vouched_held, credentials),
-            Grant::Background => holds(self.background_held, credentials) || holds(self.vouched_held, credentials),
+            Grant::Vouched { .. } => held_back(self.vouched_held),
+            Grant::Background => held_back(self.background_held) || held_back(self.vouched_held),
         }
     }
 
-    /// Remembers a failure of a request of `grant`'s kind, asked with the
-    /// credentials of digest `credentials`, until `held_until`.
-    fn hold_back(&mut self, grant: &Grant, credentials: [u8; 32], held_until: Instant) {
-        let held = Some((held_until, credentials));
+    /// Remembers a failure of a request of `grant`'s kind until `held_until`.
+    fn hold_back(&mut self, grant: &Grant, held_until: Instant) {
         match grant {
-            Grant::Vouched { .. } => self.vouched_held = held,
-            Grant::Background => self.background_held = held,
+            Grant::Vouched { .. } => self.vouched_held = Some(held_until),
+            Grant::Background => self.background_held = Some(held_until),
         }
     }
 
-    /// Whether the entry keeps nothing: nobody asks or waits to, no failure
-    /// holds back, and no token of this process expires.
-    fn idle(&self) -> bool {
-        let live = |held: Option<(Instant, [u8; 32])>| held_back(held.map(|(held_until, _)| held_until));
-        Arc::strong_count(&self.asking) == 1
-            && !live(self.background_held)
-            && !live(self.vouched_held)
-            && self.granted.is_none()
-    }
-}
-
-/// The turn of one request to ask Shopify for an app and shop. Once it ends,
-/// however it ends, the entry is forgotten if it keeps nothing.
-struct Turn<'a> {
-    credentials: &'a ClientCredentials,
-    key: (String, String),
-    asking: Option<OwnedMutexGuard<()>>,
-}
-
-impl Drop for Turn<'_> {
-    fn drop(&mut self) {
-        self.asking.take();
-        let mut entries = self.credentials.entries();
-        if entries.get(&self.key).is_some_and(Entry::idle) {
-            entries.remove(&self.key);
-        }
+    /// Whether it still keeps something: a failure that holds back, or a
+    /// token of this process that has not expired.
+    fn live(&self) -> bool {
+        held_back(self.background_held)
+            || held_back(self.vouched_held)
+            || self.granted.is_some_and(|(_, expires_at)| Utc::now() < expires_at)
     }
 }
 
@@ -167,6 +138,10 @@ impl Drop for Turn<'_> {
 /// remembers of it.
 pub(crate) struct ClientCredentials {
     configured: Option<String>,
+    /// One request at a time asks Shopify for an app and shop: its turn is
+    /// the lock a hash of the pair picks.
+    turns: [Mutex<()>; TURNS],
+    hasher: RandomState,
     entries: StdMutex<HashMap<(String, String), Entry>>,
     /// The Shopify apps whose configuration error background work reported.
     reported: StdMutex<HashSet<String>>,
@@ -205,16 +180,6 @@ fn digest(token: &str) -> [u8; 32] {
     Sha256::digest(token.as_bytes()).into()
 }
 
-/// The digest of an app's client ID and secret, which a failure is
-/// remembered with.
-fn credentials_digest(api_key: &str, api_secret: &str) -> [u8; 32] {
-    let mut hasher = Sha256::new();
-    hasher.update(api_key.as_bytes());
-    hasher.update([0]);
-    hasher.update(api_secret.as_bytes());
-    hasher.finalize().into()
-}
-
 impl ClientCredentials {
     /// The grant of the application. `SHOPIFY_CLIENT_CREDENTIALS_SHOP`, when
     /// set, names the shop background work may ask a token for.
@@ -228,6 +193,8 @@ impl ClientCredentials {
         };
         Ok(Self {
             configured,
+            turns: std::array::from_fn(|_| Mutex::new(())),
+            hasher: RandomState::new(),
             entries: StdMutex::new(HashMap::new()),
             reported: StdMutex::new(HashSet::new()),
         })
@@ -264,47 +231,35 @@ impl ClientCredentials {
         self.entries.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    fn with_entry<T>(&self, shopify_app: &str, shop: &str, read: impl FnOnce(&mut Entry) -> T) -> T {
+    /// Updates what the process knows of an app and shop it asked Shopify
+    /// for. An entry that keeps nothing is dropped, and a new one first
+    /// drops every entry that no longer keeps anything.
+    fn remember(&self, shopify_app: &str, shop: &str, update: impl FnOnce(&mut Entry)) {
+        let key = (shopify_app.to_string(), shop.to_string());
         let mut entries = self.entries();
-        read(entries
-            .entry((shopify_app.to_string(), shop.to_string()))
-            .or_default())
-    }
-
-    /// How many apps and shops the process remembers.
-    #[cfg(any(test, feature = "testing"))]
-    pub fn remembered(&self) -> usize {
-        self.entries().len()
+        if !entries.contains_key(&key) {
+            entries.retain(|_, entry| entry.live());
+        }
+        let entry = entries.entry(key.clone()).or_default();
+        update(entry);
+        if !entry.live() {
+            entries.remove(&key);
+        }
     }
 
     /// Whether a failure still holds back a request of `grant`'s kind for
-    /// this app and shop, asked with the credentials of digest
-    /// `credentials`. Reads only: it remembers nothing.
-    fn held_back(&self, shopify_app: &str, shop: &str, grant: &Grant, credentials: &[u8; 32]) -> bool {
+    /// this app and shop.
+    fn held_back(&self, shopify_app: &str, shop: &str, grant: &Grant) -> bool {
         self.entries()
             .get(&(shopify_app.to_string(), shop.to_string()))
-            .is_some_and(|entry| entry.holds_back(grant, credentials))
+            .is_some_and(|entry| entry.holds_back(grant))
     }
 
-    /// Waits for the turn to ask Shopify for this app and shop. Entries that
-    /// keep nothing are forgotten when a new one is made, so that one a
-    /// cancelled request left behind does not stay.
-    async fn turn(&self, shopify_app: &str, shop: &str) -> Turn<'_> {
-        let key = (shopify_app.to_string(), shop.to_string());
-        let asking = {
-            let mut entries = self.entries();
-            if !entries.contains_key(&key) {
-                entries.retain(|_, entry| !entry.idle());
-            }
-            entries.entry(key.clone()).or_default().asking.clone()
-        };
-        let mut turn = Turn {
-            credentials: self,
-            key,
-            asking: None,
-        };
-        turn.asking = Some(asking.lock_owned().await);
-        turn
+    /// The lock that gives one request at a time its turn to ask Shopify for
+    /// this app and shop.
+    fn turn(&self, shopify_app: &str, shop: &str) -> &Mutex<()> {
+        let index = self.hasher.hash_one((shopify_app, shop)) as usize % TURNS;
+        &self.turns[index]
     }
 
     /// Whether background work should report, for the Shopify app
@@ -323,7 +278,7 @@ impl ClientCredentials {
     pub fn expiring(&self, shopify_app: &str, shop: &str, token: &str) -> bool {
         let entries = self.entries();
         let Some(Entry {
-            granted: Some((granted, Some(expires_at))),
+            granted: Some((granted, expires_at)),
             ..
         }) = entries.get(&(shopify_app.to_string(), shop.to_string()))
         else {
@@ -335,8 +290,9 @@ impl ClientCredentials {
     /// The token to send to the Admin API of `shop` for the Shopify app
     /// `shopify_app`: the stored one, unless it was just `rejected` with a
     /// `401`, is about to expire, or the shop has none (or is marked
-    /// uninstalled, for a vouched grant), and `grant` allows asking Shopify.
-    /// When Shopify gives none, the stored token, whatever it is.
+    /// uninstalled), in which case [`ClientCredentials::grant`] decides
+    /// whether `grant` lets the caller ask Shopify. When Shopify gives none,
+    /// the stored token, whatever it is.
     pub async fn token(
         &self,
         app: &OpenShop,
@@ -350,15 +306,12 @@ impl ClientCredentials {
         let (Some(grant), Some(shop)) = (grant, strict_shop_domain(shop)) else {
             return Ok(current);
         };
-        let uninstalled = stored.as_ref().is_some_and(|stored| stored.uninstalled);
-        let renewed = current
-            .as_deref()
-            .is_some_and(|token| Some(token) == rejected || self.expiring(shopify_app, &shop, token));
-        let reinstalled = uninstalled && matches!(grant, Grant::Vouched { .. });
-        if current.is_some() && !renewed && !reinstalled {
-            return Ok(current);
-        }
-        if !self.may_ask(grant, shopify_app, &shop, stored.as_ref(), renewed) {
+        if let Some(stored) = &stored
+            && let Some(token) = stored.token.as_deref()
+            && Some(token) != rejected
+            && !stored.uninstalled
+            && !self.expiring(shopify_app, &shop, token)
+        {
             return Ok(current);
         }
         let granted = self.grant(app, shopify_app, &shop, grant, rejected).await?;
@@ -375,7 +328,8 @@ impl ClientCredentials {
     ///
     /// Fails, without asking Shopify, when the token could not be stored
     /// encrypted (production without `ENCRYPTION_KEY`), and with a message that
-    /// names neither the token nor its ciphertext when it could not be written.
+    /// names neither the token nor its ciphertext when it could not be
+    /// written, which then holds back as a failure that may pass.
     pub async fn grant(
         &self,
         app: &OpenShop,
@@ -387,37 +341,15 @@ impl ClientCredentials {
         let Some(shop) = strict_shop_domain(shop) else {
             return Ok(None);
         };
-        // A caller that may not ask leaves nothing behind: whether it may is
-        // known before anything is remembered of the app and shop.
-        match grant {
-            Grant::Vouched { .. } => {
-                if !self.may_ask(grant, shopify_app, &shop, None, false) {
-                    return Ok(None);
-                }
-            }
-            Grant::Background if self.configured.as_deref() == Some(shop.as_str()) => {}
-            Grant::Background => {
-                let stored = stored(app, shopify_app, &shop).await?;
-                let renewed = stored.as_ref().is_some_and(|stored| stored.token.is_some());
-                if !self.may_ask(grant, shopify_app, &shop, stored.as_ref(), renewed) {
-                    return Ok(None);
-                }
-            }
-        }
-        let resolved = app.apps().by_handle(Some(shopify_app))?;
-        if resolved.api_key.is_empty() || resolved.api_secret.is_empty() {
-            return Ok(None);
-        }
-        let credentials = credentials_digest(&resolved.api_key, &resolved.api_secret);
-        if self.held_back(shopify_app, &shop, grant, &credentials) {
+        if self.held_back(shopify_app, &shop, grant) {
             return Ok(None);
         }
 
         // A caller cancelled while it waits, or later, stops there: a dropped
         // future sends nothing more, and its turn is given up.
-        let _turn = self.turn(shopify_app, &shop).await;
+        let _turn = self.turn(shopify_app, &shop).lock().await;
 
-        if self.held_back(shopify_app, &shop, grant, &credentials) {
+        if self.held_back(shopify_app, &shop, grant) {
             return Ok(None);
         }
 
@@ -446,6 +378,10 @@ impl ClientCredentials {
         if let Err(error) = app.crypto().can_encrypt() {
             bail!("[openshop] Cannot store a client credentials token for {shop}: {error}");
         }
+        let resolved = app.apps().by_handle(Some(shopify_app))?;
+        if resolved.api_key.is_empty() || resolved.api_secret.is_empty() {
+            return Ok(None);
+        }
 
         let token = match request(
             app.transport().as_ref(),
@@ -460,11 +396,42 @@ impl ClientCredentials {
             Err(failure) => {
                 logger::warn(&failure.message);
                 let held_until = Instant::now() + failure.holds_back();
-                self.with_entry(shopify_app, &shop, |entry| entry.hold_back(grant, credentials, held_until));
+                self.remember(shopify_app, &shop, |entry| entry.hold_back(grant, held_until));
                 return Ok(None);
             }
         };
 
+        let written = self.store(app, shopify_app, &shop, grant, &token).await;
+        let written = match written {
+            Ok(written) => written,
+            // As a failure that may pass: every caller does not get a token
+            // of its own that it cannot keep.
+            Err(error) => {
+                let held_until = Instant::now() + TRANSIENT_BACKOFF;
+                self.remember(shopify_app, &shop, |entry| entry.hold_back(grant, held_until));
+                return Err(error);
+            }
+        };
+        if !written {
+            return Ok(None);
+        }
+
+        self.remember(shopify_app, &shop, |entry| {
+            *entry = Entry {
+                granted: token.expires_at.map(|expires_at| (digest(&token.value), expires_at)),
+                ..Entry::default()
+            };
+        });
+        logger::info(format!(
+            "[openshop] Client credentials token obtained for {shop} (app \"{shopify_app}\")"
+        ));
+        Ok(Some(token.value))
+    }
+
+    /// Stores `token` encrypted in the row `grant` may write: whether a row
+    /// took it. Fails with a message that names neither the token, its
+    /// ciphertext nor what the database said.
+    async fn store(&self, app: &OpenShop, shopify_app: &str, shop: &str, grant: &Grant, token: &Granted) -> Result<bool> {
         let unwritten = || anyhow!("[openshop] Could not store the client credentials token of app \"{shopify_app}\" for {shop}");
         let encrypted = app.crypto().encrypt_string(&token.value).map_err(|_| unwritten())?;
         let written: Option<(uuid::Uuid,)> = match grant {
@@ -482,7 +449,7 @@ impl ClientCredentials {
             ),
             // The configured shop: a row is created when there is none, but a
             // row marked uninstalled is never brought back.
-            Grant::Background if self.configured.as_deref() == Some(shop.as_str()) => sqlx::query_as(
+            Grant::Background if self.configured.as_deref() == Some(shop) => sqlx::query_as(
                 "INSERT INTO installations (app_handle, shop, access_token, scopes) VALUES ($1, $2, $3, $4) \
                  ON CONFLICT (app_handle, shop) DO UPDATE SET \
                    access_token = EXCLUDED.access_token, \
@@ -498,26 +465,14 @@ impl ClientCredentials {
             ),
         }
         .bind(shopify_app)
-        .bind(&shop)
+        .bind(shop)
         .bind(&encrypted)
         .bind(&token.scopes)
         .fetch_optional(app.db())
         .await
         // A database error may quote the row it refused: it is left out.
         .map_err(|_| unwritten())?;
-        if written.is_none() {
-            return Ok(None);
-        }
-
-        self.with_entry(shopify_app, &shop, |entry| {
-            entry.background_held = None;
-            entry.vouched_held = None;
-            entry.granted = Some((digest(&token.value), token.expires_at));
-        });
-        logger::info(format!(
-            "[openshop] Client credentials token obtained for {shop} (app \"{shopify_app}\")"
-        ));
-        Ok(Some(token.value))
+        Ok(written.is_some())
     }
 }
 
@@ -741,23 +696,22 @@ mod tests {
     fn only_a_token_this_process_obtained_expires() {
         let credentials = ClientCredentials::from_env(None).unwrap();
         let shop = "dev-store-1.myshopify.com";
-        let set = |expires_at: Option<DateTime<Utc>>| {
-            credentials.with_entry("default", shop, |entry| entry.granted = Some((digest("granted"), expires_at)));
+        let set = |expires_at: DateTime<Utc>| {
+            credentials.remember("default", shop, |entry| entry.granted = Some((digest("granted"), expires_at)));
         };
         assert!(!credentials.expiring("default", shop, "granted"));
 
-        set(Some(Utc::now() + TimeDelta::minutes(6)));
+        set(Utc::now() + TimeDelta::minutes(6));
         assert!(!credentials.expiring("default", shop, "granted"));
-        set(Some(Utc::now() + TimeDelta::minutes(4)));
-        assert!(credentials.expiring("default", shop, "granted"));
-        set(Some(Utc::now() - TimeDelta::minutes(1)));
+        set(Utc::now() + TimeDelta::minutes(4));
         assert!(credentials.expiring("default", shop, "granted"));
         // Another token, such as one OAuth stored since, is not this one.
         assert!(!credentials.expiring("default", shop, "oauth-token"));
         assert!(!credentials.expiring("other", shop, "granted"));
-        // Without `expires_in`, only a `401` renews it.
-        set(None);
+        // Once it expired, it is forgotten: a `401` renews it.
+        set(Utc::now() - TimeDelta::minutes(1));
         assert!(!credentials.expiring("default", shop, "granted"));
+        assert!(credentials.entries().is_empty());
     }
 
     #[test]
@@ -772,75 +726,83 @@ mod tests {
 
     #[test]
     fn a_background_failure_never_holds_back_a_vouched_request() {
-        let credentials = credentials_digest("key", "secret");
         let vouched = Grant::vouched("default", "dev-store-1").unwrap();
         let later = Instant::now() + REFUSAL_MEMORY;
 
         let mut entry = Entry::default();
-        entry.hold_back(&Grant::Background, credentials, later);
-        assert!(entry.holds_back(&Grant::Background, &credentials));
-        assert!(!entry.holds_back(&vouched, &credentials));
+        entry.hold_back(&Grant::Background, later);
+        assert!(entry.holds_back(&Grant::Background));
+        assert!(!entry.holds_back(&vouched));
 
         // A vouched failure holds back both kinds.
         let mut entry = Entry::default();
-        entry.hold_back(&vouched, credentials, later);
-        assert!(entry.holds_back(&vouched, &credentials));
-        assert!(entry.holds_back(&Grant::Background, &credentials));
+        entry.hold_back(&vouched, later);
+        assert!(entry.holds_back(&vouched));
+        assert!(entry.holds_back(&Grant::Background));
     }
 
-    #[test]
-    fn a_failure_holds_back_the_credentials_it_was_asked_with_only() {
-        let old = credentials_digest("key", "old-secret");
-        let fixed = credentials_digest("key", "fixed-secret");
-        assert_ne!(old, fixed);
-        assert_ne!(credentials_digest("ke", "ysecret"), credentials_digest("key", "secret"));
-        let mut entry = Entry::default();
-        entry.hold_back(&Grant::Background, old, Instant::now() + REFUSAL_MEMORY);
-        assert!(entry.holds_back(&Grant::Background, &old));
-        assert!(!entry.holds_back(&Grant::Background, &fixed));
-    }
+    #[tokio::test(start_paused = true)]
+    async fn an_entry_is_kept_only_while_it_keeps_something() {
+        let credentials = ClientCredentials::from_env(None).unwrap();
+        let shop = |index: usize| format!("dev-store-{index}.myshopify.com");
+        let hold = |entry: &mut Entry| entry.hold_back(&Grant::Background, Instant::now() + TRANSIENT_BACKOFF);
+        for index in 0..200 {
+            credentials.remember("default", &shop(index), hold);
+        }
+        assert_eq!(credentials.entries().len(), 200);
+        assert!(credentials.held_back("default", &shop(7), &Grant::Background));
 
-    #[test]
-    fn an_entry_that_keeps_nothing_is_idle() {
-        let credentials = credentials_digest("key", "secret");
-        let mut entry = Entry::default();
-        assert!(entry.idle());
-        let asking = entry.asking.clone();
-        assert!(!entry.idle());
-        drop(asking);
-        entry.hold_back(&Grant::Background, credentials, Instant::now() + TRANSIENT_BACKOFF);
-        assert!(!entry.idle());
-        // A failure whose time is up keeps nothing.
-        entry.hold_back(&Grant::Background, credentials, Instant::now());
-        assert!(entry.idle());
-        entry.granted = Some((digest("granted"), None));
-        assert!(!entry.idle());
+        // Once their failures are over, the next new entry drops them all.
+        tokio::time::advance(TRANSIENT_BACKOFF).await;
+        assert!(!credentials.held_back("default", &shop(7), &Grant::Background));
+        credentials.remember("default", &shop(200), hold);
+        assert_eq!(credentials.entries().len(), 1);
+
+        // An update that leaves nothing to keep drops the entry at once.
+        credentials.remember("default", &shop(200), |entry| *entry = Entry::default());
+        assert!(credentials.entries().is_empty());
+        // So does a token without an expiry.
+        credentials.remember("default", &shop(1), |entry| entry.granted = None);
+        assert!(credentials.entries().is_empty());
     }
 
     #[tokio::test]
-    async fn a_turn_is_forgotten_when_it_ends_even_cancelled() {
-        let credentials = ClientCredentials::from_env(None).unwrap();
-        let shop = "dev-store-1.myshopify.com";
-        let first = credentials.turn("default", shop).await;
-        assert_eq!(credentials.remembered(), 1);
-        // A caller that gives up while it waits for its turn.
-        let waiting = tokio::time::timeout(Duration::from_millis(10), credentials.turn("default", shop)).await;
-        assert!(waiting.is_err());
-        assert_eq!(credentials.remembered(), 1);
-        drop(first);
-        assert_eq!(credentials.remembered(), 0);
+    async fn callers_that_may_not_ask_leave_nothing_behind() {
+        let config = crate::app::OpenShopConfig::builder().build().unwrap();
+        let options = crate::testing::TestOptions {
+            client_credentials_shop: Some("dev-store-1.myshopify.com".to_string()),
+            encryption_key: Some("a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2".to_string()),
+            ..Default::default()
+        };
+        let ctx = crate::testing::TestContext::with_options(config, options).await.unwrap();
+        let credentials = ctx.app.client_credentials();
+        let vouched = Grant::vouched("default", "dev-store-1.myshopify.com").unwrap();
 
-        // A failure keeps the entry; once its time is up, the next new entry
-        // forgets it.
-        let turn = credentials.turn("default", shop).await;
-        credentials.with_entry("default", shop, |entry| {
-            entry.hold_back(&Grant::Background, [0; 32], Instant::now() + Duration::from_millis(20))
-        });
-        drop(turn);
-        assert_eq!(credentials.remembered(), 1);
-        tokio::time::sleep(Duration::from_millis(30)).await;
-        drop(credentials.turn("default", "dev-store-2.myshopify.com").await);
-        assert_eq!(credentials.remembered(), 0);
+        for index in 0..200 {
+            let shop = format!("unknown-{index}-{}.myshopify.com", "x".repeat(40));
+            let granted = credentials
+                .grant(&ctx.app, "default", &shop, &Grant::Background, None)
+                .await
+                .unwrap();
+            assert_eq!(granted, None);
+            // Shopify vouched for another shop.
+            let granted = credentials.grant(&ctx.app, "default", &shop, &vouched, None).await.unwrap();
+            assert_eq!(granted, None);
+            let token = credentials
+                .token(&ctx.app, "default", &shop, Some(&Grant::Background), None)
+                .await
+                .unwrap();
+            assert_eq!(token, None);
+        }
+        // Not a shop domain at all.
+        let long = format!("{}.myshopify.com", "a".repeat(64));
+        assert_eq!(
+            credentials.grant(&ctx.app, "default", &long, &Grant::Background, None).await.unwrap(),
+            None
+        );
+        assert!(ctx.transport.requests().is_empty());
+        assert!(credentials.entries().is_empty());
+        ctx.shutdown().await.unwrap();
     }
 
     #[test]

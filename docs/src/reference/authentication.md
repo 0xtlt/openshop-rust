@@ -52,11 +52,13 @@ A session token is accepted when:
 | `Unauthorized: session token was not issued to a staff user` | Empty or customer `sub`. |
 
 When the shop has no stored access token yet, the first authenticated request
-gets one and stores it encrypted: first with the
+gets one and stores it encrypted, by exchanging the session token for an
+offline access token, which does not expire. When Shopify refuses the exchange,
+or it cannot run, the request asks for a token with the
 [client credentials grant](#client-credentials-grant), which only a development
-store of the organization that owns the app obtains, then, when Shopify refuses
-it, by exchanging the session token for an offline access token. Both are
-best-effort: their failure does not fail the request.
+store of the organization that owns the app obtains. Both are best-effort:
+their failure does not fail the request. A token this process obtained with the
+grant is replaced by the exchange when it is about to expire.
 
 ## OAuth installation
 
@@ -107,7 +109,7 @@ no usable token for it (no row, no token, or a row marked uninstalled):
 | Where | Shop | When Shopify refuses |
 | --- | --- | --- |
 | A launch from Shopify admin (production shell) | The `shop` of the query, whose `hmac` covers it, when its `timestamp` is within 90 seconds of the server's clock | Redirected to `/auth`, as before |
-| An Admin API request (`/api`) | The `dest` of the verified session token, which must not have expired | The session token is exchanged, as before |
+| An Admin API request (`/api`), once Shopify refused the token exchange, or it could not run | The `dest` of the verified session token, which must not have expired | The request is served without a token, as before |
 
 A launch from Shopify admin for a development store with an empty database
 then renders the app instead of redirecting to `/auth`, which Shopify refuses
@@ -127,8 +129,9 @@ Unsigned input never starts a grant for a shop of its choosing: not a webhook
 (its signature covers the body, not the `X-Shopify-Shop-Domain` header, and a
 delivery can be replayed), not `/auth?shop=`, not a route that calls `for_shop`
 with a shop of its request, not a flow, a cron, a proxy or the MCP
-`openshop.admin.graphql` tool. That background work uses the stored token, and
-may ask Shopify in two cases only:
+`openshop.admin.graphql` tool. That background work, the `shopify` client of a
+webhook handler included, uses the stored token, and may ask Shopify in two
+cases only:
 
 - For the shop of `SHOPIFY_CLIENT_CREDENTIALS_SHOP`, with or without an
   installation row:
@@ -137,9 +140,9 @@ may ask Shopify in two cases only:
   SHOPIFY_CLIENT_CREDENTIALS_SHOP=dev-store-1.myshopify.com
   ```
 
-  For that one shop, a flow (one a webhook dispatches included), a cron, a
-  route's `for_shop`, a proxy handler or the MCP `openshop.admin.graphql` tool
-  asks for a token when the app has none, for example after the database was
+  For that one shop, a flow (one a webhook dispatches included), a webhook
+  handler, a cron, a route's `for_shop`, a proxy handler or the MCP
+  `openshop.admin.graphql` tool asks for a token when the app has none, for example after the database was
   emptied, and a cron of every shop (`.all_shops()`) targets it even without an
   installation row, once Shopify gives a token for it. It never brings back a
   shop marked uninstalled.
@@ -147,20 +150,20 @@ may ask Shopify in two cases only:
   Admin API answers `401`, or before a token this process obtained expires.
   The row proves that the shop installed the app earlier through a signed flow
   (OAuth, the token exchange or a vouched grant), so a development store that
-  got its token from a launch keeps working in crons and flows after that token
-  expires. Only the token of a row that holds one and is not marked
-  uninstalled is replaced; no row is created this way.
+  got its token from a launch keeps working in crons, flows and webhook
+  handlers after that token expires. Only the token of a row that holds one
+  and is not marked uninstalled is replaced; no row is created this way.
 
-The `shopify` client a webhook handler receives is the exception: it uses the
-stored token and never asks. Without the variable, only a signed launch, a
-session token or the renewal of a stored token asks.
+Without the variable, only a signed launch, a session token whose exchange
+Shopify refused or the renewal of a stored token asks.
 
 A token is used as it is stored, whoever stored it:
 
 - A token this process obtained with the grant is asked again five minutes
   before it expires, from the `expires_in` Shopify gave with it. That is kept
-  in memory only: another process, or the same one after a restart, uses the
-  stored token as it is until the Admin API refuses it.
+  in memory only, until the token expires: another process, or the same one
+  after a restart, uses the stored token as it is until the Admin API refuses
+  it.
 - When the Admin API answers `401` to a client that may ask, it asks once and
   sends the request again once. When Shopify refuses, or gives no other
   token, the `401` is the answer.
@@ -177,15 +180,17 @@ A token is used as it is stored, whoever stored it:
     error code (`shop_not_permitted`, `invalid_client`, `invalid_request`…),
     for one hour;
   - anything else (a `5xx`, a `429`, a timeout, a connection error, a
-    redirection, an answer without a token), for 30 seconds.
+    redirection, an answer without a token, a token the database would not
+    store), for 30 seconds.
 
   The failure of background work holds back background work only: a launch
   or an Admin API request that Shopify vouched for still asks, so that a
   store where the app was installed since is served at once. The failure of
-  a vouched request holds back both. A success clears both, and a failure
-  only holds back requests made with the same client ID and secret, so a
-  corrected secret is tried at once. The process keeps nothing for a shop a
-  caller may not ask a token of.
+  a vouched request holds back both. A success clears both. A corrected
+  client secret takes a restart, which also forgets the failures. The process
+  only keeps something of an app and shop it asked Shopify for, while a
+  failure holds back or the token it obtained has not expired: nothing for a
+  shop a caller may not ask a token of.
 
   It is logged once, with the HTTP status and Shopify's error code, never the
   client ID, the secret or the token:
@@ -199,7 +204,9 @@ with `ENCRYPTION_KEY must be set in production`, which is not remembered as a
 refusal, and no token is ever stored in plaintext. When the token cannot be
 written, the error is
 `[openshop] Could not store the client credentials token of app "<app>" for <shop>`,
-which quotes neither the token, its ciphertext nor the database's message.
+which quotes neither the token, its ciphertext nor the database's message; it
+holds back the next requests for 30 seconds, as a failure that may pass, so
+that callers do not each get a token they cannot keep.
 
 The shop the token goes to is always `<name>.myshopify.com`, read without a
 scheme, a path, a port or a user: a value such as

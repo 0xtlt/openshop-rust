@@ -49,7 +49,8 @@ pub struct ShopifyClient {
     pub shopify_app: String,
     pub api_version: String,
     app: OpenShop,
-    /// What lets this client ask Shopify for a token: none in a webhook.
+    /// What lets this client ask Shopify for a token: background work, or
+    /// the shop and app Shopify vouched for.
     grant: Option<Grant>,
     tokens: Tokens,
 }
@@ -119,8 +120,12 @@ impl ShopifyClient {
             .await
     }
 
-    /// Runs a query or mutation and returns the `data` object.
-    pub async fn graphql(&self, query: &str, variables: Option<Value>) -> Result<Value> {
+    /// Sends `body` to the Admin GraphQL API of the shop and returns
+    /// Shopify's answer as it is: `None` when the shop has no access token.
+    /// A token the Admin API refuses with a `401` is renewed once, where this
+    /// client may ask for one, and the request sent again once; when Shopify
+    /// gives no other token, the `401` is the answer.
+    pub(crate) async fn send(&self, body: &Value) -> Result<Option<OutboundResponse>> {
         let Some(shop) = strict_shop_domain(&self.shop) else {
             bail!(
                 "[openshop] Invalid shop domain for app \"{}\": expected <name>.myshopify.com",
@@ -128,27 +133,32 @@ impl ShopifyClient {
             );
         };
         let Some(access_token) = self.access_token(&shop, None).await? else {
-            bail!(
-                "[openshop] No access token found for app \"{}\" and shop \"{shop}\". Is the app installed?",
-                self.shopify_app,
-            );
+            return Ok(None);
         };
-
-        let mut body = json!({ "query": query });
-        if let Some(variables) = variables {
-            body["variables"] = variables;
-        }
-
-        let mut response = self.post(&shop, &access_token, &body).await?;
-        // A refused token is renewed once, where this client may ask for one;
-        // when Shopify gives no other token, the `401` is the answer.
+        let mut response = self.post(&shop, &access_token, body).await?;
         if response.status == 401
             && self.grant.is_some()
             && let Some(renewed) = self.access_token(&shop, Some(&access_token)).await?
             && renewed != access_token
         {
-            response = self.post(&shop, &renewed, &body).await?;
+            response = self.post(&shop, &renewed, body).await?;
         }
+        Ok(Some(response))
+    }
+
+    /// Runs a query or mutation and returns the `data` object.
+    pub async fn graphql(&self, query: &str, variables: Option<Value>) -> Result<Value> {
+        let mut body = json!({ "query": query });
+        if let Some(variables) = variables {
+            body["variables"] = variables;
+        }
+        let Some(response) = self.send(&body).await? else {
+            bail!(
+                "[openshop] No access token found for app \"{}\" and shop \"{}\". Is the app installed?",
+                self.shopify_app,
+                strict_shop_domain(&self.shop).unwrap_or_default(),
+            );
+        };
 
         if !response.ok() {
             bail!(

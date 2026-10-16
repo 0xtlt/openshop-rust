@@ -5,35 +5,41 @@
 - A development store of the organization that owns the app gets its Admin
   API token with Shopify's client credentials grant, with no OAuth. A launch
   from Shopify admin whose signed query names a shop and is less than 90
-  seconds old, or an Admin API request whose verified session token names it,
-  asks Shopify for a token when the app has none for that shop, before
-  redirecting to `/auth` or exchanging the session token as before; a
-  development store with an empty database then opens in the admin, where
-  Shopify refuses to frame `/auth`. An older signed launch is served as before,
-  from the stored token alone. Unsigned input never starts a grant for a shop
-  of its choosing. Background work (flows, including the ones a webhook
-  dispatches, crons, routes, proxies and the MCP `openshop.admin.graphql`
-  tool) may ask in two cases only: for the one shop
+  seconds old asks Shopify for a token when the app has none for that shop,
+  before redirecting to `/auth` as before; a development store with an empty
+  database then opens in the admin, where Shopify refuses to frame `/auth`. An
+  older signed launch is served as before, from the stored token alone. An
+  Admin API request whose verified session token names a shop without a token
+  exchanges the session token first, as before, and asks for the grant only
+  when Shopify refuses the exchange or it cannot run; a token this process
+  obtained with the grant is replaced by the exchange when it is about to
+  expire. Unsigned input never starts a grant for a shop of its choosing.
+  Background work (flows, including the ones a webhook dispatches, webhook
+  handlers, crons, routes, proxies and the MCP `openshop.admin.graphql` tool)
+  may ask in two cases only: for the one shop
   `SHOPIFY_CLIENT_CREDENTIALS_SHOP` names, without ever bringing back a shop
   marked uninstalled (a cron of every shop targets it even without an
   installation row), and to renew the token a shop's installation row holds,
   once after a `401` or before a token this process obtained expires. The
-  `shopify` client of a webhook handler never asks. The token is stored
+  token is stored
   encrypted in `installations` like the others, with no schema change; a
   vouched grant that brings back a shop marked uninstalled sets its
   `installed_at`, as OAuth does. A token request has its own 5-second timeout.
   A definite refusal (a `4xx` with Shopify's error code, such as
   `shop_not_permitted`) is remembered by the process for an hour per app and
-  shop, any other failure for 30 seconds; the failure of background work
-  never holds back a launch or an Admin API request Shopify vouched for, and
-  a failure holds back the client ID and secret it was asked with only.
-  Nothing is remembered for a shop a caller may not ask a token of. In
+  shop, any other failure (a token the database would not store included)
+  for 30 seconds; the failure of background work never holds back a launch or
+  an Admin API request Shopify vouched for. Nothing is remembered for a shop a
+  caller may not ask a token of, nor once a failure or a token is over. In
   production without `ENCRYPTION_KEY`, nothing is asked and the caller fails;
   a cron of every shop says so once per app.
-- `ReqwestTransport` no longer follows redirections: a request to Shopify
-  carries a secret, a token or a code, which a `3xx` would send on to another
-  host. The `3xx` is the answer, and a custom `HttpTransport` must do the
-  same.
+- Breaking for some users: `RuntimeEnv` has a new public field,
+  `client_credentials_shop`, and `testing::TestOptions` one of the same name;
+  a struct literal of either without `..Default::default()` no longer
+  compiles. `ReqwestTransport` no longer follows redirections: a request to
+  Shopify carries a secret, a token or a code, which a `3xx` would send on to
+  another host. The `3xx` is the answer, and a custom `HttpTransport` must do
+  the same.
 - A shop name longer than 63 characters (one DNS label) is not a shop
   domain.
 - `ShopifyClient` keeps the token it read per Shopify app and shop: a clone

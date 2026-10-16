@@ -85,12 +85,13 @@ A missing header yields an empty string, except `X-Shopify-Shop-Domain`: a
 handler only runs for a shop written in full as `<name>.myshopify.com`; a bare
 name or a value such as `__global__` is answered `400`. The signature covers
 the body and not that header, and a delivery can be replayed, so the `shopify`
-client of a webhook handler uses the stored access token and never asks
-Shopify for one with the
-[client credentials grant](authentication.md#client-credentials-grant). A flow
-the handler dispatches is background work: it may ask for the shop of
-`SHOPIFY_CLIENT_CREDENTIALS_SHOP`, and renew the token of a shop whose
-installation row holds one, never get a token for another shop.
+client of a webhook handler, like a flow the handler dispatches, is background
+work: with the
+[client credentials grant](authentication.md#client-credentials-grant), it may
+get a token for the shop of `SHOPIFY_CLIENT_CREDENTIALS_SHOP`, and renew once,
+after a `401`, the token of a shop whose installation row holds one and is not
+marked uninstalled; it never gets a token for another shop, nor creates a row
+for it.
 
 Nothing is read when the context is built: the access token of the shop is
 read at the first Shopify request, and the provider configuration at the first
