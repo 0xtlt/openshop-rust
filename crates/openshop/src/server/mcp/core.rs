@@ -9,7 +9,6 @@ use serde_json::{Value, json};
 
 use super::registry::core_mcp_permissions;
 use crate::engine::dispatch::DispatchOptions;
-use crate::runtime::OutboundRequest;
 use crate::runtime::time::to_iso;
 use crate::server::api::run_logs::{RunLogOptions, get_filtered_run_logs};
 use crate::server::shop_domain::normalize_shop_domain;
@@ -137,33 +136,31 @@ async fn run_admin_graphql(ctx: McpContext, input: JsonMap) -> Result<Value> {
     let variables = object_input(&input, "variables");
     let api_version = api_version_input(&input)?;
 
-    let installation: Option<(Option<String>,)> = sqlx::query_as(
-        "SELECT access_token FROM installations \
-         WHERE app_handle = $1 AND shop = $2 AND access_token IS NOT NULL AND uninstalled_at IS NULL \
-         LIMIT 1",
+    let not_installed = || anyhow!("Shop \"{shop}\" is not installed for app \"{}\"", ctx.shopify_app);
+    let uninstalled: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM installations \
+         WHERE app_handle = $1 AND shop = $2 AND uninstalled_at IS NOT NULL)",
     )
     .bind(&ctx.shopify_app)
     .bind(&shop)
-    .fetch_optional(&ctx.db)
+    .fetch_one(&ctx.db)
     .await?;
+    if uninstalled {
+        return Err(not_installed());
+    }
 
-    let stored = installation.and_then(|(token,)| token);
-    let Some(access_token) = ctx.app.crypto().decrypt_string(stored.as_deref())? else {
-        bail!("Shop \"{shop}\" is not installed for app \"{}\"", ctx.shopify_app);
-    };
-
-    let response = ctx
+    // Nothing vouches for the shop of a tool call: it is background work. The
+    // shop of `SHOPIFY_CLIENT_CREDENTIALS_SHOP` may get a token with the
+    // client credentials grant when it has none, and a stored token is
+    // renewed as a flow's would be.
+    let client = ctx
         .app
-        .transport()
-        .post_json(OutboundRequest {
-            url: format!("https://{shop}/admin/api/{api_version}/graphql.json"),
-            headers: vec![
-                ("Content-Type".to_string(), "application/json".to_string()),
-                ("X-Shopify-Access-Token".to_string(), access_token),
-            ],
-            body: json!({ "query": query, "variables": variables }),
-        })
-        .await?;
+        .shopify_client(&shop, &ctx.shopify_app)
+        .with_api_version(api_version.clone());
+    let body = json!({ "query": query, "variables": variables });
+    let Some(response) = client.send(&body).await? else {
+        return Err(not_installed());
+    };
 
     let mut result = JsonMap::new();
     result.insert("shop".into(), Value::from(shop));

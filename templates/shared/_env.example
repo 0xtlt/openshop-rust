@@ -4,6 +4,16 @@ DATABASE_URL=postgresql://openshop:openshop@localhost:5432/openshop
 SHOPIFY_API_KEY=
 SHOPIFY_API_SECRET=
 
+# A development store of the organization that owns the app, for example one
+# used by automated tests, for which flows, crons, routes, webhook handlers,
+# proxies and the MCP tool may get an access token with Shopify's client
+# credentials grant when none is stored (after the database was emptied, for
+# example). A launch from Shopify admin, or a session token whose exchange
+# Shopify refused, already asks for any shop without a token; Shopify
+# only grants it to the stores of the app's organization, never to a merchant's
+# store.
+# SHOPIFY_CLIENT_CREDENTIALS_SHOP=dev-store-1.myshopify.com
+
 # Public URL of the app, used for OAuth redirects when the Shopify TOML has none.
 # HOST=https://my-app.example.com
 

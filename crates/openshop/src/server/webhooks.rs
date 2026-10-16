@@ -17,6 +17,7 @@ use crate::engine::step::error_message;
 use crate::runtime::report::{self, Panicked};
 use crate::runtime::logger;
 use crate::server::connectors::Connectors;
+use crate::server::shop_domain::strict_shop_domain;
 use crate::shopify::client::ShopifyClient;
 use crate::types::WebhookContext;
 
@@ -58,6 +59,11 @@ async fn handle(State(app): State<OpenShop>, headers: HeaderMap, body: Bytes) ->
     let Ok(payload) = serde_json::from_str::<Value>(&body) else {
         return json_error(StatusCode::BAD_REQUEST, "Invalid JSON body");
     };
+    // The signature covers the body, not this header: it is only taken as a
+    // shop domain written in full, never a bare name.
+    let Some(shop) = strict_shop_domain(&shop).filter(|domain| *domain == shop.trim().to_ascii_lowercase()) else {
+        return json_error(StatusCode::BAD_REQUEST, "Invalid shop domain");
+    };
     report::describe(|delivery| {
         delivery.unit("webhook", &topic).shop(&shop, &shopify_app.handle);
     });
@@ -69,6 +75,9 @@ async fn handle(State(app): State<OpenShop>, headers: HeaderMap, body: Bytes) ->
         payload,
         api_version,
         db: app.db().clone(),
+        // A delivery can be replayed and its shop header is not signed: the
+        // client is the one of background work, which renews the token a
+        // shop's row holds and asks for no other shop than the configured one.
         shopify: ShopifyClient::new(&app, &shop, &shopify_app.handle),
         connectors: Connectors::for_shop(&app, &shop, &shopify_app.handle),
         app: app.clone(),

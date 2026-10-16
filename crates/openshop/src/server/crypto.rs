@@ -142,6 +142,12 @@ impl Crypto {
         }
     }
 
+    /// Fails as [`Crypto::encrypt_string`] would, without a value: in
+    /// production without a valid `ENCRYPTION_KEY`.
+    pub(crate) fn can_encrypt(&self) -> Result<()> {
+        self.key().map(|_| ())
+    }
+
     pub fn encrypt_string(&self, value: &str) -> Result<String> {
         let Some(key) = self.key()? else {
             return Ok(value.to_string());
