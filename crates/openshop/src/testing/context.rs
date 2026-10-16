@@ -179,6 +179,9 @@ pub struct TestOptions {
     /// Marks the shop as installed with this access token.
     pub access_token: Option<String>,
     pub encryption_key: Option<String>,
+    /// `SHOPIFY_CLIENT_CREDENTIALS_SHOP`: the shop background work may ask a
+    /// token for with the client credentials grant, from the mock transport.
+    pub client_credentials_shop: Option<String>,
     pub host: Option<String>,
     pub production: bool,
     /// Project root used to resolve Shopify TOML files. Defaults to a directory without any.
@@ -198,6 +201,7 @@ impl Default for TestOptions {
             api_key: "test-app".to_string(),
             access_token: None,
             encryption_key: None,
+            client_credentials_shop: None,
             host: None,
             production: false,
             cwd: None,
@@ -320,6 +324,7 @@ impl TestContext {
             host: options.host.clone(),
             shopify_app_url: None,
             encryption_key: options.encryption_key.clone(),
+            client_credentials_shop: options.client_credentials_shop.clone(),
             production: options.production,
             cwd: options
                 .cwd

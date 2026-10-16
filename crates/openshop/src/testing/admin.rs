@@ -5,6 +5,7 @@ use indexmap::IndexMap;
 
 use crate::admin::{AdminActor, AdminContext};
 use crate::app::OpenShop;
+use crate::shopify::client_credentials::Grant;
 
 #[derive(Debug, Clone)]
 pub struct AdminTestOptions {
@@ -35,7 +36,11 @@ pub async fn admin_context(app: &OpenShop, options: AdminTestOptions) -> Result<
         },
         params: options.params,
         db: app.db().clone(),
-        shopify: app.shopify_client(&options.shop, &options.shopify_app),
+        // As in production: the client of the session's shop, which renews a
+        // token the Admin API refuses.
+        shopify: app
+            .shopify_client(&options.shop, &options.shopify_app)
+            .granting(Grant::vouched(&options.shopify_app, &options.shop)),
         connectors: app.connectors(&options.shop, &options.shopify_app),
         request_id: options.request_id,
         idempotency_key: None,

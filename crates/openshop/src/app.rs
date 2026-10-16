@@ -22,6 +22,7 @@ use crate::server::mcp::registry::{McpRegistry, build_mcp_registry};
 use crate::server::shopify_apps::ShopifyApps;
 use crate::server::static_ui::UiSource;
 use crate::shopify::client::ShopifyClient;
+use crate::shopify::client_credentials::ClientCredentials;
 use crate::types::{
     AdminMenuItem, AdminPageId, AdminPageMode, AdminPagesConfig, Cron, ErrorContext, Flow, Function, McpConfig,
     McpResource, McpTool, OnErrorFn, Provider, Proxy, RetryPolicy, Route, ShopifyConfig, Webhook, WorkerConfig,
@@ -402,6 +403,7 @@ struct Inner {
     crypto: Crypto,
     apps: ShopifyApps,
     transport: Arc<dyn HttpTransport>,
+    client_credentials: ClientCredentials,
     custom_pages: Vec<CustomAdminPage>,
     mcp_registry: McpRegistry,
 }
@@ -429,6 +431,7 @@ impl OpenShop {
         crate::server::ops::check_password(config.ops_password.as_deref(), env.production)?;
         let apps = ShopifyApps::resolve(config.shopify.as_ref(), &env)?;
         let crypto = Crypto::new(env.encryption_key.clone(), env.production);
+        let client_credentials = ClientCredentials::from_env(env.client_credentials_shop.as_deref())?;
         let custom_pages = config.resolved_admin_pages()?;
         let mcp_registry = build_mcp_registry(config.mcp.as_ref(), &create_core_mcp_capabilities())?;
         Ok(Self {
@@ -439,6 +442,7 @@ impl OpenShop {
                 crypto,
                 apps,
                 transport,
+                client_credentials,
                 custom_pages,
                 mcp_registry,
             }),
@@ -472,6 +476,12 @@ impl OpenShop {
 
     pub fn transport(&self) -> &Arc<dyn HttpTransport> {
         &self.inner.transport
+    }
+
+    /// The client credentials grant, and the shop of
+    /// `SHOPIFY_CLIENT_CREDENTIALS_SHOP` background work may use it for.
+    pub(crate) fn client_credentials(&self) -> &ClientCredentials {
+        &self.inner.client_credentials
     }
 
     pub(crate) fn custom_pages(&self) -> &[CustomAdminPage] {

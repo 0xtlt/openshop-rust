@@ -1,14 +1,17 @@
 //! Shopify Admin GraphQL client for an installed shop.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::{Result, bail};
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
-use tokio::sync::OnceCell;
+use tokio::sync::Mutex;
 
+use super::client_credentials::Grant;
 use crate::app::OpenShop;
-use crate::runtime::OutboundRequest;
+use crate::runtime::{OutboundRequest, OutboundResponse};
+use crate::server::shop_domain::strict_shop_domain;
 
 pub const SHOPIFY_API_VERSION: &str = "2026-04";
 
@@ -18,17 +21,38 @@ pub fn is_api_version(value: &str) -> bool {
     bytes.len() == 7 && bytes[4] == b'-' && bytes[..4].iter().chain(&bytes[5..]).all(u8::is_ascii_digit)
 }
 
+/// The access tokens a client and its clones read, per Shopify app and shop:
+/// `None` when the shop has none.
+type Tokens = Arc<Mutex<HashMap<(String, String), Option<String>>>>;
+
 /// The Shopify Admin API of one shop.
 ///
 /// Creating a client reads nothing: the access token of the installation is
-/// read from the database at the first request, then kept.
+/// read from the database at the first request, then kept for that Shopify
+/// app and shop. A clone whose `shop` or `shopify_app` was changed reads the
+/// token of its own app and shop.
+///
+/// The shop is checked at each request: `<name>.myshopify.com` or `<name>`,
+/// nothing else, and the address the token goes to is built from it.
+///
+/// For the shop of `SHOPIFY_CLIENT_CREDENTIALS_SHOP`, a shop without a token
+/// gets one with the client credentials grant. A token this process obtained
+/// that way is renewed five minutes before it expires, and a token the Admin
+/// API refuses with a `401` is renewed once and the request sent again once,
+/// for any shop whose installation row holds it. The client of an Admin API
+/// request also asks for the shop and app of its verified session token when
+/// it has no token, and for those only: a clone pointed at another shop or
+/// app does not carry that right.
 #[derive(Clone)]
 pub struct ShopifyClient {
     pub shop: String,
     pub shopify_app: String,
     pub api_version: String,
     app: OpenShop,
-    access_token: Arc<OnceCell<Option<String>>>,
+    /// What lets this client ask Shopify for a token: background work, or
+    /// the shop and app Shopify vouched for.
+    grant: Option<Grant>,
+    tokens: Tokens,
 }
 
 impl ShopifyClient {
@@ -39,7 +63,8 @@ impl ShopifyClient {
             shopify_app: shopify_app.into(),
             api_version: SHOPIFY_API_VERSION.to_string(),
             app: app.clone(),
-            access_token: Arc::new(OnceCell::new()),
+            grant: Some(Grant::Background),
+            tokens: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -49,58 +74,91 @@ impl ShopifyClient {
         self
     }
 
-    /// The access token stored for the installation, if there is one.
-    async fn access_token(&self) -> Result<Option<&str>> {
-        let token = self
-            .access_token
-            .get_or_try_init(|| async {
-                let installation: Option<(Option<String>,)> = sqlx::query_as(
-                    "SELECT access_token FROM installations WHERE app_handle = $1 AND shop = $2 LIMIT 1",
-                )
-                .bind(&self.shopify_app)
-                .bind(&self.shop)
-                .fetch_optional(self.app.db())
-                .await?;
-                let stored = installation.and_then(|(token,)| token);
-                self.app.crypto().decrypt_string(stored.as_deref())
-            })
-            .await?;
-        Ok(token.as_deref())
+    /// What lets this client ask Shopify for a token of its shop.
+    pub(crate) fn granting(mut self, grant: Option<Grant>) -> Self {
+        self.grant = grant;
+        self
     }
 
-    /// Runs a query or mutation and returns the `data` object.
-    pub async fn graphql(&self, query: &str, variables: Option<Value>) -> Result<Value> {
-        let Some(access_token) = self.access_token().await? else {
-            bail!(
-                "[openshop] No access token found for app \"{}\" and shop \"{}\". Is the app installed?",
-                self.shopify_app,
-                self.shop
-            );
+    /// The access token of the installation, if there is one: read once and
+    /// kept for this app and shop, unless this client may ask Shopify for a
+    /// token of the shop and the shop has none, the token is about to expire,
+    /// or it was `rejected`.
+    async fn access_token(&self, shop: &str, rejected: Option<&str>) -> Result<Option<String>> {
+        let credentials = self.app.client_credentials();
+        let grant = self.grant.as_ref();
+        let key = (self.shopify_app.clone(), shop.to_string());
+        let mut tokens = self.tokens.lock().await;
+        let reusable = match tokens.get(&key) {
+            None => false,
+            Some(None) => !credentials.may_ask_without_token(grant, &self.shopify_app, shop),
+            Some(Some(token)) => {
+                rejected != Some(token.as_str())
+                    && !(grant.is_some() && credentials.expiring(&self.shopify_app, shop, token))
+            }
         };
-
-        let shop_domain = if self.shop.contains('.') {
-            self.shop.clone()
-        } else {
-            format!("{}.myshopify.com", self.shop)
-        };
-
-        let mut body = json!({ "query": query });
-        if let Some(variables) = variables {
-            body["variables"] = variables;
+        if !reusable {
+            let token = credentials
+                .token(&self.app, &self.shopify_app, shop, grant, rejected)
+                .await?;
+            tokens.insert(key.clone(), token);
         }
+        Ok(tokens.get(&key).cloned().flatten())
+    }
 
-        let response = self
-            .app
+    async fn post(&self, shop: &str, access_token: &str, body: &Value) -> Result<OutboundResponse> {
+        self.app
             .transport()
             .post_json(OutboundRequest {
-                url: format!("https://{shop_domain}/admin/api/{}/graphql.json", self.api_version),
+                url: format!("https://{shop}/admin/api/{}/graphql.json", self.api_version),
                 headers: vec![
                     ("Content-Type".to_string(), "application/json".to_string()),
                     ("X-Shopify-Access-Token".to_string(), access_token.to_string()),
                 ],
-                body,
+                body: body.clone(),
             })
-            .await?;
+            .await
+    }
+
+    /// Sends `body` to the Admin GraphQL API of the shop and returns
+    /// Shopify's answer as it is: `None` when the shop has no access token.
+    /// A token the Admin API refuses with a `401` is renewed once, where this
+    /// client may ask for one, and the request sent again once; when Shopify
+    /// gives no other token, the `401` is the answer.
+    pub(crate) async fn send(&self, body: &Value) -> Result<Option<OutboundResponse>> {
+        let Some(shop) = strict_shop_domain(&self.shop) else {
+            bail!(
+                "[openshop] Invalid shop domain for app \"{}\": expected <name>.myshopify.com",
+                self.shopify_app
+            );
+        };
+        let Some(access_token) = self.access_token(&shop, None).await? else {
+            return Ok(None);
+        };
+        let mut response = self.post(&shop, &access_token, body).await?;
+        if response.status == 401
+            && self.grant.is_some()
+            && let Some(renewed) = self.access_token(&shop, Some(&access_token)).await?
+            && renewed != access_token
+        {
+            response = self.post(&shop, &renewed, body).await?;
+        }
+        Ok(Some(response))
+    }
+
+    /// Runs a query or mutation and returns the `data` object.
+    pub async fn graphql(&self, query: &str, variables: Option<Value>) -> Result<Value> {
+        let mut body = json!({ "query": query });
+        if let Some(variables) = variables {
+            body["variables"] = variables;
+        }
+        let Some(response) = self.send(&body).await? else {
+            bail!(
+                "[openshop] No access token found for app \"{}\" and shop \"{}\". Is the app installed?",
+                self.shopify_app,
+                strict_shop_domain(&self.shop).unwrap_or_default(),
+            );
+        };
 
         if !response.ok() {
             bail!(

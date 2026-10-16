@@ -102,7 +102,15 @@ is intentionally blocked, and so is the schema push of `dev`.
 
 - `No access token found for app "<app>" and shop "<shop>"` means the shop has
   no active installation for that app. Open the app from Shopify admin, or
-  reinstall it.
+  reinstall it. For a development store of the organization that owns the app,
+  set `SHOPIFY_CLIENT_CREDENTIALS_SHOP` to it so that background work gets a
+  token with the
+  [client credentials grant](../reference/authentication.md#client-credentials-grant);
+  Shopify's refusal is logged with its status and error code, and the process
+  does not ask again for that app and shop for an hour (30 seconds after a
+  `5xx`, a `429`, a timeout or a network error). A refusal met by background
+  work does not hold back the next launch from Shopify admin, which asks
+  again.
 - `Shopify GraphQL error (<status>)` is an HTTP failure from Shopify. A 401 or
   403 usually points to a revoked token or a missing scope.
 - `GraphQL errors: …` lists the errors Shopify returned for the operation.

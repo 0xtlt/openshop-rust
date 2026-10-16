@@ -89,7 +89,7 @@ async fn create_context(
         actor: session.actor.clone(),
         params,
         db: app.db().clone(),
-        shopify: app.shopify_client(&session.shop, &session.shopify_app),
+        shopify: session.shopify_client(app),
         connectors: app.connectors(&session.shop, &session.shopify_app),
         request_id,
         idempotency_key,

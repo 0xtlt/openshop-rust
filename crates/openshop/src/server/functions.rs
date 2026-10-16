@@ -203,7 +203,7 @@ async fn list_instances(
             ),
         ));
     };
-    let shopify = app.shopify_client(&session.shop, &session.shopify_app);
+    let shopify = session.shopify_client(&app);
 
     if definition.function_type == FunctionType::CartTransform {
         let instances = list_cart_transform_instances(&shopify, &handle, &label).await?;
@@ -314,7 +314,7 @@ async fn create_instance(
         Err(error) => return Ok(json_error(StatusCode::BAD_REQUEST, error)),
     };
     let mode = discount_mode_from_body(&body, definition.first_mode());
-    let shopify = app.shopify_client(&session.shop, &session.shopify_app);
+    let shopify = session.shopify_client(&app);
     let is_cart_transform = definition.function_type == FunctionType::CartTransform;
     let already_registered = "This Cart Transform already has an instance";
 
@@ -386,7 +386,7 @@ async fn update_instance(
         Ok(config) => config,
         Err(error) => return Ok(json_error(StatusCode::BAD_REQUEST, error)),
     };
-    let shopify = app.shopify_client(&session.shop, &session.shopify_app);
+    let shopify = session.shopify_client(&app);
 
     let title = resolve_title(definition.owner.as_ref(), &function_config);
     let Some(request) = build_update_mutation(definition, &handle, mode, &id, &title, &function_config, &body) else {
@@ -438,7 +438,7 @@ async fn delete_instance(
         ));
     };
 
-    let shopify = app.shopify_client(&session.shop, &session.shopify_app);
+    let shopify = session.shopify_client(&app);
     let request = build_delete_mutation(mutations.delete, &id);
     let result = shopify.graphql(&request.mutation, Some(request.variables)).await?;
     let errors = extract_errors(&result);

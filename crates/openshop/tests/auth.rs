@@ -1089,7 +1089,17 @@ async fn session_token_request_survives_a_failed_token_exchange(ctx: &TestContex
         .respond_with(|_| Ok(MockTransport::json(200, json!("not an object"))));
     assert_eq!(ctx.get("/api/flows").send().await.unwrap().status(), 200);
 
-    assert_eq!(ctx.transport.requests().len(), 4);
+    // After the first failed exchange, the client credentials grant fails
+    // too, and holds back for thirty seconds: four exchanges, one grant.
+    let requests = ctx.transport.requests();
+    assert_eq!(requests.len(), 5);
+    assert_eq!(requests[1].body["grant_type"], "client_credentials");
+    for index in [0, 2, 3, 4] {
+        assert_eq!(
+            requests[index].body["grant_type"],
+            "urn:ietf:params:oauth:grant-type:token-exchange"
+        );
+    }
     assert_eq!(installation_count(ctx).await, 0);
 }
 

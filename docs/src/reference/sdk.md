@@ -257,7 +257,7 @@ carries one as `ctx.app`.
 | --- | --- |
 | `OpenShop::connect(config).await` | Connects to `DATABASE_URL` and reads settings from the environment. |
 | `OpenShop::new(config, db, env)` | Uses an existing `PgPool` and `RuntimeEnv`. |
-| `OpenShop::with_transport(config, db, env, transport)` | Same, with a custom `HttpTransport` for Shopify HTTP calls. |
+| `OpenShop::with_transport(config, db, env, transport)` | Same, with a custom `HttpTransport` for Shopify HTTP calls. It must not follow redirections: every call carries a secret, a token or a code, and a `3xx` is returned as the answer, as the default `ReqwestTransport` does. |
 
 All three validate the configuration and resolve the Shopify apps, and fail
 when either is invalid. `APP.main()` and `APP.run()` create the handle for
@@ -414,9 +414,21 @@ async fn product_title(ctx: &WebhookContext, id: &str) -> Result<Option<String>>
 
 `graphql()`:
 
+- fails with `[openshop] Invalid shop domain for app "<app>": expected <name>.myshopify.com`,
+  and sends nothing, when `client.shop` is not `<name>.myshopify.com` or a bare
+  `<name>` (case and blanks aside): no scheme, path, port or user;
 - fails when no installation access token exists, with
   `[openshop] No access token found for app "<app>" and shop "<shop>". Is the app installed?`.
-  Creating the client does not fail; the first call does;
+  Creating the client does not fail; the first call does. For the shop of
+  `SHOPIFY_CLIENT_CREDENTIALS_SHOP`, and for the shop and app of an admin
+  request's session, the client first asks Shopify for one with the
+  [client credentials grant](authentication.md#client-credentials-grant);
+- renews a token the Admin API refuses with `401` once, with the same grant,
+  and sends the request again once, when the shop's installation row holds
+  that token. The token is read and kept per Shopify app
+  and shop: a clone whose `shop` or `shopify_app` was changed reads the token
+  of its own shop, and does not carry the right of an admin request's session
+  to another shop or app;
 - POSTs to `https://<shop>/admin/api/<version>/graphql.json` with the
   `X-Shopify-Access-Token` header;
 - fails on non-2xx HTTP responses with

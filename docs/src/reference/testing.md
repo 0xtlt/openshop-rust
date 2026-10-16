@@ -159,6 +159,7 @@ in a test that ends with `ctx.shutdown().await`.
 | `api_key` | `test-app` | Shopify API key of the single-app setup. Session-token audience. |
 | `access_token` | `None`; `test-access-token` with `TestOptions::installed()` | Inserts an installation so Shopify client calls and factories can run. |
 | `encryption_key` | `None` | `ENCRYPTION_KEY` of the application. |
+| `client_credentials_shop` | `None` | `SHOPIFY_CLIENT_CREDENTIALS_SHOP`: the shop background work may get a token for with the [client credentials grant](authentication.md#client-credentials-grant), from the mock transport. A token stored by `access_token` is used as it is. |
 | `host` | `None` | `HOST` of the application. |
 | `production` | `false` | Production mode, for example to test encryption enforcement. |
 | `cwd` | A directory without Shopify TOML files | Project root used to resolve Shopify TOML files. |
@@ -674,6 +675,10 @@ actions, by the name the page view calls them with: `saveReview` for a function
 
 `admin_context(&app, options)` builds the `AdminContext` a function receives,
 with `ctx.db`, `ctx.shopify` and `ctx.connectors` for the shop of the options.
+`ctx.shopify` is the client of an admin request, as in production: for that
+shop and app, a token the Admin API refuses is renewed once with the
+[client credentials grant](authentication.md#client-credentials-grant), from
+the mock transport.
 `AdminTestOptions` has the fields `shop` (`test.myshopify.com`),
 `shopify_app` (`default`), `actor_id` (`test-actor`), `params` (empty), and
 `request_id` (`test-request`). `invoke_admin_function` applies the function's
