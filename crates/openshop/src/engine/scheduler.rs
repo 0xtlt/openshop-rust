@@ -62,7 +62,7 @@ async fn resolve_installed_targets(app: &OpenShop, shops: &[String]) -> Result<V
     Ok(targets)
 }
 
-/// The shop of `SHOPIFY_CLIENT_CREDENTIALS_SHOP`, for each Shopify app that
+/// The shop of the `client_credentials_shop` setting, for each Shopify app that
 /// has no installation row for it, such as after the database was emptied:
 /// targeted once Shopify gives the app a token for it, which stores the row.
 /// A row marked uninstalled is left as it is, and the shop untargeted.

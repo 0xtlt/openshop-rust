@@ -123,7 +123,24 @@ later starts nothing.
 The client of an admin handler (`/api` functions, custom admin pages, and
 `testing::admin_context` in tests) carries the same right, for the shop and
 the app of its session only: a clone of it whose `shop` or `shopify_app` was
-changed asks for nothing it was not already allowed to.
+changed may do what background work may, as any client of the application.
+
+A token obtained at a launch lasts about 24 hours. The first Admin API request
+of a session after it, in the same process, tries the token exchange once in
+its place: the offline token it gives does not expire. When Shopify refuses
+the exchange, the token of the launch is kept, and renewed as below.
+
+A token is stored only where the installation row still holds what it held
+when Shopify was asked: a shop uninstalled by its `app/uninstalled` webhook,
+or given a token by OAuth or the token exchange, meanwhile keeps what it has,
+and the caller uses that. A launch whose token cannot be stored (production
+without `ENCRYPTION_KEY`, or a database that refuses the write) is sent to
+`/auth`, as when Shopify refuses.
+
+Shopify refuses the store of a merchant: at its first launch, that refusal
+costs one request to Shopify, before the redirection to `/auth`, and is
+logged as information, not as a warning; the process does not ask again for
+that shop for an hour.
 
 Unsigned input never starts a grant for a shop of its choosing: not a webhook
 (its signature covers the body, not the `X-Shopify-Shop-Domain` header, and a
@@ -133,8 +150,13 @@ with a shop of its request, not a flow, a cron, a proxy or the MCP
 webhook handler included, uses the stored token, and may ask Shopify in two
 cases only:
 
-- For the shop of `SHOPIFY_CLIENT_CREDENTIALS_SHOP`, with or without an
-  installation row:
+- For the shop of the `client_credentials_shop` setting of
+  [`app!`](configuration.md), with or without an installation row. The
+  templates of `openshop init` read it from the environment:
+
+  ```rust,ignore
+  client_credentials_shop: std::env::var("SHOPIFY_CLIENT_CREDENTIALS_SHOP").ok(),
+  ```
 
   ```dotenv
   SHOPIFY_CLIENT_CREDENTIALS_SHOP=dev-store-1.myshopify.com
@@ -154,7 +176,7 @@ cases only:
   handlers after that token expires. Only the token of a row that holds one
   and is not marked uninstalled is replaced; no row is created this way.
 
-Without the variable, only a signed launch, a session token whose exchange
+Without the setting, only a signed launch, a session token whose exchange
 Shopify refused or the renewal of a stored token asks.
 
 A token is used as it is stored, whoever stored it:

@@ -40,7 +40,9 @@ pub async fn admin_context(app: &OpenShop, options: AdminTestOptions) -> Result<
         // token the Admin API refuses.
         shopify: app
             .shopify_client(&options.shop, &options.shopify_app)
-            .granting(Grant::vouched(&options.shopify_app, &options.shop)),
+            .granting(Some(
+                Grant::vouched(&options.shopify_app, &options.shop).unwrap_or(Grant::Background),
+            )),
         connectors: app.connectors(&options.shop, &options.shopify_app),
         request_id: options.request_id,
         idempotency_key: None,

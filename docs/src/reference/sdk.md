@@ -420,7 +420,7 @@ async fn product_title(ctx: &WebhookContext, id: &str) -> Result<Option<String>>
 - fails when no installation access token exists, with
   `[openshop] No access token found for app "<app>" and shop "<shop>". Is the app installed?`.
   Creating the client does not fail; the first call does. For the shop of
-  `SHOPIFY_CLIENT_CREDENTIALS_SHOP`, and for the shop and app of an admin
+  the `client_credentials_shop` setting, and for the shop and app of an admin
   request's session, the client first asks Shopify for one with the
   [client credentials grant](authentication.md#client-credentials-grant);
 - renews a token the Admin API refuses with `401` once, with the same grant,

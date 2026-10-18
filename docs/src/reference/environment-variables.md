@@ -19,7 +19,6 @@ afterwards has no effect on a running process.
 | `HOST` | Production | Falls back to `SHOPIFY_APP_URL` | Public application URL and allowed CORS origin |
 | `SHOPIFY_APP_URL` | When `HOST` is absent | Empty | Legacy public application URL and allowed CORS origin |
 | `ENCRYPTION_KEY` | Production | Plaintext storage in development | Provider configuration and Shopify access-token encryption |
-| `SHOPIFY_CLIENT_CREDENTIALS_SHOP` | No | None | The one `*.myshopify.com` development store that work no Shopify request vouches for (flows, crons, routes, webhook handlers, proxies, the MCP tool) may get an access token for with the [client credentials grant](authentication.md#client-credentials-grant) without an installation row. A recent signed admin launch, or a session token whose exchange Shopify refused, asks for any shop without it, and background work renews the token a shop's row holds. |
 | `OPENSHOP_ENV` | Production | Development mode | `production` enables production safety checks and encryption enforcement |
 | `NODE_ENV` | No | — | `production` is honored like `OPENSHOP_ENV=production` |
 | `PORT` | No | `3000` | HTTP port of `dev` and `start` |
@@ -34,11 +33,11 @@ afterwards has no effect on a running process.
 Notes:
 
 - An empty value counts as unset for `SHOPIFY_API_KEY`, `SHOPIFY_API_SECRET`,
-  `HOST`, `SHOPIFY_APP_URL`, `ENCRYPTION_KEY`, `SHOPIFY_CLIENT_CREDENTIALS_SHOP`,
-  and `OPENSHOP_UI_DIR`.
-- A `SHOPIFY_CLIENT_CREDENTIALS_SHOP` that is not a `*.myshopify.com` domain
-  stops the command at startup with
-  `[openshop] SHOPIFY_CLIENT_CREDENTIALS_SHOP must be a *.myshopify.com domain`.
+  `HOST`, `SHOPIFY_APP_URL`, `ENCRYPTION_KEY`, and `OPENSHOP_UI_DIR`.
+- The templates of `openshop init` also read `OPS_PASSWORD`, `SENTRY_DSN` and
+  `SHOPIFY_CLIENT_CREDENTIALS_SHOP` in `src/main.rs` or `src/lib.rs`, and pass
+  them to the `ops_password`, `sentry` and `client_credentials_shop` settings
+  of [`app!`](configuration.md): the framework reads none of them.
 - A `PORT` that is not a number between 1 and 65535 falls back to `3000`.
 - A `PGPOOL_*` value that is not a non-negative integer falls back to its
   default. `0` disables a timeout and is the default size for `PGPOOL_MAX`:

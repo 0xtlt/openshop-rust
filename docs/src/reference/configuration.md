@@ -116,6 +116,7 @@ the environment (`shopify: shopify_apps()?`): the error is the one
 | `max_request_body_bytes` | `usize` | `2 * 1024 * 1024` (2 MB); larger request bodies are answered with `413` |
 | `ops_password` | `Option<String>`, or a `String`: the password of the [operator dashboard](operator-dashboard.md) | No dashboard: `/ops` answers `404` |
 | `sentry` | `Option<String>`, or a `String`: the DSN of the project failures are reported to, or a `SentryConfig` that also names the environment and the release; see [Sentry](sentry.md) | Nothing is reported |
+| `client_credentials_shop` | `Option<String>`, or a `String`: the one `*.myshopify.com` development store that work no Shopify request vouches for (flows, crons, routes, webhook handlers, proxies, the MCP tool) may get an access token for with the [client credentials grant](authentication.md#client-credentials-grant) without an installation row. A value that is not a shop domain stops the application with `[openshop] client_credentials_shop must be a *.myshopify.com domain` | Only a signed launch, a session token whose exchange Shopify refused, or the renewal of a stored token asks |
 
 ## Builder methods
 
@@ -179,6 +180,7 @@ configuration is built.
 | `.max_request_body_bytes(bytes)` | `usize` | `2 * 1024 * 1024` (2 MB); larger request bodies are answered with `413` |
 | `.ops_password(password)` | `Option<String>` or `String` | No [operator dashboard](operator-dashboard.md) |
 | `.sentry(sentry)` | `Option<String>`, `String`, `&str` or `SentryConfig`; needs the `sentry` feature, on by default | Nothing is reported to [Sentry](sentry.md) |
+| `.client_credentials_shop(shop)` | `Option<String>` or `String` | Background work asks no token for a shop without a row |
 | `.worker(config)` | `WorkerConfig` | See [Worker defaults](#worker-defaults) |
 | `.retry_policy(policy)` | `RetryPolicy` | See [Retry defaults](#retry-defaults) |
 | `.on_error(hook)` | `Fn(Arc<anyhow::Error>, ErrorContext) -> impl Future<Output = ()>` | No hook |
@@ -517,7 +519,7 @@ Cron entries support these shop modes:
 | `CronShops` | Set with | Behavior |
 | --- | --- | --- |
 | `Global` | None of the methods below | Run once without a shop context. The run uses the shop `__global__` and the app handle `default`. |
-| `All` | `.all_shops()` | Run once per installation that is not uninstalled, for every `(app handle, shop)` pair. The shop of `SHOPIFY_CLIENT_CREDENTIALS_SHOP` is also targeted for each app that has no row for it, once Shopify gives that app a token for it with the [client credentials grant](authentication.md#client-credentials-grant); a row marked uninstalled keeps it out. |
+| `All` | `.all_shops()` | Run once per installation that is not uninstalled, for every `(app handle, shop)` pair. The shop of the `client_credentials_shop` setting is also targeted for each app that has no row for it, once Shopify gives that app a token for it with the [client credentials grant](authentication.md#client-credentials-grant); a row marked uninstalled keeps it out. |
 | `Shop(shop)` | `.shop("shop.myshopify.com")` | Run only for one shop. |
 | `Shops(shops)` | `.shops(["a.myshopify.com", "b.myshopify.com"])` | Run for selected shops. |
 
