@@ -27,17 +27,26 @@ sysroot=$(rustc --print sysroot)
 commit=$(rustc -vV | sed -n 's/^commit-hash: //p')
 
 # The place is shared by every checkout: one build at a time, from the copy of
-# the sources to the end. `mkdir` is the lock that every platform has; a lock
-# left by a process that is gone is taken over.
+# the sources to the end. `mkdir` is the lock that every platform has. A lock
+# left by a process that is gone is not taken over by the script, two builds
+# could do it at once and one would remove the lock of the other: it says so,
+# and the lock is removed by hand.
 lock=$work.lock
+unknown=0
 until mkdir "$lock" 2>/dev/null; do
   holder=$(cat "$lock/pid" 2>/dev/null || true)
-  if [ -n "$holder" ] && ! kill -0 "$holder" 2>/dev/null; then
-    rm -rf "$lock"
-  else
-    echo "Waiting for the build of another checkout (${holder:-?})" >&2
-    sleep 2
+  if [ -z "$holder" ]; then
+    # Just made, or left by a process that was killed before it wrote its pid.
+    unknown=$((unknown + 1))
+  elif ! kill -0 "$holder" 2>/dev/null; then
+    unknown=100
   fi
+  if [ "$unknown" -ge 10 ]; then
+    echo "The build that made $lock is gone: remove it (rm -rf $lock) and run this again" >&2
+    exit 1
+  fi
+  echo "Waiting for the build of another checkout (${holder:-?})" >&2
+  sleep 2
 done
 echo $$ > "$lock/pid"
 trap 'rm -rf "$lock"' EXIT

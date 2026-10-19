@@ -1,8 +1,8 @@
 #!/bin/sh
 # Prints a SHA-256 of what the committed admin UI bundle (crates/openshop/ui-dist)
 # is built from: the code of the admin UI and of openshop-shared, index.html,
-# Trunk.toml, the manifests and the lockfile (build profile and dependencies
-# included), the script that builds it, and the versions of Rust and trunk of
+# Trunk.toml, the manifests (the package and dependency tables of the
+# workspace one) and the lockfile, the script that builds it, and the versions of Rust and trunk of
 # mise.toml. `build-dist.sh` writes it to `ui-dist.sha256`, CI computes it
 # again: a change to any of them without a new bundle fails there. The bytes of
 # the bundle cannot be compared instead, they depend on the platform it is
@@ -30,6 +30,9 @@ fi
   } | LC_ALL=C sort | while read -r file; do
     printf '%s  %s\n' "$(sum < "$file" | cut -d' ' -f1)" "$file"
   done
+  # What openshop-shared inherits from the workspace (edition, version, the
+  # dependencies); the members are not part of it.
+  awk '/^\[/ { keep = ($0 ~ /^\[workspace\.(package|dependencies)\]/) } keep' Cargo.toml
   # The toolchains the bundle is built with.
   grep -E '^(rust|"github:trunk-rs/trunk") = ' mise.toml
 } | sum | cut -d' ' -f1
