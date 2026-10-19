@@ -47,6 +47,13 @@ ones, which are written with it in one statement, and the lines a flow logged
 are stored before the outcome of its run is. `flush().await` writes the lines
 logged so far without waiting.
 
+At most 10,000 lines wait to be written. A flow that logs faster than the
+database takes them loses the newest lines instead of slowing down, and the run
+gets one `warn` line saying how many (`1500 log lines were dropped`). A write
+that fails is told to the runtime logger with the run and the number of lines
+lost. A NUL byte, which PostgreSQL cannot store, is removed from a message and
+from the strings and keys of a payload.
+
 Logs are associated with the current run and appear in the embedded admin. The
 Admin API supports level/text filters, context expansion, and JSON or CSV
 export. The run-log endpoint returns the complete filtered set and does not

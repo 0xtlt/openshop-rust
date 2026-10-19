@@ -15,6 +15,7 @@ migrations/
   20261006143115_openshop_init.sql
   20261006143116_openshop_queue_indexes.sql
   20261006143117_openshop_cron_ticks.sql
+  20261006143118_openshop_drop_flow_runs_status_index.sql
 ```
 
 Each file starts with a marker line:
@@ -118,6 +119,18 @@ attention:
 - **Data.** Moving or transforming rows is never generated. Write it in the
   same file, or in an empty one created with `--name` when nothing else
   changed.
+
+A change that cannot be written automatically, such as the primary key or the
+constraints of a column, is left as a line in the file:
+
+```sql
+-- TODO(26142195): the constraints of reviews.product_id changed from none to `REFERENCES products(id)`. Write the statements by hand.
+```
+
+Write the statements below it, then change `TODO` to `DONE`. Until you do, the
+snapshot keeps the previous state of that column, `migrate check` fails, and
+`migrate generate` reminds you without writing the line again. Once it reads
+`DONE`, `migrate generate` records the new state.
 
 Review the new SQL under `migrations/` and commit it, with the snapshot and
 the code that needs it. `migrate check` does not decide whether a schema change

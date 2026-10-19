@@ -145,6 +145,12 @@ fn main() -> Result<()> {
 A variable read before `APP.main()` is called, for example at the top of
 `main`, does not see values that only exist in `.env`.
 
+`APP.main()` loads `.env` before it starts the async runtime, because setting
+an environment variable is only sound while no other thread reads it. A `main`
+that starts its own runtime and calls `APP.run()` or `openshop::cli::run` loads
+`.env` after the runtime started, and logs a warning when that sets a
+variable: use `APP.main()`.
+
 ## Resolution priority
 
 ### Development `.env`

@@ -741,7 +741,11 @@ fn what_a_url_carries_of_secrets_is_not_sent_in_tags_extra_contexts_or_the_reque
             ..Default::default()
         });
         let request = Request {
-            url: Some("https://user:hunter2@shop.test/app/orders?session=SECRET".parse().unwrap()),
+            url: Some(
+                "https://user:hunter2@shop.test/app/orders?session=SECRET"
+                    .parse()
+                    .unwrap(),
+            ),
             method: Some("POST".into()),
             query_string: Some("session=SECRET".into()),
             cookies: Some("sid=SECRET".into()),
@@ -763,10 +767,16 @@ fn what_a_url_carries_of_secrets_is_not_sent_in_tags_extra_contexts_or_the_reque
 
     let event = the_only(events);
     let sent = format!("{event:?}");
-    assert!(!sent.contains("SECRET") && !sent.contains("hunter2") && !sent.contains("u:p@"), "{sent}");
+    assert!(
+        !sent.contains("SECRET") && !sent.contains("hunter2") && !sent.contains("u:p@"),
+        "{sent}"
+    );
 
     // What is not a secret stays.
-    assert_eq!(tag(&event, "callback"), Some("https://[redacted]@example.com/cb?[redacted]"));
+    assert_eq!(
+        tag(&event, "callback"),
+        Some("https://[redacted]@example.com/cb?[redacted]")
+    );
     assert_eq!(event.extra["calls"]["all"], json!(["https://[redacted]@x.test/y"]));
     let request = event.request.expect("the request");
     assert_eq!(request.method.as_deref(), Some("POST"));

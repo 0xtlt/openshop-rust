@@ -88,7 +88,9 @@ app migrate status
 ```
 
 Confirm `pending: 0` before starting the new processes. This command applies
-committed SQL only. Neither the web process nor the worker migrates on startup.
+committed SQL only. Neither the web process nor the worker migrates on startup,
+and both refuse to start while a migration of `migrations/` is not applied:
+`Not starting: 1 migration is not applied (…). Run `migrate` first.`
 
 ## 5. Start both services
 

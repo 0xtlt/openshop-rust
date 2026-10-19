@@ -98,7 +98,9 @@ larger configurations easier to split:
 - A run that completes after a failed attempt no longer keeps the error of that
   attempt; the logs still show it.
 - Cron schedules accept nicknames such as `@daily` in addition to five- and
-  six-field expressions.
+  six-field expressions. They are read in UTC, or in the IANA time zone given
+  with `.timezone(…)`, and not in the time zone of the host. A process that
+  wakes late fires the latest occurrence it missed, once.
 - Error messages stored on runs and steps include the context chain
   (`while syncing: connection refused`).
 
@@ -107,7 +109,8 @@ larger configurations easier to split:
 - An identifier that is not a UUID returns `404` (`Run not found`,
   `Token not found`) instead of a database error.
 - `POST /api/crons/toggle` requires `key` (string) and `enabled` (boolean) and
-  answers `400` otherwise.
+  answers `400` otherwise. A key that is not the key of a declared cron answers
+  `404 Cron not found`, and stores nothing.
 - `POST /api/runs/bulk-delete` answers `400 No IDs provided` for a missing or
   invalid body; identifiers that are not UUIDs count as skipped.
 - Log export uses JSON for any `format` other than `csv`, and only letters and

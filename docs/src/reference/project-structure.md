@@ -18,7 +18,8 @@ my-app/
 ├── migrations/
 │   ├── <timestamp>_openshop_init.sql
 │   ├── <timestamp>_openshop_queue_indexes.sql
-│   └── <timestamp>_openshop_cron_ticks.sql
+│   ├── <timestamp>_openshop_cron_ticks.sql
+│   └── <timestamp>_openshop_drop_flow_runs_status_index.sql
 ├── Cargo.toml
 ├── shopify.app.toml
 ├── shopify.web.toml

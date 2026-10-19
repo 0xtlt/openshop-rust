@@ -2,6 +2,48 @@
 
 ## Unreleased
 
+- Crons are read in UTC, not in the time zone of the host, and a cron takes an
+  IANA `timezone` with `.timezone("Europe/Paris")`, daylight saving time
+  included. This is a breaking change on a host whose time zone is not UTC: the
+  same schedule fires at another hour until a `timezone` is given. A process
+  that wakes late (a suspended host, a clock set forward) fires the latest
+  occurrence it missed, once, where it used to fire every one at once. A
+  scheduler that stops, because its schedule has no occurrence left or because it
+  panicked, logs an error, reports it to Sentry and starts again after a wait
+  that grows to five minutes, where it used to end without a word. The overrides
+  of a firing are read in one query for all its shops instead of one per shop,
+  and `/api/crons/toggle` and the MCP tool answer `Cron not found` to a key the
+  application does not declare (the overrides of an old key, whose schedule
+  changed, were never read and are still ignored).
+- The log lines of a run wait in a queue of 10,000 instead of an unbounded one:
+  a flow that logs faster than the database takes them loses the newest lines,
+  never waits, and the run gets a `warn` line with the number dropped. A log
+  write that fails is told to the runtime logger, and a NUL byte in a message
+  or a payload is removed, where it used to make PostgreSQL refuse every line
+  written in the same statement.
+- The framework schema has a migration, `openshop_drop_flow_runs_status_index`,
+  that drops the index `flow_runs_status_available_created_idx` on
+  `(status, available_at, created_at)`: the partial queue indexes of the second
+  migration serve the claim and the expiry, and nothing else reads it. It loses
+  no data, and the TypeScript runtime does not use it by name. Run
+  `migrate generate` then `migrate` before starting the new version: `start` and
+  `worker` now refuse to start while `migrations/` holds a migration the
+  database has not applied, or does not cover the framework schema, with
+  `Not starting: … Run `migrate` first.`. Without a `migrations/` folder they
+  start as before.
+- `migrate generate` no longer records in the snapshot a change it can only
+  leave as a `-- TODO` line (the primary key or the constraints of a column): the
+  snapshot keeps the previous state, `migrate check` fails, and a second
+  `generate` does not write the line again. Change `TODO(…)` to `DONE(…)` in the
+  migration once you wrote the statements, and the next `generate` records it.
+- `APP.main()` loads `.env` for `dev` before it starts the async runtime,
+  instead of calling `set_var` from inside it. `cli::env::load_env_file` returns
+  the number of variables it set; a `main` with its own runtime that calls
+  `APP.run()` still gets `.env`, with a warning.
+- Sentry events are scrubbed of URLs wherever they carry text: the tags, the
+  extra data, the contexts, the data of the breadcrumbs and the parameters of a
+  log entry, and a request the application attaches loses its query string,
+  cookies and body and the headers named like a secret.
 - Several `start` processes can run crons: an occurrence of a cron for a shop
   is queued once, not once per process. Each process still starts a scheduler,
   and all of them compute the same occurrences; the first to insert a row in
