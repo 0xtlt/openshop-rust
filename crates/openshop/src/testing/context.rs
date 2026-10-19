@@ -185,6 +185,10 @@ pub struct TestOptions {
     pub client_credentials_shop: Option<String>,
     pub host: Option<String>,
     pub production: bool,
+    /// A development environment, where secrets are stored in plaintext without
+    /// an `encryption_key`. `true` by default; with `false` and no key the
+    /// application refuses to start.
+    pub development: bool,
     /// Project root used to resolve Shopify TOML files. Defaults to a directory without any.
     pub cwd: Option<PathBuf>,
     pub server: ServerOptions,
@@ -205,6 +209,7 @@ impl Default for TestOptions {
             client_credentials_shop: None,
             host: None,
             production: false,
+            development: true,
             cwd: None,
             server: ServerOptions::default(),
             transport: None,
@@ -329,6 +334,7 @@ impl TestContext {
             shopify_app_url: None,
             encryption_key: options.encryption_key.clone(),
             production: options.production,
+            development: options.development,
             cwd: options
                 .cwd
                 .clone()

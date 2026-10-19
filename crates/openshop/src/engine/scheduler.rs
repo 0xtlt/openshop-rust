@@ -81,7 +81,7 @@ async fn configured_targets(app: &OpenShop) -> Result<Vec<CronTarget>> {
         if known.iter().any(|(handle,)| *handle == shopify_app.handle) {
             continue;
         }
-        // Without a way to store the token (production without
+        // Without a way to store the token (a malformed
         // `ENCRYPTION_KEY`), nothing is asked: said once per app, not at
         // every tick, and never remembered as a refusal.
         if let Err(error) = app.crypto().can_encrypt() {

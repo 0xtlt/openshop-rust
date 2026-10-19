@@ -367,7 +367,7 @@ impl ClientCredentials {
     /// use the token it stored, or fall back at once when it failed.
     ///
     /// Fails, without asking Shopify, when the token could not be stored
-    /// encrypted (production without `ENCRYPTION_KEY`), and with a message that
+    /// encrypted (no usable `ENCRYPTION_KEY`), and with a message that
     /// names neither the token nor its ciphertext when it could not be
     /// written, which then holds back as a failure that may pass.
     pub async fn grant(

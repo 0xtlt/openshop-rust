@@ -64,7 +64,9 @@ the installations of every shop, read-only, outside Shopify admin.
 Set `SENTRY_DSN` to report failures to Sentry: the runs that fail, the
 handlers that fail and the panics, each with its flow and its shop.
 
-Set `OPENSHOP_ENV=production` and `ENCRYPTION_KEY` in production. Schema
+Set `OPENSHOP_ENV=production` and `ENCRYPTION_KEY` in production: without a
+key, `start` and `worker` do not start (`dev` stores secrets in plaintext).
+Generate one with `openssl rand -hex 32`. Schema
 changes live in `./migrations`: run `cargo run -- migrate generate` after
 upgrading OpenShop, or `cargo run -- migrate generate --name=<name>` to add
 your own tables.

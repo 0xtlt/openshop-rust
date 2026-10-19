@@ -236,7 +236,11 @@ larger configurations easier to split:
 ## Environment
 
 - `OPENSHOP_ENV=production` enables production mode (`NODE_ENV=production` is
-  honored too): `ENCRYPTION_KEY` is required and the schema push is refused.
+  honored too): the schema push is refused.
+- `ENCRYPTION_KEY` is required unless `OPENSHOP_ENV` (or `NODE_ENV`) is
+  `development` or `test`, or the command is `dev`. The application does not
+  start without it, in production or in any environment that is not explicitly
+  a development one.
 - `OPENSHOP_UI_DIR` replaces the embedded admin UI.
 
 ## Not ported

@@ -77,7 +77,10 @@ async fn main() -> Result<()> {
     let app = OpenShop::new(
         OpenShopConfig::builder().flow(flow).build()?,
         pool.clone(),
-        RuntimeEnv::default(),
+        RuntimeEnv {
+            development: true,
+            ..Default::default()
+        },
     )?;
 
     // The rows `dispatch_flow` writes, one millisecond apart.

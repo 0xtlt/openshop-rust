@@ -221,9 +221,11 @@ A token is used as it is stored, whoever stored it:
 [openshop] Shopify refused the client credentials of app "default" for dev-store-1.myshopify.com (400: shop_not_permitted)
 ```
 
-In production without `ENCRYPTION_KEY`, nothing is asked: the caller fails
-with `ENCRYPTION_KEY must be set in production`, which is not remembered as a
-refusal, and no token is ever stored in plaintext. When the token cannot be
+Without a usable `ENCRYPTION_KEY`, nothing is asked: the caller fails with the
+error of the key (`ENCRYPTION_KEY must be 64 hex characters (32 bytes)` for a
+malformed one; a missing one stops the application from starting outside
+development), which is not remembered as a refusal, and no token is ever stored
+in plaintext. When the token cannot be
 written, the error is
 `[openshop] Could not store the client credentials token of app "<app>" for <shop>`,
 which quotes neither the token, its ciphertext nor the database's message; it

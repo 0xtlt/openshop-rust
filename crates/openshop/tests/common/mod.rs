@@ -24,6 +24,7 @@ pub fn test_env() -> RuntimeEnv {
     RuntimeEnv {
         shopify_api_key: Some(TEST_API_KEY.to_string()),
         shopify_api_secret: Some(TEST_SECRET.to_string()),
+        development: true,
         cwd: std::env::temp_dir().join("openshop-test-no-toml"),
         ..Default::default()
     }

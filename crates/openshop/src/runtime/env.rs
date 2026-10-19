@@ -20,8 +20,18 @@ pub struct RuntimeEnv {
     pub encryption_key: Option<String>,
     /// `OPENSHOP_ENV=production` (or `NODE_ENV=production`).
     pub production: bool,
+    /// `OPENSHOP_ENV=development` or `test` (or the same `NODE_ENV`), which is
+    /// how an environment says it is not a deployed one. The `dev` command is
+    /// one too. Unset, or any other value, is not.
+    pub development: bool,
     /// Project root used to resolve Shopify TOML files and migrations.
     pub cwd: PathBuf,
+}
+
+/// `(production, development)` from the values of `OPENSHOP_ENV` and `NODE_ENV`.
+fn environment(openshop_env: Option<&str>, node_env: Option<&str>) -> (bool, bool) {
+    let any = |accepted: &[&str]| [openshop_env, node_env].into_iter().flatten().any(|value| accepted.contains(&value));
+    (any(&["production"]), any(&["development", "test"]))
 }
 
 fn non_empty(name: &str) -> Option<String> {
@@ -30,9 +40,10 @@ fn non_empty(name: &str) -> Option<String> {
 
 impl RuntimeEnv {
     pub fn from_env() -> Self {
-        let production = ["OPENSHOP_ENV", "NODE_ENV"]
-            .iter()
-            .any(|name| std::env::var(name).is_ok_and(|value| value == "production"));
+        let (production, development) = environment(
+            std::env::var("OPENSHOP_ENV").ok().as_deref(),
+            std::env::var("NODE_ENV").ok().as_deref(),
+        );
 
         Self {
             shopify_api_key: non_empty("SHOPIFY_API_KEY"),
@@ -41,8 +52,16 @@ impl RuntimeEnv {
             shopify_app_url: non_empty("SHOPIFY_APP_URL"),
             encryption_key: non_empty("ENCRYPTION_KEY"),
             production,
+            development,
             cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
         }
+    }
+
+    /// Whether secrets may be stored in plaintext, without an `ENCRYPTION_KEY`:
+    /// only in an environment that says it is a development one, and never in
+    /// production.
+    pub fn allows_plaintext_secrets(&self) -> bool {
+        self.development && !self.production
     }
 
     /// `HOST ?? SHOPIFY_APP_URL ?? ''`
@@ -79,6 +98,33 @@ mod tests {
         };
         assert_eq!(env.fallback_app_url(), "https://a.example");
         assert_eq!(RuntimeEnv::default().fallback_app_url(), "");
+    }
+
+    #[test]
+    fn plaintext_secrets_need_an_explicit_development_environment() {
+        let env = |production, development| RuntimeEnv {
+            production,
+            development,
+            ..Default::default()
+        };
+        assert!(!RuntimeEnv::default().allows_plaintext_secrets());
+        assert!(env(false, true).allows_plaintext_secrets());
+        assert!(!env(true, false).allows_plaintext_secrets());
+        assert!(!env(true, true).allows_plaintext_secrets());
+    }
+
+    #[test]
+    fn only_a_known_value_names_the_environment() {
+        assert_eq!(environment(None, None), (false, false));
+        assert_eq!(environment(Some("production"), None), (true, false));
+        assert_eq!(environment(None, Some("production")), (true, false));
+        assert_eq!(environment(Some("development"), None), (false, true));
+        assert_eq!(environment(Some("test"), None), (false, true));
+        assert_eq!(environment(None, Some("development")), (false, true));
+        // `prod`, `staging`, a typo, an empty value: not a development environment.
+        for value in ["prod", "staging", "Production", "developement", ""] {
+            assert!(!environment(Some(value), None).1, "{value}");
+        }
     }
 
     #[test]

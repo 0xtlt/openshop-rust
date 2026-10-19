@@ -3,7 +3,8 @@
 ## Required production controls
 
 1. Set `OPENSHOP_ENV=production` and a random 64-character hexadecimal
-   `ENCRYPTION_KEY`, and keep the key stable.
+   `ENCRYPTION_KEY`, and keep the key stable. Without a key, the application
+   refuses to start unless the environment is explicitly a development one.
 2. Terminate HTTPS before OpenShop and set `HOST` to the public HTTPS origin.
 3. Use a dedicated PostgreSQL role with access only to the OpenShop database.
 4. Run committed migrations before web and workers; do not grant runtime
@@ -37,14 +38,18 @@ returned as stored.
 
 | Situation | Behavior |
 | --- | --- |
-| No key, development | Values are stored in plaintext. A warning is logged once: `[openshop] ENCRYPTION_KEY not set — provider credentials stored in plaintext`. |
-| No key, production | Writes, and reads of encrypted values, fail with `ENCRYPTION_KEY must be set in production`. |
+| No key, development (`openshop dev`, or `OPENSHOP_ENV=development` or `test`) | Values are stored in plaintext. A warning is logged once: `[openshop] ENCRYPTION_KEY not set — provider credentials stored in plaintext`. |
+| No key, anything else (production, `staging`, a typo, `OPENSHOP_ENV` unset) | The application does not start: `ENCRYPTION_KEY must be set (64 hex characters, generate one with \`openssl rand -hex 32\`); to store secrets in plaintext on a development machine, run \`openshop dev\` or set OPENSHOP_ENV=development`. |
 | Key that is not 64 hex characters | Writes, and reads of encrypted values, fail with `ENCRYPTION_KEY must be 64 hex characters (32 bytes)`. |
 | Encrypted value, no key, development | Reads fail with `Cannot decrypt provider config: ENCRYPTION_KEY not set` or `Cannot decrypt secret: ENCRYPTION_KEY not set`. |
 | Wrong key or corrupted value | Reads fail with `Unable to decrypt: data is corrupted or the key is wrong`. |
 
-The key is checked when a value is first encrypted or decrypted, not when the
-process starts. Rotating the key requires decrypting and re-encrypting existing
+Plaintext is opt-in: nothing but an explicit development environment stores a
+secret without a key, and `OPENSHOP_ENV=production` never does, even next to
+`NODE_ENV=development`. `start` and `worker` are not development commands: run
+locally without a key, they need `OPENSHOP_ENV=development`. A missing key is
+checked when the application starts; a key that is set is checked when a value
+is first encrypted or decrypted. Rotating the key requires decrypting and re-encrypting existing
 values; replacing it without a migration makes stored secrets unreadable.
 
 MCP tokens are never stored: OpenShop keeps a salted scrypt hash and a

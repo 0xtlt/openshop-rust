@@ -147,6 +147,15 @@ the admin keeps the current value. To replace it, submit a new value. If the
 `ENCRYPTION_KEY` changed, restore the original key; existing ciphertext cannot
 be decrypted with a replacement.
 
+## The application does not start: `ENCRYPTION_KEY must be set`
+
+Without an `ENCRYPTION_KEY`, OpenShop refuses to start rather than store
+provider credentials and access tokens in plaintext. Set a key
+(`openssl rand -hex 32`) in the environment of the process. On a development
+machine, `openshop dev` does not need one; `start` and `worker` do, unless
+`OPENSHOP_ENV=development`. `OPENSHOP_ENV=staging`, `prod` or a typo is not a
+development environment.
+
 ## Tests cannot reach the database
 
 The template's database tests are marked `#[ignore]` and run with
