@@ -9,8 +9,8 @@
   all silently stored them in clear. Now an application without a key does not
   start (`OpenShop::new` fails with `ENCRYPTION_KEY must be set …`, which
   names how to set one), unless the environment is explicitly a development
-  one: `OPENSHOP_ENV` (or `NODE_ENV`) is `development` or `test`, or the
-  command is `openshop dev`. `OPENSHOP_ENV=production` never allows plaintext.
+  one: `OPENSHOP_ENV` is `development` or `test` (`NODE_ENV` does not count),
+  or the command is `openshop dev`. `OPENSHOP_ENV=production` never allows plaintext.
   `start` and `worker` run locally without a key now need a key or
   `OPENSHOP_ENV=development`; set `ENCRYPTION_KEY` in every deployed
   environment. Rows already stored in plaintext are still read, and the

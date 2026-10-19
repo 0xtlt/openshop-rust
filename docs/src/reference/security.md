@@ -44,9 +44,9 @@ returned as stored.
 | Encrypted value, no key, development | Reads fail with `Cannot decrypt provider config: ENCRYPTION_KEY not set` or `Cannot decrypt secret: ENCRYPTION_KEY not set`. |
 | Wrong key or corrupted value | Reads fail with `Unable to decrypt: data is corrupted or the key is wrong`. |
 
-Plaintext is opt-in: nothing but an explicit development environment stores a
-secret without a key, and `OPENSHOP_ENV=production` never does, even next to
-`NODE_ENV=development`. `start` and `worker` are not development commands: run
+Plaintext is opt-in: only `OPENSHOP_ENV=development` or `test` (and the `dev`
+command) stores a secret without a key. `NODE_ENV=development` does not, and
+`OPENSHOP_ENV=production` never does. `start` and `worker` are not development commands: run
 locally without a key, they need `OPENSHOP_ENV=development`. A missing key is
 checked when the application starts; a key that is set is checked when a value
 is first encrypted or decrypted. Rotating the key requires decrypting and re-encrypting existing

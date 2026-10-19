@@ -20,7 +20,7 @@ afterwards has no effect on a running process.
 | `SHOPIFY_APP_URL` | When `HOST` is absent | Empty | Legacy public application URL and allowed CORS origin |
 | `ENCRYPTION_KEY` | Yes, unless the environment is `development` or `test` | None: the application does not start without it, except in development, where secrets are stored in plaintext | Provider configuration and Shopify access-token encryption |
 | `OPENSHOP_ENV` | Production | Unset: neither production nor development | `production` enables production safety checks. `development` or `test` allows plaintext secrets without `ENCRYPTION_KEY` (`openshop dev` does so itself) |
-| `NODE_ENV` | No | — | `production`, `development` and `test` are honored like `OPENSHOP_ENV` |
+| `NODE_ENV` | No | — | `production` is honored like `OPENSHOP_ENV=production`. It never allows plaintext secrets: only `OPENSHOP_ENV` does |
 | `PORT` | No | `3000` | HTTP port of `dev` and `start` |
 | `OPENSHOP_UI_DIR` | No | The bundle set with the `admin_ui` setting of `app!`, then the embedded admin UI | Directory of a custom admin UI bundle served by `dev` and `start` |
 | `PGPOOL_MAX` | No | `10` | Maximum PostgreSQL pool connections per process |
