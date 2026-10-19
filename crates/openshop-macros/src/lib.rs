@@ -1,5 +1,6 @@
 //! Procedural macros of the OpenShop framework. Use them through the
 //! `openshop` crate, which re-exports them and documents them.
+#![forbid(unsafe_code)]
 
 mod admin;
 mod app;

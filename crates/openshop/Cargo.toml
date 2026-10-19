@@ -80,5 +80,5 @@ leptos = "0.8"
 sentry = { workspace = true, features = ["test"] }
 tokio = { workspace = true, features = ["io-util", "test-util"] }
 
-[lints.rust]
-unsafe_code = "deny"
+[lints]
+workspace = true

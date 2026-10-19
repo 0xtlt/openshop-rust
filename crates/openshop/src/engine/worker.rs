@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use futures::FutureExt;
-use rand::Rng;
+use rand::RngExt;
 use serde_json::Value;
 use tokio::sync::{Mutex, Notify};
 use tokio::task::JoinHandle;

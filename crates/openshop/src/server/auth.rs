@@ -7,7 +7,7 @@ use axum::http::header::LOCATION;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
-use rand::RngCore;
+use rand::Rng;
 use serde_json::{Value, json};
 use uuid::Uuid;
 

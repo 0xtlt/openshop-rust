@@ -32,5 +32,5 @@ tokio.workspace = true
 # The questions of `openshop init`.
 dialoguer.workspace = true
 
-[lints.rust]
-unsafe_code = "forbid"
+[lints]
+workspace = true

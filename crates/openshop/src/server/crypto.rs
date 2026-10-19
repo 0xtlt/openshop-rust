@@ -9,7 +9,7 @@ use std::sync::{Arc, OnceLock};
 use aes_gcm::aead::{Aead, KeyInit};
 use aes_gcm::{Aes256Gcm, Nonce};
 use anyhow::{Result, anyhow, bail};
-use rand::RngCore;
+use rand::Rng;
 use serde_json::Value;
 
 use crate::runtime::logger;

@@ -302,6 +302,8 @@ fn project_manifest(template: &str, package_name: &str, openshop: &str) -> Resul
                     }
                 }
             }
+            // `workspace = true` stands for the lints of the workspace, which a project has not.
+            "[lints]" => {}
             _ => manifest.extend(lines.into_iter().map(str::to_string)),
         }
     }
@@ -913,7 +915,7 @@ mod tests {
 
     #[test]
     fn a_template_manifest_becomes_the_manifest_of_a_project() {
-        let template = "[package]\nname = \"openshop-template-x\"\nversion.workspace = true\n\n[dependencies]\nopenshop = { workspace = true, features = [\"ui\"] }\nserde.workspace = true\nregex = { workspace = true, features = [\"unicode\"] }\n# The views.\nleptos = \"0.8\"\n\n[dev-dependencies]\nopenshop = { workspace = true, features = [\"testing\"] }\n# Only in the repository.\npreview = { path = \"../preview\" }\n";
+        let template = "[package]\nname = \"openshop-template-x\"\nversion.workspace = true\n\n[dependencies]\nopenshop = { workspace = true, features = [\"ui\"] }\nserde.workspace = true\nregex = { workspace = true, features = [\"unicode\"] }\n# The views.\nleptos = \"0.8\"\n\n[dev-dependencies]\nopenshop = { workspace = true, features = [\"testing\"] }\n# Only in the repository.\npreview = { path = \"../preview\" }\n\n[lints]\nworkspace = true\n";
         let manifest = project_manifest(template, "shop", "path = \"/openshop\"").unwrap();
         let (manifest, profiles) = manifest.split_once("\n\n# MCP token hashing").unwrap();
         assert_eq!(

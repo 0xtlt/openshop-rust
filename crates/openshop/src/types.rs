@@ -2056,3 +2056,6 @@ impl WorkerConfig {
 
 pub const ACTIVE_RUN_STATUSES: [&str; 3] = ["pending", "running", "sleeping"];
 pub const ALL_RUN_STATUSES: [&str; 6] = ["pending", "running", "sleeping", "completed", "failed", "canceled"];
+
+#[cfg(test)]
+mod tests;

@@ -1,4 +1,5 @@
 //! `openshop`: scaffold and develop OpenShop applications.
+#![forbid(unsafe_code)]
 
 mod bundle;
 mod codegen;
