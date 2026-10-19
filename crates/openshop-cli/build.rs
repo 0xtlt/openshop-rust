@@ -66,11 +66,11 @@ fn commit(workspace: &Path) -> Option<String> {
     if top.canonicalize().ok()? != workspace.canonicalize().ok()? {
         return None;
     }
-    // A new commit, or another branch, is a new build: nothing else is.
-    let mut watched = vec!["HEAD".to_string(), "packed-refs".to_string()];
-    watched.extend(git(workspace, &["symbolic-ref", "-q", "HEAD"]));
-    for name in watched {
-        if let Some(path) = git(workspace, &["rev-parse", "--git-path", &name]) {
+    // A new commit, or another branch, is a new build: nothing else is. The
+    // branches are watched as a directory, since the file of the current one
+    // may not exist yet (it is packed until it gets a commit).
+    for name in ["HEAD", "packed-refs", "refs/heads"] {
+        if let Some(path) = git(workspace, &["rev-parse", "--git-path", name]) {
             let path = workspace.join(path);
             if path.exists() {
                 println!("cargo::rerun-if-changed={}", path.display());
