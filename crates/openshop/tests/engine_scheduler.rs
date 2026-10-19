@@ -286,10 +286,30 @@ async fn cron_override_only_disables_its_own_shop() {
     test.cleanup().await;
 }
 
-/// The occurrence a run was queued for: runs of one tick are created within
-/// milliseconds of it, so half a second back lands them all on the same second.
-fn tick_of(run: &FlowRun) -> i64 {
-    (run.created_at.timestamp_millis() - 500).div_euclid(1_000)
+/// The occurrences claimed in `cron_ticks` for each value of `column`, and the
+/// number of runs queued for each value of `kind`: the same list of counts when
+/// every claimed occurrence queued one run, and no run was queued without one.
+/// Timing cannot tell this on a loaded machine; the claim and its run are
+/// written in one transaction.
+async fn assert_one_run_per_claim(test: &TestApp, column: &str, kind: impl Fn(&FlowRun) -> String) {
+    let runs = runs_of(test, "quick-flow").await;
+    let mut run_counts = std::collections::BTreeMap::<String, i64>::new();
+    for run in &runs {
+        *run_counts.entry(kind(run)).or_default() += 1;
+    }
+    let mut runs_per_kind: Vec<i64> = run_counts.into_values().collect();
+    let mut claims_per_kind: Vec<i64> =
+        sqlx::query_scalar(&format!("SELECT count(*) FROM cron_ticks GROUP BY {column}"))
+            .fetch_all(&test.db)
+            .await
+            .unwrap();
+    runs_per_kind.sort();
+    claims_per_kind.sort();
+    assert_eq!(runs_per_kind, claims_per_kind, "runs and claimed occurrences differ");
+    assert!(
+        runs_per_kind.iter().all(|count| *count >= 2),
+        "too few ticks: {runs_per_kind:?}"
+    );
 }
 
 #[tokio::test]
@@ -309,25 +329,42 @@ async fn replicas_queue_a_tick_once_for_each_shop() {
 
     // Several ticks, so that a replica that is late for one is still seen.
     wait_for_runs(&test, "quick-flow", |runs| {
-        runs.iter().map(tick_of).collect::<BTreeSet<_>>().len() >= 3
+        ["shop-a.myshopify.com", "shop-b.myshopify.com"]
+            .iter()
+            .all(|shop| runs.iter().filter(|run| run.shop == *shop).count() >= 3)
     })
     .await;
     schedulers.clear();
-    tokio::time::sleep(Duration::from_millis(150)).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
 
-    let runs = runs_of(&test, "quick-flow").await;
-    let mut seen = BTreeSet::new();
-    for run in &runs {
-        assert!(
-            seen.insert((tick_of(run), run.shop.clone())),
-            "{} was queued twice for the same tick",
-            run.shop
-        );
-    }
-    // Every tick reached both shops.
-    for tick in runs.iter().map(tick_of).collect::<BTreeSet<_>>() {
-        assert_eq!(runs.iter().filter(|run| tick_of(run) == tick).count(), 2, "tick {tick}");
-    }
+    assert_one_run_per_claim(&test, "shop", |run| run.shop.clone()).await;
+    test.cleanup().await;
+}
+
+#[tokio::test]
+async fn crons_of_one_flow_and_schedule_each_queue_their_own_run() {
+    let full = || Cron::new(EVERY_SECOND, "quick-flow").input(json!({ "mode": "full" }));
+    let delta = || Cron::new(EVERY_SECOND, "quick-flow").input(json!({ "mode": "delta" }));
+    let test = TestApp::new(config([concurrent_flow("quick-flow")], [full(), delta()])).await;
+    // A replica of the same configuration, with the crons in another order.
+    let replica = test.sibling(config([concurrent_flow("quick-flow")], [delta(), full()]));
+    let mut schedulers = vec![
+        Scheduler::start(&test.app).unwrap(),
+        Scheduler::start(&replica).unwrap(),
+    ];
+
+    let mode = |run: &FlowRun| run.input.as_ref().unwrap()["mode"].as_str().unwrap().to_string();
+    wait_for_runs(&test, "quick-flow", |runs| {
+        ["full", "delta"]
+            .iter()
+            .all(|wanted| runs.iter().filter(|run| mode(run) == *wanted).count() >= 3)
+    })
+    .await;
+    schedulers.clear();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // Two crons, so two groups of claims; not one cron's claims taking the other's.
+    assert_one_run_per_claim(&test, "cron_key", mode).await;
     test.cleanup().await;
 }
 

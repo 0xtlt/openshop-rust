@@ -8,8 +8,12 @@
   the new `cron_ticks` table `(app_handle, shop, cron_key, scheduled_at)` queues
   the run, in the same transaction, and the others skip it. A run that
   the flow's concurrency refuses leaves the occurrence free. There is no leader
-  and nothing to elect again when a process stops. The scheduler removes the
-  rows older than a day. The framework schema has a third migration,
+  and nothing to elect again when a process stops. Two crons of the same flow
+  and schedule, with another name, shops or input, each claim their own
+  occurrences; the override key stays `flow:schedule`. The scheduler removes
+  the rows older than a day, and skips, with a warning, an occurrence it
+  reaches more than an hour late, such as after the process was paused: the
+  others fired it long ago and its claim may be gone. The framework schema has a third migration,
   `openshop_cron_ticks`: run `migrate generate` then `migrate` before starting
   the new version, or every occurrence of a cron fails with a missing table
   (`migrate check` fails until it is there). The TypeScript runtime does not
