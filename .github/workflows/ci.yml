@@ -210,3 +210,94 @@ jobs:
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
       - run: cargo-deny --all-features check
       - run: cargo-deny --all-features --manifest-path crates/openshop-ui/Cargo.toml check
+
+  # The committed admin UI bundle (`crates/openshop/ui-dist`) is what
+  # applications embed: it has to be the one of the sources. Its bytes depend
+  # on the platform it is built on, so CI cannot build it again and compare:
+  # the hash of its sources, written when it was built, is compared instead.
+  # The build itself runs here too, to keep `build-dist.sh` working.
+  ui-dist:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - name: The bundle is built from these sources
+        run: |
+          crates/openshop-ui/sources-hash.sh | diff - crates/openshop-ui/ui-dist.sha256 || {
+            echo "::error::crates/openshop/ui-dist is not built from crates/openshop-ui: run \`mise run ui:build\` and commit the result"
+            exit 1
+          }
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: "1.98.1"
+          targets: wasm32-unknown-unknown
+      - uses: ./.github/actions/install-trunk
+      - run: crates/openshop-ui/build-dist.sh "$RUNNER_TEMP/ui-dist"
+
+  # The `Dockerfile` of a generated project is what a deployment builds: one
+  # project of a template with admin views (`custom`, which builds the bundle)
+  # and one without (`minimal`), built into an image. The repository is private,
+  # so the build gets the token the way `init-git` does, as a BuildKit secret: a
+  # `gitconfig` that is never written to a layer.
+  docker:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        template: [minimal, custom]
+    env:
+      CARGO_PROFILE_DEV_DEBUG: 0
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # The head of a pull request, which GitHub serves, not its merge commit.
+      COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
+      TEMPLATE: ${{ matrix.template }}
+      DOCKER_BUILDKIT: 1
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: "1.98.1"
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - run: cargo build -p openshop-cli --locked
+      - name: Make a project of the template
+        run: target/debug/openshop init "$RUNNER_TEMP/app" --template="$TEMPLATE" --openshop-rev="$COMMIT"
+      - name: Build its image
+        run: |
+          umask 077
+          printf '[url "https://x-access-token:%s@github.com/"]\n\tinsteadOf = https://github.com/\n' "$GH_TOKEN" > "$RUNNER_TEMP/gitconfig"
+          docker build --secret id=gitconfig,src="$RUNNER_TEMP/gitconfig" --tag "app-$TEMPLATE" "$RUNNER_TEMP/app"
+          rm "$RUNNER_TEMP/gitconfig"
+      - name: The app does not run as root
+        run: |
+          uid=$(docker run --rm "app-$TEMPLATE" id -u)
+          test "$uid" != 0 || { echo "::error::the image runs as root"; exit 1; }
+          docker run --rm "app-$TEMPLATE" app --help
+
+  # The guide builds.
+  docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/install-mdbook
+      - run: mdbook build docs
+
+  # `openshop dev` is used on Windows too: what is `cfg(unix)` there has a
+  # fallback, which this keeps compiling. Not the tests, which need PostgreSQL.
+  windows:
+    runs-on: windows-latest
+    env:
+      CARGO_PROFILE_DEV_DEBUG: 0
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: "1.98.1"
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - run: cargo check -p openshop-cli -p openshop --all-targets --locked

@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+- CI checks three things it did not. The committed admin UI bundle
+  (`crates/openshop/ui-dist`) is compared with its sources: `mise run ui:build`
+  (now `crates/openshop-ui/build-dist.sh`) writes the hash of what the bundle is
+  built from to `crates/openshop-ui/ui-dist.sha256`, and the `ui-dist` job fails
+  when the sources moved without a new bundle. The bundle was already stale (the
+  admin UI was fixed for Rust 1.88 without rebuilding it) and carried the paths
+  of the machine that built it: it is rebuilt, from a fixed place with the paths
+  rewritten. The bytes of a bundle depend on the platform that builds it, so CI
+  cannot compare them. The `docker` job makes a project of the `minimal` and of
+  the `custom` template and builds its image; the `docs` job builds the guide;
+  the `windows` job checks that `openshop` and the CLI compile there.
+- The `Dockerfile` of a generated project is stricter. The image runs as a user
+  without privileges (`app`, uid 10001) instead of root, trunk is checked against
+  the SHA-256 of its release before it runs, and both base images are named by
+  digest (Dependabot proposes the next ones). A private `openshop` repository
+  is fetched with the optional build secret `gitconfig` (a git configuration
+  with a token, never written to a layer): `docker build --secret
+  id=gitconfig,src=./gitconfig .`; without it the build is the same as before.
 - CI is hardened. Every action is pinned to the commit of a release, the
   workflows only get `contents: read`, trunk and cargo-deny are installed from
   their release with a SHA-256 written in the repository (a release asset can
