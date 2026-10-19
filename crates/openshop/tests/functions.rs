@@ -1657,10 +1657,10 @@ async fn validates_and_coerces_instance_config() {
 
     let invalid = [
         (json!({ "tier": "gold" }), "Field \"threshold\" is required"),
-        // A number field that cannot be parsed counts as missing.
+        // A number field that cannot be parsed is refused, not treated as missing.
         (
             json!({ "threshold": "many", "tier": "gold" }),
-            "Field \"threshold\" is required",
+            "Field \"threshold\": must be a number (was \"many\")",
         ),
         (
             json!({ "threshold": 0, "tier": "gold" }),

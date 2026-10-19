@@ -3,6 +3,7 @@
 use serde_json::Value;
 
 use crate::types::{Field, FieldType, JsonMap, Provider, is_missing};
+use crate::validators::describe;
 
 /// JavaScript's `Number(string)` for the inputs a form can send.
 pub(crate) fn js_number(text: &str) -> Value {
@@ -18,25 +19,63 @@ pub(crate) fn js_number(text: &str) -> Value {
     }
 }
 
-/// JavaScript truthiness, used for checkbox values.
-pub(crate) fn js_truthy(value: &Value) -> bool {
-    match value {
-        Value::Null => false,
-        Value::Bool(flag) => *flag,
-        Value::Number(number) => number.as_f64().is_some_and(|float| float != 0.0 && !float.is_nan()),
-        Value::String(text) => !text.is_empty(),
-        Value::Array(_) | Value::Object(_) => true,
+/// The error for a value a validator refused. The summary of a validator may
+/// repeat the value, so for a password it is not forwarded: a secret never
+/// leaves in an error.
+pub(crate) fn validation_error(name: &str, field: &Field, summary: &str) -> String {
+    match field.field_type {
+        FieldType::Password => format!("Field \"{name}\" is invalid"),
+        _ => format!("Field \"{name}\": {summary}"),
     }
 }
 
-/// Form inputs arrive as strings: numbers and checkboxes are coerced to their types.
-pub(crate) fn coerce_field_value(field: &Field, value: Option<Value>) -> Option<Value> {
-    let value = value?;
+/// Form inputs arrive as strings: numbers and checkboxes are coerced to their
+/// types (`"3"` is 3, `"true"` is true). A value that is not of the type of its
+/// field, even after that, is refused with an error naming the field. A null or
+/// an empty string counts as no value.
+pub(crate) fn coerce_field_value(name: &str, field: &Field, value: Option<Value>) -> Result<Option<Value>, String> {
+    let refuse = |expected: &str, value: &Value| Err(format!("Field \"{name}\": must be {expected} (was {})", describe(value)));
+    let Some(value) = value.filter(|value| !is_missing(Some(value))) else {
+        return Ok(None);
+    };
     match (field.field_type, &value) {
-        (FieldType::Number, Value::String(text)) if !text.trim().is_empty() => Some(js_number(text)),
-        (FieldType::Checkbox, Value::String(text)) => Some(Value::Bool(text == "true")),
-        (FieldType::Checkbox, other) => Some(Value::Bool(js_truthy(other))),
-        _ => Some(value),
+        (FieldType::Text | FieldType::Password, Value::String(_)) => Ok(Some(value)),
+        (FieldType::Text, other) => refuse("a string", other),
+        // A secret is not repeated in the error.
+        (FieldType::Password, _) => Err(format!("Field \"{name}\": must be a string")),
+        (FieldType::Number, Value::Number(_)) => Ok(Some(value)),
+        (FieldType::Number, Value::String(text)) if !text.trim().is_empty() => match js_number(text) {
+            Value::Null => refuse("a number", &value),
+            number => Ok(Some(number)),
+        },
+        // A blank number (spaces only) is no value.
+        (FieldType::Number, Value::String(_)) => Ok(None),
+        (FieldType::Number, other) => refuse("a number", other),
+        (FieldType::Checkbox, Value::Bool(_)) => Ok(Some(value)),
+        (FieldType::Checkbox, Value::String(text)) if text == "true" || text == "false" => {
+            Ok(Some(Value::Bool(text == "true")))
+        }
+        (FieldType::Checkbox, other) => refuse("a boolean", other),
+        (FieldType::Select, Value::String(text))
+            if field
+                .options
+                .iter()
+                .flatten()
+                .any(|option| option.value == *text) =>
+        {
+            Ok(Some(value))
+        }
+        (FieldType::Select, other) => Err(format!(
+            "Field \"{name}\": must be one of {} (was {})",
+            field
+                .options
+                .iter()
+                .flatten()
+                .map(|option| format!("\"{}\"", option.value))
+                .collect::<Vec<_>>()
+                .join(", "),
+            describe(other)
+        )),
     }
 }
 
@@ -82,18 +121,20 @@ pub fn parse_provider_config(
     let empty = JsonMap::new();
     let input = raw_config.and_then(Value::as_object).unwrap_or(&empty);
     let mut data = JsonMap::new();
+    let mut kept = Vec::new();
 
     for (name, field) in &provider.fields {
-        let mut value = input.get(name).cloned();
+        let submitted = input.get(name).cloned();
 
-        if field.field_type == FieldType::Password
-            && is_missing(value.as_ref())
-            && let Some(existing) = existing_config.get(name)
-        {
-            value = Some(existing.clone());
-        }
-
-        let value = coerce_field_value(field, value);
+        // A blank password keeps the stored value as it is: it was checked and
+        // transformed when it was saved, and is neither again.
+        let value = match existing_config.get(name) {
+            Some(existing) if field.field_type == FieldType::Password && is_missing(submitted.as_ref()) => {
+                kept.push(name.as_str());
+                Some(existing.clone())
+            }
+            _ => coerce_field_value(name, field, submitted)?,
+        };
         if field.is_required() && is_missing(value.as_ref()) {
             return Err(format!("Field \"{name}\" is required"));
         }
@@ -116,8 +157,11 @@ pub fn parse_provider_config(
             return Err(format!("Field \"{name}\" is required"));
         }
 
+        if kept.contains(&name.as_str()) {
+            continue;
+        }
         if let (Some(validate), Some(value)) = (&field.validate, value.filter(|value| !is_missing(Some(value)))) {
-            let validated = validate(&value).map_err(|summary| format!("Field \"{name}\": {summary}"))?;
+            let validated = validate(&value).map_err(|summary| validation_error(name, field, &summary))?;
             transformed.insert(name.clone(), validated);
         }
     }
@@ -128,6 +172,7 @@ pub fn parse_provider_config(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::FieldOption;
     use crate::validators;
     use serde_json::json;
 
@@ -266,6 +311,149 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.starts_with("Field \"retries\": "), "{error}");
+    }
+
+    fn typed() -> Provider {
+        Provider::new("typed")
+            .field(
+                "mode",
+                Field::select(
+                    "Mode",
+                    [FieldOption::new("Live", "live"), FieldOption::new("Test", "test")],
+                ),
+            )
+            .field("retries", Field::number("Retries").optional())
+            .field("sandbox", Field::checkbox("Sandbox").optional())
+            .field("label", Field::text("Label").optional())
+            .field("token", Field::password("Token").optional())
+    }
+
+    fn typed_error(config: Value) -> String {
+        parse_provider_config(&typed(), Some(&config), &JsonMap::new()).unwrap_err()
+    }
+
+    #[test]
+    fn refuses_a_select_value_that_is_not_an_option() {
+        assert_eq!(
+            typed_error(json!({ "mode": "prod" })),
+            "Field \"mode\": must be one of \"live\", \"test\" (was \"prod\")"
+        );
+        assert_eq!(
+            typed_error(json!({ "mode": 1 })),
+            "Field \"mode\": must be one of \"live\", \"test\" (was 1)"
+        );
+        let parsed = parse_provider_config(&typed(), Some(&json!({ "mode": "test" })), &JsonMap::new()).unwrap();
+        assert_eq!(parsed["mode"], "test");
+    }
+
+    #[test]
+    fn refuses_a_number_that_is_not_one() {
+        assert_eq!(
+            typed_error(json!({ "mode": "live", "retries": "abc" })),
+            "Field \"retries\": must be a number (was \"abc\")"
+        );
+        assert_eq!(
+            typed_error(json!({ "mode": "live", "retries": "Infinity" })),
+            "Field \"retries\": must be a number (was \"Infinity\")"
+        );
+        assert_eq!(
+            typed_error(json!({ "mode": "live", "retries": true })),
+            "Field \"retries\": must be a number (was true)"
+        );
+        let parsed = parse_provider_config(
+            &typed(),
+            Some(&json!({ "mode": "live", "retries": " 2.5 " })),
+            &JsonMap::new(),
+        )
+        .unwrap();
+        assert_eq!(parsed["retries"], 2.5);
+        let parsed = parse_provider_config(
+            &typed(),
+            Some(&json!({ "mode": "live", "retries": "" })),
+            &JsonMap::new(),
+        )
+        .unwrap();
+        assert!(!parsed.contains_key("retries"));
+    }
+
+    #[test]
+    fn refuses_a_checkbox_that_is_not_a_boolean() {
+        for bad in [json!("yes"), json!("on"), json!(1), json!([])] {
+            let error = typed_error(json!({ "mode": "live", "sandbox": bad }));
+            assert!(error.starts_with("Field \"sandbox\": must be a boolean (was "), "{error}");
+        }
+        for (sent, saved) in [(json!(true), true), (json!("true"), true), (json!("false"), false)] {
+            let parsed =
+                parse_provider_config(&typed(), Some(&json!({ "mode": "live", "sandbox": sent })), &JsonMap::new())
+                    .unwrap();
+            assert_eq!(parsed["sandbox"], saved);
+        }
+    }
+
+    #[test]
+    fn refuses_text_and_password_that_are_not_strings() {
+        assert_eq!(
+            typed_error(json!({ "mode": "live", "label": 5 })),
+            "Field \"label\": must be a string (was 5)"
+        );
+        assert_eq!(
+            typed_error(json!({ "mode": "live", "token": { "a": 1 } })),
+            "Field \"token\": must be a string"
+        );
+    }
+
+    #[test]
+    fn never_repeats_a_secret_in_an_error() {
+        let provider = Provider::new("erp")
+            .field("token", Field::password("Token").validate(validators::non_empty()))
+            .transformer(|mut data| {
+                if let Some(Value::String(token)) = data.get("token").cloned() {
+                    data.insert("token".into(), json!({ "accessToken": token }));
+                }
+                Value::Object(data)
+            });
+        // The summary of a validator is not forwarded for a password.
+        let error =
+            parse_provider_config(&provider, Some(&json!({ "token": "secret-token" })), &JsonMap::new()).unwrap_err();
+        assert_eq!(error, "Field \"token\" is invalid");
+
+        // A stored password is neither validated nor transformed again.
+        let stored = object(json!({ "token": { "accessToken": "secret-token" } }));
+        let parsed = parse_provider_config(&provider, Some(&json!({ "token": "" })), &stored).unwrap();
+        assert_eq!(parsed, stored);
+
+        // A validator of the application that repeats the value in its summary.
+        let chatty = Provider::new("custom").field(
+            "token",
+            Field::password("Token").validate(|value| match value.as_str() {
+                Some(token) => Ok(json!({ "accessToken": token })),
+                None => Err(format!("invalid token: {value}")),
+            }),
+        );
+        let stored = parse_provider_config(&chatty, Some(&json!({ "token": "review-secret" })), &JsonMap::new()).unwrap();
+        assert_eq!(parse_provider_config(&chatty, Some(&json!({})), &stored).unwrap(), stored);
+        let refusing = Provider::new("custom").field(
+            "token",
+            Field::password("Token").validate(|value| Err(format!("invalid token: {value}"))),
+        );
+        let error = parse_provider_config(&refusing, Some(&json!({ "token": "review-secret" })), &JsonMap::new())
+            .unwrap_err();
+        assert_eq!(error, "Field \"token\" is invalid");
+
+        let plain = Provider::new("erp").field("token", Field::password("Token"));
+        let parsed = parse_provider_config(&plain, Some(&json!({})), &stored).unwrap();
+        assert_eq!(parsed, stored);
+    }
+
+    #[test]
+    fn ignores_fields_that_are_not_declared() {
+        let parsed = parse_provider_config(
+            &typed(),
+            Some(&json!({ "mode": "live", "extra": "x", "__proto__": { "a": 1 } })),
+            &JsonMap::new(),
+        )
+        .unwrap();
+        assert_eq!(parsed, object(json!({ "mode": "live" })));
     }
 
     #[test]

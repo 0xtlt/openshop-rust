@@ -422,6 +422,20 @@
   workers remove the log lines older than it, once an hour, 5,000 at a time.
   It is unset by default: the lines are kept as before.
 
+- A provider configuration is checked against the type of each field before it
+  is saved, and a Shopify Function configuration likewise. A `select` value
+  must be one of the options, a `number` a number (`"abc"` was dropped without
+  an error for an optional field), a `checkbox` `true`, `false`, `"true"` or
+  `"false"` (`"yes"` was saved as false), and a `text` or `password` a string.
+  The error names the field: `Field "mode": must be one of "live", "test"
+  (was "prod")`. Keys that are not fields are still ignored. Configurations
+  that used to be accepted are now refused with `400`.
+- `validators::url()` accepts only `http` and `https` URLs with a host:
+  `file:///etc/passwd` and `gopher://…` are refused. The new
+  `validators::public_url()` also refuses `localhost`, `metadata.google.internal`
+  and IP addresses that are loopback, private, link-local (the cloud metadata
+  endpoint), shared, multicast or unspecified, for a URL the server fetches on
+  behalf of a merchant. It cannot see through DNS rebinding.
 - `openshop init` makes a project from one of three templates: `minimal`, one
   provider and one flow, as before; `custom`, a custom app with every building
   block and a page of its own next to the built-in admin; `public`, a public
