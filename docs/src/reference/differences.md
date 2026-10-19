@@ -110,6 +110,10 @@ larger configurations easier to split:
   answers `400` otherwise.
 - `POST /api/runs/bulk-delete` answers `400 No IDs provided` for a missing or
   invalid body; identifiers that are not UUIDs count as skipped.
+- Retry, cancel and delete check the status of the run in the write itself, so
+  a run that changed meanwhile is answered `409`. A retry of a flow that
+  rejects concurrent runs answers `409` with `existingRunId` while another
+  run of it is active for the shop.
 - Log export uses JSON for any `format` other than `csv`, and only letters and
   digits are kept in the file extension.
 - Run details list steps in creation order.

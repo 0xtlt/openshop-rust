@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- Retrying, canceling and deleting a run are decided by the write, not by the
+  status the request read before: a cancel no longer overwrites a run that
+  completed meanwhile, a retry no longer resets a run that started again, and
+  a delete (single or bulk) no longer removes a run that just started and its
+  steps and logs; the request answers `409` with the current status, or `404`
+  if the run is gone. Behaviour change: a retry follows the concurrency of the
+  flow like a dispatch, under the same lock; when the flow rejects concurrent
+  runs (the default) and another run of it is active for the shop, it answers
+  `409` with `existingRunId` and the run stays as it was, where it used to run
+  beside the other one. A cancel tells the worker only once the run is
+  canceled.
 - The Admin API answers what the caller got wrong with a `4xx`, and no longer
   shows what the server got wrong. Behaviour change:
   `POST /api/flows/:name/run` answers `404` for an unknown flow, and `422`

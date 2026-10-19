@@ -122,6 +122,15 @@ other than `reset` behaves as `resume`. Retry accepts only `failed`,
 `completed`, or `canceled` runs; it resets the attempt count and the deadline.
 Active runs cannot be deleted.
 
+Each of these transitions is decided by the write itself, not by the status
+the request read: a cancel never overwrites a run that has just completed, a
+retry never resets a run that has just started, and a delete never removes a
+run that has just started. The request then answers `409` with the status the
+run has now, or `404` if the run is gone. A retry follows the concurrency of
+the flow like a dispatch: when the flow rejects concurrent runs and another run
+of it is active for the shop, the retry is refused with the `409` below and the
+run is left as it was.
+
 | Status | `error` | Condition |
 | --- | --- | --- |
 | `400` | `No IDs provided` | Bulk delete without a non-empty `ids` array. |
@@ -129,12 +138,13 @@ Active runs cannot be deleted.
 | `404` | `Run not found` | The run does not exist for the authenticated app and shop. |
 | `404` | `Flow "<name>" not found` | Dispatch of an unregistered flow name. |
 | `422` | `Invalid input for flow "<name>": <reason>` | The input fails the input schema of the flow. |
-| `409` | `Cannot retry a run with status "<status>"` | Retry of an active run. |
-| `409` | `Cannot cancel a run with status "<status>"` | Cancel of a finished run. |
-| `409` | `Cannot delete an active run — cancel it first` | Delete of an active run. |
-| `409` | `Flow "<name>" is already running for shop "<shop>" (run #<id>)` | Flow concurrency conflict. The body also contains `existingRunId`. |
+| `409` | `Cannot retry a run with status "<status>"` | Retry of a run that is active, or became active meanwhile. |
+| `409` | `Cannot cancel a run with status "<status>"` | Cancel of a run that is finished, or finished meanwhile. |
+| `409` | `Cannot delete an active run — cancel it first` | Delete of a run that is active, or became active meanwhile. |
+| `409` | `The run changed while the request was processed — try again` | The status of the run changed twice while the request was processed. |
+| `409` | `Flow "<name>" is already running for shop "<shop>" (run #<id>)` | Flow concurrency conflict, on a dispatch or on a retry. The body also contains `existingRunId`. |
 
-In a bulk delete, IDs that are unknown, active, or not UUIDs count as skipped.
+In a bulk delete, IDs that are unknown, active (or active by the time of the delete), or not UUIDs count as skipped.
 
 ## Run logs
 

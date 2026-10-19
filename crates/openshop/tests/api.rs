@@ -9,6 +9,7 @@ use chrono::{DateTime, SubsecRound, Utc};
 use common::{create_config, noop_flow};
 use openshop::builder::{Field, Flow, Function, FunctionType, Provider};
 use openshop::db::schema::FlowRun;
+use openshop::engine::abort::{cleanup_abort, register_abort};
 use openshop::engine::{RunFlowOptions, run_flow};
 use openshop::runtime::time::to_iso;
 use openshop::server::ServerOptions;
@@ -216,6 +217,44 @@ async fn execute(ctx: &TestContext, run_id: Uuid, flow_name: &str) -> RunOutcome
     run_flow(&ctx.app, RunFlowOptions::new(run_id, flow_name, ctx.shop.clone()))
         .await
         .unwrap()
+}
+
+/// A transaction that has changed a run and not committed yet: the requests
+/// that write the run wait for it. Committing it plays a concurrent request
+/// that won the race.
+struct RaceWinner {
+    tx: sqlx::Transaction<'static, sqlx::Postgres>,
+    pid: i32,
+}
+
+/// Starts the transaction with a statement over the run (`$1`).
+async fn race_winner(ctx: &TestContext, run_id: Uuid, statement: &str) -> RaceWinner {
+    let mut tx = ctx.db.begin().await.unwrap();
+    let (pid,): (i32,) = sqlx::query_as("SELECT pg_backend_pid()")
+        .fetch_one(&mut *tx)
+        .await
+        .unwrap();
+    sqlx::query(statement).bind(run_id).execute(&mut *tx).await.unwrap();
+    RaceWinner { tx, pid }
+}
+
+impl RaceWinner {
+    /// Waits until a request is stuck behind this transaction, then commits it.
+    async fn win(self, db: &PgPool) {
+        for _ in 0..500 {
+            let (waiting,): (i64,) =
+                sqlx::query_as("SELECT count(*) FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid))")
+                    .bind(self.pid)
+                    .fetch_one(db)
+                    .await
+                    .unwrap();
+            if waiting > 0 {
+                return self.tx.commit().await.unwrap();
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("no request waits for the run");
+    }
 }
 
 fn strings(values: &Value, key: &str) -> Vec<String> {
@@ -907,19 +946,197 @@ async fn post_run_retry_resume_keeps_completed_steps_and_reset_discards_them() {
 async fn post_run_retry_rejects_active_runs(ctx: &TestContext) {
     let base = base_time();
 
+    // Another flow, so that the active runs do not make `test-flow` refuse the
+    // retries below.
     for status in ["pending", "running", "sleeping"] {
-        let run_id = seed_run(ctx, "test-flow", status, base).await;
+        let run_id = seed_run(ctx, "other-flow", status, base).await;
         let (code, body) = send(ctx.post(&format!("/api/runs/{run_id}/retry"))).await;
         assert_eq!(code, StatusCode::CONFLICT);
         assert_eq!(body, error(&format!("Cannot retry a run with status \"{status}\"")));
         assert_eq!(run_status(&ctx.db, run_id).await, status);
     }
-    for status in ["completed", "canceled"] {
-        let run_id = seed_run(ctx, "test-flow", status, base).await;
+    // One flow each: a retried run is active, and `test-flow` rejects a second one.
+    for (flow_name, status) in [("test-flow", "completed"), ("third-flow", "canceled")] {
+        let run_id = seed_run(ctx, flow_name, status, base).await;
         let (code, _) = send(ctx.post(&format!("/api/runs/{run_id}/retry"))).await;
         assert_eq!(code, StatusCode::OK);
         assert_eq!(run_status(&ctx.db, run_id).await, "pending");
     }
+}
+
+// A request reads the run, then writes it. These tests let another transaction
+// change the run in between, and check that the request notices.
+
+#[openshop::test(api_context())]
+async fn post_run_cancel_does_not_overwrite_a_run_that_completed_meanwhile(ctx: &TestContext) {
+    let run_id = seed_run(ctx, "test-flow", "running", base_time()).await;
+    let token = register_abort(&run_id.to_string());
+    let winner = race_winner(
+        ctx,
+        run_id,
+        "UPDATE flow_runs SET status = 'completed', completed_at = now() WHERE id = $1",
+    )
+    .await;
+
+    let request = tokio::spawn(send(ctx.post(&format!("/api/runs/{run_id}/cancel"))));
+    winner.win(&ctx.db).await;
+    let (code, body) = request.await.unwrap();
+
+    assert_eq!(code, StatusCode::CONFLICT);
+    assert_eq!(body, error("Cannot cancel a run with status \"completed\""));
+    assert_eq!(run_status(&ctx.db, run_id).await, "completed");
+    assert!(
+        !token.is_cancelled(),
+        "the worker of a run that completed is left alone"
+    );
+    cleanup_abort(&run_id.to_string());
+}
+
+#[openshop::test(api_context())]
+async fn post_run_retry_of_a_run_deleted_meanwhile_is_not_found(ctx: &TestContext) {
+    let run_id = seed_run(ctx, "test-flow", "completed", base_time()).await;
+    let winner = race_winner(ctx, run_id, "DELETE FROM flow_runs WHERE id = $1").await;
+
+    let request = tokio::spawn(send(ctx.post(&format!("/api/runs/{run_id}/retry"))));
+    winner.win(&ctx.db).await;
+    let (code, body) = request.await.unwrap();
+
+    assert_eq!(code, StatusCode::NOT_FOUND);
+    assert_eq!(body, error("Run not found"));
+    assert!(find_run(&ctx.db, run_id).await.is_none());
+}
+
+#[openshop::test(api_context())]
+async fn post_run_retry_does_not_reset_a_run_that_started_again_meanwhile(ctx: &TestContext) {
+    let base = base_time();
+    let run_id = seed_run(ctx, "test-flow", "failed", base).await;
+    seed_step(&ctx.db, run_id, "push", "failed", base).await;
+    let winner = race_winner(
+        ctx,
+        run_id,
+        "UPDATE flow_runs SET status = 'running', worker_id = 'w1', attempts = 3 WHERE id = $1",
+    )
+    .await;
+
+    let request = tokio::spawn(send(ctx.post(&format!("/api/runs/{run_id}/retry"))));
+    winner.win(&ctx.db).await;
+    let (code, body) = request.await.unwrap();
+
+    assert_eq!(code, StatusCode::CONFLICT);
+    assert_eq!(body, error("Cannot retry a run with status \"running\""));
+    let run = find_run(&ctx.db, run_id).await.expect("run");
+    assert_eq!((run.status.as_str(), run.attempts), ("running", 3));
+    assert_eq!(run.worker_id.as_deref(), Some("w1"));
+    assert_eq!(step_names(&ctx.db, run_id).await, ["push"], "the steps are kept");
+    assert!(log_messages(&ctx.db, run_id).await.is_empty());
+}
+
+#[openshop::test(api_context())]
+async fn delete_run_does_not_remove_a_run_that_started_meanwhile(ctx: &TestContext) {
+    let base = base_time();
+    let run_id = seed_run(ctx, "test-flow", "completed", base).await;
+    seed_step(&ctx.db, run_id, "step", "completed", base).await;
+    seed_log(&ctx.db, run_id, "info", "line", json!({}), base).await;
+    let winner = race_winner(
+        ctx,
+        run_id,
+        "UPDATE flow_runs SET status = 'running', worker_id = 'w1' WHERE id = $1",
+    )
+    .await;
+
+    let request = tokio::spawn(send(ctx.delete(&format!("/api/runs/{run_id}"))));
+    winner.win(&ctx.db).await;
+    let (code, body) = request.await.unwrap();
+
+    assert_eq!(code, StatusCode::CONFLICT);
+    assert_eq!(body, error("Cannot delete an active run — cancel it first"));
+    assert_eq!(run_status(&ctx.db, run_id).await, "running");
+    assert_eq!(step_names(&ctx.db, run_id).await, ["step"]);
+    assert_eq!(log_messages(&ctx.db, run_id).await, ["line"]);
+}
+
+#[openshop::test(api_context())]
+async fn post_runs_bulk_delete_skips_a_run_that_started_meanwhile(ctx: &TestContext) {
+    let base = base_time();
+    let started = seed_run(ctx, "test-flow", "completed", base).await;
+    let finished = seed_run(ctx, "test-flow", "failed", base).await;
+    for id in [started, finished] {
+        seed_step(&ctx.db, id, "step", "completed", base).await;
+    }
+    let winner = race_winner(
+        ctx,
+        started,
+        "UPDATE flow_runs SET status = 'running', worker_id = 'w1' WHERE id = $1",
+    )
+    .await;
+
+    let request = tokio::spawn(send(
+        ctx.post("/api/runs/bulk-delete")
+            .json(&json!({ "ids": [started, finished] })),
+    ));
+    winner.win(&ctx.db).await;
+    let (code, body) = request.await.unwrap();
+
+    assert_eq!(code, StatusCode::OK);
+    assert_eq!(body, json!({ "deleted": 1, "skipped": 1 }));
+    assert_eq!(run_status(&ctx.db, started).await, "running");
+    assert_eq!(step_names(&ctx.db, started).await, ["step"]);
+    assert!(find_run(&ctx.db, finished).await.is_none());
+    assert!(step_names(&ctx.db, finished).await.is_empty());
+}
+
+#[openshop::test(api_context())]
+async fn post_run_retry_refuses_what_the_concurrency_of_the_flow_refuses(ctx: &TestContext) {
+    let base = base_time();
+    let failed = seed_run(ctx, "test-flow", "failed", base).await;
+    seed_step(&ctx.db, failed, "push", "failed", base).await;
+    let active = seed_run(ctx, "test-flow", "sleeping", base).await;
+    let other_shop = seed_run_for(&ctx.db, "default", OTHER_SHOP, "test-flow", "running", base).await;
+
+    // `test-flow` rejects concurrent runs by default, like a dispatch does.
+    let (code, body) = send(ctx.post(&format!("/api/runs/{failed}/retry"))).await;
+    assert_eq!(code, StatusCode::CONFLICT);
+    assert_eq!(
+        body,
+        json!({
+            "error": format!("Flow \"test-flow\" is already running for shop \"{}\" (run #{active})", ctx.shop),
+            "existingRunId": active,
+        })
+    );
+    assert_eq!(run_status(&ctx.db, failed).await, "failed");
+    assert_eq!(step_names(&ctx.db, failed).await, ["push"], "nothing was changed");
+    assert!(log_messages(&ctx.db, failed).await.is_empty());
+
+    // The run of the shop is the only one in the way: not the run of another shop.
+    sqlx::query("UPDATE flow_runs SET status = 'completed' WHERE id = $1")
+        .bind(active)
+        .execute(&ctx.db)
+        .await
+        .unwrap();
+    let (code, _) = send(ctx.post(&format!("/api/runs/{failed}/retry"))).await;
+    assert_eq!(code, StatusCode::OK);
+    assert_eq!(run_status(&ctx.db, failed).await, "pending");
+    assert_eq!(run_status(&ctx.db, other_shop).await, "running");
+
+    // Now `failed` is the active run: another finished run cannot be retried.
+    let (code, body) = send(ctx.post(&format!("/api/runs/{active}/retry"))).await;
+    assert_eq!(code, StatusCode::CONFLICT);
+    assert_eq!(body["existingRunId"], json!(failed));
+    assert_eq!(run_status(&ctx.db, active).await, "completed");
+}
+
+#[tokio::test]
+async fn post_run_retry_of_a_flow_that_allows_concurrency_runs_beside_an_active_run() {
+    let ctx = context(api_config_with(noop_flow("test-flow").concurrency(Concurrency::Allow))).await;
+    let base = base_time();
+    let failed = seed_run(&ctx, "test-flow", "failed", base).await;
+    let active = seed_run(&ctx, "test-flow", "running", base).await;
+
+    let (code, _) = send(ctx.post(&format!("/api/runs/{failed}/retry"))).await;
+    assert_eq!(code, StatusCode::OK);
+    assert_eq!(run_status(&ctx.db, failed).await, "pending");
+    assert_eq!(run_status(&ctx.db, active).await, "running");
+    ctx.shutdown().await.unwrap();
 }
 
 #[openshop::test(api_context())]
