@@ -549,8 +549,8 @@ async fn resumes_a_sleeping_run_after_its_resume_time() {
     let elapsed = started.elapsed();
     worker.stop().await;
 
-    // One attempt up to the sleep, one after it; the worker was free in between.
-    assert_eq!(run.attempts, 2);
+    // The worker was free during the sleep, and waking up is not a new attempt.
+    assert_eq!(run.attempts, 1);
     assert_eq!(before_runs.load(Ordering::SeqCst), 1);
     assert!(elapsed >= Duration::from_millis(150), "{elapsed:?}");
 
@@ -562,7 +562,7 @@ async fn resumes_a_sleeping_run_after_its_resume_time() {
     let expected = [
         ("before", "completed", 1),
         ("nap", "completed", 1),
-        ("after", "completed", 2),
+        ("after", "completed", 1),
     ]
     .map(|(name, status, attempt)| (name.to_string(), status.to_string(), attempt));
     assert_eq!(steps, expected);
@@ -574,6 +574,263 @@ async fn resumes_a_sleeping_run_after_its_resume_time() {
             .await
             .unwrap();
     assert_eq!(sleeping_logs, 1);
+    test.cleanup().await;
+}
+
+#[tokio::test]
+async fn sleeping_does_not_use_up_the_attempts_of_a_run() {
+    let flow = Flow::new("nap-flow", |ctx: FlowContext| async move {
+        for nap in ["first", "second", "third"] {
+            ctx.step.sleep(nap, Duration::from_millis(30)).await?;
+        }
+        Ok(())
+    })
+    .retry_policy(RetryPolicy::new().max_attempts(1));
+    let test = TestApp::new(create_config([flow])).await;
+    let run_id = dispatch(&test, "nap-flow").await;
+
+    let worker = worker(&test.app, 1);
+    worker.start().await;
+    let run = wait_for_status(&test, run_id, "completed").await;
+    worker.stop().await;
+
+    assert_eq!(run.attempts, 1);
+    assert_eq!(run.error, None);
+    test.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_failure_after_a_sleep_is_counted_once() {
+    let tries = Arc::new(AtomicUsize::new(0));
+    let flow = Flow::new("nap-then-fail", {
+        let tries = tries.clone();
+        move |ctx: FlowContext| {
+            let tries = tries.clone();
+            async move {
+                ctx.step.sleep("nap", Duration::from_millis(30)).await?;
+                bail!("failure #{}", tries.fetch_add(1, Ordering::SeqCst) + 1)
+            }
+        }
+    })
+    .retry_policy(
+        RetryPolicy::new()
+            .max_attempts(2)
+            .initial_interval(Duration::from_millis(10)),
+    );
+    let test = TestApp::new(create_config([flow])).await;
+    let run_id = dispatch(&test, "nap-then-fail").await;
+
+    let worker = worker(&test.app, 1);
+    worker.start().await;
+    let run = wait_for_status(&test, run_id, "failed").await;
+    worker.stop().await;
+
+    // The sleep is replayed: the failure of the second attempt is the last.
+    assert_eq!(run.attempts, 2);
+    assert_eq!(run.error.as_deref(), Some("failure #2"));
+    test.cleanup().await;
+}
+
+/// Puts a run in the state a crashed worker leaves: leased, and past its lease.
+async fn abandon(test: &TestApp, run_id: Uuid, attempts: i32) {
+    sqlx::query(
+        "UPDATE flow_runs SET status = 'running', worker_id = 'dead-worker', attempts = $2, \
+           started_at = now(), available_at = now() - interval '1 second' WHERE id = $1",
+    )
+    .bind(run_id)
+    .bind(attempts)
+    .execute(&test.db)
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn fails_a_run_that_used_all_its_attempts_instead_of_claiming_it_again() {
+    let executions = Arc::new(AtomicUsize::new(0));
+    let flow = Flow::new("crashing-flow", {
+        let executions = executions.clone();
+        move |_ctx: FlowContext| {
+            let executions = executions.clone();
+            async move {
+                executions.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }
+        }
+    })
+    .concurrency(Concurrency::Allow);
+    let test = TestApp::new(create_config([flow, noop_flow("quick-flow")])).await;
+
+    // Each of the first two was claimed as often as its policy allows, and
+    // took its worker down every time.
+    let exhausted = dispatch_with(
+        &test,
+        DispatchOptions::new("crashing-flow", TEST_SHOP).retry_policy(RetryPolicy::new().max_attempts(2)),
+    )
+    .await;
+    abandon(&test, exhausted, 2).await;
+    let without_retries = dispatch_with(
+        &test,
+        DispatchOptions::new("crashing-flow", TEST_SHOP).retry_policy(without_retry()),
+    )
+    .await;
+    abandon(&test, without_retries, 1).await;
+    // This one has an attempt left.
+    let spared = dispatch_with(
+        &test,
+        DispatchOptions::new("crashing-flow", TEST_SHOP).retry_policy(RetryPolicy::new().max_attempts(2)),
+    )
+    .await;
+    abandon(&test, spared, 1).await;
+
+    let worker = worker(&test.app, 1);
+    worker.start().await;
+    wait_for_status(&test, spared, "completed").await;
+    let after = dispatch(&test, "quick-flow").await;
+    wait_for_status(&test, after, "completed").await;
+    worker.stop().await;
+
+    for (run_id, attempts) in [(exhausted, 2), (without_retries, 1)] {
+        let run = find_run(&test, run_id).await;
+        assert_eq!(run.status, "failed");
+        assert_eq!(run.attempts, attempts, "it is not claimed again");
+        assert_eq!(run.worker_id, None);
+        assert!(run.completed_at.is_some());
+        let error = run.error.expect("the reason");
+        assert!(error.contains("attempts"), "{error}");
+    }
+    assert_eq!(find_run(&test, spared).await.attempts, 2);
+    assert_eq!(executions.load(Ordering::SeqCst), 1, "only the spared run executed");
+    test.cleanup().await;
+}
+
+/// A run claimed twice by one worker: the first execution, whose lease expired,
+/// is still going while the second one runs.
+struct Reclaimed {
+    test: TestApp,
+    worker: Worker,
+    run_id: Uuid,
+    /// Lets the first execution return.
+    release_first: CancellationToken,
+    /// Lets the second execution return.
+    release_second: CancellationToken,
+    /// How many executions were told to stop, first and second.
+    stopped: [Arc<AtomicUsize>; 2],
+}
+
+async fn reclaim_a_run_in_flight() -> Reclaimed {
+    let starts = Arc::new(AtomicUsize::new(0));
+    let stopped = [Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0))];
+    let started = Arc::new(Notify::new());
+    let (release_first, release_second) = (CancellationToken::new(), CancellationToken::new());
+    let flow = Flow::new("slow-flow", {
+        let (starts, stopped, started) = (starts.clone(), stopped.clone(), started.clone());
+        let releases = [release_first.clone(), release_second.clone()];
+        move |ctx: FlowContext| {
+            let (starts, stopped, started) = (starts.clone(), stopped.clone(), started.clone());
+            let releases = releases.clone();
+            async move {
+                let nth = starts.fetch_add(1, Ordering::SeqCst).min(1);
+                started.notify_one();
+                tokio::select! {
+                    _ = releases[nth].cancelled() => {}
+                    _ = ctx.signal.cancelled() => { stopped[nth].fetch_add(1, Ordering::SeqCst); }
+                }
+                Ok(())
+            }
+        }
+    });
+    let test = TestApp::new(create_config([flow])).await;
+    let run_id = dispatch(&test, "slow-flow").await;
+
+    let worker = worker(&test.app, 2);
+    worker.start().await;
+    tokio::time::timeout(TIMEOUT, started.notified())
+        .await
+        .expect("run claimed");
+    assert_eq!(find_run(&test, run_id).await.attempts, 1);
+
+    // Its lease expires while it is still running: the same worker claims it again.
+    sqlx::query("UPDATE flow_runs SET available_at = now() - interval '1 second' WHERE id = $1")
+        .bind(run_id)
+        .execute(&test.db)
+        .await
+        .unwrap();
+    tokio::time::timeout(TIMEOUT, started.notified())
+        .await
+        .expect("run claimed again");
+    assert_eq!(find_run(&test, run_id).await.attempts, 2);
+    assert_eq!(worker.active_count(), 2);
+
+    Reclaimed {
+        test,
+        worker,
+        run_id,
+        release_first,
+        release_second,
+        stopped,
+    }
+}
+
+#[tokio::test]
+async fn an_execution_that_lost_its_run_cannot_finish_it() {
+    let Reclaimed {
+        test,
+        worker,
+        run_id,
+        release_first,
+        release_second,
+        ..
+    } = reclaim_a_run_in_flight().await;
+
+    // The old execution returns first, successfully.
+    release_first.cancel();
+    wait_until("the old execution to end", || worker.active_count() == 1).await;
+    let run = find_run(&test, run_id).await;
+    assert_eq!(run.status, "running", "the old execution did not finish the run");
+    assert_eq!(run.attempts, 2);
+    assert_eq!(run.worker_id.as_deref(), Some(worker.worker_id()));
+    assert!(run.completed_at.is_none());
+
+    // The current execution is the one that counts.
+    release_second.cancel();
+    let run = wait_for_status(&test, run_id, "completed").await;
+    assert_eq!(run.attempts, 2);
+    assert_eq!(run.error, None);
+    worker.stop().await;
+    test.cleanup().await;
+}
+
+#[tokio::test]
+async fn an_execution_that_lost_its_run_stops_at_its_next_heartbeat() {
+    let Reclaimed {
+        test,
+        worker,
+        run_id,
+        release_second,
+        stopped,
+        ..
+    } = reclaim_a_run_in_flight().await;
+
+    // Both executions send a heartbeat; only the current one extends the lease.
+    skip_to_next_heartbeat().await;
+    wait_until("the old execution to be told to stop", || {
+        stopped[0].load(Ordering::SeqCst) == 1
+    })
+    .await;
+    wait_until("the old execution to end", || worker.active_count() == 1).await;
+    let run = find_run(&test, run_id).await;
+    assert_eq!((run.status.as_str(), run.attempts), ("running", 2));
+    assert!(run.available_at.is_some_and(|lease| lease > chrono::Utc::now()));
+    assert_eq!(stopped[1].load(Ordering::SeqCst), 0);
+
+    // A cancellation still reaches the current execution.
+    assert!(cancel_run(&run_id.to_string()));
+    wait_until("the current execution to be told to stop", || {
+        stopped[1].load(Ordering::SeqCst) == 1
+    })
+    .await;
+    release_second.cancel();
+    worker.stop().await;
     test.cleanup().await;
 }
 

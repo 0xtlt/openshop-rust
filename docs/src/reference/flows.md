@@ -226,8 +226,22 @@ the full `timeout` in its execution race. The `on_error` hook runs after each
 failed attempt, including attempts that will be retried; a failure or panic
 inside the hook is ignored.
 
+Every time a worker takes a run, it counts as an attempt, except when the run
+wakes up from `ctx.step.sleep`: a sleep is not a failure, so a flow can sleep as
+often as it needs to, even with `max_attempts(1)`. If a worker dies without
+recording the outcome of an attempt, the run is taken again once its lease has
+expired. When that attempt was the last one, the run is marked `failed` with the
+error `Run abandoned: …` instead, so a flow that takes its worker down is not
+taken forever.
+
 A run requeued with the Admin API retry endpoint carries no retry policy: if it
-fails again it is marked `failed` without further attempts.
+fails again, or if its worker dies, it is marked `failed` without further
+attempts.
+
+Only the worker that took a run last can record its outcome. If the lease of a
+slow execution expired and the run was taken again, even by the same worker, the
+old execution is told to stop at its next heartbeat, and what it returns is
+ignored.
 
 ## Concurrency
 

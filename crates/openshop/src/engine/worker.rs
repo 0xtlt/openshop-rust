@@ -85,30 +85,53 @@ fn report_failed_run(run: &FailedRun) {
 /// `running` row past its `available_at` is an expired lease and can be taken
 /// over. A run past its deadline is left to [`EXPIRE_SQL`].
 ///
+/// Every claim is an attempt, except the one of a run waking up from a sleep:
+/// a sleep is not a failure, and a flow may sleep as often as it needs to.
+/// An expired lease means the worker died before it recorded the outcome of
+/// its attempt. A run that did so with its last attempt is failed instead of
+/// claimed, or a flow that takes its worker down would be claimed forever. The
+/// attempts allowed are the `maxAttempts` of the retry policy of the run, or
+/// one when it has none, as in [`super::runner`] when a failure is recorded.
+///
 /// The candidates repeat the predicate of `flow_runs_claimable_idx`, which
-/// yields them already ordered, and the update finds them by primary key:
+/// yields them already ordered, and the updates find them by primary key:
 /// the cost of a claim follows its size, not the length of the queue.
 const CLAIM_SQL: &str = "\
     WITH candidate AS ( \
-      SELECT id, available_at, created_at FROM flow_runs \
+      SELECT id, available_at, created_at, \
+        status = 'running' AND attempts >= GREATEST( \
+          CASE WHEN retry_policy->>'maxAttempts' ~ '^[0-9]{1,9}$' \
+            THEN (retry_policy->>'maxAttempts')::bigint ELSE 1 END, 1) AS exhausted \
+      FROM flow_runs \
       WHERE status IN ('pending', 'sleeping', 'running') AND available_at <= $1 \
         AND (deadline_at IS NULL OR deadline_at > $1) \
       ORDER BY available_at ASC, created_at ASC \
       LIMIT $4 \
       FOR UPDATE SKIP LOCKED \
+    ), failed AS ( \
+      UPDATE flow_runs SET \
+        status = 'failed', \
+        error = 'Run abandoned: its worker stopped after ' || attempts || ' attempts without recording an outcome', \
+        worker_id = NULL, available_at = NULL, completed_at = $1 \
+      WHERE id = ANY(ARRAY(SELECT id FROM candidate WHERE exhausted)) \
+      RETURNING id, flow_name, app_handle, shop, input, attempts, error \
     ), claimed AS ( \
       UPDATE flow_runs SET \
         status = 'running', \
-        attempts = attempts + 1, \
+        attempts = CASE WHEN status = 'sleeping' THEN GREATEST(attempts, 1) ELSE attempts + 1 END, \
         worker_id = $2, \
         available_at = $3, \
         started_at = COALESCE(started_at, $1) \
-      WHERE id = ANY(ARRAY(SELECT id FROM candidate)) \
-      RETURNING id, flow_name, app_handle, shop, input, attempts \
+      WHERE id = ANY(ARRAY(SELECT id FROM candidate WHERE NOT exhausted)) \
+      RETURNING id, flow_name, app_handle, shop, input, attempts, NULL::text AS error \
     ) \
-    SELECT claimed.* FROM claimed JOIN candidate USING (id) \
+    SELECT run.*, candidate.exhausted FROM ( \
+      SELECT * FROM claimed UNION ALL SELECT * FROM failed \
+    ) run JOIN candidate USING (id) \
     ORDER BY candidate.available_at, candidate.created_at";
 
+/// A run the claim returned: leased to this worker, or failed because it used
+/// all its attempts.
 #[derive(Debug, Clone, sqlx::FromRow)]
 struct ClaimedRun {
     id: Uuid,
@@ -117,6 +140,8 @@ struct ClaimedRun {
     shop: String,
     input: Option<Value>,
     attempts: i32,
+    error: Option<String>,
+    exhausted: bool,
 }
 
 struct Inner {
@@ -222,11 +247,11 @@ impl Inner {
             }
 
             match self.claim(free).await {
-                Ok(claimed) if claimed.is_empty() => {
+                Ok((claimed, failed)) if claimed.is_empty() && failed == 0 => {
                     consecutive_empty += 1;
                     self.sleep(self.backoff_delay(consecutive_empty), stop).await;
                 }
-                Ok(claimed) => {
+                Ok((claimed, _)) => {
                     consecutive_empty = 0;
                     for run in claimed {
                         self.clone().process_run(run);
@@ -264,15 +289,27 @@ impl Inner {
         }
     }
 
-    async fn claim(&self, limit: usize) -> Result<Vec<ClaimedRun>> {
-        let claimed = sqlx::query_as::<_, ClaimedRun>(CLAIM_SQL)
+    /// Leases runs, and fails the ones that used all their attempts. Resolves
+    /// to the runs to execute and to how many were failed.
+    async fn claim(&self, limit: usize) -> Result<(Vec<ClaimedRun>, usize)> {
+        let rows = sqlx::query_as::<_, ClaimedRun>(CLAIM_SQL)
             .bind(Utc::now())
             .bind(&self.worker_id)
             .bind(self.lease_until())
             .bind(limit as i64)
             .fetch_all(self.app.db())
             .await?;
-        Ok(claimed)
+        let (exhausted, claimed): (Vec<_>, Vec<_>) = rows.into_iter().partition(|run| run.exhausted);
+        for run in &exhausted {
+            report_failed_run(&FailedRun {
+                id: run.id,
+                flow_name: run.flow_name.clone(),
+                app_handle: run.app_handle.clone(),
+                shop: run.shop.clone(),
+                error: run.error.clone().unwrap_or_default(),
+            });
+        }
+        Ok((claimed, exhausted.len()))
     }
 
     fn lease_until(&self) -> DateTime<Utc> {
@@ -288,16 +325,17 @@ impl Inner {
         });
     }
 
-    /// Fails a run this worker still owns. If the write fails too, the lease
-    /// expires and the run is claimed again.
-    async fn fail_run(&self, run_id: Uuid, error: String) {
+    /// Fails a run this worker still owns, at the attempt it claimed. If the
+    /// write fails too, the lease expires and the run is claimed again.
+    async fn fail_run(&self, run_id: Uuid, attempt: i32, error: String) {
         let _ = sqlx::query(
             "UPDATE flow_runs SET status = 'failed', error = $2, worker_id = NULL, completed_at = now() \
-             WHERE id = $1 AND worker_id = $3 AND status = 'running'",
+             WHERE id = $1 AND worker_id = $3 AND status = 'running' AND attempts = $4",
         )
         .bind(run_id)
         .bind(error)
         .bind(&self.worker_id)
+        .bind(attempt)
         .execute(self.app.db())
         .await;
     }
@@ -311,7 +349,7 @@ impl Inner {
                 app_handle: claimed.app_handle,
                 shop: claimed.shop,
             };
-            self.fail_run(run.id, run.error.clone()).await;
+            self.fail_run(run.id, claimed.attempts, run.error.clone()).await;
             report_failed_run(&run);
             return;
         }
@@ -323,17 +361,18 @@ impl Inner {
 
         let heartbeat: HeartbeatFn = {
             let inner = self.clone();
-            let run_id = claimed.id;
+            let (run_id, attempt) = (claimed.id, claimed.attempts);
             Arc::new(move || {
                 let inner = inner.clone();
                 Box::pin(async move {
                     let extended = sqlx::query(
                         "UPDATE flow_runs SET available_at = $1 \
-                         WHERE id = $2 AND worker_id = $3 AND status = 'running'",
+                         WHERE id = $2 AND worker_id = $3 AND status = 'running' AND attempts = $4",
                     )
                     .bind(inner.lease_until())
                     .bind(run_id)
                     .bind(&inner.worker_id)
+                    .bind(attempt)
                     .execute(inner.app.db())
                     .await?;
                     Ok(extended.rows_affected() > 0)
@@ -358,7 +397,7 @@ impl Inner {
             Ok(Err(error)) => error_message(&error),
             Err(panic) => format!("panicked: {}", panic_message(panic)),
         };
-        self.fail_run(claimed.id, format!("Worker error: {failure}")).await;
+        self.fail_run(claimed.id, claimed.attempts, format!("Worker error: {failure}")).await;
     }
 
     fn backoff_delay(&self, consecutive: u32) -> u64 {

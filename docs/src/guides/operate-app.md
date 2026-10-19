@@ -73,7 +73,8 @@ Operational signals:
 | Signal | Likely cause | Action |
 | --- | --- | --- |
 | Growing `pending` count | No worker, saturated concurrency, or DB failure | Check worker processes and database connectivity; then scale workers. |
-| Old `running` runs | Worker crash or a long step | Check worker logs and step timeout; expired leases allow another worker to reclaim work. |
+| Old `running` runs | Worker crash or a long step | Check worker logs and step timeout; expired leases allow another worker to reclaim work, as long as the run has attempts left. |
+| `failed` runs with `Run abandoned` | A flow that kills its worker (out of memory, abort) on each attempt | Check the memory and crash logs of the worker; the run is not claimed again once it used all its attempts. |
 | Repeated `sleeping` runs | Explicit `ctx.step.sleep` | Inspect run logs and `availableAt`. |
 | Runs returning to `pending` | Retrying failures | Inspect the run's `error`, `attempts`, and `availableAt`. |
 | Many `failed` runs | Provider, Shopify, validation, or deployment regression | Filter logs by error and compare the first failure time with deployments. |
@@ -194,7 +195,7 @@ fn checksum(chunk: u64) -> u64 {
 
 The worker stops claiming new runs on shutdown and waits up to its lease duration
 for active runs. If a process dies, its leases eventually expire and another worker
-can reclaim the runs.
+can reclaim the runs, each claim using an attempt of the run.
 
 ## Backups and incident data
 

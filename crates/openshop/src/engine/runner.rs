@@ -12,7 +12,7 @@ use serde_json::{Value, json};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use super::abort::{cleanup_abort, register_abort};
+use super::abort::{Abort, register_abort};
 use super::backoff::compute_next_retry_at;
 use super::dispatch::unknown_flow;
 use super::errors::{FlowCanceledError, FlowTimeoutError, SleepSignal};
@@ -121,7 +121,7 @@ impl RunOutcome {
 
 /// Stops the heartbeat and forgets the cancellation token on every exit path.
 struct RunGuard {
-    run_id: String,
+    abort: Abort,
     heartbeat: Option<tokio::task::JoinHandle<()>>,
 }
 
@@ -130,7 +130,7 @@ impl Drop for RunGuard {
         if let Some(heartbeat) = self.heartbeat.take() {
             heartbeat.abort();
         }
-        cleanup_abort(&self.run_id);
+        self.abort.cleanup();
     }
 }
 
@@ -178,8 +178,18 @@ impl<'a> RunUpdate<'a> {
     }
 }
 
+/// Who an execution is, when a worker leased the run for it. A claim of the
+/// run bumps its `attempts`, except when it wakes up from a sleep. So the
+/// worker and the attempt tell this execution from every other one, including
+/// an earlier one of the same worker whose lease expired.
+#[derive(Clone, Copy)]
+struct Owner<'a> {
+    worker_id: &'a str,
+    attempt: Option<i32>,
+}
+
 /// Applies an update only while the run is owned, and reports whether it was.
-async fn finish_run(db: &PgPool, run_id: Uuid, worker_id: Option<&str>, update: RunUpdate<'_>) -> Result<bool> {
+async fn finish_run(db: &PgPool, run_id: Uuid, owner: Option<Owner<'_>>, update: RunUpdate<'_>) -> Result<bool> {
     let result = sqlx::query(
         "UPDATE flow_runs SET \
            status = $2, \
@@ -187,14 +197,16 @@ async fn finish_run(db: &PgPool, run_id: Uuid, worker_id: Option<&str>, update: 
            available_at = COALESCE($4, available_at), \
            completed_at = CASE WHEN $5 THEN now() ELSE completed_at END, \
            worker_id = NULL \
-         WHERE id = $1 AND ($6::text IS NULL OR (worker_id = $6 AND status = 'running'))",
+         WHERE id = $1 AND ($6::text IS NULL \
+           OR (worker_id = $6 AND status = 'running' AND attempts = COALESCE($7, attempts)))",
     )
     .bind(run_id)
     .bind(update.status)
     .bind(update.error)
     .bind(update.available_at)
     .bind(update.completed)
-    .bind(worker_id)
+    .bind(owner.map(|owner| owner.worker_id))
+    .bind(owner.and_then(|owner| owner.attempt))
     .execute(db)
     .await?;
     Ok(result.rows_affected() > 0)
@@ -238,7 +250,8 @@ async fn run_attempt(app: &OpenShop, opts: RunFlowOptions) -> Result<RunOutcome>
 
     let run_id = opts.run_id;
     let run_id_text = run_id.to_string();
-    let signal = register_abort(&run_id_text);
+    let abort = register_abort(&run_id_text);
+    let signal = abort.token.clone();
 
     let heartbeat_interval = opts.heartbeat_interval.unwrap_or(HEARTBEAT_INTERVAL);
     let heartbeat = opts.on_heartbeat.clone().map(|on_heartbeat| {
@@ -257,7 +270,7 @@ async fn run_attempt(app: &OpenShop, opts: RunFlowOptions) -> Result<RunOutcome>
         })
     });
     let _guard = RunGuard {
-        run_id: run_id_text.clone(),
+        abort,
         heartbeat,
     };
 
@@ -269,7 +282,10 @@ async fn run_attempt(app: &OpenShop, opts: RunFlowOptions) -> Result<RunOutcome>
     report::describe(|run| {
         run.tag("attempt", attempt);
     });
-    let worker_id = opts.worker_id.as_deref();
+    let owner = opts.worker_id.as_deref().map(|worker_id| Owner {
+        worker_id,
+        attempt: opts.attempt,
+    });
     let step = StepExecutor::new(
         db.clone(),
         run_id_text,
@@ -334,7 +350,7 @@ async fn run_attempt(app: &OpenShop, opts: RunFlowOptions) -> Result<RunOutcome>
 
     let result = match outcome {
         Ok(()) => {
-            if finish_run(db, run_id, worker_id, RunUpdate::status("completed").completed()).await? {
+            if finish_run(db, run_id, owner, RunUpdate::status("completed").completed()).await? {
                 logger.info_with(
                     format!("Flow \"{flow_name}\" completed"),
                     json!({ "flowName": flow_name }),
@@ -350,7 +366,7 @@ async fn run_attempt(app: &OpenShop, opts: RunFlowOptions) -> Result<RunOutcome>
                 if finish_run(
                     db,
                     run_id,
-                    worker_id,
+                    owner,
                     RunUpdate::status("sleeping").available_at(resume_at),
                 )
                 .await?
@@ -364,7 +380,7 @@ async fn run_attempt(app: &OpenShop, opts: RunFlowOptions) -> Result<RunOutcome>
                     RunOutcome::LeaseLost
                 }
             } else if error.downcast_ref::<FlowCanceledError>().is_some() || signal.is_cancelled() {
-                if finish_run(db, run_id, worker_id, RunUpdate::status("canceled").completed()).await? {
+                if finish_run(db, run_id, owner, RunUpdate::status("canceled").completed()).await? {
                     logger.info_with(
                         format!("Flow \"{flow_name}\" was canceled"),
                         json!({ "flowName": flow_name }),
@@ -374,7 +390,7 @@ async fn run_attempt(app: &OpenShop, opts: RunFlowOptions) -> Result<RunOutcome>
                     RunOutcome::LeaseLost
                 }
             } else {
-                record_failure(app, run_id, worker_id, flow_name, &logger, error).await?
+                record_failure(app, run_id, owner, flow_name, &logger, error).await?
             }
         }
     };
@@ -386,7 +402,7 @@ async fn run_attempt(app: &OpenShop, opts: RunFlowOptions) -> Result<RunOutcome>
 async fn record_failure(
     app: &OpenShop,
     run_id: Uuid,
-    worker_id: Option<&str>,
+    owner: Option<Owner<'_>>,
     flow_name: &str,
     logger: &FlowLogger,
     error: anyhow::Error,
@@ -410,7 +426,7 @@ async fn record_failure(
         Some(next_at) => RunUpdate::status("pending").error(&error_message).available_at(next_at),
         None => RunUpdate::status("failed").error(&error_message).completed(),
     };
-    let owned = finish_run(db, run_id, worker_id, update).await?;
+    let owned = finish_run(db, run_id, owner, update).await?;
     if !owned {
         return Ok(RunOutcome::LeaseLost);
     }

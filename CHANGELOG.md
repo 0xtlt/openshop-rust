@@ -385,6 +385,22 @@
 - An open connection no longer holds its own copy of the route table, which
   axum made for every connection it accepted. With the routes of the demo, a
   connection goes from 62 KB to 19 KB: 43 MB less with 1,000 connections open.
+- A worker claims a run at most `max_attempts` times. A run whose lease
+  expired after its last attempt, because its worker died before recording the
+  outcome (out of memory, abort), is marked `failed` with a `Run abandoned`
+  error and reported, instead of being claimed again for ever. A run without a
+  retry policy, such as one requeued from the Admin API, has one attempt.
+- Waking up from `ctx.step.sleep` no longer uses an attempt: a flow can sleep
+  as often as it needs to, also with `max_attempts(1)`, and a failure after a
+  sleep is retried as far as the policy says. Breaking: `attempts` of a run
+  that slept is lower than before, and the steps run after a sleep belong to
+  the attempt that slept. No schema change.
+- Only the last claim of a run can record its outcome. The write that ends an
+  attempt, the heartbeat and the failure of a run carry the worker and the
+  attempt that claimed it, so a slow execution whose lease expired and whose
+  run was claimed again, by another worker or by the same one, can no longer
+  finish, sleep, fail or cancel it, and stops at its next heartbeat. It no
+  longer takes the cancellation token of the new execution with it either.
 
 ## 0.0.12-beta.0
 

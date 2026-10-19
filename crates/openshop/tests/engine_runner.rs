@@ -147,6 +147,51 @@ async fn returns_lease_lost_when_the_worker_no_longer_owns_the_run() {
 }
 
 #[tokio::test]
+async fn an_execution_whose_run_was_claimed_again_by_the_same_worker_cannot_record_its_outcome() {
+    // The same worker takes the run over after its lease expired: only the claim
+    // counter tells the old execution from the new one.
+    let flow = Flow::new(FLOW, |ctx: FlowContext| async move {
+        sqlx::query("UPDATE flow_runs SET attempts = 2 WHERE worker_id = 'worker-a'")
+            .execute(&ctx.db)
+            .await?;
+        if ctx.input["then"] == "fail" {
+            bail!("boom");
+        }
+        Ok(())
+    })
+    .concurrency(Concurrency::Allow);
+    let test = TestApp::new(create_config([flow])).await;
+
+    for then in ["complete", "fail"] {
+        let run_id = dispatch(&test).await;
+        sqlx::query("UPDATE flow_runs SET status = 'running', worker_id = 'worker-a', attempts = 1 WHERE id = $1")
+            .bind(run_id)
+            .execute(&test.db)
+            .await
+            .unwrap();
+
+        let result = run_flow(
+            &test.app,
+            options(run_id)
+                .input(json!({ "then": then }))
+                .worker_id("worker-a")
+                .attempt(1),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result, RunOutcome::LeaseLost, "{then}");
+
+        let run = find_run(&test, run_id).await;
+        assert_eq!(run.status, "running", "{then}");
+        assert_eq!(run.worker_id.as_deref(), Some("worker-a"), "{then}");
+        assert_eq!(run.attempts, 2, "{then}");
+        assert_eq!(run.error, None, "{then}");
+        assert!(run.completed_at.is_none(), "{then}");
+    }
+    test.cleanup().await;
+}
+
+#[tokio::test]
 async fn lost_lease_never_records_a_failure_or_a_sleep() {
     let reported = Arc::new(AtomicUsize::new(0));
     let flow = Flow::new(FLOW, |ctx: FlowContext| async move {

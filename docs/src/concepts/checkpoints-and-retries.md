@@ -68,8 +68,9 @@ data you extracted from them.
 | Manual retry in reset mode | Discards step results and starts the work again |
 | Dispatch a new run | Creates an independent set of checkpoints |
 
-Retries use the configured attempt limit and backoff. A flow deadline can stop
-further retries even when attempts remain. The
+Retries use the configured attempt limit and backoff. Waking up from a sleep is
+not a retry and does not use an attempt. A flow deadline can stop further retries
+even when attempts remain. The
 [flow reference](../reference/flows.md) gives the exact defaults and precedence.
 
 ## Sleep releases capacity; cancellation acts at await points
