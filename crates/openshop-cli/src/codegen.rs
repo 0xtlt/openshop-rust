@@ -2,6 +2,7 @@
 //! `graphql!` checks operations against.
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use openshop::Value;
@@ -39,22 +40,42 @@ pub fn parse_options(args: &[String]) -> Result<CodegenOptions> {
     Ok(options)
 }
 
+/// How long to wait for the endpoint to be reached.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// How long the whole download may take, the schema being several megabytes.
+const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(120);
+
 async fn download(api_version: &str) -> Result<Value> {
     let url = format!("{SCHEMA_ENDPOINT}/{api_version}");
-    let response = reqwest::Client::new()
-        .post(&url)
+    fetch_schema(&url, api_version, CONNECT_TIMEOUT, DOWNLOAD_TIMEOUT).await
+}
+
+/// Introspects the schema served at `url`. A server that does not answer in
+/// time fails the command, instead of leaving it waiting forever.
+async fn fetch_schema(url: &str, api_version: &str, connect: Duration, total: Duration) -> Result<Value> {
+    let timed_out = |error: &reqwest::Error| error.is_timeout().then_some(total);
+    let client = reqwest::Client::builder()
+        .connect_timeout(connect)
+        .timeout(total)
+        .build()?;
+    let response = client
+        .post(url)
         .json(&openshop::json!({ "query": INTROSPECTION_QUERY }))
         .send()
         .await
-        .with_context(|| format!("[openshop] Could not reach {url}"))?;
+        .map_err(|error| match timed_out(&error) {
+            Some(total) => anyhow::anyhow!("[openshop] {url} did not answer within {total:?}. Try again."),
+            None => anyhow::Error::new(error).context(format!("[openshop] Could not reach {url}")),
+        })?;
     let status = response.status();
     if !status.is_success() {
         bail!("[openshop] {url} answered {status}. Is {api_version} a Shopify API version?");
     }
-    response
-        .json()
-        .await
-        .with_context(|| format!("[openshop] {url} did not answer with JSON"))
+    response.json().await.map_err(|error| match timed_out(&error) {
+        Some(total) => anyhow::anyhow!("[openshop] {url} did not finish its answer within {total:?}. Try again."),
+        None => anyhow::Error::new(error).context(format!("[openshop] {url} did not answer with JSON")),
+    })
 }
 
 /// Stores the schema of an introspection result. Returns the file and the number of types.
@@ -146,6 +167,46 @@ mod tests {
             error
                 .to_string()
                 .starts_with("[openshop] Unknown codegen option \"--watch\".")
+        );
+    }
+
+    /// A server that accepts a connection, sends `sent` and then says nothing,
+    /// the connection held open.
+    async fn stalled_server(sent: &'static str) -> String {
+        use tokio::io::AsyncWriteExt;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/2026-04", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((mut socket, _)) = listener.accept().await {
+                socket.write_all(sent.as_bytes()).await.unwrap();
+                held.push(socket);
+            }
+        });
+        url
+    }
+
+    #[tokio::test]
+    async fn a_server_that_does_not_answer_fails_the_download() {
+        let url = stalled_server("").await;
+        let wait = Duration::from_millis(300);
+        let started = std::time::Instant::now();
+        let error = fetch_schema(&url, "2026-04", wait, wait).await.unwrap_err();
+        assert!(started.elapsed() < Duration::from_secs(10));
+        assert_eq!(
+            error.to_string(),
+            format!("[openshop] {url} did not answer within 300ms. Try again.")
+        );
+    }
+
+    #[tokio::test]
+    async fn an_answer_that_stops_halfway_fails_the_download() {
+        let url = stalled_server("HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 100\r\n\r\n{").await;
+        let wait = Duration::from_millis(300);
+        let error = fetch_schema(&url, "2026-04", wait, wait).await.unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            format!("[openshop] {url} did not finish its answer within 300ms. Try again.")
         );
     }
 
