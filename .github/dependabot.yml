@@ -27,3 +27,9 @@ updates:
     groups:
       actions:
         patterns: ["*"]
+
+  # The base images of the Dockerfile of the generated projects, named by digest.
+  - package-ecosystem: docker
+    directory: /templates/shared
+    schedule:
+      interval: weekly
