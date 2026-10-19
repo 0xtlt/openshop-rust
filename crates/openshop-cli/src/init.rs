@@ -910,7 +910,9 @@ mod tests {
         assert!(read("shopify.app.toml").contains("name = \"My Shop App\""));
         assert!(read("README.md").starts_with("# My Shop App\n"));
         assert!(read("Dockerfile").contains("target/release/my-shop-app"));
-        assert_eq!(read(".gitignore"), "target/\n.env\n.shopify/\ndist/\n");
+        assert_eq!(read(".gitignore"), "target/\n.env\n.shopify/\ndist/\ngitconfig\n");
+        // The build secret, if it was written in the project, is not copied by `COPY . .`.
+        assert!(read(".dockerignore").lines().any(|line| line == "gitconfig"));
         assert!(read(".env.example").contains("DATABASE_URL="));
         assert!(read("src/flows/sync_orders.rs").contains("syncOrders"));
         // The application is declared, and starts with MCP off.
@@ -1133,7 +1135,7 @@ mod tests {
         assert!(page.contains("#[admin_page(\"/hello\", nav = \"Hello\")]"));
         assert!(page.contains("#[view]") && page.contains("use_loader(Self::GREETING, || ())"));
         assert_eq!(read("src/admin/mod.rs"), "pub mod hello;\n");
-        assert_eq!(read(".gitignore"), "target/\n.env\n.shopify/\ndist/\n");
+        assert_eq!(read(".gitignore"), "target/\n.env\n.shopify/\ndist/\ngitconfig\n");
 
         let manifest = read("Cargo.toml");
         let source = Source::default().dependency();
