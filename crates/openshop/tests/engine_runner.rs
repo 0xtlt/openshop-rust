@@ -192,6 +192,78 @@ async fn an_execution_whose_run_was_claimed_again_by_the_same_worker_cannot_reco
 }
 
 #[tokio::test]
+async fn an_execution_that_lost_its_run_cannot_store_a_step_result() {
+    // The run is claimed again by the same worker, so the old execution is
+    // still going when it reaches the end of a step, or the start of the next.
+    let flow = Flow::new(FLOW, |ctx: FlowContext| async move {
+        let reclaim = || async {
+            sqlx::query("UPDATE flow_runs SET attempts = 2 WHERE worker_id = 'worker-a'")
+                .execute(&ctx.db)
+                .await
+        };
+        match ctx.input["when"].as_str().unwrap() {
+            "during" => {
+                let _: u32 = ctx
+                    .step
+                    .run("charge", || async {
+                        reclaim().await?;
+                        Ok(1)
+                    })
+                    .await?;
+            }
+            "failing" => {
+                let _: u32 = ctx
+                    .step
+                    .run("charge", || async {
+                        reclaim().await?;
+                        bail!("declined")
+                    })
+                    .await?;
+            }
+            _ => {
+                reclaim().await?;
+                let _: u32 = ctx.step.run("charge", || async { Ok(1) }).await?;
+            }
+        }
+        Ok(())
+    })
+    .concurrency(Concurrency::Allow);
+    let test = TestApp::new(create_config([flow])).await;
+
+    for when in ["during", "failing", "before"] {
+        let run_id = dispatch(&test).await;
+        sqlx::query("UPDATE flow_runs SET status = 'running', worker_id = 'worker-a', attempts = 1 WHERE id = $1")
+            .bind(run_id)
+            .execute(&test.db)
+            .await
+            .unwrap();
+
+        let result = run_flow(
+            &test.app,
+            options(run_id)
+                .input(json!({ "when": when }))
+                .worker_id("worker-a")
+                .attempt(1),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result, RunOutcome::LeaseLost, "{when}");
+
+        let steps = find_steps(&test, run_id).await;
+        assert!(
+            steps.iter().all(|step| step.status == "running"),
+            "{when}: a stale execution stored {:?}",
+            steps.iter().map(|step| step.status.as_str()).collect::<Vec<_>>()
+        );
+        assert_eq!(steps.len(), usize::from(when != "before"), "{when}");
+        let run = find_run(&test, run_id).await;
+        assert_eq!((run.status.as_str(), run.attempts), ("running", 2), "{when}");
+        assert_eq!(run.error, None, "{when}");
+    }
+    test.cleanup().await;
+}
+
+#[tokio::test]
 async fn lost_lease_never_records_a_failure_or_a_sleep() {
     let reported = Arc::new(AtomicUsize::new(0));
     let flow = Flow::new(FLOW, |ctx: FlowContext| async move {

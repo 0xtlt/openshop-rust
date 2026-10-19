@@ -145,3 +145,41 @@ pub async fn check_provider(ctx: &openshop::testing::TestContext, provider: &str
 pub async fn shop_connectors(ctx: &openshop::testing::TestContext) -> openshop::Connectors {
     ctx.app.connectors(&ctx.shop, "default")
 }
+
+/// Makes the updates of `table` that match `when` fail the way a lost
+/// connection does (SQLSTATE 08006): the first `failures` of them, or all of
+/// them until [`heal_write_fault`]. No code of the framework is involved.
+pub async fn inject_write_fault(db: &PgPool, table: &str, when: &str, failures: i64) {
+    sqlx::raw_sql(&format!(
+        "CREATE SEQUENCE fault_{table}_hits; \
+         CREATE FUNCTION fault_{table}() RETURNS trigger LANGUAGE plpgsql AS $$ \
+         BEGIN \
+           IF nextval('fault_{table}_hits') <= {failures} THEN \
+             RAISE EXCEPTION 'injected fault' USING ERRCODE = '08006'; \
+           END IF; \
+           RETURN NEW; \
+         END $$; \
+         CREATE TRIGGER fault BEFORE UPDATE ON {table} FOR EACH ROW WHEN ({when}) \
+           EXECUTE FUNCTION fault_{table}()"
+    ))
+    .execute(db)
+    .await
+    .expect("fault trigger");
+}
+
+/// Removes the fault of [`inject_write_fault`].
+pub async fn heal_write_fault(db: &PgPool, table: &str) {
+    sqlx::raw_sql(&format!("DROP TRIGGER fault ON {table}"))
+        .execute(db)
+        .await
+        .expect("drop fault trigger");
+}
+
+/// How many updates the fault of [`inject_write_fault`] has seen.
+pub async fn write_fault_hits(db: &PgPool, table: &str) -> i64 {
+    let (hits,): (i64,) = sqlx::query_as(&format!("SELECT last_value FROM fault_{table}_hits"))
+        .fetch_one(db)
+        .await
+        .unwrap();
+    hits
+}

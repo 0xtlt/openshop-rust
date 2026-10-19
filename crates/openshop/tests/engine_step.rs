@@ -6,9 +6,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use chrono::Utc;
-use common::{TEST_SHOP, TestApp, create_config, noop_flow};
+use common::{TEST_SHOP, TestApp, create_config, inject_write_fault, noop_flow, write_fault_hits};
 use openshop::db::schema::StepResult;
-use openshop::engine::{SleepSignal, StepExecutor};
+use openshop::engine::{LeaseLostError, RunOwner, SleepSignal, StepExecutor};
 use openshop::runtime::time::to_iso;
 use openshop::{
     CancellationToken, Context, FlowCanceledError, FlowLogger, StepOptions, StepTimeoutError, anyhow, bail, json,
@@ -47,6 +47,7 @@ fn executor_with(
         signal,
         default_timeout,
         attempt,
+        None,
     )
 }
 
@@ -520,7 +521,7 @@ async fn logs_the_lifecycle_of_each_step() {
     let test = new_test().await;
     let run_id = create_run(&test).await;
     let logger = FlowLogger::new(test.db.clone(), run_id.to_string());
-    let step = StepExecutor::new(test.db.clone(), run_id.to_string(), logger.clone(), None, None, 1);
+    let step = StepExecutor::new(test.db.clone(), run_id.to_string(), logger.clone(), None, None, 1, None);
 
     for _ in 0..2 {
         let _: u32 = step.run("load", || async { Ok(3) }).await.unwrap();
@@ -639,5 +640,149 @@ async fn writes_a_line_without_waiting_for_the_end_of_the_run() {
     let messages: Vec<&str> = writes.iter().map(|(_, message, _)| message.as_str()).collect();
     assert_eq!(messages, ["still running", "done"]);
     assert_ne!(writes[0].2, writes[1].2, "the second line has its own statement");
+    test.cleanup().await;
+}
+
+/// A run leased by `worker-a` at its first attempt, and a step executor that
+/// acts for that claim.
+async fn owned_executor(test: &TestApp) -> (Uuid, StepExecutor, CancellationToken) {
+    let run_id = create_run(test).await;
+    sqlx::query("UPDATE flow_runs SET worker_id = 'worker-a', attempts = 1 WHERE id = $1")
+        .bind(run_id)
+        .execute(&test.db)
+        .await
+        .unwrap();
+    let (step, signal) = owner_of(test, run_id);
+    (run_id, step, signal)
+}
+
+/// An execution of `worker-a` at attempt 1, with its own cancellation signal.
+fn owner_of(test: &TestApp, run_id: Uuid) -> (StepExecutor, CancellationToken) {
+    let signal = CancellationToken::new();
+    let step = StepExecutor::new(
+        test.db.clone(),
+        run_id.to_string(),
+        FlowLogger::new(test.db.clone(), run_id.to_string()),
+        Some(signal.clone()),
+        None,
+        1,
+        Some(RunOwner {
+            worker_id: "worker-a".to_string(),
+            attempt: Some(1),
+        }),
+    );
+    (step, signal)
+}
+
+/// Another execution takes the run over.
+async fn take_over(test: &TestApp, run_id: Uuid) {
+    sqlx::query("UPDATE flow_runs SET attempts = 2 WHERE id = $1")
+        .bind(run_id)
+        .execute(&test.db)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn an_owner_stores_its_steps_while_it_holds_the_run() {
+    let test = new_test().await;
+    let (run_id, step, signal) = owned_executor(&test).await;
+
+    let _: u32 = step.run("load", || async { Ok(3) }).await.unwrap();
+    step.run::<(), _, _>("save", || async { bail!("disk full") })
+        .await
+        .unwrap_err();
+    step.sleep("pause", Duration::from_secs(60)).await.unwrap_err();
+
+    let stored: Vec<(String, String)> = find_steps(&test, run_id)
+        .await
+        .into_iter()
+        .map(|step| (step.step_name, step.status))
+        .collect();
+    assert_eq!(
+        stored,
+        [("load", "completed"), ("save", "failed"), ("pause", "sleeping")]
+            .map(|(name, status)| (name.to_string(), status.to_string()))
+    );
+    assert!(!signal.is_cancelled());
+    test.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_step_of_an_execution_that_lost_its_run_stores_nothing() {
+    let test = new_test().await;
+    let (run_id, step, signal) = owned_executor(&test).await;
+
+    // The step starts, then the run is taken over while it works.
+    let error = step
+        .run("charge", || async {
+            take_over(&test, run_id).await;
+            Ok(1)
+        })
+        .await
+        .unwrap_err();
+    assert!(error.downcast_ref::<LeaseLostError>().is_some(), "{error:#}");
+    assert!(signal.is_cancelled(), "the flow is told to stop");
+    let stored = find_steps(&test, run_id).await;
+    assert_eq!(stored.len(), 1);
+    assert_eq!(stored[0].status, "running", "the result was not stored");
+    assert_eq!(stored[0].output, None);
+
+    // Neither does a step that starts afterwards, nor a sleep.
+    let (step, _) = owner_of(&test, run_id);
+    let error = step.run("notify", || async { Ok(2) }).await.unwrap_err();
+    assert!(error.downcast_ref::<LeaseLostError>().is_some(), "{error:#}");
+    let (step, _) = owner_of(&test, run_id);
+    let error = step.sleep("pause", Duration::from_secs(60)).await.unwrap_err();
+    assert!(error.downcast_ref::<LeaseLostError>().is_some(), "{error:#}");
+    assert_eq!(find_steps(&test, run_id).await.len(), 1);
+    test.cleanup().await;
+}
+
+#[tokio::test]
+async fn retries_storing_a_step_after_a_transient_error() {
+    let test = new_test().await;
+    let (run_id, step, _) = owned_executor(&test).await;
+    inject_write_fault(&test.db, "step_results", "NEW.status = 'completed'", 2).await;
+
+    let runs = Arc::new(AtomicUsize::new(0));
+    let counted = runs.clone();
+    let value: u32 = step
+        .run("charge", || async move {
+            counted.fetch_add(1, Ordering::SeqCst);
+            Ok(5)
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(value, 5);
+    assert_eq!(runs.load(Ordering::SeqCst), 1);
+    assert_eq!(write_fault_hits(&test.db, "step_results").await, 3);
+    let stored = find_steps(&test, run_id).await;
+    assert_eq!(stored[0].status, "completed");
+    assert_eq!(stored[0].output, Some(json!(5)));
+    test.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_step_of_a_run_canceled_from_the_api_still_records_its_cancellation() {
+    let test = new_test().await;
+    let (run_id, step, signal) = owned_executor(&test).await;
+
+    // The API marks the run canceled, keeps its worker, and fires the signal.
+    let error = step
+        .run::<u32, _, _>("charge", || async {
+            sqlx::query("UPDATE flow_runs SET status = 'canceled' WHERE id = $1")
+                .bind(run_id)
+                .execute(&test.db)
+                .await?;
+            signal.cancel();
+            std::future::pending().await
+        })
+        .await
+        .unwrap_err();
+
+    assert!(error.downcast_ref::<FlowCanceledError>().is_some(), "{error:#}");
+    assert_eq!(find_steps(&test, run_id).await[0].status, "canceled");
     test.cleanup().await;
 }

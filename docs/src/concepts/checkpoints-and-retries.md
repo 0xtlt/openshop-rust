@@ -73,6 +73,25 @@ not a retry and does not use an attempt. A flow deadline can stop further retrie
 even when attempts remain. The
 [flow reference](../reference/flows.md) gives the exact defaults and precedence.
 
+## A failed write is retried, not counted as a failure
+
+The engine writes the state of a run and of its steps to the database. When such
+a write fails because the connection dropped or the pool timed out, it is tried
+again a few times, over about a second and a half, before the error stands. The
+write carries the same ownership check each time, so a try that comes after the
+run was taken over by another execution writes nothing.
+
+If the outcome of a run still cannot be recorded, the run is not marked `failed`:
+that write would go through the same database. The worker stops extending its
+lease and drops the run, which another claim takes up once the lease expires,
+and the completed steps are replayed from their checkpoints. The claim uses an
+attempt, and a flow that is not idempotent between two checkpoints runs that
+part again, as after any crash.
+
+A step whose result cannot be stored after those tries fails with the database
+error, like any step that fails. A step that finds its run taken over by another
+execution stops the flow with `LeaseLostError` and stores nothing.
+
 ## Sleep releases capacity; cancellation acts at await points
 
 `ctx.step.sleep()` records when the run can resume and releases its worker slot.

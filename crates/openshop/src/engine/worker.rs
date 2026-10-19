@@ -17,6 +17,7 @@ use uuid::Uuid;
 
 use super::runner::{HEARTBEAT_INTERVAL, HeartbeatFn, RunFlowOptions, describe_run, panic_message, run_flow};
 use super::step::error_message;
+use super::transient::{is_transient, retry};
 use crate::app::OpenShop;
 use crate::runtime::{logger, report};
 use crate::runtime::time::millis;
@@ -325,19 +326,29 @@ impl Inner {
         });
     }
 
-    /// Fails a run this worker still owns, at the attempt it claimed. If the
-    /// write fails too, the lease expires and the run is claimed again.
+    /// Fails a run this worker still owns, at the attempt it claimed. A
+    /// transient error is retried. If the write fails for good, the lease
+    /// expires and the run is claimed again.
     async fn fail_run(&self, run_id: Uuid, attempt: i32, error: String) {
-        let _ = sqlx::query(
-            "UPDATE flow_runs SET status = 'failed', error = $2, worker_id = NULL, completed_at = now() \
-             WHERE id = $1 AND worker_id = $3 AND status = 'running' AND attempts = $4",
-        )
-        .bind(run_id)
-        .bind(error)
-        .bind(&self.worker_id)
-        .bind(attempt)
-        .execute(self.app.db())
+        let failed = retry(format!("failing run {run_id}"), || async {
+            sqlx::query(
+                "UPDATE flow_runs SET status = 'failed', error = $2, worker_id = NULL, completed_at = now() \
+                 WHERE id = $1 AND worker_id = $3 AND status = 'running' AND attempts = $4",
+            )
+            .bind(run_id)
+            .bind(&error)
+            .bind(&self.worker_id)
+            .bind(attempt)
+            .execute(self.app.db())
+            .await?;
+            Ok(())
+        })
         .await;
+        if let Err(failure) = failed {
+            logger::warn(format!(
+                "[openshop] Run {run_id} is left to its lease, which expires without a heartbeat: {failure:#}"
+            ));
+        }
     }
 
     async fn execute(self: &Arc<Self>, claimed: ClaimedRun) {
@@ -394,6 +405,19 @@ impl Inner {
         // neither leak this worker's slot nor leave the run leased.
         let failure = match AssertUnwindSafe(run_flow(&self.app, options)).catch_unwind().await {
             Ok(Ok(_)) => return,
+            // The outcome could not be written, whatever the flow did. Failing
+            // the run through the same database would only fail again, or turn
+            // a blip into a definitive failure. Its heartbeat stopped with the
+            // execution: the lease expires and the run is claimed again, from
+            // its checkpoints.
+            Ok(Err(error)) if is_transient(&error) => {
+                logger::warn(format!(
+                    "[openshop] Run {} is left to its lease, which expires without a heartbeat: {}",
+                    claimed.id,
+                    error_message(&error)
+                ));
+                return;
+            }
             Ok(Err(error)) => error_message(&error),
             Err(panic) => format!("panicked: {}", panic_message(panic)),
         };

@@ -241,7 +241,8 @@ attempts.
 Only the worker that took a run last can record its outcome. If the lease of a
 slow execution expired and the run was taken again, even by the same worker, the
 old execution is told to stop at its next heartbeat, and what it returns is
-ignored.
+ignored. Its steps are fenced the same way: a step that finishes after the run
+was taken again stores no result and fails with `LeaseLostError`.
 
 ## Concurrency
 

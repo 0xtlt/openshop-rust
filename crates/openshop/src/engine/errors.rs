@@ -16,6 +16,20 @@ impl std::fmt::Display for FlowCanceledError {
 
 impl std::error::Error for FlowCanceledError {}
 
+/// Raised by a step that finds the run is no longer owned by its execution: the
+/// lease expired and another execution took it over. The execution ends
+/// without writing anything more.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct LeaseLostError;
+
+impl std::fmt::Display for LeaseLostError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Run was taken over by another execution")
+    }
+}
+
+impl std::error::Error for LeaseLostError {}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StepTimeoutError {
     pub step_name: String,

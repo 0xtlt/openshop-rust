@@ -15,8 +15,9 @@ use uuid::Uuid;
 use super::abort::{Abort, register_abort};
 use super::backoff::compute_next_retry_at;
 use super::dispatch::unknown_flow;
-use super::errors::{FlowCanceledError, FlowTimeoutError, SleepSignal};
-use super::step::{StepExecutor, error_message};
+use super::errors::{FlowCanceledError, FlowTimeoutError, LeaseLostError, SleepSignal};
+use super::step::{RunOwner, StepExecutor, error_message};
+use super::transient::retry;
 use crate::app::OpenShop;
 use crate::runtime::report::{self, Description, Panicked};
 use crate::runtime::time::to_iso;
@@ -178,19 +179,15 @@ impl<'a> RunUpdate<'a> {
     }
 }
 
-/// Who an execution is, when a worker leased the run for it. A claim of the
-/// run bumps its `attempts`, except when it wakes up from a sleep. So the
-/// worker and the attempt tell this execution from every other one, including
-/// an earlier one of the same worker whose lease expired.
-#[derive(Clone, Copy)]
-struct Owner<'a> {
-    worker_id: &'a str,
-    attempt: Option<i32>,
-}
-
 /// Applies an update only while the run is owned, and reports whether it was.
-async fn finish_run(db: &PgPool, run_id: Uuid, owner: Option<Owner<'_>>, update: RunUpdate<'_>) -> Result<bool> {
-    let result = sqlx::query(
+///
+/// A transient error is retried; the ownership is checked again by every try,
+/// so one that comes after the run was taken over writes nothing. If the first
+/// try did commit and only its answer was lost, the next one finds the run
+/// finished and reports it as not owned.
+async fn finish_run(db: &PgPool, run_id: Uuid, owner: Option<&RunOwner>, update: RunUpdate<'_>) -> Result<bool> {
+    retry(format!("recording the outcome of run {run_id}"), || async {
+        let result = sqlx::query(
         "UPDATE flow_runs SET \
            status = $2, \
            error = CASE WHEN $2 = 'completed' THEN NULL ELSE COALESCE($3, error) END, \
@@ -200,16 +197,18 @@ async fn finish_run(db: &PgPool, run_id: Uuid, owner: Option<Owner<'_>>, update:
          WHERE id = $1 AND ($6::text IS NULL \
            OR (worker_id = $6 AND status = 'running' AND attempts = COALESCE($7, attempts)))",
     )
-    .bind(run_id)
-    .bind(update.status)
-    .bind(update.error)
-    .bind(update.available_at)
-    .bind(update.completed)
-    .bind(owner.map(|owner| owner.worker_id))
-    .bind(owner.and_then(|owner| owner.attempt))
-    .execute(db)
-    .await?;
-    Ok(result.rows_affected() > 0)
+        .bind(run_id)
+        .bind(update.status)
+        .bind(update.error)
+        .bind(update.available_at)
+        .bind(update.completed)
+        .bind(owner.map(|owner| owner.worker_id.as_str()))
+        .bind(owner.and_then(|owner| owner.attempt))
+        .execute(db)
+        .await?;
+        Ok(result.rows_affected() > 0)
+    })
+    .await
 }
 
 /// Names a run for the failures reported about it.
@@ -282,10 +281,11 @@ async fn run_attempt(app: &OpenShop, opts: RunFlowOptions) -> Result<RunOutcome>
     report::describe(|run| {
         run.tag("attempt", attempt);
     });
-    let owner = opts.worker_id.as_deref().map(|worker_id| Owner {
+    let owner = opts.worker_id.clone().map(|worker_id| RunOwner {
         worker_id,
         attempt: opts.attempt,
     });
+    let owner = owner.as_ref();
     let step = StepExecutor::new(
         db.clone(),
         run_id_text,
@@ -293,6 +293,7 @@ async fn run_attempt(app: &OpenShop, opts: RunFlowOptions) -> Result<RunOutcome>
         Some(signal.clone()),
         flow.step_timeout,
         attempt,
+        owner.cloned(),
     );
     let connectors = match opts.connectors.clone() {
         Some(connectors) => connectors,
@@ -361,7 +362,10 @@ async fn run_attempt(app: &OpenShop, opts: RunFlowOptions) -> Result<RunOutcome>
             }
         }
         Err(error) => {
-            if let Some(sleep) = error.downcast_ref::<SleepSignal>() {
+            if error.downcast_ref::<LeaseLostError>().is_some() {
+                // A step found the run taken over: nothing more is written.
+                RunOutcome::LeaseLost
+            } else if let Some(sleep) = error.downcast_ref::<SleepSignal>() {
                 let resume_at = sleep.resume_at;
                 if finish_run(
                     db,
@@ -402,7 +406,7 @@ async fn run_attempt(app: &OpenShop, opts: RunFlowOptions) -> Result<RunOutcome>
 async fn record_failure(
     app: &OpenShop,
     run_id: Uuid,
-    owner: Option<Owner<'_>>,
+    owner: Option<&RunOwner>,
     flow_name: &str,
     logger: &FlowLogger,
     error: anyhow::Error,
@@ -411,10 +415,15 @@ async fn record_failure(
     let error_message = error_message(&error);
 
     let run: Option<(i32, Option<DateTime<Utc>>, Option<Value>)> =
-        sqlx::query_as("SELECT attempts, deadline_at, retry_policy FROM flow_runs WHERE id = $1 LIMIT 1")
-            .bind(run_id)
-            .fetch_optional(db)
-            .await?;
+        retry(format!("reading the retry policy of run {run_id}"), || async {
+            Ok(
+                sqlx::query_as("SELECT attempts, deadline_at, retry_policy FROM flow_runs WHERE id = $1 LIMIT 1")
+                    .bind(run_id)
+                    .fetch_optional(db)
+                    .await?,
+            )
+        })
+        .await?;
 
     let next_at = run.and_then(|(attempts, deadline_at, retry_policy)| {
         let policy: ResolvedRetryPolicy = serde_json::from_value(retry_policy?).ok()?;

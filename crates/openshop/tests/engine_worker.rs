@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use common::{TEST_SHOP, TestApp, create_config, noop_flow};
+use common::{TEST_SHOP, TestApp, create_config, heal_write_fault, inject_write_fault, noop_flow, write_fault_hits};
 use openshop::builder::{Flow, InputSchema};
 use openshop::db::schema::{FlowRun, StepResult};
 use openshop::engine::{Worker, cancel_run};
@@ -834,6 +834,95 @@ async fn an_execution_that_lost_its_run_stops_at_its_next_heartbeat() {
     test.cleanup().await;
 }
 
+/// A flow that checkpoints a step, then ends; counts its executions.
+fn charging_flow(executions: Arc<AtomicUsize>, charges: Arc<AtomicUsize>) -> Flow {
+    Flow::new("charging-flow", move |ctx: FlowContext| {
+        let (executions, charges) = (executions.clone(), charges.clone());
+        async move {
+            executions.fetch_add(1, Ordering::SeqCst);
+            let _: usize = ctx
+                .step
+                .run(
+                    "charge",
+                    || async move { Ok(charges.fetch_add(1, Ordering::SeqCst) + 1) },
+                )
+                .await?;
+            Ok(())
+        }
+    })
+}
+
+#[tokio::test]
+async fn retries_writing_the_outcome_of_a_run_after_a_transient_error() {
+    let (executions, charges) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+    let test = TestApp::new(create_config([charging_flow(executions.clone(), charges.clone())])).await;
+    // Two lost connections in a row, as the run completes.
+    inject_write_fault(&test.db, "flow_runs", "NEW.status = 'completed'", 2).await;
+    let run_id = dispatch(&test, "charging-flow").await;
+
+    let worker = worker(&test.app, 1);
+    worker.start().await;
+    let run = wait_for_status(&test, run_id, "completed").await;
+    worker.stop().await;
+
+    assert_eq!(
+        write_fault_hits(&test.db, "flow_runs").await,
+        3,
+        "two failures, then the write"
+    );
+    assert_eq!(run.attempts, 1);
+    assert_eq!(run.error, None);
+    assert_eq!(run.worker_id, None);
+    assert!(run.completed_at.is_some());
+    assert_eq!(executions.load(Ordering::SeqCst), 1, "the flow ran once");
+    test.cleanup().await;
+}
+
+#[tokio::test]
+async fn leaves_a_run_to_its_lease_when_its_outcome_cannot_be_written() {
+    let (executions, charges) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+    let test = TestApp::new(create_config([charging_flow(executions.clone(), charges.clone())])).await;
+    inject_write_fault(&test.db, "flow_runs", "NEW.status = 'completed'", i64::MAX).await;
+    let run_id = dispatch(&test, "charging-flow").await;
+
+    let worker = worker_with(
+        &test.app,
+        WorkerConfig::new()
+            .concurrency(1)
+            .lease_duration(Duration::from_secs(3)),
+    );
+    worker.start().await;
+    wait_until("the flow to end", || executions.load(Ordering::SeqCst) == 1).await;
+    wait_until("the worker to give up writing the outcome", || {
+        worker.active_count() == 0
+    })
+    .await;
+
+    // The run is not failed: it keeps its lease, which nothing extends any more.
+    let run = find_run(&test, run_id).await;
+    assert_eq!(run.status, "running");
+    assert_eq!(run.error, None);
+    assert_eq!(run.worker_id.as_deref(), Some(worker.worker_id()));
+    assert!(run.completed_at.is_none());
+    assert_eq!(run.attempts, 1);
+
+    // The database is back before the lease expires: the run is claimed again
+    // and resumes from its checkpoint.
+    heal_write_fault(&test.db, "flow_runs").await;
+    let run = wait_for_status(&test, run_id, "completed").await;
+    worker.stop().await;
+
+    assert_eq!(run.attempts, 2);
+    assert_eq!(run.error, None);
+    assert_eq!(executions.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        charges.load(Ordering::SeqCst),
+        1,
+        "the checkpointed step does not run twice"
+    );
+    test.cleanup().await;
+}
+
 #[tokio::test]
 async fn does_not_claim_runs_scheduled_in_the_future() {
     let flow = noop_flow("quick-flow").concurrency(Concurrency::Allow);
@@ -1390,10 +1479,12 @@ async fn worker_that_lost_its_lease_cancels_the_flow_on_the_next_heartbeat() {
     wait_until("the flow to be interrupted", || worker.active_count() == 0).await;
     worker.stop().await;
 
+    // The step does not record its cancellation either: it belongs to the
+    // other worker's run now, like the run itself.
     let steps = find_steps(&test, run_id).await;
     assert_eq!(
         (steps[0].step_name.as_str(), steps[0].status.as_str()),
-        ("forever", "canceled")
+        ("forever", "running")
     );
     // The run itself now belongs to the other worker and is left untouched.
     assert_eq!(find_run(&test, run_id).await, stolen);

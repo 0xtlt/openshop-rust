@@ -401,6 +401,23 @@
   run was claimed again, by another worker or by the same one, can no longer
   finish, sleep, fail or cancel it, and stops at its next heartbeat. It no
   longer takes the cancellation token of the new execution with it either.
+- A transient database error no longer fails a run. The write that records the
+  outcome of a run (completed, sleeping, canceled, retry or failure), the one
+  that reads its retry policy, the failure of a run, and the writes of a step
+  are tried up to five times, 100 ms apart and doubling, when the error comes
+  from the connection or the load of the database: I/O, TLS, pool timeout,
+  SQLSTATE 08, 53, 57P01-03, 40001 and 40P01. Each try keeps the ownership
+  check, and each failure is logged. When the outcome still cannot be written,
+  the worker leaves the run `running` and stops its heartbeat instead of
+  marking it `failed` through the same database: the lease expires and the
+  run is claimed again, its completed steps replayed from their checkpoints.
+- The writes of a step carry the worker and the attempt of the claim as well:
+  an execution whose run was taken over, by another worker or by the same one,
+  can no longer store the result of a step, start one or suspend at a sleep.
+  The step fails with the new `engine::LeaseLostError`, stops the flow, and
+  the run is left to the new execution. Breaking: `StepExecutor::new` takes
+  the owner (`engine::RunOwner`, `None` outside a worker) as a last argument,
+  and a stale step is no longer recorded as `canceled` or `failed`.
 
 ## 0.0.12-beta.0
 
