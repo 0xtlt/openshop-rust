@@ -17,10 +17,9 @@ use indexmap::IndexMap;
 use serde_json::{Value, json};
 
 use super::file_routes::{resolve_route_paths, to_router_path};
-use super::hmac::verify_proxy_signature;
+use super::hmac::{proxy_shop, verify_proxy_signature};
 use super::http::{json_error, not_found, parse_query};
 use super::jwt::{customer_id_from_jwt_sub, is_staff_subject, read_jwt_audience, verify_session_token};
-use super::shop_domain::normalize_shop_domain;
 use super::shopify_apps::ResolvedShopifyApp;
 use crate::app::OpenShop;
 use crate::declare::InvalidInput;
@@ -47,8 +46,10 @@ fn signed_customer_id(value: Option<&String>) -> Option<String> {
 fn resolve_proxy_auth(
     app: &OpenShop,
     query: &IndexMap<String, String>,
+    pairs: &[(String, String)],
     headers: &IndexMap<String, String>,
     modes: &[ProxyAuthKind],
+    now: i64,
 ) -> Result<ResolvedProxyAuth, &'static str> {
     let authorization = headers.get("authorization").map(String::as_str).unwrap_or_default();
     if let Some(token) = authorization.strip_prefix("Bearer ") {
@@ -80,12 +81,12 @@ fn resolve_proxy_auth(
             .apps()
             .all()
             .iter()
-            .filter(|shopify_app| verify_proxy_signature(query, &shopify_app.api_secret))
+            .filter(|shopify_app| verify_proxy_signature(pairs, &shopify_app.api_secret, now))
             .collect();
         let [shopify_app] = matches[..] else {
             return Err("Invalid proxy signature");
         };
-        let Some(shop) = query.get("shop").and_then(|shop| normalize_shop_domain(shop)) else {
+        let Some(shop) = proxy_shop(pairs) else {
             return Err("Invalid shop parameter");
         };
         return Ok(ResolvedProxyAuth {
@@ -154,7 +155,11 @@ async fn handle(
         .filter_map(|(name, value)| Some((name.as_str().to_lowercase(), value.to_str().ok()?.to_string())))
         .collect();
     let query = parse_query(uri.query());
-    let auth = match resolve_proxy_auth(&app, &query, &headers, route.auth_modes) {
+    let pairs: Vec<(String, String)> = url::form_urlencoded::parse(uri.query().unwrap_or_default().as_bytes())
+        .map(|(key, value)| (key.into_owned(), value.into_owned()))
+        .collect();
+    let now = chrono::Utc::now().timestamp();
+    let auth = match resolve_proxy_auth(&app, &query, &pairs, &headers, route.auth_modes, now) {
         Ok(auth) => auth,
         Err(error) => return json_error(StatusCode::UNAUTHORIZED, error),
     };

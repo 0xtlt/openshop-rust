@@ -315,6 +315,31 @@
   `RuntimeEnv::allows_plaintext_secrets()` reads, and `TestOptions` a
   `development` field, true by default, so tests keep working without a key;
   with `false` and no key the context does not start.
+- An app proxy request is checked beyond its signature. Its `timestamp` must
+  be present and within five minutes of the server clock, on either side: a
+  signed URL that was captured could be replayed for ever, since nothing in
+  the signature expires. A parameter whose name or value contains `=`, or
+  whose name is empty, is refused: Shopify signs the `key=value` pairs glued
+  without separator, so the same signature stood for the query cut in other
+  pairs, with another `shop` for instance. A repeated parameter is verified as
+  Shopify signs it, its values joined by `,` (`extra=1&extra=2` is signed
+  `extra=1,2`; it was verified as `extra=1`, and refused), and the pairs are
+  sorted as the `key=value` strings Shopify sorts, not by key. `shop`,
+  `timestamp`, `path_prefix`, `logged_in_customer_id` and `signature` cannot be
+  repeated. A `=` is not the only way to move the end of a value into the
+  next key: a parameter of the visitor is also refused when the value before
+  it, glued to its name, ends with `shop`, `timestamp`, `path_prefix` or
+  `logged_in_customer_id` (a request of an anonymous visitor could be read as
+  the one of customer 42); `timestamp` must be digits, `path_prefix` a plain
+  path, and `shop` exactly a `<name>.myshopify.com` domain (`shop` used to be
+  read as a URL, and `a.myshopify.comt@b.myshopify.com` is one for `b`; it is
+  answered `Invalid shop parameter`). All of these answer `401 Invalid proxy
+  signature`. The signature
+  still covers neither the path, the method nor the body, which Shopify does
+  not sign. Breaking for code that calls `server::hmac::verify_proxy_signature`
+  (it takes the query pairs and the current Unix time) or signs proxy queries
+  without a `timestamp` in its tests: `testing::proxy_signature` signs what it
+  is given, add a fresh `timestamp`.
 - `openshop init` makes a project from one of three templates: `minimal`, one
   provider and one flow, as before; `custom`, a custom app with every building
   block and a page of its own next to the built-in admin; `public`, a public
