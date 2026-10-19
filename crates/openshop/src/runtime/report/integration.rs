@@ -95,7 +95,16 @@ fn scrub_context(context: &mut Context) {
             trace.description.iter_mut().for_each(scrub);
             scrub_map(&mut trace.data);
         }
-        _ => {}
+        // Every other kind of context, those of the SDK that are yet to come
+        // included, through its JSON form: all its strings, at any depth. One
+        // that does not come back as a context is not sent.
+        other => {
+            let scrubbed = serde_json::to_value(&*other).ok().and_then(|mut json| {
+                scrub_value(&mut json);
+                serde_json::from_value::<Context>(json).ok()
+            });
+            *other = scrubbed.unwrap_or_else(|| Context::Other(Map::new()));
+        }
     }
 }
 

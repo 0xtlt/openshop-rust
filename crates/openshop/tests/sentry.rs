@@ -787,3 +787,37 @@ fn what_a_url_carries_of_secrets_is_not_sent_in_tags_extra_contexts_or_the_reque
     assert_eq!(request.query_string.as_deref(), Some("[redacted]"));
     assert!(request.url.is_some_and(|url| url.path() == "/app/orders"));
 }
+
+#[test]
+fn what_a_url_carries_of_secrets_is_not_sent_in_an_opentelemetry_context() {
+    use openshop::sentry::protocol::{Context, Map, OtelContext};
+
+    let events = captured(async {
+        let mut attributes = Map::new();
+        attributes.insert("url.full".into(), json!("https://api.example.com/a?token=SECRET"));
+        attributes.insert("nested".into(), json!({ "list": ["https://u:hunter2@h.test/x"] }));
+        let mut resource = Map::new();
+        resource.insert("service.url".into(), json!("https://svc.test/y?key=SECRET"));
+        let mut other = Map::new();
+        other.insert("extra".into(), json!("https://z.test/?k=SECRET"));
+        openshop::sentry::configure_scope(|scope| {
+            scope.set_context(
+                "otel",
+                Context::Otel(Box::new(OtelContext {
+                    attributes,
+                    resource,
+                    other,
+                })),
+            );
+        });
+        openshop::sentry::capture_message("failed", Level::Error);
+    });
+
+    let event = the_only(events);
+    let sent = format!("{event:?}");
+    assert!(!sent.contains("SECRET") && !sent.contains("hunter2"), "{sent}");
+    let Some(Context::Otel(otel)) = event.contexts.get("otel") else {
+        panic!("{sent}")
+    };
+    assert_eq!(otel.attributes["url.full"], "https://api.example.com/a?[redacted]");
+}
