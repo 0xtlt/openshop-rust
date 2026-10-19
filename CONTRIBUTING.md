@@ -29,7 +29,8 @@ dependency commits the lockfile with it. It also checks that the workspace
 builds with the oldest Rust it claims (`rust-version` in `Cargo.toml`), and runs
 [cargo-deny](https://embarkstudios.github.io/cargo-deny/) on the dependencies,
 as `deny.toml` configures it (`cargo install --locked cargo-deny`, then
-`cargo deny check`). Every action of the workflows is pinned to a commit;
+`cargo deny check`; `cargo audit`, which reads `Cargo.lock` itself, is
+configured in `.cargo/audit.toml`). Every action of the workflows is pinned to a commit;
 Dependabot proposes the updates.
 
 The admin UI is its own workspace:
