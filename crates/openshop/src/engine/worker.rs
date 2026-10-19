@@ -15,6 +15,7 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+use super::retention::{SWEEP_INTERVAL, purge_logs};
 use super::runner::{HEARTBEAT_INTERVAL, HeartbeatFn, RunFlowOptions, describe_run, panic_message, run_flow};
 use super::step::error_message;
 use crate::app::OpenShop;
@@ -181,7 +182,11 @@ impl Worker {
         *self.inner.wake.lock().await = stop.clone();
         let inner = self.inner.clone();
         *self.inner.loop_handle.lock().await = Some(tokio::spawn(async move {
-            tokio::join!(inner.claim_loop(&stop), inner.expire_loop(&stop));
+            tokio::join!(
+                inner.claim_loop(&stop),
+                inner.expire_loop(&stop),
+                inner.retention_loop(&stop)
+            );
         }));
     }
 
@@ -261,6 +266,26 @@ impl Inner {
                 )),
             }
             self.sleep(self.config.poll_interval_ms, stop).await;
+        }
+    }
+
+    /// Removes the log lines past the `log_retention` setting once per sweep
+    /// interval, if the application sets one.
+    async fn retention_loop(&self, stop: &CancellationToken) {
+        let Some(retention) = self.app.config().log_retention else {
+            return;
+        };
+        let retention = chrono::Duration::from_std(retention).unwrap_or(chrono::Duration::MAX);
+        while self.running.load(Ordering::SeqCst) {
+            let cutoff = Utc::now()
+                .checked_sub_signed(retention)
+                .unwrap_or(DateTime::<Utc>::MIN_UTC);
+            match purge_logs(self.app.db(), cutoff).await {
+                Ok(0) => {}
+                Ok(removed) => logger::info(format!("[openshop] Removed {removed} log lines past their retention")),
+                Err(error) => logger::warn(format!("[openshop] Worker failed to remove old log lines: {error:#}")),
+            }
+            self.sleep(SWEEP_INTERVAL.as_millis() as u64, stop).await;
         }
     }
 

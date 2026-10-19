@@ -2,7 +2,7 @@
 
 use crate::{json, query::QueryParams, types::LogEntry};
 use serde_json::Value;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 pub const LOG_LEVELS: [&str; 3] = ["info", "warn", "error"];
 const DEFAULT_LEVELS_PARAM: &str = "info,warn,error";
@@ -57,11 +57,6 @@ pub fn logs_url(run_id: &str, query: &str, levels: &[String]) -> String {
     params.append_to(&format!("/api/runs/{run_id}/logs"))
 }
 
-/// Unfiltered logs, used for the per-level counters.
-pub fn all_logs_url(run_id: &str) -> String {
-    format!("/api/runs/{run_id}/logs?levels={DEFAULT_LEVELS_PARAM}")
-}
-
 pub fn export_url(run_id: &str, query: &str, levels: &[String], format: &str) -> String {
     let mut params = QueryParams::new();
     if !query.is_empty() {
@@ -90,8 +85,9 @@ impl LevelCounts {
     }
 }
 
-pub fn count_levels(logs: &[LogEntry]) -> LevelCounts {
-    let count = |level: &str| logs.iter().filter(|log| log.level == level).count();
+/// The counters of the levels, from the counts of the whole run the server sends.
+pub fn count_levels(counts: &HashMap<String, u64>) -> LevelCounts {
+    let count = |level: &str| counts.get(level).copied().unwrap_or(0) as usize;
     LevelCounts {
         info: count("info"),
         warn: count("warn"),
@@ -181,7 +177,6 @@ mod tests {
             logs_url("abc", "last:5m", &levels(&["error"])),
             "/api/runs/abc/logs?q=last%3A5m&levels=error"
         );
-        assert_eq!(all_logs_url("abc"), "/api/runs/abc/logs?levels=info,warn,error");
         assert_eq!(
             export_url("abc", "order", &levels(&["warn", "info"]), "csv"),
             "/api/runs/abc/logs/export?q=order&levels=warn%2Cinfo&format=csv"
@@ -190,8 +185,12 @@ mod tests {
 
     #[test]
     fn counts_logs_per_level() {
-        let logs = [log("1", "info"), log("2", "error"), log("3", "info"), log("4", "debug")];
-        let counts = count_levels(&logs);
+        let sent = HashMap::from([
+            ("info".to_string(), 2),
+            ("error".to_string(), 1),
+            ("debug".to_string(), 4),
+        ]);
+        let counts = count_levels(&sent);
         assert_eq!(
             counts,
             LevelCounts {

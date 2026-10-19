@@ -82,6 +82,11 @@ larger configurations easier to split:
   statement, which caps a worker at `concurrency` runs per poll interval.
 - Claiming reads the queue through a partial index, so its cost does not grow
   with the number of runs waiting.
+- The logs of a run are served by page (`limit`, `cursor`, `next`, and
+  `levelCounts` beside `logs` and `total`) and the export is streamed. The
+  `logs` table has indexes on its time and its level, and workers remove the
+  lines past the `log_retention` setting when it is set. The columns are those
+  of the TypeScript runtime, which keeps reading and writing the table.
 - Runs past their deadline are failed once per poll interval, including while
   every slot is taken, instead of before each claim. A claim skips them, so
   none starts late.

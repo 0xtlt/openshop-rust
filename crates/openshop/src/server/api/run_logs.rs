@@ -1,17 +1,36 @@
-//! Filtering and exporting the logs of a run.
+//! Reading and exporting the logs of a run, a page or a chunk at a time.
+//!
+//! Levels and the time range are restricted by the database. The text filters
+//! (`|=`, `!=`, `|~`, free text) run on the lines as they are read, so a
+//! request holds one chunk of a run at a time and not the run. Lines are
+//! ordered newest first, by `(created_at, id)`, which is what the cursors of
+//! the pages follow.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, VecDeque};
 
 use anyhow::Result;
+use axum::body::{Body, Bytes};
 use axum::http::header::{CONTENT_DISPOSITION, CONTENT_TYPE};
-use axum::response::{IntoResponse, Response};
+use axum::response::Response;
+use chrono::{DateTime, Utc};
+use futures::stream::{self, Stream};
 use serde::Serialize;
 use serde_json::Value;
-use sqlx::PgPool;
+use sqlx::{PgPool, Postgres, QueryBuilder};
+use uuid::Uuid;
 
 use crate::db::schema::LogRow;
 use crate::runtime::time::to_iso;
-use crate::server::log_query::{apply_context_expansion, matches_log_filters, parse_log_query};
+use crate::server::log_query::{LogFilter, ParsedLogQuery, matches_log_filters, parse_log_query};
+
+/// Lines read from the database at a time.
+const CHUNK: i64 = 500;
+/// Lines of a page when the request names no limit.
+pub const DEFAULT_LIMIT: usize = 1_000;
+/// The most lines a page holds, whatever the request asks for.
+pub const MAX_LIMIT: usize = 5_000;
+/// The most lines kept before a match to show as its context.
+const MAX_CONTEXT_BEFORE: usize = 1_000;
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct LogResponseRow {
@@ -27,6 +46,39 @@ pub struct FilteredRunLogs {
     pub logs: Vec<LogResponseRow>,
     /// Number of log lines of the run before filtering.
     pub total: usize,
+    /// Number of lines of each level in the run, before filtering.
+    #[serde(rename = "levelCounts")]
+    pub level_counts: BTreeMap<String, usize>,
+    /// Where the next page starts, `null` on the last one.
+    pub next: Option<String>,
+}
+
+/// The position of a line in the order of a run: where a page stops.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LogCursor {
+    created_at: DateTime<Utc>,
+    id: Uuid,
+}
+
+impl LogCursor {
+    pub fn parse(value: &str) -> Option<Self> {
+        let (micros, id) = value.split_once('.')?;
+        Some(Self {
+            created_at: DateTime::from_timestamp_micros(micros.parse().ok()?)?,
+            id: Uuid::parse_str(id).ok()?,
+        })
+    }
+
+    fn of(log: &LogRow) -> Self {
+        Self {
+            created_at: log.created_at,
+            id: log.id,
+        }
+    }
+
+    pub fn encode(&self) -> String {
+        format!("{}.{}", self.created_at.timestamp_micros(), self.id)
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -35,127 +87,340 @@ pub struct RunLogOptions<'a> {
     /// Comma-separated levels, e.g. `info,warn,error`.
     pub levels: &'a str,
     pub include_context: bool,
+    /// The most lines of the page. Context lines of the last match come on top.
+    pub limit: usize,
+    /// The `next` of the previous page.
+    pub cursor: Option<LogCursor>,
 }
 
+/// The lines of a run a scan keeps in the database: its levels, its time
+/// range, and where it starts.
+struct Scan {
+    run_id: String,
+    levels: Vec<String>,
+    from: Option<DateTime<Utc>>,
+    to: Option<DateTime<Utc>>,
+    after: Option<LogCursor>,
+    done: bool,
+}
+
+impl Scan {
+    fn new(run_id: &str, levels: &str, parsed: &ParsedLogQuery, after: Option<LogCursor>) -> Self {
+        let levels: Vec<String> = levels
+            .split(',')
+            .filter(|level| !level.is_empty())
+            .map(str::to_string)
+            .collect();
+        Self {
+            run_id: run_id.to_string(),
+            done: levels.is_empty(),
+            levels,
+            from: parsed.time.from,
+            to: parsed.time.to,
+            after,
+        }
+    }
+
+    /// The next lines of the scan, `None` once it has read them all.
+    async fn next_chunk(&mut self, db: &PgPool, size: i64) -> Result<Option<Vec<LogRow>>> {
+        if self.done {
+            return Ok(None);
+        }
+        let mut query = QueryBuilder::<Postgres>::new(
+            "SELECT id, flow_run_id, level, message, payload, created_at FROM logs WHERE flow_run_id = ",
+        );
+        query.push_bind(self.run_id.clone());
+        query.push(" AND level = ANY(").push_bind(self.levels.clone()).push(")");
+        if let Some(from) = self.from {
+            query.push(" AND created_at >= ").push_bind(from);
+        }
+        if let Some(to) = self.to {
+            query.push(" AND created_at <= ").push_bind(to);
+        }
+        if let Some(after) = self.after {
+            // The first condition is the one an index on `created_at` can use.
+            query.push(" AND created_at <= ").push_bind(after.created_at);
+            query.push(" AND (created_at < ").push_bind(after.created_at);
+            query.push(" OR id < ").push_bind(after.id).push(")");
+        }
+        query.push(" ORDER BY created_at DESC, id DESC LIMIT ").push_bind(size);
+        let rows: Vec<LogRow> = query.build_query_as().fetch_all(db).await?;
+        if (rows.len() as i64) < size {
+            self.done = true;
+        }
+        self.after = rows.last().map(LogCursor::of).or(self.after);
+        Ok((!rows.is_empty()).then_some(rows))
+    }
+}
+
+async fn level_counts(db: &PgPool, run_id: &str) -> Result<BTreeMap<String, usize>> {
+    let rows: Vec<(String, i64)> =
+        sqlx::query_as("SELECT level, count(*) FROM logs WHERE flow_run_id = $1 GROUP BY level")
+            .bind(run_id)
+            .fetch_all(db)
+            .await?;
+    Ok(rows
+        .into_iter()
+        .map(|(level, count)| (level, count as usize))
+        .collect())
+}
+
+fn plain(log: LogRow) -> LogResponseRow {
+    LogResponseRow { log, matched: None }
+}
+
+/// One page of the lines of a run.
+///
+/// Without a text filter the database returns the page. With one, the scan
+/// reads the run chunk by chunk, keeping the matches, and the context lines
+/// around them when asked for, until the page is full. A page stops after a
+/// whole match with its context, so the pages put end to end hold what one
+/// unpaged request would.
 pub async fn get_filtered_run_logs(
     db: &PgPool,
     flow_run_id: &str,
     options: RunLogOptions<'_>,
 ) -> Result<FilteredRunLogs> {
-    let all_logs: Vec<LogRow> = sqlx::query_as(
-        "SELECT id, flow_run_id, level, message, payload, created_at FROM logs \
-         WHERE flow_run_id = $1 ORDER BY created_at DESC",
-    )
-    .bind(flow_run_id)
-    .fetch_all(db)
-    .await?;
-    let total = all_logs.len();
-
-    let active_levels: HashSet<&str> = options.levels.split(',').filter(|level| !level.is_empty()).collect();
+    let level_counts = level_counts(db, flow_run_id).await?;
+    let total = level_counts.values().sum();
     let parsed = parse_log_query(options.query);
-
-    let filtered: Vec<LogRow> = all_logs
-        .into_iter()
-        .filter(|log| active_levels.contains(log.level.as_str()))
-        .filter(|log| parsed.time.from.is_none_or(|from| log.created_at >= from))
-        .filter(|log| parsed.time.to.is_none_or(|to| log.created_at <= to))
-        .collect();
-
-    let plain = |log: LogRow| LogResponseRow { log, matched: None };
+    let limit = options.limit.clamp(1, MAX_LIMIT);
+    let mut scan = Scan::new(flow_run_id, options.levels, &parsed, options.cursor);
 
     if parsed.filters.is_empty() {
+        let mut logs = scan.next_chunk(db, limit as i64 + 1).await?.unwrap_or_default();
+        let next = if logs.len() > limit {
+            logs.truncate(limit);
+            logs.last().map(|log| LogCursor::of(log).encode())
+        } else {
+            None
+        };
         return Ok(FilteredRunLogs {
-            logs: filtered.into_iter().map(plain).collect(),
+            logs: logs.into_iter().map(plain).collect(),
             total,
+            level_counts,
+            next,
         });
     }
 
-    let ids: Vec<String> = filtered.iter().map(|log| log.id.to_string()).collect();
-    let matched: HashSet<&str> = filtered
-        .iter()
-        .zip(&ids)
-        .filter(|(log, _)| matches_log_filters(log.message.as_deref(), log.payload.as_ref(), &parsed.filters))
-        .map(|(_, id)| id.as_str())
-        .collect();
+    let (before, after) = if options.include_context {
+        (parsed.context.before.min(MAX_CONTEXT_BEFORE), parsed.context.after)
+    } else {
+        (0, 0)
+    };
+    let mut page = Page {
+        filters: &parsed.filters,
+        with_context: options.include_context,
+        before,
+        after,
+        limit,
+        pending: VecDeque::new(),
+        after_left: 0,
+        logs: Vec::new(),
+        last: None,
+    };
+    let mut next = None;
+    'scan: while let Some(chunk) = scan.next_chunk(db, CHUNK).await? {
+        for log in chunk {
+            if let Some(cursor) = page.push(log) {
+                next = Some(cursor.encode());
+                break 'scan;
+            }
+        }
+    }
+    Ok(FilteredRunLogs {
+        logs: page.logs,
+        total,
+        level_counts,
+        next,
+    })
+}
 
-    if !options.include_context {
-        let logs = filtered
-            .iter()
-            .zip(&ids)
-            .filter(|(_, id)| matched.contains(id.as_str()))
-            .map(|(log, _)| plain(log.clone()))
-            .collect();
-        return Ok(FilteredRunLogs { logs, total });
+/// A page being filled by a scan, newest line first.
+struct Page<'a> {
+    filters: &'a [LogFilter],
+    with_context: bool,
+    before: usize,
+    after: usize,
+    limit: usize,
+    /// Lines that may become the context before the next match.
+    pending: VecDeque<LogRow>,
+    /// Lines still to take after the last match.
+    after_left: usize,
+    logs: Vec<LogResponseRow>,
+    /// The last line of the page.
+    last: Option<LogCursor>,
+}
+
+impl Page<'_> {
+    fn emit(&mut self, log: LogRow, matched: bool) {
+        self.last = Some(LogCursor::of(&log));
+        self.logs.push(LogResponseRow {
+            log,
+            matched: self.with_context.then_some(matched),
+        });
     }
 
-    let id_refs: Vec<&str> = ids.iter().map(String::as_str).collect();
-    let visible = apply_context_expansion(&id_refs, &matched, parsed.context);
-    let logs = filtered
-        .iter()
-        .zip(&ids)
-        .filter(|(_, id)| visible.contains(id.as_str()))
-        .map(|(log, id)| LogResponseRow {
-            log: log.clone(),
-            matched: Some(matched.contains(id.as_str())),
-        })
-        .collect();
-    Ok(FilteredRunLogs { logs, total })
+    /// Takes the next line of the scan. Returns where the next page starts
+    /// when the page is full and the line is a match that belongs to the next.
+    fn push(&mut self, log: LogRow) -> Option<LogCursor> {
+        let matched = matches_log_filters(log.message.as_deref(), log.payload.as_ref(), self.filters);
+        let full = self.logs.len() >= self.limit;
+        if matched {
+            if full && self.after_left == 0 {
+                return self.last;
+            }
+            while let Some(context) = self.pending.pop_front() {
+                self.emit(context, false);
+            }
+            self.emit(log, true);
+            self.after_left = self.after;
+        } else if self.after_left > 0 {
+            self.after_left -= 1;
+            self.emit(log, false);
+        } else if !full && self.before > 0 {
+            if self.pending.len() == self.before {
+                self.pending.pop_front();
+            }
+            self.pending.push_back(log);
+        }
+        None
+    }
 }
 
 fn csv_escape(value: &str) -> String {
     format!("\"{}\"", value.replace('"', "\"\""))
 }
 
-pub fn logs_to_csv(logs: &[LogResponseRow]) -> String {
-    let mut lines = vec!["id,level,message,payload,createdAt".to_string()];
-    for row in logs {
-        let log = &row.log;
-        let payload = match &log.payload {
-            Some(payload) if !payload.is_null() => payload.to_string(),
-            _ => Value::from("").to_string(),
-        };
-        lines.push(
-            [
-                log.id.to_string(),
-                log.level.clone(),
-                csv_escape(log.message.as_deref().unwrap_or_default()),
-                csv_escape(&payload),
-                to_iso(&log.created_at),
-            ]
-            .join(","),
-        );
-    }
-    lines.join("\n")
+const CSV_HEADER: &str = "id,level,message,payload,createdAt";
+
+fn csv_row(log: &LogRow) -> String {
+    let payload = match &log.payload {
+        Some(payload) if !payload.is_null() => payload.to_string(),
+        _ => Value::from("").to_string(),
+    };
+    [
+        log.id.to_string(),
+        log.level.clone(),
+        csv_escape(log.message.as_deref().unwrap_or_default()),
+        csv_escape(&payload),
+        to_iso(&log.created_at),
+    ]
+    .join(",")
 }
 
-/// `format` is `csv` or `json`; anything else is exported as JSON.
-pub fn create_log_export_response(run_id: &str, format: &str, logs: &[LogResponseRow]) -> Response {
+/// An element of the pretty-printed array of a JSON export.
+fn json_item(log: &LogRow) -> String {
+    let pretty = serde_json::to_string_pretty(&plain(log.clone())).unwrap_or_else(|_| "{}".to_string());
+    pretty
+        .lines()
+        .map(|line| format!("  {line}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ExportFormat {
+    Csv,
+    Json,
+}
+
+/// A file being written as its lines are read.
+struct Export {
+    db: PgPool,
+    scan: Scan,
+    filters: Vec<LogFilter>,
+    format: ExportFormat,
+    started: bool,
+    finished: bool,
+    /// Lines written so far.
+    written: usize,
+}
+
+impl Export {
+    /// The text of the next chunk of the file, `None` once it is complete.
+    async fn next_bytes(&mut self) -> Result<Option<Bytes>> {
+        while !self.finished {
+            let chunk = self.scan.next_chunk(&self.db, CHUNK).await?;
+            let mut text = String::new();
+            if !self.started {
+                self.started = true;
+                text.push_str(match self.format {
+                    ExportFormat::Csv => CSV_HEADER,
+                    ExportFormat::Json => "[",
+                });
+            }
+            for log in chunk.iter().flatten() {
+                if !self.filters.is_empty()
+                    && !matches_log_filters(log.message.as_deref(), log.payload.as_ref(), &self.filters)
+                {
+                    continue;
+                }
+                if self.format == ExportFormat::Json && self.written > 0 {
+                    text.push(',');
+                }
+                text.push('\n');
+                text.push_str(&match self.format {
+                    ExportFormat::Csv => csv_row(log),
+                    ExportFormat::Json => json_item(log),
+                });
+                self.written += 1;
+            }
+            if chunk.is_none() {
+                self.finished = true;
+                if self.format == ExportFormat::Json {
+                    text.push_str(if self.written == 0 { "]" } else { "\n]" });
+                }
+            }
+            if !text.is_empty() {
+                return Ok(Some(Bytes::from(text)));
+            }
+        }
+        Ok(None)
+    }
+}
+
+/// `format` is `csv` or `json`; anything else is exported as JSON. The file
+/// is written as the lines are read: it is never held whole.
+pub fn create_log_export_response(db: PgPool, run_id: &str, format: &str, options: RunLogOptions<'_>) -> Response {
     let extension = if !format.is_empty() && format.chars().all(|character| character.is_ascii_alphanumeric()) {
         format
     } else {
         "json"
     };
     let disposition = format!("attachment; filename=\"run-{run_id}-logs.{extension}\"");
-
-    if format == "csv" {
-        return (
-            [
-                (CONTENT_TYPE, "text/csv".to_string()),
-                (CONTENT_DISPOSITION, disposition),
-            ],
-            logs_to_csv(logs),
-        )
-            .into_response();
+    let parsed = parse_log_query(options.query);
+    let format = if format == "csv" {
+        ExportFormat::Csv
+    } else {
+        ExportFormat::Json
+    };
+    let export = Export {
+        db,
+        scan: Scan::new(run_id, options.levels, &parsed, None),
+        filters: parsed.filters,
+        format,
+        started: false,
+        finished: false,
+        written: 0,
+    };
+    let content_type = match format {
+        ExportFormat::Csv => "text/csv",
+        ExportFormat::Json => "application/json",
+    };
+    let mut response = Response::new(Body::from_stream(export_stream(export)));
+    let headers = response.headers_mut();
+    headers.insert(CONTENT_TYPE, content_type.parse().expect("static header"));
+    if let Ok(value) = disposition.parse() {
+        headers.insert(CONTENT_DISPOSITION, value);
     }
+    response
+}
 
-    (
-        [
-            (CONTENT_TYPE, "application/json".to_string()),
-            (CONTENT_DISPOSITION, disposition),
-        ],
-        serde_json::to_string_pretty(logs).unwrap_or_else(|_| "[]".to_string()),
-    )
-        .into_response()
+fn export_stream(export: Export) -> impl Stream<Item = Result<Bytes>> {
+    stream::try_unfold(export, |mut export| async move {
+        Ok(export.next_bytes().await?.map(|bytes| (bytes, export)))
+    })
 }
 
 #[cfg(test)]
@@ -181,15 +446,16 @@ mod tests {
 
     #[test]
     fn exports_csv_with_escaped_cells() {
-        let csv = logs_to_csv(&[row(Some("He said \"hi\""), Some(json!({ "a": 1 }))), row(None, None)]);
-        let lines: Vec<&str> = csv.lines().collect();
-        assert_eq!(lines[0], "id,level,message,payload,createdAt");
+        let lines = [
+            csv_row(&row(Some("He said \"hi\""), Some(json!({ "a": 1 }))).log),
+            csv_row(&row(None, None).log),
+        ];
         assert_eq!(
-            lines[1],
+            lines[0],
             "00000000-0000-0000-0000-000000000000,info,\"He said \"\"hi\"\"\",\"{\"\"a\"\":1}\",2026-03-01T10:00:00.000Z"
         );
         assert_eq!(
-            lines[2],
+            lines[1],
             "00000000-0000-0000-0000-000000000000,info,\"\",\"\"\"\"\"\",2026-03-01T10:00:00.000Z"
         );
     }
@@ -206,16 +472,36 @@ mod tests {
         assert_eq!(serde_json::to_value(matched).unwrap()["_matched"], false);
     }
 
+    fn options() -> RunLogOptions<'static> {
+        RunLogOptions {
+            query: "",
+            levels: "info",
+            include_context: false,
+            limit: DEFAULT_LIMIT,
+            cursor: None,
+        }
+    }
+
     #[test]
-    fn export_response_sets_download_headers() {
-        let response = create_log_export_response("abc", "csv", &[]);
+    fn a_cursor_survives_its_encoding() {
+        let cursor = LogCursor::of(&row(None, None).log);
+        assert_eq!(LogCursor::parse(&cursor.encode()), Some(cursor));
+        for bad in ["", "nope", "1.2", "x.00000000-0000-0000-0000-000000000000"] {
+            assert_eq!(LogCursor::parse(bad), None, "{bad}");
+        }
+    }
+
+    #[tokio::test]
+    async fn export_response_sets_download_headers() {
+        let db = PgPool::connect_lazy("postgres://localhost/unused").unwrap();
+        let response = create_log_export_response(db.clone(), "abc", "csv", options());
         assert_eq!(response.headers()[CONTENT_TYPE], "text/csv");
         assert_eq!(
             response.headers()[CONTENT_DISPOSITION],
             "attachment; filename=\"run-abc-logs.csv\""
         );
 
-        let response = create_log_export_response("abc", "x\"y", &[]);
+        let response = create_log_export_response(db, "abc", "x\"y", options());
         assert_eq!(response.headers()[CONTENT_TYPE], "application/json");
         assert_eq!(
             response.headers()[CONTENT_DISPOSITION],

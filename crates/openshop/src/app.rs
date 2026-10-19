@@ -2,6 +2,7 @@
 
 use std::future::Future;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Result;
 use indexmap::IndexMap;
@@ -65,6 +66,8 @@ pub struct OpenShopConfig {
     /// The development store whose token work no Shopify request vouches for
     /// may get with the client credentials grant.
     pub client_credentials_shop: Option<String>,
+    /// How long the log lines of the runs are kept. `None` keeps them forever.
+    pub log_retention: Option<Duration>,
     /// Where failures are reported, when the application gives a Sentry DSN.
     #[cfg(feature = "sentry")]
     pub sentry: Option<SentryConfig>,
@@ -383,6 +386,17 @@ impl OpenShopBuilder {
     /// `client_credentials_shop: std::env::var("SHOPIFY_CLIENT_CREDENTIALS_SHOP").ok()`.
     pub fn client_credentials_shop(mut self, shop: impl Into<Option<String>>) -> Self {
         self.config.client_credentials_shop = shop.into().filter(|shop| !shop.trim().is_empty());
+        self
+    }
+
+    /// Removes the log lines older than `retention`, in small batches, from
+    /// the workers (`dev`, `start` and `worker`). Without it, or with `None`,
+    /// the lines are kept forever. Runs and step results are not purged.
+    ///
+    /// The application gives the duration, from wherever it keeps its
+    /// settings: `log_retention: Duration::from_secs(30 * 24 * 3600)`.
+    pub fn log_retention(mut self, retention: impl Into<Option<Duration>>) -> Self {
+        self.config.log_retention = retention.into();
         self
     }
 

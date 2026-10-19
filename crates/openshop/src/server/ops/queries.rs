@@ -5,10 +5,29 @@
 
 use anyhow::Result;
 use chrono::{DateTime, Duration, Utc};
-use sqlx::{FromRow, PgPool, Postgres, QueryBuilder};
+use sqlx::{FromRow, PgPool, Postgres, QueryBuilder, Transaction};
 use uuid::Uuid;
 
 use crate::db::FlowRun;
+
+/// The longest a statement of the dashboard runs. A slow page ends with an
+/// error instead of holding the database, which the page asks for again every
+/// 30 seconds.
+const STATEMENT_TIMEOUT: &str = "10s";
+
+/// A transaction whose statements are bounded by [`STATEMENT_TIMEOUT`]. It only
+/// reads, and ends with a rollback when it is dropped.
+async fn bounded(db: &PgPool) -> Result<Transaction<'static, Postgres>> {
+    bounded_by(db, STATEMENT_TIMEOUT).await
+}
+
+async fn bounded_by(db: &PgPool, timeout: &str) -> Result<Transaction<'static, Postgres>> {
+    let mut tx = db.begin().await?;
+    sqlx::query(&format!("SET LOCAL statement_timeout = '{timeout}'"))
+        .execute(&mut *tx)
+        .await?;
+    Ok(tx)
+}
 
 /// The periods a page can look at, with the size of a point of its chart.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -163,10 +182,11 @@ impl RunFilter {
 
 /// The runs a filter keeps, the latest first.
 pub(super) async fn runs(db: &PgPool, filter: &RunFilter, limit: i64) -> Result<Vec<FlowRun>> {
+    let mut tx = bounded(db).await?;
     let mut query = Sql::new("SELECT * FROM flow_runs");
     filter.push(&mut query);
     query.push(" ORDER BY created_at DESC LIMIT ").push_bind(limit);
-    Ok(query.build_query_as().fetch_all(db).await?)
+    Ok(query.build_query_as().fetch_all(&mut *tx).await?)
 }
 
 /// Counts per bucket: what a chart draws.
@@ -210,6 +230,7 @@ pub(super) async fn run_counts(
     bucket: Duration,
     buckets: usize,
 ) -> Result<Counts> {
+    let mut tx = bounded(db).await?;
     let mut query = Sql::new("SELECT ");
     push_bucket(&mut query, "created_at", start, bucket);
     query.push(", count(*), count(*) FILTER (WHERE status = 'failed') FROM flow_runs");
@@ -220,7 +241,7 @@ pub(super) async fn run_counts(
     }
     .push(&mut query);
     query.push(" GROUP BY 1");
-    Ok(spread(query.build_query_as().fetch_all(db).await?, buckets))
+    Ok(spread(query.build_query_as().fetch_all(&mut *tx).await?, buckets))
 }
 
 /// Which log lines a page looks at. `shop` and `text` match a part of the
@@ -281,11 +302,22 @@ const LOGS_WITH_RUNS: &str = " FROM logs l LEFT JOIN flow_runs r ON r.id::text =
 
 /// The log lines a filter keeps, the latest first.
 pub(super) async fn logs(db: &PgPool, filter: &LogFilter, limit: i64) -> Result<Vec<LogLine>> {
-    let mut query = Sql::new("SELECT l.created_at, l.level, l.message, l.flow_run_id, r.shop, r.flow_name");
+    let mut tx = bounded(db).await?;
+    Ok(logs_query("", filter, limit)
+        .build_query_as()
+        .fetch_all(&mut *tx)
+        .await?)
+}
+
+/// The statement of [`logs`], after `prefix` (`EXPLAIN` in the tests).
+fn logs_query(prefix: &str, filter: &LogFilter, limit: i64) -> Sql {
+    let mut query = Sql::new(format!(
+        "{prefix}SELECT l.created_at, l.level, l.message, l.flow_run_id, r.shop, r.flow_name"
+    ));
     query.push(LOGS_WITH_RUNS);
     filter.push(&mut query);
     query.push(" ORDER BY l.created_at DESC LIMIT ").push_bind(limit);
-    Ok(query.build_query_as().fetch_all(db).await?)
+    query
 }
 
 /// The log lines a filter keeps, and those of level `error`, per bucket from `start`.
@@ -296,6 +328,7 @@ pub(super) async fn log_counts(
     bucket: Duration,
     buckets: usize,
 ) -> Result<Counts> {
+    let mut tx = bounded(db).await?;
     let mut query = Sql::new("SELECT ");
     push_bucket(&mut query, "l.created_at", start, bucket);
     query.push(", count(*), count(*) FILTER (WHERE l.level = 'error')");
@@ -307,7 +340,7 @@ pub(super) async fn log_counts(
     }
     .push(&mut query);
     query.push(" GROUP BY 1");
-    Ok(spread(query.build_query_as().fetch_all(db).await?, buckets))
+    Ok(spread(query.build_query_as().fetch_all(&mut *tx).await?, buckets))
 }
 
 /// What the runs of a period add up to.
@@ -318,12 +351,13 @@ pub(super) struct Totals {
 }
 
 pub(super) async fn totals(db: &PgPool, since: DateTime<Utc>) -> Result<Totals> {
+    let mut tx = bounded(db).await?;
     Ok(sqlx::query_as(
         "SELECT count(*) AS runs, count(*) FILTER (WHERE status = 'failed') AS failed \
          FROM flow_runs WHERE created_at >= $1",
     )
     .bind(since)
-    .fetch_one(db)
+    .fetch_one(&mut *tx)
     .await?)
 }
 
@@ -337,6 +371,7 @@ pub(super) struct Queue {
 }
 
 pub(super) async fn queue(db: &PgPool) -> Result<Queue> {
+    let mut tx = bounded(db).await?;
     Ok(sqlx::query_as(
         "SELECT count(*) FILTER (WHERE status IN ('pending', 'sleeping')) AS waiting, \
                 count(*) FILTER (WHERE status = 'running') AS running, \
@@ -345,7 +380,7 @@ pub(super) async fn queue(db: &PgPool) -> Result<Queue> {
                 ) AS oldest_waiting \
          FROM flow_runs WHERE status IN ('pending', 'sleeping', 'running')",
     )
-    .fetch_one(db)
+    .fetch_one(&mut *tx)
     .await?)
 }
 
@@ -361,6 +396,7 @@ pub(super) struct Tally {
 }
 
 async fn tallies(db: &PgPool, column: &str, since: DateTime<Utc>, only_failing: bool, limit: i64) -> Result<Vec<Tally>> {
+    let mut tx = bounded(db).await?;
     let failing = if only_failing {
         " HAVING count(*) FILTER (WHERE status = 'failed') > 0"
     } else {
@@ -377,7 +413,7 @@ async fn tallies(db: &PgPool, column: &str, since: DateTime<Utc>, only_failing: 
     ))
     .bind(since)
     .bind(limit)
-    .fetch_all(db)
+    .fetch_all(&mut *tx)
     .await?)
 }
 
@@ -429,6 +465,7 @@ pub(super) async fn shops(
     state: Option<&str>,
     limit: i64,
 ) -> Result<Vec<Shop>> {
+    let mut tx = bounded(db).await?;
     let mut query = Sql::new(
         "SELECT i.app_handle, i.shop, i.scopes, i.installed_at, i.uninstalled_at, \
                 i.access_token IS NOT NULL AS has_token, \
@@ -464,7 +501,7 @@ pub(super) async fn shops(
     query
         .push(" ORDER BY failed DESC, runs DESC, i.installed_at DESC, i.shop ASC LIMIT ")
         .push_bind(limit);
-    Ok(query.build_query_as().fetch_all(db).await?)
+    Ok(query.build_query_as().fetch_all(&mut *tx).await?)
 }
 
 /// Whether a shop saved the configuration of a provider, and how its last
@@ -479,30 +516,33 @@ pub(super) struct ProviderState {
 }
 
 pub(super) async fn providers_of(db: &PgPool, shop: &str) -> Result<Vec<ProviderState>> {
+    let mut tx = bounded(db).await?;
     Ok(sqlx::query_as(
         "SELECT app_handle, provider_name, last_checked_at, last_check_ok, updated_at \
          FROM provider_configs WHERE shop = $1 ORDER BY app_handle, provider_name",
     )
     .bind(shop)
-    .fetch_all(db)
+    .fetch_all(&mut *tx)
     .await?)
 }
 
 /// The keys of the crons a shop turned off for itself.
 pub(super) async fn crons_off_for(db: &PgPool, shop: &str) -> Result<Vec<String>> {
+    let mut tx = bounded(db).await?;
     let rows: Vec<(String,)> =
         sqlx::query_as("SELECT cron_key FROM cron_overrides WHERE shop = $1 AND enabled = false ORDER BY cron_key")
             .bind(shop)
-            .fetch_all(db)
+            .fetch_all(&mut *tx)
             .await?;
     Ok(rows.into_iter().map(|(key,)| key).collect())
 }
 
 /// How many shops turned each cron off, by cron key.
 pub(super) async fn crons_off(db: &PgPool) -> Result<Vec<(String, i64)>> {
+    let mut tx = bounded(db).await?;
     Ok(
         sqlx::query_as("SELECT cron_key, count(*) FROM cron_overrides WHERE enabled = false GROUP BY cron_key")
-            .fetch_all(db)
+            .fetch_all(&mut *tx)
             .await?,
     )
 }
@@ -515,7 +555,9 @@ pub(super) fn run_id(line: &LogLine) -> Option<Uuid> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testing::TestDb;
     use chrono::TimeZone;
+    use serde_json::Value;
 
     #[test]
     fn a_range_is_named_by_its_key_and_defaults_to_the_last_day() {
@@ -577,5 +619,110 @@ mod tests {
         assert_eq!(shop(None, true).state(), ("installed", &at));
         assert_eq!(shop(None, false).state(), ("pending", &at));
         assert_eq!(shop(Some(later), false).state(), ("uninstalled", &later));
+    }
+
+    #[tokio::test]
+    async fn a_slow_statement_of_the_dashboard_is_cancelled() {
+        let db = TestDb::create().await.unwrap();
+        let mut tx = bounded_by(&db.pool, "100ms").await.unwrap();
+        let error = sqlx::query("SELECT pg_sleep(5)").execute(&mut *tx).await.unwrap_err();
+        // query_canceled
+        let code = error.as_database_error().and_then(|error| error.code());
+        assert_eq!(code.as_deref(), Some("57014"), "{error}");
+        drop(tx);
+
+        let mut tx = bounded(&db.pool).await.unwrap();
+        let (timeout,): (String,) = sqlx::query_as("SHOW statement_timeout")
+            .fetch_one(&mut *tx)
+            .await
+            .unwrap();
+        assert_eq!(timeout, STATEMENT_TIMEOUT);
+        drop(tx);
+        db.cleanup().await.unwrap();
+    }
+
+    /// The `(node type, relation)` of every node of a plan that reads a table.
+    fn scans(plan: &Value, found: &mut Vec<(String, String)>) {
+        match plan {
+            Value::Object(node) => {
+                if let (Some(Value::String(kind)), Some(Value::String(relation))) =
+                    (node.get("Node Type"), node.get("Relation Name"))
+                {
+                    found.push((kind.clone(), relation.clone()));
+                }
+                node.values().for_each(|child| scans(child, found));
+            }
+            Value::Array(items) => items.iter().for_each(|child| scans(child, found)),
+            _ => {}
+        }
+    }
+
+    /// The plan PostgreSQL chooses for the statement of the logs page.
+    async fn logs_plan(db: &TestDb, filter: &LogFilter) -> (String, Vec<(String, String)>) {
+        let (plan,): (Value,) = logs_query("EXPLAIN (FORMAT JSON) ", filter, 50)
+            .build_query_as()
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+        let mut found = Vec::new();
+        scans(&plan, &mut found);
+        (plan.to_string(), found)
+    }
+
+    #[tokio::test]
+    async fn the_logs_page_reads_through_its_indexes() {
+        let db = TestDb::create().await.unwrap();
+        // A month of lines of a few thousand runs, enough for a scan of the
+        // table to cost more than an index.
+        sqlx::raw_sql(
+            "INSERT INTO flow_runs (shop, flow_name, created_at) \
+               SELECT 'shop.myshopify.com', 'flow', now() - n * interval '10 minutes' \
+               FROM generate_series(1, 4000) AS n; \
+             INSERT INTO logs (flow_run_id, level, message, created_at) \
+               SELECT id::text, CASE WHEN random() < 0.05 THEN 'error' ELSE 'info' END, 'line', \
+                      created_at + k * interval '1 second' \
+               FROM flow_runs, generate_series(1, 20) AS k; \
+             ANALYZE flow_runs; ANALYZE logs",
+        )
+        .execute(&db.pool)
+        .await
+        .unwrap();
+
+        let latest = LogFilter {
+            since: Some(Utc::now() - Duration::hours(2)),
+            ..LogFilter::default()
+        };
+        let (plan, found) = logs_plan(&db, &latest).await;
+        assert!(plan.contains("logs_created_at_idx"), "{plan}");
+        assert!(!found.contains(&("Seq Scan".into(), "logs".into())), "{plan}");
+
+        let errors = LogFilter {
+            level: Some("error".into()),
+            ..latest
+        };
+        let (plan, found) = logs_plan(&db, &errors).await;
+        assert!(plan.contains("logs_level_created_at_idx"), "{plan}");
+        assert!(!found.contains(&("Seq Scan".into(), "logs".into())), "{plan}");
+
+        // A line finds its run through the index of the text of the id. On a
+        // table this small PostgreSQL prefers to hash the runs, so the other
+        // joins are ruled out to show that the index can serve this one.
+        let mut tx = db.pool.begin().await.unwrap();
+        sqlx::raw_sql(
+            "SET LOCAL enable_hashjoin = off; SET LOCAL enable_mergejoin = off; SET LOCAL enable_seqscan = off",
+        )
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+        let (join,): (Value,) = sqlx::query_as(
+            "EXPLAIN (FORMAT JSON) SELECT r.shop FROM logs l LEFT JOIN flow_runs r ON r.id::text = l.flow_run_id \
+             WHERE l.created_at >= now() - interval '1 hour'",
+        )
+        .fetch_one(&mut *tx)
+        .await
+        .unwrap();
+        drop(tx);
+        assert!(join.to_string().contains("flow_runs_id_text_idx"), "{join}");
+        db.cleanup().await.unwrap();
     }
 }

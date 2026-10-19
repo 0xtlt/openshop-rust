@@ -20,7 +20,7 @@ use crate::{
 use gloo_timers::callback::Timeout;
 use leptos::{prelude::*, task::spawn_local};
 use leptos_router::hooks::use_params_map;
-use log_query::{LevelCounts, all_logs_url, count_levels, logs_url, note_logs, page_url, parse_levels, toggle_level};
+use log_query::{LevelCounts, count_levels, logs_url, note_logs, page_url, parse_levels, toggle_level};
 use logs_section::LogsSection;
 use output::{OutputModal, build_step_rows, step_row};
 use run_action_modals::{ActionFuture, RunActionModals};
@@ -48,6 +48,8 @@ pub fn FlowRun() -> impl IntoView {
     let run = RwSignal::new(None::<RunDetail>);
     let filtered_logs = RwSignal::new(Vec::<LogEntry>::new());
     let total_logs = RwSignal::new(0_u64);
+    // The server sends the newest lines first; older ones are left to the export.
+    let has_more_logs = RwSignal::new(false);
     let query = RwSignal::new(initial_params.get("q").unwrap_or_default().to_string());
     let levels = RwSignal::new(parse_levels(initial_params.get("levels")));
     let show_help = RwSignal::new(false);
@@ -92,15 +94,10 @@ pub fn FlowRun() -> impl IntoView {
                     new_log_ids.set(fresh);
                     Timeout::new(5_000, move || new_log_ids.set(HashSet::new())).forget();
                 }
+                set_if_changed(level_counts, count_levels(&data.level_counts));
+                set_if_changed(has_more_logs, data.next.is_some());
                 set_if_changed(filtered_logs, data.logs);
                 set_if_changed(total_logs, data.total);
-            }
-            // All logs once more for the level counters, in the same cycle.
-            if let Ok(response) = api_fetch(&all_logs_url(&id)).await
-                && response.ok
-                && let Ok(data) = response.json::<LogsResponse>()
-            {
-                set_if_changed(level_counts, count_levels(&data.logs));
             }
         });
     };
@@ -280,6 +277,7 @@ pub fn FlowRun() -> impl IntoView {
                     level_counts
                     filtered_logs
                     total_logs
+                    has_more_logs
                     new_log_ids
                     show_help
                     on_query_input=Callback::new(handle_query_input)

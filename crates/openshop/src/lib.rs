@@ -432,7 +432,7 @@ pub use openshop_macros::graphql;
 /// Every other entry is a setting, written `name: value` and passed to the
 /// method of that name of [`OpenShopBuilder`](builder::OpenShopBuilder): `crons`, `on_error`, `mcp`,
 /// `shopify`, `worker`, `retry_policy`, `builtin_pages`, `admin_menu`, `admin_ui`,
-/// `max_request_body_bytes`, `ops_password`, `sentry`… A value can fail with `?`, such as one read from
+/// `max_request_body_bytes`, `ops_password`, `log_retention`, `sentry`… A value can fail with `?`, such as one read from
 /// the environment (`shopify: shopify_apps()?`): the error is the one
 /// `APP.config()` and `APP.main()` return.
 ///

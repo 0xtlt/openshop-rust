@@ -47,6 +47,11 @@ pub const FRAMEWORK_MIGRATIONS: &[FrameworkMigration] = &[
         name: "openshop_queue_indexes",
         sql: include_str!("../../migrations/0002_openshop_queue_indexes.sql"),
     },
+    FrameworkMigration {
+        id: "0004_openshop_logs_indexes",
+        name: "openshop_logs_indexes",
+        sql: include_str!("../../migrations/0004_openshop_logs_indexes.sql"),
+    },
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]

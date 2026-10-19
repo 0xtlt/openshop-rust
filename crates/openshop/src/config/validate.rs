@@ -248,6 +248,7 @@ pub fn validate_openshop_config(config: &OpenShopConfig) -> Result<()> {
     resolve_route_paths("proxy", config.proxies.keys().map(String::as_str))?;
 
     validate_worker_config(&config.worker)?;
+    assert_positive_duration(config.log_retention, "logRetention")?;
     validate_retry_policy(&config.retry_policy, "retryPolicy")?;
     build_mcp_registry(config.mcp.as_ref(), &create_core_mcp_capabilities())?;
     Ok(())

@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+- The logs of a run are indexed, bounded and paged. The framework schema gets
+  a migration, `openshop_logs_indexes` (also added to the three templates):
+  indexes on `logs (created_at)`, on `logs (level, created_at)` and on
+  `flow_runs ((id::text))`, which the operator dashboard reads the latest
+  lines and joins a line to its run through. Nothing else changes in the
+  table, which the TypeScript runtime shares: `flow_run_id` stays text, with
+  no foreign key. The statements of the dashboard are cancelled after 10
+  seconds instead of running for as long as the database lets them.
+  `GET /api/runs/:id/logs` returns the newest 1,000 lines (`limit` up to
+  5,000) with a `next` cursor to pass as `cursor` for the following page, and
+  `levelCounts`, the lines of each level in the run, which the admin UI reads
+  instead of fetching the whole run a second time; levels and time bounds are
+  filtered by the database, and the text filters on the lines as they are read.
+  The export is streamed instead of built in memory. The tool
+  `openshop.logs.search` is unchanged. The admin UI bundle is rebuilt.
+- The new `log_retention` setting of `app!` (a `Duration`, or `None`) has the
+  workers remove the log lines older than it, once an hour, 5,000 at a time.
+  It is unset by default: the lines are kept as before.
+
 - `openshop init` makes a project from one of three templates: `minimal`, one
   provider and one flow, as before; `custom`, a custom app with every building
   block and a page of its own next to the built-in admin; `public`, a public

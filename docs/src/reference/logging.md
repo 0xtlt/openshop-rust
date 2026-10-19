@@ -145,7 +145,28 @@ directly to standard output.
 
 ## Retention and export
 
-OpenShop does not currently apply an automatic retention policy to flow logs.
-Plan database retention, backup, and deletion according to application
-requirements. Deleting a run through the Admin API deletes its logs. Export is
-intended for diagnosis, not as a durable analytics pipeline.
+OpenShop keeps flow logs forever unless the application sets
+[`log_retention`](configuration.md#settings), the age after which the workers
+remove a log line:
+
+```rust
+openshop::app! {
+    // …
+    log_retention: std::time::Duration::from_secs(30 * 24 * 3600),
+}
+```
+
+A worker (`dev`, `start`, and `worker`) removes the lines older than that once
+an hour, 5,000 at a time with a short pause between two statements, and at
+most 1,000,000 per sweep: a larger backlog goes on at the next sweep. Several
+workers can purge at the same time. Only the `logs` table is purged; runs and
+step results stay. The default is to keep everything, since removing data is
+not something an upgrade should start doing: set a retention that fits your
+needs, and plan backups and deletion with the rest of your policy. Deleting a
+run through the Admin API deletes its logs.
+
+The logs of a run are read and exported without holding the run in memory. The
+logs endpoint returns the newest 1,000 lines by default, 5,000 at most, with a
+`next` cursor for the following page; the export streams the whole run. See
+[Run logs](admin-api.md#run-logs). Export is intended for diagnosis, not as a
+durable analytics pipeline.

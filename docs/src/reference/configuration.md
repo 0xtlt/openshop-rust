@@ -115,6 +115,7 @@ the environment (`shopify: shopify_apps()?`): the error is the one
 | `admin_ui` | `UiSource` | The admin UI bundle built into the framework; see [Custom admin pages](custom-admin-pages.md#serve-the-bundle) |
 | `max_request_body_bytes` | `usize` | `2 * 1024 * 1024` (2 MB); larger request bodies are answered with `413` |
 | `ops_password` | `Option<String>`, or a `String`: the password of the [operator dashboard](operator-dashboard.md) | No dashboard: `/ops` answers `404` |
+| `log_retention` | `Option<Duration>`, or a `Duration`: the age after which workers remove a log line, in batches; see [Retention and export](logging.md#retention-and-export). Zero is refused with `logRetention must be a positive number` | `None`: log lines are kept forever |
 | `sentry` | `Option<String>`, or a `String`: the DSN of the project failures are reported to, or a `SentryConfig` that also names the environment and the release; see [Sentry](sentry.md) | Nothing is reported |
 | `client_credentials_shop` | `Option<String>`, or a `String`: the one `*.myshopify.com` development store that work no Shopify request vouches for (flows, crons, routes, webhook handlers, proxies, the MCP tool) may get an access token for with the [client credentials grant](authentication.md#client-credentials-grant) without an installation row. A value that is not a shop domain stops the application with `[openshop] client_credentials_shop must be a *.myshopify.com domain` | Only a signed launch, a session token whose exchange Shopify refused, or the renewal of a stored token asks |
 
@@ -179,6 +180,7 @@ configuration is built.
 | `.admin_ui(ui)` | `UiSource` | The admin UI bundle built into the framework; see [Custom admin pages](custom-admin-pages.md#serve-the-bundle) |
 | `.max_request_body_bytes(bytes)` | `usize` | `2 * 1024 * 1024` (2 MB); larger request bodies are answered with `413` |
 | `.ops_password(password)` | `Option<String>` or `String` | No [operator dashboard](operator-dashboard.md) |
+| `.log_retention(retention)` | `Option<Duration>` or `Duration` | Log lines are kept forever |
 | `.sentry(sentry)` | `Option<String>`, `String`, `&str` or `SentryConfig`; needs the `sentry` feature, on by default | Nothing is reported to [Sentry](sentry.md) |
 | `.client_credentials_shop(shop)` | `Option<String>` or `String` | Background work asks no token for a shop without a row |
 | `.worker(config)` | `WorkerConfig` | See [Worker defaults](#worker-defaults) |
@@ -207,7 +209,8 @@ Calling the other methods again:
 - `.builtin_pages(…)` and `.builtin_page(…)` merge with earlier calls; later values win.
 - The remaining settings (`.shopify(…)`, `.worker(…)`, `.retry_policy(…)`,
   `.on_error(…)`, `.admin_menu(…)`, `.admin_ui(…)`,
-  `.max_request_body_bytes(…)`, `.ops_password(…)`, `.sentry(…)`) replace the
+  `.max_request_body_bytes(…)`, `.ops_password(…)`, `.log_retention(…)`,
+  `.sentry(…)`) replace the
   earlier value.
 
 The fields of `OpenShopConfig` are public. `OpenShop::new` validates the

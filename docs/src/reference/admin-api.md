@@ -139,11 +139,27 @@ bulk delete, IDs that are unknown, active, or not UUIDs count as skipped.
 
 | Method and path | Request | Response |
 | --- | --- | --- |
-| `GET /api/runs/:id/logs` | `q`, `levels` | `{ logs, total }`, newest first, with matching context markers. |
-| `GET /api/runs/:id/logs/export` | `format`, `q`, `levels` | Downloadable JSON or CSV. |
+| `GET /api/runs/:id/logs` | `q`, `levels`, `limit`, `cursor` | `{ logs, total, levelCounts, next }`, newest first, with matching context markers. |
+| `GET /api/runs/:id/logs/export` | `format`, `q`, `levels` | Downloadable JSON or CSV, streamed. |
 
 A log has the keys `id`, `flowRunId`, `level`, `message`, `payload`, and
-`createdAt`. `total` is the number of log lines of the run before filtering.
+`createdAt`. `total` is the number of log lines of the run before filtering,
+and `levelCounts` the number of each level (`{ "info": 4, "error": 1 }`) in
+the whole run.
+
+A page holds `limit` lines: 1,000 when it is absent or not a number, 5,000 at
+most. `next` is a cursor, `null` on the last page; pass it as `cursor` with the
+same `q` and `levels` to get the following lines. Lines are ordered by
+`(createdAt, id)`, newest first, so pages neither repeat nor skip a line. A
+cursor that is not one answers `400` with `Invalid cursor`. With a text filter
+a page stops after a whole match and its context, so it can hold more than
+`limit` lines by the context lines of its last match. Levels and time bounds
+are applied by the database; the text of the filters is checked on the lines as
+they are read, so a rare match in a long run still reads the run, a chunk at a
+time. `before` context is limited to 1,000 lines.
+
+The export is written as the lines are read, 500 at a time, and is never held
+whole by the server: it has no `Content-Length`.
 
 `levels` is a comma-separated subset of `info,warn,error`; all three are enabled by
 default. `q` uses the [log query syntax](logging.md#log-query-syntax), including

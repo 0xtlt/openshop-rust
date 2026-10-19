@@ -4,6 +4,7 @@ pub mod abort;
 pub mod backoff;
 pub mod dispatch;
 pub mod errors;
+pub mod retention;
 pub mod runner;
 pub mod scheduler;
 pub mod step;
