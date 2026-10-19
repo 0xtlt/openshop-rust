@@ -299,14 +299,11 @@ fn toml_string(value: &str) -> String {
 }
 
 /// `git = …` and the tag, branch or rev of a git source as `cargo metadata`
-/// prints it: `<url>?<kind>=<name>`, then `#<commit>` once it is locked. Cargo
-/// does not escape the name, which may hold `&`, `#`, `%` or `/`: it is the
-/// rest of the query, not a list of pairs, and the fragment is a commit only.
+/// prints the source of a declared dependency: `<url>?<kind>=<name>`. Cargo
+/// does not escape the name, which may hold `&`, `#`, `%` or `/`, and does not
+/// add the locked commit to a declared dependency (only a resolved package id
+/// has it): the name is the whole rest of the query, kept as it is.
 fn git_options(source: &str) -> Vec<String> {
-    let locked = source
-        .rsplit_once('#')
-        .filter(|(_, commit)| commit.len() == 40 && commit.chars().all(|character| character.is_ascii_hexdigit()));
-    let source = locked.map_or(source, |(source, _)| source);
     let (url, reference) = source.split_once('?').unwrap_or((source, ""));
     let mut options = vec![format!("git = {}", toml_string(url))];
     if let Some((kind @ ("tag" | "branch" | "rev"), name)) = reference.split_once('=') {
@@ -755,25 +752,30 @@ mod tests {
     #[test]
     fn keeps_the_reference_of_a_git_source_as_declared() {
         let url = "https://github.com/0xtlt/openshop-rust";
-        let commit = "8c520e677ad3c1fdecbb970bad81a12b328a168f";
-        let rev = format!(r#"rev = "{commit}""#);
+        let commit = "0123456789abcdef0123456789abcdef01234567";
         for (source, expected) in [
-            (format!("{url}?tag=v1.2.3"), r#"tag = "v1.2.3""#),
-            (format!("{url}?rev={commit}#{commit}"), rev.as_str()),
-            (format!("{url}?branch=feature/r&d"), r#"branch = "feature/r&d""#),
+            (format!("{url}?tag=v1.2.3"), r#"tag = "v1.2.3""#.to_string()),
+            (format!("{url}?rev={commit}"), format!(r#"rev = "{commit}""#)),
             (
-                format!("{url}?branch=a&b=c&tag=d#{commit}"),
-                r#"branch = "a&b=c&tag=d""#,
+                format!("{url}?branch=feature/r&d"),
+                r#"branch = "feature/r&d""#.to_string(),
             ),
-            (format!("{url}?branch=50%25 off#1"), r#"branch = "50%25 off#1""#),
-            (format!("{url}?branch=fix#12"), r#"branch = "fix#12""#),
-            (format!("{url}?branch=fix#12#{commit}"), r#"branch = "fix#12""#),
+            (
+                format!("{url}?branch=a&b=c&tag=d"),
+                r#"branch = "a&b=c&tag=d""#.to_string(),
+            ),
+            (
+                format!("{url}?branch=50%25 off#1"),
+                r#"branch = "50%25 off#1""#.to_string(),
+            ),
+            (format!("{url}?branch=fix#12"), r#"branch = "fix#12""#.to_string()),
+            // A branch that ends like a commit hash is still a branch name.
+            (
+                format!("{url}?branch=fix#{commit}"),
+                format!(r#"branch = "fix#{commit}""#),
+            ),
         ] {
-            assert_eq!(
-                git_options(&source),
-                [format!("git = {url:?}"), expected.to_string()],
-                "{source}"
-            );
+            assert_eq!(git_options(&source), [format!("git = {url:?}"), expected], "{source}");
         }
         // Into the manifest of the bundle, from what `cargo metadata` prints.
         let declared = json!({
