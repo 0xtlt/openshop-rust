@@ -38,24 +38,39 @@ pub fn parse_env_file(content: &str) -> Vec<(String, String)> {
     content.lines().filter_map(parse_env_line).collect()
 }
 
-/// Loads `<cwd>/.env`. Variables already set in the environment win.
+/// Loads `<cwd>/.env`. Variables already set in the environment win. Returns
+/// how many it set.
 ///
-/// Call this before starting any thread that reads the environment; the CLI does
-/// so first thing in `dev`.
-pub fn load_env_file(cwd: &Path) {
+/// Setting an environment variable is only sound while no other thread reads
+/// the environment: call this before the async runtime starts. `App::main`
+/// does so for `dev`, and then there is nothing left to set.
+pub fn load_env_file(cwd: &Path) -> usize {
     let Ok(content) = std::fs::read_to_string(cwd.join(".env")) else {
-        return;
+        return 0;
     };
+    let mut set = 0;
     for (key, value) in parse_env_file(&content) {
         if std::env::var_os(&key).is_none() {
             set_env(&key, &value);
+            set += 1;
         }
+    }
+    set
+}
+
+/// Loads the `.env` file of the project for the `dev` command, and only for it.
+/// Returns how many variables it set.
+pub fn load_dev_env(args: &[String], cwd: &Path) -> usize {
+    match args.first().map(String::as_str) {
+        Some("dev") => load_env_file(cwd),
+        _ => 0,
     }
 }
 
 #[allow(unsafe_code)]
 fn set_env(key: &str, value: &str) {
-    // SAFETY: called from the CLI entry point before worker tasks read the environment.
+    // SAFETY: called before the runtime starts, so that no other thread reads the environment.
+    // A caller that runs its own runtime is told so by `run_with_args`.
     unsafe { std::env::set_var(key, value) }
 }
 
@@ -89,5 +104,34 @@ mod tests {
                 ("B".to_string(), "'".to_string())
             ]
         );
+    }
+
+    #[test]
+    fn only_dev_loads_the_env_file_and_sets_what_is_missing() {
+        let dir = std::env::temp_dir().join(format!("openshop-env-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join(".env"),
+            "OPENSHOP_TEST_ENV_NEW=from-file\nOPENSHOP_TEST_ENV_KEPT=from-file\n",
+        )
+        .unwrap();
+        // SAFETY: names no other test or code reads.
+        #[allow(unsafe_code)]
+        unsafe {
+            std::env::set_var("OPENSHOP_TEST_ENV_KEPT", "from-process")
+        };
+        let args = |args: &[&str]| args.iter().map(|arg| arg.to_string()).collect::<Vec<_>>();
+
+        for command in [&["start"][..], &["worker"], &["migrate"], &[]] {
+            assert_eq!(load_dev_env(&args(command), &dir), 0, "{command:?}");
+        }
+        assert!(std::env::var_os("OPENSHOP_TEST_ENV_NEW").is_none());
+
+        assert_eq!(load_dev_env(&args(&["dev"]), &dir), 1);
+        assert_eq!(std::env::var("OPENSHOP_TEST_ENV_NEW").unwrap(), "from-file");
+        assert_eq!(std::env::var("OPENSHOP_TEST_ENV_KEPT").unwrap(), "from-process");
+        // Loaded once: a second pass, as the one in `run`, has nothing left to set.
+        assert_eq!(load_dev_env(&args(&["dev"]), &dir), 0);
+        std::fs::remove_dir_all(dir).ok();
     }
 }

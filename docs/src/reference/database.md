@@ -412,7 +412,7 @@ inside them: they retain a PostgreSQL connection and may keep locks open.
 
 ## Framework tables
 
-The framework schema consists of nine tables. Every table has a UUID `id`
+The framework schema consists of ten tables. Every table has a UUID `id`
 primary key. Rows are scoped by `app_handle` (default `'default'`) and `shop`
 unless noted.
 
@@ -423,6 +423,7 @@ unless noted.
 | `step_results` | Checkpoints; scoped by `flow_run_id` | `step_name`, `attempt`, `status`, `output`, `error`, `duration_ms`, `created_at` | `(flow_run_id, step_name, attempt)` |
 | `provider_configs` | Saved provider configuration | `provider_name`, `config`, `last_checked_at`, `last_check_ok`, `updated_at` | `(app_handle, shop, provider_name)` |
 | `cron_overrides` | Per-shop cron enabled state | `cron_key`, `enabled`, `updated_at` | `(app_handle, shop, cron_key)` |
+| `cron_ticks` | Occurrences of a cron already queued for a shop, so that several schedulers queue each once; rows older than a day are removed. Rust only: the TypeScript runtime neither reads nor writes it | `cron_key`, `scheduled_at` | `(app_handle, shop, cron_key, scheduled_at)` |
 | `logs` | Flow log lines; scoped by `flow_run_id` | `level`, `message`, `payload`, `created_at` | — |
 | `mcp_tokens` | MCP token hashes and metadata | `name`, `token_id`, `token_hash`, `token_fingerprint`, `status`, `expires_at`, `revoked_at`, `last_used_at`, `created_at`, `updated_at` | `(token_id)` |
 | `mcp_permission_grants` | Permissions granted to MCP tokens | `token_id`, `permission_key`, `granted`, `created_at`, `updated_at` | `(app_handle, shop, token_id, permission_key)` |

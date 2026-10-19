@@ -345,6 +345,7 @@ with builder methods.
 | `flow` | `Cron::new` | registered flow key, such as `sync_orders::NAME` | Required |
 | `input` | `.input(…)` | JSON object (`serde_json::Value`) | `{}` |
 | `shops` | `.all_shops()`, `.shop(…)`, or `.shops([…])` | `CronShops`; see [Cron shop targeting](#cron-shop-targeting) | `CronShops::Global`: the cron runs once, for no shop |
+| `timezone` | `.timezone(…)` | IANA name, such as `"Europe/Paris"` | UTC |
 
 ```rust,ignore
 Cron::new("0 2 * * *", sync_orders::NAME)
@@ -355,9 +356,17 @@ Cron::new("0 2 * * *", sync_orders::NAME)
 
 The schedule is a five-field cron expression, a six-field expression with
 leading seconds, or one of the nicknames `@yearly`, `@annually`, `@monthly`,
-`@weekly`, `@daily`, and `@hourly`. It is evaluated in the local time zone of
-the process that runs the scheduler. An invalid expression is rejected when the
-configuration is built.
+`@weekly`, `@daily`, and `@hourly`. It is evaluated in UTC, whatever the time
+zone of the host, or in the `timezone` of the cron, daylight saving time
+included: `Cron::new("0 9 * * *", sync_orders::NAME).timezone("Europe/Paris")`
+fires at 09:00 in Paris. An invalid expression or time zone is rejected when
+the configuration is built.
+
+A process that was stopped or suspended does not catch up on what it missed.
+When it wakes after several occurrences went by, it fires the latest one, once.
+A scheduler that stops, because its schedule has no occurrence left or because
+it panicked, logs an error, reports it to Sentry, and starts again after a
+wait that grows from one second to five minutes.
 
 The `input` of a cron is checked against the [input](flows.md#input) of its
 flow when the configuration is built. An input the flow would refuse makes
@@ -367,7 +376,10 @@ A cron without `input` is checked as `{}`: give an input to the cron of a flow
 that requires one.
 
 `Cron::key()` returns `<flow>:<schedule>`, the identifier used by per-shop
-overrides. An `input` that is not a JSON object is ignored.
+overrides. Changing the schedule of a cron changes its key: the overrides of the
+old key are never read again, and `/api/crons/toggle` and the MCP tool answer
+`Cron not found` to a key the application does not declare. An `input` that is
+not a JSON object is ignored.
 
 ## Admin pages
 

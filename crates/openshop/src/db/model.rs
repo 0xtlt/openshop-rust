@@ -300,6 +300,10 @@ impl Table {
         &self.columns
     }
 
+    pub(super) fn columns_mut(&mut self) -> &mut [ColumnDef] {
+        &mut self.columns
+    }
+
     pub fn indexes(&self) -> &[IndexDef] {
         &self.indexes
     }

@@ -19,7 +19,7 @@ use chrono::Utc;
 use sha2::{Digest, Sha256};
 use sqlx::{Executor, PgPool};
 
-use super::diff::{self, SNAPSHOT_FILE, SchemaSnapshot};
+use super::diff::{self, MANUAL_TODO, SNAPSHOT_FILE, SchemaSnapshot};
 use super::model::Table;
 
 pub const MIGRATIONS_DIR: &str = "migrations";
@@ -48,9 +48,19 @@ pub const FRAMEWORK_MIGRATIONS: &[FrameworkMigration] = &[
         sql: include_str!("../../migrations/0002_openshop_queue_indexes.sql"),
     },
     FrameworkMigration {
+        id: "0003_openshop_cron_ticks",
+        name: "openshop_cron_ticks",
+        sql: include_str!("../../migrations/0003_openshop_cron_ticks.sql"),
+    },
+    FrameworkMigration {
         id: "0005_openshop_run_lease",
         name: "openshop_run_lease",
         sql: include_str!("../../migrations/0005_openshop_run_lease.sql"),
+    },
+    FrameworkMigration {
+        id: "0006_openshop_drop_flow_runs_status_index",
+        name: "openshop_drop_flow_runs_status_index",
+        sql: include_str!("../../migrations/0006_openshop_drop_flow_runs_status_index.sql"),
     },
 ];
 
@@ -172,6 +182,49 @@ pub async fn get_client_migration_status(pool: &PgPool, cwd: &Path) -> Result<Mi
     Ok(status)
 }
 
+/// Refuses to go on while `./migrations` holds a migration the database has not
+/// applied, or lacks part of the framework schema. The processes that serve and
+/// run flows start with it: against a schema that is behind, they fail at the
+/// first statement that needs what is missing, or worse.
+///
+/// Without a `./migrations` folder there is nothing to compare the database
+/// with, and it passes. It reads the database and writes nothing.
+pub async fn assert_migrated(pool: &PgPool, cwd: &Path) -> Result<()> {
+    let Some(folder) = resolve_client_migrations_folder(cwd) else {
+        return Ok(());
+    };
+    let files = read_migration_files(&folder)?;
+    if !missing_framework_migrations(&files).is_empty() {
+        bail!(
+            "[openshop] Not starting: the current OpenShop schema is not covered by ./migrations. {GENERATE_THEN_MIGRATE}"
+        );
+    }
+
+    let applied: Vec<(String,)> = match sqlx::query_as(&format!("SELECT tag FROM {MIGRATIONS_TABLE}"))
+        .fetch_all(pool)
+        .await
+    {
+        Ok(applied) => applied,
+        // `undefined_table`: no migration was ever applied.
+        Err(sqlx::Error::Database(error)) if error.code().as_deref() == Some("42P01") => Vec::new(),
+        Err(error) => return Err(error.into()),
+    };
+    let pending: Vec<&str> = files
+        .iter()
+        .map(|file| file.tag.as_str())
+        .filter(|tag| !applied.iter().any(|(applied,)| applied == tag))
+        .collect();
+    if !pending.is_empty() {
+        bail!(
+            "[openshop] Not starting: {} migration{} not applied ({}). Run `migrate` first.",
+            pending.len(),
+            if pending.len() == 1 { " is" } else { "s are" },
+            pending.join(", ")
+        );
+    }
+    Ok(())
+}
+
 const NO_MIGRATIONS: &str = "[openshop] No client migrations found in ./migrations. Run `openshop migrate generate`, review the generated SQL, then run `openshop migrate`.";
 
 /// Applies pending migrations, each in its own transaction. Returns the applied tags.
@@ -221,6 +274,16 @@ fn covered_framework_ids(files: &[MigrationFile]) -> Vec<String> {
         .flat_map(|file| file.sql.lines())
         .filter_map(|line| line.trim().strip_prefix(FRAMEWORK_MARKER))
         .map(|id| id.trim().to_string())
+        .collect()
+}
+
+/// The changes to write by hand that the files already list as a `-- TODO:` line.
+fn listed_todos(files: &[MigrationFile]) -> Vec<String> {
+    files
+        .iter()
+        .flat_map(|file| file.sql.lines())
+        .filter_map(|line| line.trim().strip_prefix(MANUAL_TODO))
+        .map(|explanation| explanation.trim().to_string())
         .collect()
 }
 
@@ -328,13 +391,33 @@ pub fn generate_migrations(
     let files = read_migration_files(&folder)?;
     let missing = missing_framework_migrations(&files);
     let (previous, recorded) = baseline(&folder, &files, models)?;
-    let changes = diff::diff(&previous, models);
+    // A change to write by hand is not recorded until the author says the
+    // migrations write it, with `--manual-done`. It is not written to a file
+    // twice: a file already lists it.
+    let accepted = args.iter().any(|arg| arg == "--manual-done");
+    let listed = listed_todos(&files);
+    let all = diff::diff(&previous, models);
+    let changes = diff::without_manual(all.clone(), |explanation| {
+        accepted || listed.iter().any(|todo| todo == explanation)
+    });
+    let waiting: Vec<String> = if accepted {
+        Vec::new()
+    } else {
+        all.iter()
+            .filter(|change| !changes.contains(change))
+            .filter_map(|change| change.warning())
+            .map(|warning| format!("still to write by hand: {warning}"))
+            .collect()
+    };
     // A project without models and without snapshot does not get one.
     let new_snapshot = (recorded || !models.is_empty())
-        .then(|| SchemaSnapshot::of(models).to_json())
+        .then(|| diff::recorded(&previous, models, accepted).to_json())
         .filter(|json| !recorded || *json != previous.to_json());
 
-    let mut generated = GeneratedMigrations::default();
+    let mut generated = GeneratedMigrations {
+        warnings: waiting,
+        ..Default::default()
+    };
     if missing.is_empty() && changes.is_empty() && name.is_none() && new_snapshot.is_none() {
         return Ok(generated);
     }
@@ -371,10 +454,9 @@ pub fn generate_migrations(
             ),
         )?;
         generated.files.push(path);
-        generated.warnings = changes
-            .iter()
-            .filter_map(|change| change.warning().map(str::to_string))
-            .collect();
+        generated
+            .warnings
+            .extend(changes.iter().filter_map(|change| change.warning().map(str::to_string)));
     } else if let Some(name) = name {
         let path = next_path(&name);
         std::fs::write(&path, format!("-- {name}\n-- Write your schema changes below.\n"))?;
@@ -418,8 +500,13 @@ pub fn check_migrations(cwd: &Path, models: &[Table]) -> Result<()> {
         .into_iter()
         .map(|change| format!("\n  - {change}"))
         .collect();
+    let by_hand = if pending.iter().any(|change| matches!(change, diff::Change::Manual(_))) {
+        "\nA change to write by hand stays pending until the migrations write it and `migrate generate --manual-done` records it."
+    } else {
+        ""
+    };
     bail!(
-        "[openshop] The models changed since the last generated migration:{}\n{GENERATE_THEN_MIGRATE}",
+        "[openshop] The models changed since the last generated migration:{}\n{GENERATE_THEN_MIGRATE}{by_hand}",
         changes.concat()
     );
 }
@@ -839,5 +926,54 @@ mod tests {
         assert!(assert_unmodified(&file, &[("0001_a".into(), checksum("SELECT 2;"))]).unwrap());
         let error = assert_unmodified(&file, &[("0001_a".into(), checksum("SELECT 1;"))]).unwrap_err();
         assert!(error.to_string().contains("was modified after it was applied"));
+    }
+
+
+    #[test]
+    fn a_change_to_write_by_hand_is_not_recorded_until_the_author_accepts_it() {
+        use crate::db::{ColumnDef, Table};
+
+        let dir = temp_dir("manual");
+        let folder = dir.join(MIGRATIONS_DIR);
+        let plain = Table::conventional("reviews").with_column(ColumnDef::new("code", "text"));
+        let keyed = Table::conventional("reviews").with_column(ColumnDef::new("code", "text").primary_key());
+        let recorded = |dir: &Path| std::fs::read_to_string(dir.join(MIGRATIONS_DIR).join(SNAPSHOT_FILE)).unwrap();
+        generate(&dir, std::slice::from_ref(&plain));
+        let first = recorded(&dir);
+
+        // The migration tells what to write, and the snapshot keeps the old key.
+        let second = generate(&dir, std::slice::from_ref(&keyed));
+        let [path] = &second.files[..] else {
+            panic!("{:?}", second.files)
+        };
+        assert!(std::fs::read_to_string(path).unwrap().contains("-- TODO: the primary key of reviews changed: code is now part of the primary key"));
+        assert_eq!(recorded(&dir), first);
+        let error = check_migrations(&dir, std::slice::from_ref(&keyed)).unwrap_err().to_string();
+        assert!(error.contains("the primary key of reviews changed: code is now part of the primary key"), "{error}");
+        assert!(error.contains("--manual-done"), "{error}");
+
+        // Asked again, it does not write the same TODO twice, and says what is left.
+        let third = generate(&dir, std::slice::from_ref(&keyed));
+        assert!(third.files.is_empty() && third.snapshot.is_none(), "{third:?}");
+        assert!(third.warnings[0].starts_with("still to write by hand: the primary key of reviews"));
+        assert!(check_migrations(&dir, std::slice::from_ref(&keyed)).is_err());
+
+        // Written by the author, who says so: the models are recorded.
+        let accepted = generate_migrations(&dir, &["--manual-done".to_string()], false, std::slice::from_ref(&keyed))
+            .unwrap();
+        assert!(accepted.files.is_empty() && accepted.warnings.is_empty(), "{accepted:?}");
+        assert_eq!(accepted.snapshot, Some(folder.join(SNAPSHOT_FILE)));
+        check_migrations(&dir, std::slice::from_ref(&keyed)).unwrap();
+        assert_eq!(generate(&dir, std::slice::from_ref(&keyed)), GeneratedMigrations::default());
+
+        // The same change again later is a new change: what was accepted before does not cover it.
+        let back = generate(&dir, std::slice::from_ref(&plain));
+        assert_eq!(back.files.len(), 1, "{back:?}");
+        generate_migrations(&dir, &["--manual-done".to_string()], false, std::slice::from_ref(&plain)).unwrap();
+        check_migrations(&dir, std::slice::from_ref(&plain)).unwrap();
+        let again = generate(&dir, std::slice::from_ref(&keyed));
+        assert!(again.snapshot.is_none(), "{again:?}");
+        assert!(check_migrations(&dir, std::slice::from_ref(&keyed)).is_err());
+        std::fs::remove_dir_all(dir).ok();
     }
 }

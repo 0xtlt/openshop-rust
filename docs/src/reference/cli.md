@@ -145,10 +145,10 @@ the current directory.
 | Command | Input or flags | Behavior |
 | --- | --- | --- |
 | `dev` | Process environment and `.env` | Loads `.env`, pushes the framework schema and registered models, then runs the API, the admin UI, a worker, and the cron scheduler in one process. Refused in production mode. |
-| `start` | Process environment | Serves the API and the admin UI and starts cron dispatch. No worker, no schema changes. |
-| `worker` | `--concurrency=N` | Executes queued runs. No HTTP server, no cron dispatch, no schema changes. |
+| `start` | Process environment | Serves the API and the admin UI and starts cron dispatch. No worker, no schema changes. Refuses to start while `migrations/` holds a migration the database has not applied, or does not cover the framework schema. |
+| `worker` | `--concurrency=N` | Executes queued runs. No HTTP server, no cron dispatch, no schema changes. Refuses to start in the same cases as `start`. |
 | `migrate` | Committed `migrations/` directory | Applies pending SQL files in file-name order. |
-| `migrate generate` | `--name=<name>`, `--allow-generate-in-production` | Writes the framework schema your project does not cover yet, and the statements that bring your tables in line with the registered models since the last generation; with `--name` and nothing else to write, writes an empty migration for your own changes. Updates `migrations/schema.snapshot.json`. Does not connect to the database. Blocked in production by default. See [Generated model migrations](database.md#generated-model-migrations). |
+| `migrate generate` | `--name=<name>`, `--manual-done`, `--allow-generate-in-production` | Writes the framework schema your project does not cover yet, and the statements that bring your tables in line with the registered models since the last generation; with `--name` and nothing else to write, writes an empty migration for your own changes. Updates `migrations/schema.snapshot.json`. Does not connect to the database. Blocked in production by default. See [Generated model migrations](database.md#generated-model-migrations). |
 | `migrate check` | `migrations/` directory | Fails when the committed migrations do not cover the framework schema, or when the models changed since the last generated migration. Does not connect to the database. |
 | `migrate status` | Database and `migrations/` directory | Prints the migrations folder and the applied and pending migrations. |
 

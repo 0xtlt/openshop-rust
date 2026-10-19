@@ -4,7 +4,7 @@
 use axum::extract::{Path, RawQuery, State};
 use axum::http::StatusCode;
 use axum::response::Response;
-use chrono::{DateTime, Local, SecondsFormat, Utc};
+use chrono::{DateTime, SecondsFormat, Utc};
 use indexmap::IndexMap;
 use uuid::Uuid;
 
@@ -17,7 +17,7 @@ use super::html_response;
 use super::queries::{self, Counts, LogFilter, LogLine, Range, RunFilter, SHOP_STATES, Shop, Tally};
 use crate::app::OpenShop;
 use crate::db::{FlowRun, Installation, LogRow, StepResult};
-use crate::engine::scheduler::parse_schedule;
+use crate::engine::scheduler::next_occurrence;
 use crate::server::http::{ApiResult, parse_query};
 use crate::types::CronShops;
 use openshop_shared::rpc::encode_uri_component;
@@ -982,17 +982,16 @@ pub(super) async fn shop(State(app): State<OpenShop>, Path(domain): Path<String>
 pub(super) async fn crons(State(app): State<OpenShop>) -> ApiResult {
     let config = app.config();
     let turned_off = queries::crons_off(app.db()).await?;
-    // The scheduler reads schedules in the time zone of the server.
-    let now = Local::now();
+    let now = Utc::now();
     let rows: Vec<Row> = config
         .crons
         .iter()
         .map(|cron| {
-            let next = parse_schedule(&cron.schedule, &cron.flow)
-                .ok()
-                .filter(|_| config.flows.contains_key(&cron.flow))
-                .and_then(|schedule| schedule.find_next_occurrence(&now, false).ok())
-                .map(|next| time(&next.with_timezone(&Utc)))
+            // The scheduler reads a schedule in UTC, or in the time zone of the cron.
+            let next = Some(&cron.flow)
+                .filter(|flow| config.flows.contains_key(*flow))
+                .and_then(|_| next_occurrence(cron, now))
+                .map(|next| time(&next))
                 .unwrap_or_else(|| "never: the flow is not registered".to_string());
             let shops = match cron.shops.clone().unwrap_or_default() {
                 CronShops::Global => "once, without a shop".to_string(),

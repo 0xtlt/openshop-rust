@@ -113,6 +113,9 @@ impl Change {
     }
 }
 
+/// The line of a change to write by hand opens with this, then its explanation.
+pub const MANUAL_TODO: &str = "-- TODO: ";
+
 /// The statements of a migration, each preceded by its warning.
 pub fn render(changes: &[Change]) -> String {
     let rendered: Vec<String> = changes
@@ -123,7 +126,7 @@ pub fn render(changes: &[Change]) -> String {
                 warning: Some(warning),
             } => format!("-- WARNING: {warning}\n{sql}\n"),
             Change::Statement { sql, warning: None } => format!("{sql}\n"),
-            Change::Manual(explanation) => format!("-- TODO: {explanation}\n"),
+            Change::Manual(explanation) => format!("{MANUAL_TODO}{explanation}\n"),
         })
         .collect();
     rendered.join("\n")
@@ -196,25 +199,91 @@ fn alter_column(table: &str, before: &ColumnDef, after: &ColumnDef, changes: &mu
         });
     }
     if before.primary_key != after.primary_key {
-        changes.push(Change::Manual(format!(
-            "the primary key of {table} changed on {}. Write the constraint change by hand.",
-            after.name
-        )));
+        changes.push(Change::Manual(primary_key_note(table, after)));
     }
     if before.constraints != after.constraints {
-        let show = |constraints: &str| {
-            if constraints.is_empty() {
-                "none".to_string()
-            } else {
-                format!("`{constraints}`")
-            }
-        };
-        changes.push(Change::Manual(format!(
-            "the constraints of {place} changed from {} to {}. Write the statements by hand.",
-            show(&before.constraints),
-            show(&after.constraints)
-        )));
+        changes.push(Change::Manual(constraints_note(&place, before, after)));
     }
+}
+
+fn primary_key_note(table: &str, after: &ColumnDef) -> String {
+    let now = if after.primary_key {
+        "is now part of the primary key"
+    } else {
+        "is no longer part of the primary key"
+    };
+    format!(
+        "the primary key of {table} changed: {} {now}. Write the constraint change by hand.",
+        after.name
+    )
+}
+
+fn constraints_note(place: &str, before: &ColumnDef, after: &ColumnDef) -> String {
+    let show = |constraints: &str| {
+        if constraints.is_empty() {
+            "none".to_string()
+        } else {
+            format!("`{constraints}`")
+        }
+    };
+    format!(
+        "the constraints of {place} changed from {} to {}. Write the statements by hand.",
+        show(&before.constraints),
+        show(&after.constraints)
+    )
+}
+
+/// The changes that remain once the changes to write by hand that `skip`
+/// accepts, by their explanation, are left out.
+pub fn without_manual(changes: Vec<Change>, skip: impl Fn(&str) -> bool) -> Vec<Change> {
+    changes
+        .into_iter()
+        .filter(|change| match change {
+            Change::Manual(explanation) => !skip(explanation),
+            Change::Statement { .. } => true,
+        })
+        .collect()
+}
+
+/// The snapshot to record for `models`: the models, except that a primary key
+/// or constraints that changed keep their previous state, unless `accepted`:
+/// the author said the migrations write them. Recording them earlier would make
+/// the models and the database look in line while the database was not.
+pub fn recorded(previous: &SchemaSnapshot, models: &[Table], accepted: bool) -> SchemaSnapshot {
+    let mut snapshot = SchemaSnapshot::of(models);
+    if accepted {
+        return snapshot;
+    }
+    for table in &mut snapshot.tables {
+        let Some(before) = continued(
+            &previous.tables,
+            |before| &before.table,
+            &table.table,
+            table.previous_name(),
+            |name| models.iter().any(|other| other.table == name),
+        ) else {
+            continue;
+        };
+        let names = table.columns().to_vec();
+        for (column, current) in table.columns_mut().iter_mut().zip(&names) {
+            let Some(was) = continued(
+                before.columns(),
+                |column| &column.name,
+                &current.name,
+                current.renamed_from.as_deref(),
+                |name| names.iter().any(|other| other.name == name),
+            ) else {
+                continue;
+            };
+            if was.primary_key != column.primary_key {
+                column.primary_key = was.primary_key;
+            }
+            if was.constraints != column.constraints {
+                column.constraints = was.constraints.clone();
+            }
+        }
+    }
+    snapshot
 }
 
 /// The changes of one table, grouped by the place they take in the migration.

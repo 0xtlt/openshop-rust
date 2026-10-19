@@ -63,6 +63,10 @@ pub(crate) fn warn(message: impl AsRef<str>) {
     logger().warn(message.as_ref(), None);
 }
 
+pub(crate) fn error(message: impl AsRef<str>) {
+    logger().error(message.as_ref(), None);
+}
+
 pub(crate) fn warn_with(message: impl AsRef<str>, context: Value) {
     logger().warn(message.as_ref(), Some(&context));
 }

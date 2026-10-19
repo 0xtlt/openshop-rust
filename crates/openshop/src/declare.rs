@@ -167,8 +167,8 @@ impl App {
         crate::cli::run(|| self.config()).await
     }
 
-    /// [`App::run`] for a `main` that is not `async`: starts the runtime and
-    /// runs the command given on the command line.
+    /// [`App::run`] for a `main` that is not `async`: loads `.env` for `dev`,
+    /// starts the runtime and runs the command given on the command line.
     ///
     /// ```no_run
     /// # static APP: openshop::App = openshop::app! {};
@@ -177,6 +177,10 @@ impl App {
     /// }
     /// ```
     pub fn main(&self) -> Result<()> {
+        // `dev` reads `.env` into the environment, which no thread may read meanwhile:
+        // before the runtime and its threads exist.
+        let args: Vec<String> = std::env::args().skip(1).collect();
+        crate::cli::env::load_dev_env(&args, &std::env::current_dir()?);
         tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()?

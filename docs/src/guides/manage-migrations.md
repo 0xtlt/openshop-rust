@@ -14,7 +14,9 @@ templates, by the tables of their models:
 migrations/
   20261006143115_openshop_init.sql
   20261006143116_openshop_queue_indexes.sql
-  20261006143117_openshop_run_lease.sql
+  20261006143117_openshop_cron_ticks.sql
+  20261006143118_openshop_run_lease.sql
+  20261006143119_openshop_drop_flow_runs_status_index.sql
 ```
 
 Each file starts with a marker line:
@@ -118,6 +120,20 @@ attention:
 - **Data.** Moving or transforming rows is never generated. Write it in the
   same file, or in an empty one created with `--name` when nothing else
   changed.
+
+A change that cannot be written automatically, such as the primary key or the
+constraints of a column, is left as a line in the file:
+
+```sql
+-- TODO: the constraints of reviews.product_id changed from none to `REFERENCES products(id)`. Write the statements by hand.
+```
+
+Write the statements below it. Until you say they are written, the snapshot
+keeps the previous state of that column, `migrate check` fails, and
+`migrate generate` reminds you without writing the line again. When the
+migrations do what the models say, run
+`cargo run -- migrate generate --manual-done`: it records the models as they
+are. The flag covers the changes pending when you run it, not later ones.
 
 Review the new SQL under `migrations/` and commit it, with the snapshot and
 the code that needs it. `migrate check` does not decide whether a schema change

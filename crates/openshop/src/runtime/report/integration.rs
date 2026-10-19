@@ -1,6 +1,7 @@
 //! What the framework adds to the Sentry client of an application: panics
 //! reported without waiting, and events sent without what a URL carries of
-//! secrets.
+//! secrets, wherever the event has one: messages, tags, extra data, contexts,
+//! breadcrumbs, and the request.
 
 use std::cell::{Cell, RefCell};
 use std::panic::{self, PanicHookInfo};
@@ -8,7 +9,7 @@ use std::sync::{Arc, LazyLock, Once};
 
 use regex::{Captures, Regex};
 use sentry::integrations::panic::PanicIntegration;
-use sentry::protocol::Event;
+use sentry::protocol::{Context, Event, Map, Request, Value};
 use sentry::{ClientOptions, Hub, Integration};
 use uuid::Uuid;
 
@@ -33,13 +34,127 @@ impl Integration for Reports {
     }
 
     fn process_event(&self, mut event: Event<'static>, _options: &ClientOptions) -> Option<Event<'static>> {
-        let exceptions = event.exception.iter_mut().filter_map(|exception| exception.value.as_mut());
-        let breadcrumbs = event.breadcrumbs.iter_mut().filter_map(|breadcrumb| breadcrumb.message.as_mut());
-        exceptions.chain(breadcrumbs).chain(event.message.as_mut()).for_each(scrub);
-        if let Some(entry) = &mut event.logentry {
-            scrub(&mut entry.message);
-        }
+        scrub_event(&mut event);
         Some(event)
+    }
+}
+
+/// Everything of an event that can carry a URL or a credential.
+fn scrub_event(event: &mut Event<'static>) {
+    let exceptions = event.exception.iter_mut().filter_map(|exception| exception.value.as_mut());
+    let breadcrumbs = event.breadcrumbs.iter_mut().filter_map(|breadcrumb| breadcrumb.message.as_mut());
+    exceptions.chain(breadcrumbs).chain(event.message.as_mut()).for_each(scrub);
+    if let Some(entry) = &mut event.logentry {
+        scrub(&mut entry.message);
+        entry.params.iter_mut().for_each(scrub_value);
+    }
+    for exception in &mut event.exception {
+        if let Some(mechanism) = &mut exception.mechanism {
+            scrub_map(&mut mechanism.data);
+        }
+    }
+    for breadcrumb in &mut event.breadcrumbs {
+        scrub_map(&mut breadcrumb.data);
+    }
+    event.tags.values_mut().for_each(scrub);
+    scrub_map(&mut event.extra);
+    event.contexts.values_mut().for_each(scrub_context);
+    if let Some(user) = &mut event.user {
+        scrub_map(&mut user.other);
+    }
+    if let Some(request) = &mut event.request {
+        scrub_request(request);
+    }
+}
+
+fn scrub_map(map: &mut Map<String, Value>) {
+    map.values_mut().for_each(scrub_value);
+}
+
+/// Scrubs the strings of a JSON value, at any depth.
+fn scrub_value(value: &mut Value) {
+    match value {
+        Value::String(text) => scrub(text),
+        Value::Array(items) => items.iter_mut().for_each(scrub_value),
+        Value::Object(map) => map.values_mut().for_each(scrub_value),
+        _ => {}
+    }
+}
+
+fn scrub_context(context: &mut Context) {
+    match context {
+        Context::Other(map) => scrub_map(map),
+        Context::Response(response) => {
+            response.cookies = response.cookies.take().map(|_| REDACTED.to_string());
+            scrub_headers(&mut response.headers);
+            if let Some(data) = &mut response.data {
+                scrub_value(data);
+            }
+        }
+        // Every other kind of context, those of the SDK that are yet to come
+        // included, through its JSON form: all its strings, at any depth. One
+        // that does not come back as a context is not sent.
+        other => {
+            let scrubbed = serde_json::to_value(&*other).ok().and_then(|mut json| {
+                scrub_value(&mut json);
+                serde_json::from_value::<Context>(json).ok()
+            });
+            *other = scrubbed.unwrap_or_else(|| Context::Other(Map::new()));
+        }
+    }
+}
+
+const REDACTED: &str = "[redacted]";
+
+/// Whether the name of a header or of a variable says that its value is a secret.
+fn is_secret_name(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    [
+        "authorization",
+        "cookie",
+        "token",
+        "secret",
+        "password",
+        "api-key",
+        "api_key",
+        "apikey",
+        "hmac",
+        "signature",
+    ]
+    .iter()
+    .any(|word| name.contains(word))
+}
+
+/// The value of a header named like a secret is removed, the others are scrubbed.
+fn scrub_headers(headers: &mut Map<String, String>) {
+    for (name, value) in headers.iter_mut() {
+        if is_secret_name(name) {
+            *value = REDACTED.to_string();
+        } else {
+            scrub(value);
+        }
+    }
+}
+
+/// The request keeps its method and its address, without credentials, query
+/// string or token; its cookies, body and secret headers are removed.
+fn scrub_request(request: &mut Request) {
+    request.url = request
+        .url
+        .take()
+        .and_then(|url| sentry::protocol::Url::parse(&scrub_url(url.as_str())).ok());
+    if request.query_string.as_ref().is_some_and(|query| !query.is_empty()) {
+        request.query_string = Some(REDACTED.to_string());
+    }
+    request.cookies = request.cookies.take().map(|_| REDACTED.to_string());
+    request.data = request.data.take().map(|_| REDACTED.to_string());
+    scrub_headers(&mut request.headers);
+    for (name, value) in request.env.iter_mut() {
+        if is_secret_name(name) {
+            *value = REDACTED.to_string();
+        } else {
+            scrub(value);
+        }
     }
 }
 

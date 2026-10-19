@@ -8,8 +8,8 @@ use std::path::{Path, PathBuf};
 use common::{TEST_SHOP, TempProject, create_config, empty_database, noop_flow, test_env};
 use openshop::db::Table;
 use openshop::db::migrate::{
-    FRAMEWORK_MIGRATIONS, MigrationStatus, check_migrations, generate_migrations, get_client_migration_status,
-    migrate_schema, push_schema,
+    FRAMEWORK_MIGRATIONS, MigrationStatus, assert_migrated, check_migrations, generate_migrations,
+    get_client_migration_status, migrate_schema, push_schema,
 };
 use openshop::testing::{MockTransport, TestDb};
 use openshop::{DispatchOptions, OpenShop, PgPool};
@@ -69,6 +69,9 @@ async fn indexes(pool: &PgPool, table: &str) -> Vec<String> {
 }
 
 const QUEUE_INDEXES: [&str; 2] = ["flow_runs_claimable_idx", "flow_runs_deadline_idx"];
+
+/// Made redundant by the queue indexes, and dropped by a later migration.
+const DROPPED_INDEX: &str = "flow_runs_status_available_created_idx";
 
 /// Generates for an application without models and returns the files.
 fn generate(cwd: &Path, args: &[String], production: bool) -> openshop::Result<Vec<PathBuf>> {
@@ -405,6 +408,7 @@ async fn generate_then_migrate_creates_the_framework_tables() {
         [
             "__openshop_migrations",
             "cron_overrides",
+            "cron_ticks",
             "flow_runs",
             "installations",
             "logs",
@@ -472,7 +476,14 @@ async fn generate_then_migrate_upgrades_a_deployed_framework_schema() {
         QUEUE_INDEXES.iter().all(|index| after.contains(&index.to_string())),
         "{after:?}"
     );
-    assert!(before.iter().all(|index| after.contains(index)));
+    // Nothing is lost but the index that the queue indexes replace.
+    assert!(before.contains(&DROPPED_INDEX.to_string()) && !after.contains(&DROPPED_INDEX.to_string()));
+    assert!(
+        before
+            .iter()
+            .filter(|index| *index != DROPPED_INDEX)
+            .all(|index| after.contains(index))
+    );
     db.cleanup().await.unwrap();
 }
 
@@ -569,5 +580,50 @@ async fn push_schema_creates_framework_and_model_tables() {
         columns(&db.pool, "reviews").await,
         ["created_at", "id", "rating", "shop", "updated_at"]
     );
+    db.cleanup().await.unwrap();
+}
+
+#[tokio::test]
+async fn start_and_worker_refuse_a_database_that_is_behind_the_migrations() {
+    let db = empty_database().await;
+    let project = TempProject::new();
+
+    // No migrations folder: nothing to compare the database with.
+    assert_migrated(&db.pool, project.path()).await.unwrap();
+
+    // The framework schema is not in the folder yet.
+    project.write(INIT, INIT_SQL);
+    let error = assert_migrated(&db.pool, project.path()).await.unwrap_err();
+    assert!(error.to_string().contains("is not covered by ./migrations"), "{error}");
+
+    // Covered, but never applied: the table that tracks them does not exist either.
+    generate(project.path(), &[], false).unwrap();
+    let error = assert_migrated(&db.pool, project.path()).await.unwrap_err().to_string();
+    let count = FRAMEWORK_MIGRATIONS.len() + 1;
+    assert!(
+        error.starts_with(&format!(
+            "[openshop] Not starting: {count} migrations are not applied ("
+        )),
+        "{error}"
+    );
+    assert!(
+        error.contains(INIT) && error.ends_with("Run `migrate` first."),
+        "{error}"
+    );
+    // Looking did not create anything.
+    assert!(tables(&db.pool).await.is_empty());
+
+    // One more migration, after the others were applied.
+    migrate_schema(&db.pool, project.path()).await.unwrap();
+    assert_migrated(&db.pool, project.path()).await.unwrap();
+    project.write(NEXT, NEXT_SQL);
+    let error = assert_migrated(&db.pool, project.path()).await.unwrap_err().to_string();
+    assert_eq!(
+        error,
+        format!("[openshop] Not starting: 1 migration is not applied ({NEXT}). Run `migrate` first.")
+    );
+
+    migrate_schema(&db.pool, project.path()).await.unwrap();
+    assert_migrated(&db.pool, project.path()).await.unwrap();
     db.cleanup().await.unwrap();
 }

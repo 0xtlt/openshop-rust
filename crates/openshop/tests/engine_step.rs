@@ -899,6 +899,37 @@ async fn a_step_whose_start_was_stored_but_not_answered_runs_once() {
     test.cleanup().await;
 }
 
+// A NUL byte cannot be stored in a PostgreSQL text: one in a line used to fail
+// the whole statement, and with it every line logged at the same time.
+#[tokio::test]
+async fn a_nul_byte_in_a_line_does_not_lose_the_lines_around_it() {
+    let test = new_test().await;
+    let run_id = create_run(&test).await;
+    let logger = FlowLogger::new(test.db.clone(), run_id.to_string());
+
+    logger.info("before");
+    logger.warn_with(
+        "bad\0byte",
+        json!({ "na\0me": "va\0lue", "list": ["x\0", 1], "nested": { "k": "\0" } }),
+    );
+    logger.info("after");
+    logger.flush().await;
+
+    let lines: Vec<(String, String)> =
+        sqlx::query_as("SELECT message, payload::text FROM logs WHERE flow_run_id = $1 ORDER BY created_at, ctid")
+            .bind(run_id.to_string())
+            .fetch_all(&test.db)
+            .await
+            .unwrap();
+    let messages: Vec<&str> = lines.iter().map(|(message, _)| message.as_str()).collect();
+    assert_eq!(messages, ["before", "bad\u{FFFD}byte", "after"]);
+    assert_eq!(
+        lines[1].1, "{\"na\u{FFFD}me\":\"va\u{FFFD}lue\",\"list\":[\"x\u{FFFD}\",1],\"nested\":{\"k\":\"\u{FFFD}\"}}",
+        "no NUL, and not its escape either"
+    );
+    test.cleanup().await;
+}
+
 #[tokio::test]
 async fn a_sleep_stored_but_not_answered_still_suspends_the_run() {
     let test = new_test().await;
@@ -960,6 +991,44 @@ async fn a_step_is_recognized_when_the_answer_to_the_check_is_lost_too() {
     test.cleanup().await;
 }
 
+struct Warnings(std::sync::Mutex<Vec<String>>);
+
+impl openshop::runtime::RuntimeLogger for Warnings {
+    fn info(&self, _message: &str, _context: Option<&openshop::Value>) {}
+    fn warn(&self, message: &str, _context: Option<&openshop::Value>) {
+        self.0.lock().unwrap().push(message.to_string());
+    }
+    fn error(&self, _message: &str, _context: Option<&openshop::Value>) {}
+}
+
+#[tokio::test]
+async fn a_log_write_that_fails_is_told_to_the_process_logger() {
+    let test = new_test().await;
+    let run_id = create_run(&test).await;
+    // The pool of the logger is closed: its writes fail, the flow does not.
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect_with((*test.db.connect_options()).clone())
+        .await
+        .unwrap();
+    let logger = FlowLogger::new(pool.clone(), run_id.to_string());
+    pool.close().await;
+
+    let warnings = Arc::new(Warnings(Default::default()));
+    let previous = openshop::runtime::logger::set_logger(warnings.clone());
+    logger.info("never stored");
+    logger.flush().await;
+    openshop::runtime::logger::set_logger(previous);
+
+    let told = warnings.0.lock().unwrap().clone();
+    let told = told.iter().find(|line| line.contains(&run_id.to_string()));
+    assert!(
+        told.is_some_and(|line| line.contains("1 log line")),
+        "nothing said that the line was lost: {told:?}"
+    );
+    test.cleanup().await;
+}
+
 #[tokio::test]
 async fn a_sleep_is_recognized_when_the_answer_to_the_check_is_lost_too() {
     let test = new_test().await;
@@ -983,5 +1052,110 @@ async fn a_sleep_is_recognized_when_the_answer_to_the_check_is_lost_too() {
     assert!(error.downcast_ref::<SleepSignal>().is_some(), "{error:#}");
     let stored = find_steps(&test, run_id).await;
     assert_eq!((stored.len(), stored[0].status.as_str()), (1, "sleeping"));
+    test.cleanup().await;
+}
+#[tokio::test]
+async fn a_flow_that_logs_faster_than_the_database_writes_drops_lines_and_says_so() {
+    let test = new_test().await;
+    let run_id = create_run(&test).await;
+    let logger = FlowLogger::new(test.db.clone(), run_id.to_string());
+
+    // A current-thread runtime: the task that writes does not run until the
+    // flow awaits, so the queue fills up. Memory must not grow with it.
+    const LOGGED: usize = 50_000;
+    for position in 0..LOGGED {
+        logger.info_with("tick", json!({ "position": position }));
+    }
+    logger.flush().await;
+
+    let stored: (i64,) = sqlx::query_as("SELECT count(*) FROM logs WHERE flow_run_id = $1 AND message = 'tick'")
+        .bind(run_id.to_string())
+        .fetch_one(&test.db)
+        .await
+        .unwrap();
+    let stored = stored.0 as usize;
+    assert!(stored > 0 && stored < LOGGED, "{stored} lines were stored");
+
+    let notice: (String, String) =
+        sqlx::query_as("SELECT level, message FROM logs WHERE flow_run_id = $1 AND message LIKE '%dropped%'")
+            .bind(run_id.to_string())
+            .fetch_one(&test.db)
+            .await
+            .unwrap();
+    assert_eq!(notice.0, "warn");
+    assert_eq!(notice.1, format!("{} log lines were dropped", LOGGED - stored));
+    test.cleanup().await;
+}
+
+// Two keys that differ by a NUL byte must not become one.
+#[tokio::test]
+async fn keys_that_differ_by_a_nul_byte_stay_two_keys() {
+    let test = new_test().await;
+    let run_id = create_run(&test).await;
+    let logger = FlowLogger::new(test.db.clone(), run_id.to_string());
+
+    logger.info_with("apart", json!({ "a": 1, "a\0": 2 }));
+    logger.info_with("taken", json!({ "a\u{FFFD}": 1, "a\0": 2, "a\0\0": 3 }));
+    logger.flush().await;
+
+    let payloads: Vec<(String,)> =
+        sqlx::query_as("SELECT payload::text FROM logs WHERE flow_run_id = $1 ORDER BY created_at, ctid")
+            .bind(run_id.to_string())
+            .fetch_all(&test.db)
+            .await
+            .unwrap();
+    assert_eq!(payloads[0].0, "{\"a\":1,\"a\u{FFFD}\":2}");
+    assert_eq!(
+        payloads[1].0,
+        "{\"a\u{FFFD}\":1,\"a\u{FFFD}#2\":2,\"a\u{FFFD}\u{FFFD}\":3}"
+    );
+    test.cleanup().await;
+}
+
+/// The most lines a statement of one run holds.
+async fn most_lines_in_a_statement(test: &TestApp, run_id: Uuid) -> usize {
+    let mut statements: std::collections::HashMap<String, usize> = Default::default();
+    for (_, _, statement) in find_log_writes(test, run_id).await {
+        *statements.entry(statement).or_default() += 1;
+    }
+    statements.values().copied().max().unwrap_or(0)
+}
+
+// A reader that always finds a line waiting never reached its timer: the
+// batch grew with what was logged, up to the whole queue.
+#[tokio::test]
+async fn a_batch_is_cut_at_a_thousand_lines() {
+    let test = new_test().await;
+    let run_id = create_run(&test).await;
+    let logger = FlowLogger::new(test.db.clone(), run_id.to_string());
+
+    // Fewer than the queue holds, logged before the writer runs once.
+    for position in 0..5_000 {
+        logger.info_with("tick", json!({ "position": position }));
+    }
+    logger.flush().await;
+
+    let stored = find_log_writes(&test, run_id).await.len();
+    assert_eq!(stored, 5_000);
+    let most = most_lines_in_a_statement(&test, run_id).await;
+    assert!(most <= 1_000, "{most} lines in one statement");
+    test.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_batch_is_cut_at_a_megabyte() {
+    let test = new_test().await;
+    let run_id = create_run(&test).await;
+    let logger = FlowLogger::new(test.db.clone(), run_id.to_string());
+
+    let big = "x".repeat(100_000);
+    for position in 0..200 {
+        logger.info_with("big", json!({ "position": position, "text": big }));
+    }
+    logger.flush().await;
+
+    assert_eq!(find_log_writes(&test, run_id).await.len(), 200);
+    let most = most_lines_in_a_statement(&test, run_id).await;
+    assert!(most <= 11, "{most} lines of 100 kB in one statement");
     test.cleanup().await;
 }

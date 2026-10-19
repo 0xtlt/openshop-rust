@@ -718,3 +718,129 @@ fn what_a_url_carries_of_secrets_is_not_sent() {
     let sent = format!("{event:?}");
     assert!(!sent.contains("SECRET") && !sent.contains("hunter2"), "{sent}");
 }
+
+#[test]
+fn what_a_url_carries_of_secrets_is_not_sent_in_tags_extra_contexts_or_the_request() {
+    use openshop::sentry::protocol::{Breadcrumb, Context, Map, Request};
+    use std::collections::BTreeMap;
+
+    let events = captured(async {
+        openshop::sentry::configure_scope(|scope| {
+            scope.set_tag("callback", "https://hook:hunter2@example.com/cb?token=SECRET");
+            scope.set_extra(
+                "calls",
+                json!({ "last": "GET https://api.example.com/a?key=SECRET", "all": ["https://u:p@x.test/y"] }),
+            );
+            let mut context = Map::new();
+            context.insert("url".into(), json!("https://api.example.com/orders?api_key=SECRET"));
+            scope.set_context("upstream", Context::Other(context));
+        });
+        openshop::sentry::add_breadcrumb(Breadcrumb {
+            message: Some("calling".into()),
+            data: BTreeMap::from([("url".to_string(), json!("https://api.example.com/b?key=SECRET"))]),
+            ..Default::default()
+        });
+        let request = Request {
+            url: Some(
+                "https://user:hunter2@shop.test/app/orders?session=SECRET"
+                    .parse()
+                    .unwrap(),
+            ),
+            method: Some("POST".into()),
+            query_string: Some("session=SECRET".into()),
+            cookies: Some("sid=SECRET".into()),
+            data: Some("password=SECRET".into()),
+            headers: BTreeMap::from([
+                ("Authorization".to_string(), "Bearer SECRET".to_string()),
+                ("X-Shopify-Access-Token".to_string(), "SECRET".to_string()),
+                ("Referer".to_string(), "https://app.test/back?code=SECRET".to_string()),
+                ("Accept".to_string(), "text/html".to_string()),
+            ]),
+            ..Default::default()
+        };
+        openshop::sentry::capture_event(Event {
+            message: Some("failed".into()),
+            request: Some(request),
+            ..Default::default()
+        });
+    });
+
+    let event = the_only(events);
+    let sent = format!("{event:?}");
+    assert!(
+        !sent.contains("SECRET") && !sent.contains("hunter2") && !sent.contains("u:p@"),
+        "{sent}"
+    );
+
+    // What is not a secret stays.
+    assert_eq!(
+        tag(&event, "callback"),
+        Some("https://[redacted]@example.com/cb?[redacted]")
+    );
+    assert_eq!(event.extra["calls"]["all"], json!(["https://[redacted]@x.test/y"]));
+    let request = event.request.expect("the request");
+    assert_eq!(request.method.as_deref(), Some("POST"));
+    assert_eq!(request.headers["Accept"], "text/html");
+    assert_eq!(request.headers["Referer"], "https://app.test/back?[redacted]");
+    assert_eq!(request.headers["Authorization"], "[redacted]");
+    assert_eq!(request.cookies.as_deref(), Some("[redacted]"));
+    assert_eq!(request.query_string.as_deref(), Some("[redacted]"));
+    assert!(request.url.is_some_and(|url| url.path() == "/app/orders"));
+}
+
+#[test]
+fn what_a_url_carries_of_secrets_is_not_sent_in_an_opentelemetry_context() {
+    use openshop::sentry::protocol::{Context, Map, OtelContext};
+
+    let events = captured(async {
+        let mut attributes = Map::new();
+        attributes.insert("url.full".into(), json!("https://api.example.com/a?token=SECRET"));
+        attributes.insert("nested".into(), json!({ "list": ["https://u:hunter2@h.test/x"] }));
+        let mut resource = Map::new();
+        resource.insert("service.url".into(), json!("https://svc.test/y?key=SECRET"));
+        let mut other = Map::new();
+        other.insert("extra".into(), json!("https://z.test/?k=SECRET"));
+        openshop::sentry::configure_scope(|scope| {
+            scope.set_context(
+                "otel",
+                Context::Otel(Box::new(OtelContext {
+                    attributes,
+                    resource,
+                    other,
+                })),
+            );
+        });
+        openshop::sentry::capture_message("failed", Level::Error);
+    });
+
+    let event = the_only(events);
+    let sent = format!("{event:?}");
+    assert!(!sent.contains("SECRET") && !sent.contains("hunter2"), "{sent}");
+    let Some(Context::Otel(otel)) = event.contexts.get("otel") else {
+        panic!("{sent}")
+    };
+    assert_eq!(otel.attributes["url.full"], "https://api.example.com/a?[redacted]");
+}
+
+#[test]
+fn what_a_url_carries_of_secrets_is_not_sent_in_a_trace_context() {
+    use openshop::sentry::protocol::{Context, TraceContext};
+
+    let events = captured(async {
+        openshop::sentry::configure_scope(|scope| {
+            scope.set_context(
+                "trace",
+                Context::Trace(Box::new(TraceContext {
+                    op: Some("GET https://a.test/x?token=SECRET".into()),
+                    origin: Some("https://u:hunter2@o.test/y".into()),
+                    description: Some("https://d.test/z?k=SECRET".into()),
+                    ..Default::default()
+                })),
+            );
+        });
+        openshop::sentry::capture_message("failed", Level::Error);
+    });
+
+    let sent = format!("{:?}", the_only(events));
+    assert!(!sent.contains("SECRET") && !sent.contains("hunter2"), "{sent}");
+}

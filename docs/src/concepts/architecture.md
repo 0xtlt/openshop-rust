@@ -69,9 +69,11 @@ responsible for their shop filter.
 
 ## Scaling boundaries
 
-- Run one scheduler unless duplicate cron attempts are acceptable. The scheduler
-  has no leader election, and every web process starts one. Flow concurrency can
-  reject an overlapping run, but it is not a scheduler de-duplication guarantee.
+- Run as many web processes as you need: each starts a scheduler, and an
+  occurrence of a cron for a shop is claimed in the `cron_ticks` table by the
+  first one that reaches it, so its run is queued once. There is no leader to
+  lose. Flow concurrency still decides whether an occurrence is refused while
+  a run of the flow is active.
 - Run multiple workers against the same database to increase throughput.
 - Set worker concurrency below the combined PostgreSQL and provider capacity.
 - Keep migrations separate from process startup so every replica sees the same

@@ -106,7 +106,9 @@ app migrate status
 ```
 
 Confirm `pending: 0` before starting the new processes. This command applies
-committed SQL only. Neither the web process nor the worker migrates on startup.
+committed SQL only. Neither the web process nor the worker migrates on startup,
+and both refuse to start while a migration of `migrations/` is not applied:
+`Not starting: 1 migration is not applied (…). Run `migrate` first.`
 
 ## 5. Start both services
 
@@ -122,9 +124,10 @@ or process-manager entries; two sequential lines in a shell script would never
 start the worker. The web process serves HTTP and dispatches scheduled runs.
 The worker executes the queued work.
 
-Keep one web replica when using crons: every web replica starts a scheduler and
-there is no leader election. Scale workers after measuring database and provider
-capacity. See [Operate an app](operate-app.md) for that procedure.
+Several web replicas are fine with crons: every replica starts a scheduler, and
+the first to reach an occurrence of a cron for a shop queues its run, so it
+runs once. Scale workers after measuring database and provider capacity. See
+[Operate an app](operate-app.md) for that procedure.
 
 Both processes stop cleanly on `SIGTERM`. Give the worker up to its lease
 duration, 30 seconds by default, to finish active runs before the platform kills

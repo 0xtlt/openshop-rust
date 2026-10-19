@@ -365,6 +365,24 @@ async fn post_crons_toggle_validates_its_body(ctx: &TestContext) {
     assert_eq!(data[0]["enabled"], true);
 }
 
+#[openshop::test(api_context())]
+async fn post_crons_toggle_ignores_what_is_not_a_cron_of_the_app(ctx: &TestContext) {
+    // A key of a schedule that was changed, or invented: it would be stored and never read.
+    let (status, response) = send(
+        ctx.post("/api/crons/toggle")
+            .json(&json!({ "key": "test-flow:0 0 * * *", "enabled": false })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(response, error("Cron not found"));
+
+    let (overrides,): (i64,) = sqlx::query_as("SELECT count(*) FROM cron_overrides")
+        .fetch_one(&ctx.db)
+        .await
+        .unwrap();
+    assert_eq!(overrides, 0);
+}
+
 // ─── Runs ────────────────────────────────────────────────────────────
 
 #[openshop::test(api_context())]

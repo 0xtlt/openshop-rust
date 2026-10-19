@@ -284,6 +284,12 @@ pub(crate) async fn cron_items(
         .collect())
 }
 
+/// Whether the application declares a cron with this key. An override of any
+/// other key is never read, so none is stored.
+pub(crate) fn is_cron_key(app: &crate::app::OpenShop, key: &str) -> bool {
+    app.config().crons.iter().any(|cron| cron.key() == key)
+}
+
 pub(crate) async fn set_cron_enabled(
     app: &crate::app::OpenShop,
     app_handle: &str,
@@ -311,6 +317,9 @@ async fn set_cron_enabled_tool(ctx: McpContext, input: JsonMap) -> Result<Value>
     let Some(enabled) = boolean_input(&input, "enabled") else {
         bail!("enabled is required");
     };
+    if !is_cron_key(&ctx.app, key) {
+        bail!("Cron not found");
+    }
     set_cron_enabled(&ctx.app, &ctx.shopify_app, &ctx.shop, key, enabled).await?;
     Ok(structured_result(json!({ "ok": true, "key": key, "enabled": enabled })))
 }

@@ -286,6 +286,119 @@ async fn cron_override_only_disables_its_own_shop() {
     test.cleanup().await;
 }
 
+/// The occurrences claimed in `cron_ticks` for each value of `column`, and the
+/// number of runs queued for each value of `kind`: the same list of counts when
+/// every claimed occurrence queued one run, and no run was queued without one.
+/// Timing cannot tell this on a loaded machine; the claim and its run are
+/// written in one transaction.
+async fn assert_one_run_per_claim(test: &TestApp, column: &str, kind: impl Fn(&FlowRun) -> String) {
+    let runs = runs_of(test, "quick-flow").await;
+    let mut run_counts = std::collections::BTreeMap::<String, i64>::new();
+    for run in &runs {
+        *run_counts.entry(kind(run)).or_default() += 1;
+    }
+    let mut runs_per_kind: Vec<i64> = run_counts.into_values().collect();
+    let mut claims_per_kind: Vec<i64> =
+        sqlx::query_scalar(&format!("SELECT count(*) FROM cron_ticks GROUP BY {column}"))
+            .fetch_all(&test.db)
+            .await
+            .unwrap();
+    runs_per_kind.sort();
+    claims_per_kind.sort();
+    assert_eq!(runs_per_kind, claims_per_kind, "runs and claimed occurrences differ");
+    assert!(
+        runs_per_kind.iter().all(|count| *count >= 2),
+        "too few ticks: {runs_per_kind:?}"
+    );
+}
+
+#[tokio::test]
+async fn replicas_queue_a_tick_once_for_each_shop() {
+    let shops = vec!["shop-a.myshopify.com".to_string(), "shop-b.myshopify.com".to_string()];
+    let config = || {
+        config(
+            [concurrent_flow("quick-flow")],
+            [Cron::new(EVERY_SECOND, "quick-flow").shops(shops.clone())],
+        )
+    };
+    let test = TestApp::new(config()).await;
+    // Three processes of the same application on one database.
+    let replicas = [test.sibling(config()), test.sibling(config())];
+    let mut schedulers = vec![Scheduler::start(&test.app).unwrap()];
+    schedulers.extend(replicas.iter().map(|replica| Scheduler::start(replica).unwrap()));
+
+    // Several ticks, so that a replica that is late for one is still seen.
+    wait_for_runs(&test, "quick-flow", |runs| {
+        ["shop-a.myshopify.com", "shop-b.myshopify.com"]
+            .iter()
+            .all(|shop| runs.iter().filter(|run| run.shop == *shop).count() >= 3)
+    })
+    .await;
+    schedulers.clear();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    assert_one_run_per_claim(&test, "shop", |run| run.shop.clone()).await;
+    test.cleanup().await;
+}
+
+#[tokio::test]
+async fn crons_of_one_flow_and_schedule_each_queue_their_own_run() {
+    let full = || Cron::new(EVERY_SECOND, "quick-flow").input(json!({ "mode": "full" }));
+    let delta = || Cron::new(EVERY_SECOND, "quick-flow").input(json!({ "mode": "delta" }));
+    let test = TestApp::new(config([concurrent_flow("quick-flow")], [full(), delta()])).await;
+    // A replica of the same configuration, with the crons in another order.
+    let replica = test.sibling(config([concurrent_flow("quick-flow")], [delta(), full()]));
+    let mut schedulers = vec![
+        Scheduler::start(&test.app).unwrap(),
+        Scheduler::start(&replica).unwrap(),
+    ];
+
+    let mode = |run: &FlowRun| run.input.as_ref().unwrap()["mode"].as_str().unwrap().to_string();
+    wait_for_runs(&test, "quick-flow", |runs| {
+        ["full", "delta"]
+            .iter()
+            .all(|wanted| runs.iter().filter(|run| mode(run) == *wanted).count() >= 3)
+    })
+    .await;
+    schedulers.clear();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // Two crons, so two groups of claims; not one cron's claims taking the other's.
+    assert_one_run_per_claim(&test, "cron_key", mode).await;
+    test.cleanup().await;
+}
+
+#[tokio::test]
+async fn forgets_the_ticks_of_the_past_day() {
+    let test = TestApp::new(config(
+        [concurrent_flow("quick-flow")],
+        [Cron::new(EVERY_SECOND, "quick-flow")],
+    ))
+    .await;
+    for age in ["2 days", "1 hour"] {
+        sqlx::query(
+            "INSERT INTO cron_ticks (app_handle, shop, cron_key, scheduled_at) \
+             VALUES ('default', '__global__', $1, now() - $2::interval)",
+        )
+        .bind(format!("other-flow:{age}"))
+        .bind(age)
+        .execute(&test.db)
+        .await
+        .unwrap();
+    }
+
+    let mut scheduler = Scheduler::start(&test.app).unwrap();
+    wait_for_runs(&test, "quick-flow", |runs| !runs.is_empty()).await;
+    scheduler.stop();
+
+    let keys: Vec<String> = sqlx::query_scalar("SELECT cron_key FROM cron_ticks WHERE cron_key LIKE 'other-flow:%'")
+        .fetch_all(&test.db)
+        .await
+        .unwrap();
+    assert_eq!(keys, ["other-flow:1 hour"]);
+    test.cleanup().await;
+}
+
 #[tokio::test]
 async fn stop_clears_all_crons() {
     let test = TestApp::new(config(
@@ -427,5 +540,79 @@ async fn registers_one_job_per_cron_including_nicknames() {
         .await
         .unwrap();
     assert_eq!(queued, 0);
+    test.cleanup().await;
+}
+
+#[tokio::test]
+async fn invalid_time_zones_are_rejected_before_the_scheduler_starts() {
+    let error = OpenShopConfig::builder()
+        .flow(noop_flow("quick-flow"))
+        .cron(Cron::new("0 9 * * *", "quick-flow").timezone("Mars/Olympus"))
+        .build()
+        .err()
+        .expect("rejected by the builder")
+        .to_string();
+    assert_eq!(
+        error,
+        "[openshop] Invalid config: crons[0].timezone is invalid: Invalid time zone \"Mars/Olympus\" \
+         for the cron of flow \"quick-flow\": expected an IANA name such as \"Europe/Paris\""
+    );
+
+    OpenShopConfig::builder()
+        .flow(noop_flow("quick-flow"))
+        .cron(Cron::new("0 9 * * *", "quick-flow").timezone("Europe/Paris"))
+        .build()
+        .expect("a known time zone");
+}
+
+/// Keeps what the process logger is told as errors.
+struct Errors(std::sync::Mutex<Vec<String>>);
+
+impl openshop::runtime::RuntimeLogger for Errors {
+    fn info(&self, _message: &str, _context: Option<&openshop::Value>) {}
+    fn warn(&self, _message: &str, _context: Option<&openshop::Value>) {}
+    fn error(&self, message: &str, _context: Option<&openshop::Value>) {
+        self.0.lock().unwrap().push(message.to_string());
+    }
+}
+
+#[tokio::test]
+async fn a_cron_that_stops_is_told_and_started_again() {
+    // 30 February: the expression is valid and never comes.
+    let never = "0 0 0 30 2 *";
+    let test = TestApp::new(config(
+        [concurrent_flow("never-flow")],
+        [Cron::new(never, "never-flow").name("Never")],
+    ))
+    .await;
+
+    let errors = std::sync::Arc::new(Errors(Default::default()));
+    let previous = openshop::runtime::logger::set_logger(errors.clone());
+    let mut scheduler = Scheduler::start(&test.app).unwrap();
+    // Told once at the start, and again after the wait it announces.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let told = loop {
+        let told: Vec<String> = errors
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|line| line.contains("Cron \"Never\" stopped"))
+            .cloned()
+            .collect();
+        if told.len() >= 2 || Instant::now() > deadline {
+            break told;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    scheduler.stop();
+    openshop::runtime::logger::set_logger(previous);
+
+    assert_eq!(told.len(), 2, "{told:?}");
+    assert_eq!(
+        told[0],
+        "[openshop] Cron \"Never\" stopped, its schedule has no more occurrence. Starting it again in 1s."
+    );
+    assert!(told[1].ends_with("Starting it again in 2s."), "{told:?}");
     test.cleanup().await;
 }
