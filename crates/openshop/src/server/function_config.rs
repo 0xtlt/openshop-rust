@@ -91,6 +91,16 @@ mod tests {
     }
 
     #[test]
+    fn does_not_repeat_a_password_in_a_validator_error() {
+        let fields = IndexMap::from([(
+            "token".to_string(),
+            Field::password("Token").validate(|value| Err(format!("invalid token: {value}"))),
+        )]);
+        let error = validate_function_config(&fields, Some(&json!({ "token": "function-secret" }))).unwrap_err();
+        assert_eq!(error, "Field \"token\" is invalid");
+    }
+
+    #[test]
     fn refuses_values_of_the_wrong_type() {
         let error =
             validate_function_config(&fields(), Some(&json!({ "minQuantity": "abc", "percentage": 10 }))).unwrap_err();

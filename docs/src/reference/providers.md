@@ -197,8 +197,9 @@ its field. A value of another type is refused with `400` and
 
 A null or an empty string is no value: a required field then fails with
 `Field "…" is required`, and an optional one is not saved. A blank password
-keeps the one already saved, as it is. The error for a password never repeats
-its value. Keys that are not fields of the provider are
+keeps the one already saved, as it is: it is not transformed or validated
+again. A validator that refuses a password gives `Field "…" is invalid`, since
+its summary could repeat the secret. Keys that are not fields of the provider are
 ignored and not saved. A transformer runs on the checked values, before the
 validators.
 
