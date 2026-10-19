@@ -325,6 +325,59 @@ fn docs(function: &ImplItemFn) -> Vec<&Attribute> {
         .collect()
 }
 
+/// What the block declares next to the items of the user: the name of the
+/// provider, its definition, and its connectors.
+const DECLARED: [&str; 3] = ["NAME", "provider", "on"];
+
+/// Refuses an item of the block, or the constant of a method, that would be
+/// declared twice by the expansion. Rustc would point at the attribute.
+fn check_names(item: &ItemImpl, methods: &[Method]) -> syn::Result<()> {
+    let own: Vec<&Ident> = item
+        .items
+        .iter()
+        .filter_map(|implemented| match implemented {
+            ImplItem::Fn(function) => Some(&function.sig.ident),
+            ImplItem::Const(constant) => Some(&constant.ident),
+            _ => None,
+        })
+        .collect();
+    for ident in &own {
+        let name = plain_name(ident);
+        if DECLARED.contains(&name.as_str()) {
+            return Err(syn::Error::new(
+                ident.span(),
+                format!(
+                    "`{name}` is declared by `#[provider]` (the name, the definition and the connectors of the provider): give this item another name"
+                ),
+            ));
+        }
+    }
+    let mut constants: Vec<String> = Vec::new();
+    for method in methods {
+        let ident = &method.function.sig.ident;
+        let constant = constant_ident(ident).to_string();
+        if DECLARED.contains(&constant.as_str()) {
+            return Err(syn::Error::new(
+                ident.span(),
+                format!(
+                    "the call of this method would be the constant `{constant}`, which `#[provider]` declares: give the method another name"
+                ),
+            ));
+        }
+        let taken = constants.contains(&constant) || own.iter().any(|own| own.to_string() == constant);
+        if taken {
+            return Err(syn::Error::new(
+                ident.span(),
+                format!(
+                    "the call of this method would be the constant `{constant}`, which is already in this block: give the method another name"
+                ),
+            ));
+        }
+        constants.push(constant);
+    }
+    Ok(())
+}
+
 pub fn provider(name: Option<LitStr>, mut item: ItemImpl) -> syn::Result<TokenStream> {
     let krate = quote!(::openshop);
     if let Some((_, path, _)) = &item.trait_ {
@@ -403,6 +456,8 @@ pub fn provider(name: Option<LitStr>, mut item: ItemImpl) -> syn::Result<TokenSt
         }
         methods.push(method(function)?);
     }
+
+    check_names(&item, &methods)?;
 
     let mut constants = Vec::new();
     let mut handlers = Vec::new();
@@ -708,6 +763,57 @@ mod tests {
         assert!(!generated.contains("const ENDPOINT"), "{generated}");
         assert!(!generated.contains("const NEW"), "{generated}");
         assert!(!generated.contains("const CHECK"), "{generated}");
+    }
+
+    #[test]
+    fn refuses_what_the_expansion_would_declare_twice() {
+        let declared = |name: &str| {
+            format!(
+                "`{name}` is declared by `#[provider]` (the name, the definition and the connectors of the provider): give this item another name"
+            )
+        };
+        assert_eq!(
+            provider_refusal(parse_quote! { impl W { pub fn on() -> Self { W } } }),
+            declared("on")
+        );
+        assert_eq!(
+            provider_refusal(parse_quote! { impl W { pub fn provider() -> Self { W } } }),
+            declared("provider")
+        );
+        assert_eq!(
+            provider_refusal(parse_quote! { impl W { const NAME: &str = "w"; } }),
+            declared("NAME")
+        );
+        assert_eq!(
+            provider_refusal(parse_quote! { impl W { pub async fn name(&self) -> Result<String> { todo!() } } }),
+            "the call of this method would be the constant `NAME`, which `#[provider]` declares: give the method another name"
+        );
+        assert_eq!(
+            provider_refusal(parse_quote! { impl W {
+                const PING: u32 = 1;
+                pub async fn ping(&self) -> Result<String> { todo!() }
+            } }),
+            "the call of this method would be the constant `PING`, which is already in this block: give the method another name"
+        );
+        assert_eq!(
+            provider_refusal(parse_quote! { impl W {
+                pub async fn ping(&self) -> Result<String> { todo!() }
+                pub async fn Ping(&self) -> Result<String> { todo!() }
+            } }),
+            "the call of this method would be the constant `PING`, which is already in this block: give the method another name"
+        );
+        // A private constant of another name, and private helpers, are fine.
+        assert!(
+            provider(
+                None,
+                parse_quote! { impl W {
+                    const LIMIT: u32 = 1;
+                    fn new() -> Self { W }
+                    pub async fn ping(&self) -> Result<String> { todo!() }
+                } }
+            )
+            .is_ok()
+        );
     }
 
     #[test]

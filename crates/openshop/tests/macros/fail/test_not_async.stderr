@@ -1,0 +1,5 @@
+error: `#[openshop::test]` goes on `async fn(ctx: &TestContext)`, or `&mut TestContext` to create resources
+ --> tests/macros/fail/test_not_async.rs:6:4
+  |
+6 | fn runs(_ctx: &openshop::testing::TestContext) {}
+  |    ^^^^

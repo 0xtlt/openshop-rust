@@ -324,6 +324,76 @@ fn refuses_literals_that_do_not_fit() {
 }
 
 #[test]
+fn int_literals_are_32_bit_integers() {
+    check("{ orders(first: 2147483647) { nodes { id } } }");
+    check("query($first: Int = -2147483648) { orders(first: $first) { nodes { id } } }");
+    assert_eq!(
+        refusal("{ orders(first: 2147483648) { nodes { id } } }"),
+        "The integer is outside the range of `Int`, a 32-bit integer, given for argument `first` of `QueryRoot.orders` (line 1, column 3)"
+    );
+    assert_eq!(
+        refusal("{ orders(first: -2147483649) { nodes { id } } }"),
+        "The integer is outside the range of `Int`, a 32-bit integer, given for argument `first` of `QueryRoot.orders` (line 1, column 3)"
+    );
+    // A float, an ID or a custom scalar is not bounded by `Int`.
+    check("{ orders(first: 1) { nodes { id } } product(id: 99999999999) { id } }");
+}
+
+#[test]
+fn default_values_fit_the_type_of_their_variable() {
+    check(
+        "query($first: Int! = 10, $sort: OrderSortKeys = CREATED_AT, $ids: [ID!] = [\"1\"]) { orders(first: $first, sortKey: $sort) { nodes { id } } nodes(ids: $ids) { id } }",
+    );
+    assert_eq!(
+        refusal("query($first: Int = \"ten\") { orders(first: $first) { nodes { id } } }"),
+        "a string is given for the default value of `$first`, of type `Int` (line 1, column 7)"
+    );
+    assert_eq!(
+        refusal("query($first: Int! = null) { orders(first: $first) { nodes { id } } }"),
+        "`null` is not allowed for the default value of `$first`, of type `Int!` (line 1, column 7)"
+    );
+    assert_eq!(
+        refusal("query($sort: OrderSortKeys = CREATED) { orders(first: 1, sortKey: $sort) { nodes { id } } }"),
+        "`CREATED` is not a value of the enum `OrderSortKeys` (did you mean `CREATED_AT`?) (in the default value of `$sort`) (line 1, column 7)"
+    );
+    assert_eq!(
+        refusal("query($first: Int = 3000000000) { orders(first: $first) { nodes { id } } }"),
+        "The integer is outside the range of `Int`, a 32-bit integer, given for the default value of `$first` (line 1, column 7)"
+    );
+}
+
+#[test]
+fn json_and_custom_scalars_accept_any_literal() {
+    // `JSON` takes an object, a list or a scalar, in a default value and in an argument.
+    let operation = check(
+        "mutation($payload: JSON = {Amount: \"30\", customer_id: 12345, tags: [\"a\", {nested: true}]}) {
+           flowTriggerReceive(handle: \"h\", payload: $payload) { userErrors { message } }
+         }",
+    );
+    assert_eq!(operation.variables.len(), 1);
+    check(
+        "mutation($items: JSON = [1, \"two\", null]) { flowTriggerReceive(handle: \"h\", payload: $items) { userErrors { message } } }",
+    );
+    check(
+        "mutation { flowTriggerReceive(handle: \"h\", payload: {Amount: \"30\", list: [1, 2], none: null}) { userErrors { message } } }",
+    );
+    check(
+        "mutation($id: String) { flowTriggerReceive(handle: \"h\", payload: {customer: $id}) { userErrors { message } } }",
+    );
+    check("mutation { flowTriggerReceive(handle: \"h\", payload: [1, 2]) { userErrors { message } } }");
+    // A variable inside the literal is declared like any other.
+    assert_eq!(
+        refusal("mutation { flowTriggerReceive(handle: \"h\", payload: {customer: $id}) { userErrors { message } } }"),
+        "Variable `$id` is not declared (line 1, column 12)"
+    );
+    // An object stays refused for a built-in scalar.
+    assert_eq!(
+        refusal("mutation { flowTriggerReceive(handle: {a: 1}, payload: {}) { userErrors { message } } }"),
+        "An object is given for argument `handle` of `Mutation.flowTriggerReceive`, of type `String` (line 1, column 12)"
+    );
+}
+
+#[test]
 fn checks_input_object_literals() {
     assert_eq!(
         refusal(

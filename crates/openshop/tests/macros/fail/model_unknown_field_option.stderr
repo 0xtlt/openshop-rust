@@ -1,0 +1,5 @@
+error: unknown field option; expected `column`, `default`, `sql_type`, `renamed_from`, `references(…)`, `on_delete`, `index` or `unique`
+ --> tests/macros/fail/model_unknown_field_option.rs:7:13
+  |
+7 |     #[model(indexed)]
+  |             ^^^^^^^

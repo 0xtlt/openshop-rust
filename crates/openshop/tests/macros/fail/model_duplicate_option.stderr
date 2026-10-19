@@ -1,0 +1,5 @@
+error: given twice
+ --> tests/macros/fail/model_duplicate_option.rs:7:32
+  |
+7 |     #[model(column = "writer", column = "author")]
+  |                                ^^^^^^

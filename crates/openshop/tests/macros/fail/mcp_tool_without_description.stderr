@@ -1,0 +1,5 @@
+error: an MCP tool needs a description: a documentation comment, or `description = "…"`
+ --> tests/macros/fail/mcp_tool_without_description.rs:4:10
+  |
+4 | async fn list_reviews(_ctx: McpContext) -> Result<Value> {
+  |          ^^^^^^^^^^^^

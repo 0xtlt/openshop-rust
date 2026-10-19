@@ -1,0 +1,7 @@
+error: expected the path of the page: `#[admin_page("/reviews")]`
+ --> tests/macros/fail/admin_page_without_path.rs:5:1
+  |
+5 | #[admin_page]
+  | ^^^^^^^^^^^^^
+  |
+  = note: this error originates in the attribute macro `admin_page` (in Nightly builds, run with -Z macro-backtrace for more info)

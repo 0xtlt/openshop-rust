@@ -80,6 +80,8 @@ leptos = "0.8"
 # The transport that keeps events, for `tests/sentry.rs`.
 sentry = { workspace = true, features = ["test"] }
 tokio = { workspace = true, features = ["io-util", "test-util"] }
+# The errors of the macros, `tests/macros.rs`.
+trybuild = "1"
 
 [lints.rust]
 unsafe_code = "deny"

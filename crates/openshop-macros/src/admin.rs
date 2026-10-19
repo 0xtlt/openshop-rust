@@ -256,6 +256,22 @@ pub fn admin_page(arguments: Arguments, mut item: ItemImpl) -> syn::Result<Token
     // The view calls the loaders and the actions of its page through a
     // constant each, which carries what they take and what they return.
     let mut constants = Vec::new();
+    // The expansion declares `PATH`, and a constant per function: not twice.
+    let own: Vec<&Ident> = item
+        .items
+        .iter()
+        .filter_map(|implemented| match implemented {
+            ImplItem::Fn(function) => Some(&function.sig.ident),
+            ImplItem::Const(constant) => Some(&constant.ident),
+            _ => None,
+        })
+        .collect();
+    if let Some(taken) = own.iter().find(|ident| *ident == &"PATH") {
+        return Err(syn::Error::new(
+            taken.span(),
+            "`PATH` is the path of the page, which `#[admin_page]` declares: give this item another name",
+        ));
+    }
     if view.is_some() {
         for reference in &references {
             let Reference {
@@ -271,6 +287,14 @@ pub fn admin_page(arguments: Arguments, mut item: ItemImpl) -> syn::Result<Token
                 return Err(syn::Error::new(
                     function.span(),
                     "`PATH` is the path of the page: give the function another name",
+                ));
+            }
+            if let Some(taken) = own.iter().find(|ident| ***ident == constant && ***ident != *function) {
+                return Err(syn::Error::new(
+                    taken.span(),
+                    format!(
+                        "the view of the page calls `{function}` through the constant `{constant}`: give this item another name"
+                    ),
                 ));
             }
             let Some(output) = output else {
@@ -479,6 +503,33 @@ mod tests {
                 #[view] fn view() -> impl IntoView { }
             } }),
             "`PATH` is the path of the page: give the function another name"
+        );
+    }
+
+    #[test]
+    fn refuses_what_the_expansion_would_declare_twice() {
+        assert_eq!(
+            refusal(parse_quote! { impl P { const PATH: &str = "/x"; } }),
+            "`PATH` is the path of the page, which `#[admin_page]` declares: give this item another name"
+        );
+        assert_eq!(
+            refusal(parse_quote! { impl P {
+                #[loader] async fn list(ctx: AdminContext) -> Result<String> { todo!() }
+                const LIST: u32 = 1;
+                #[view] fn view() -> impl IntoView { }
+            } }),
+            "the view of the page calls `list` through the constant `LIST`: give this item another name"
+        );
+        // Without a view there is no constant to collide with.
+        assert!(
+            admin_page(
+                parse_quote!("/reviews"),
+                parse_quote! { impl P {
+                    #[loader] async fn list(ctx: AdminContext) -> Result<String> { todo!() }
+                    const LIST: u32 = 1;
+                } }
+            )
+            .is_ok()
         );
     }
 

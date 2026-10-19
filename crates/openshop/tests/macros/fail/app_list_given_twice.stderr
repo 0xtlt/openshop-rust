@@ -1,0 +1,5 @@
+error: `flows` is given twice
+  --> tests/macros/fail/app_list_given_twice.rs:10:5
+   |
+10 |     flows: [sync_orders],
+   |     ^^^^^

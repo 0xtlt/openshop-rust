@@ -86,9 +86,23 @@ pub fn write_schema(cwd: &Path, options: &CodegenOptions, introspection: &Value)
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
+    let created = !path.exists();
     std::fs::write(&path, schema.to_json())
         .with_context(|| format!("[openshop] Could not write {}", path.display()))?;
+    if created {
+        touch_sources(cwd);
+    }
     Ok((path, schema.types.len()))
+}
+
+/// Cargo follows a schema file `graphql!` read, not one that did not exist
+/// yet: the sources are touched so that the crate is checked against the new file.
+fn touch_sources(cwd: &Path) {
+    for source in ["src/main.rs", "src/lib.rs"] {
+        if let Ok(file) = std::fs::File::options().write(true).open(cwd.join(source)) {
+            let _ = file.set_modified(std::time::SystemTime::now());
+        }
+    }
 }
 
 pub async fn run_codegen(cwd: &Path, args: &[String]) -> Result<()> {
@@ -229,7 +243,28 @@ mod tests {
             ],
         } } });
 
+        // The crate was built before the file existed: its source is touched, once.
+        let main = dir.join("src/main.rs");
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(&main, "fn main() {}").unwrap();
+        let long_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+        let set_old = || {
+            let file = std::fs::File::options().write(true).open(&main).unwrap();
+            file.set_modified(long_ago).unwrap();
+        };
+        set_old();
+
         let (path, types) = write_schema(&dir, &options, &introspection).unwrap();
+        assert!(
+            std::fs::metadata(&main).unwrap().modified().unwrap()
+                > std::time::SystemTime::now() - std::time::Duration::from_secs(1800)
+        );
+        set_old();
+        write_schema(&dir, &options, &introspection).unwrap();
+        assert!(
+            std::fs::metadata(&main).unwrap().modified().unwrap()
+                < std::time::SystemTime::now() - std::time::Duration::from_secs(1800)
+        );
         assert_eq!(path, dir.join("graphql/admin.schema.json"));
         assert_eq!(types, 2);
         let schema = Schema::from_json(&std::fs::read_to_string(&path).unwrap()).unwrap();

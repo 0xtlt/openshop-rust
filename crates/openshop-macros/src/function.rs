@@ -76,13 +76,11 @@ pub fn derive(input: DeriveInput) -> syn::Result<TokenStream> {
     let mut label: Option<LitStr> = None;
     let mut definition_options = Vec::new();
     let mut owner_options = Vec::new();
-    let mut stated = false;
     for attribute in input
         .attrs
         .iter()
         .filter(|attribute| attribute.path().is_ident("function"))
     {
-        stated = true;
         for argument in &attribute.parse_args::<Arguments>()?.0 {
             let option = argument.name().unwrap_or_default();
             match argument {
@@ -111,9 +109,8 @@ pub fn derive(input: DeriveInput) -> syn::Result<TokenStream> {
         }
     }
     let Some((function_type, handle)) = function else {
-        let span = if stated { name.span() } else { Span::call_site() };
         return Err(syn::Error::new(
-            span,
+            name.span(),
             "a function states its type and its handle: `#[function(discount = \"volume-discount\")]`",
         ));
     };
