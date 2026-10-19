@@ -21,11 +21,23 @@ const WRITE_DELAY: Duration = Duration::from_millis(50);
 /// database takes them loses the newest ones, and the run says how many.
 const QUEUE_CAPACITY: usize = 10_000;
 
+/// The most a single statement holds, in lines and in bytes of text: a batch is
+/// written once it reaches either, whatever is still waiting.
+const MAX_BATCH_LINES: usize = 1_000;
+const MAX_BATCH_BYTES: usize = 1 << 20;
+
 struct Line {
     level: &'static str,
     message: String,
-    payload: Value,
+    /// The JSON text of the payload.
+    payload: String,
     at: DateTime<Utc>,
+}
+
+impl Line {
+    fn size(&self) -> usize {
+        self.message.len() + self.payload.len()
+    }
 }
 
 enum Message {
@@ -51,23 +63,31 @@ impl FlowLogger {
         let lost = dropped.clone();
 
         tokio::spawn(async move {
-            let mut lines = Vec::new();
+            let mut lines: Vec<Line> = Vec::new();
             let mut flushes = Vec::new();
             while let Some(first) = receiver.recv().await {
+                let mut bytes = 0;
                 match first {
-                    Message::Line(line) => lines.push(line),
+                    Message::Line(line) => {
+                        bytes += line.size();
+                        lines.push(line);
+                    }
                     Message::Flush(done) => flushes.push(done),
                 }
                 // The lines logged within `WRITE_DELAY` of the first one go to the
-                // database with it. A flush, at the end of the run, does not wait.
+                // database with it, up to a batch: a flow that logs without pause
+                // would otherwise keep the batch growing and never write it. A
+                // flush, at the end of the run, does not wait.
                 if flushes.is_empty() {
                     let delay = tokio::time::sleep(WRITE_DELAY);
                     tokio::pin!(delay);
-                    loop {
+                    while lines.len() < MAX_BATCH_LINES && bytes < MAX_BATCH_BYTES && !delay.is_elapsed() {
                         tokio::select! {
-                            biased;
                             message = receiver.recv() => match message {
-                                Some(Message::Line(line)) => lines.push(line),
+                                Some(Message::Line(line)) => {
+                                    bytes += line.size();
+                                    lines.push(line);
+                                }
                                 Some(Message::Flush(done)) => {
                                     flushes.push(done);
                                     break;
@@ -85,7 +105,7 @@ impl FlowLogger {
                     lines.push(Line {
                         level: "warn",
                         message: notice,
-                        payload: Value::Object(Default::default()),
+                        payload: "{}".to_string(),
                         at: Utc::now(),
                     });
                 }
@@ -119,7 +139,7 @@ impl FlowLogger {
         let line = Line {
             level,
             message: without_nul(message).into_owned(),
-            payload,
+            payload: payload.to_string(),
             at: Utc::now(),
         };
         // A full queue loses the line; a closed one belongs to a stopped runtime.
@@ -163,15 +183,20 @@ impl FlowLogger {
     }
 }
 
+/// What replaces a NUL byte: visible, so that two texts that differ by one
+/// still differ.
+const NUL_REPLACEMENT: char = '\u{FFFD}';
+
 fn without_nul(text: &str) -> Cow<'_, str> {
     if text.contains('\0') {
-        Cow::Owned(text.replace('\0', ""))
+        Cow::Owned(text.replace('\0', &NUL_REPLACEMENT.to_string()))
     } else {
         Cow::Borrowed(text)
     }
 }
 
-/// Removes the NUL bytes from the strings and the keys of a payload.
+/// Replaces the NUL bytes in the strings and the keys of a payload. Keys that
+/// become equal stay apart: the later ones get `#2`, `#3`… after them.
 fn strip_nul(value: &mut Value) {
     match value {
         Value::String(text) => {
@@ -182,10 +207,17 @@ fn strip_nul(value: &mut Value) {
         Value::Array(items) => items.iter_mut().for_each(strip_nul),
         Value::Object(map) => {
             if map.keys().any(|key| key.contains('\0')) {
-                *map = std::mem::take(map)
-                    .into_iter()
-                    .map(|(key, value)| (without_nul(&key).into_owned(), value))
-                    .collect();
+                let mut clean = serde_json::Map::new();
+                for (key, value) in std::mem::take(map) {
+                    let mut name = without_nul(&key).into_owned();
+                    let mut copy = 1;
+                    while clean.contains_key(&name) {
+                        copy += 1;
+                        name = format!("{}#{copy}", without_nul(&key));
+                    }
+                    clean.insert(name, value);
+                }
+                *map = clean;
             }
             map.values_mut().for_each(strip_nul);
         }
@@ -202,7 +234,7 @@ async fn write(db: &PgPool, flow_run_id: &str, lines: &[Line]) {
     let messages: Vec<&str> = lines.iter().map(|line| line.message.as_str()).collect();
     // Sent as text: the `json` column keeps it as it is, where a `jsonb` parameter
     // would come back with spaces and its keys in another order.
-    let payloads: Vec<String> = lines.iter().map(|line| line.payload.to_string()).collect();
+    let payloads: Vec<&str> = lines.iter().map(|line| line.payload.as_str()).collect();
     let dates: Vec<DateTime<Utc>> = lines.iter().map(|line| line.at).collect();
 
     // A failed log write must not crash the flow: it is told to the process logger.
