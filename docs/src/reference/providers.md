@@ -433,7 +433,14 @@ of a fake without a rule, fails with
 and answers with an error when the saved config does not fit the type. The
 admin check endpoint saves `lastCheckedAt` and `lastCheckOk` only when a config
 row already exists. A checker error produces `{ ok: false, error }` with HTTP
-500; returning `false` produces `{ ok: false }` with HTTP 200. A provider
+500. Only an error written for the client is shown: return
+`PublicError::new("API key rejected")` (`Err(PublicError::new(…).into())`, or
+`bail!(PublicError::new(…))`). Any other error, such as a `reqwest` error whose
+message holds the URL, or a decoding error that quotes a stored value, is
+logged under an id, and the response has `error: "Error: Internal error (error
+id <id>)"` and `errorId` instead of its text. A checker that takes longer than 10 seconds produces
+`{ ok: false, error }` with HTTP 504. Returning `false` produces `{ ok: false }`
+with HTTP 200. A provider
 without a checker answers `400` with `No checker defined`.
 
 `GET /api/providers` also returns `configured`. It is true when every required

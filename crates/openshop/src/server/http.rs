@@ -1,7 +1,7 @@
 //! Small HTTP helpers shared by the route modules.
 
 use axum::Json;
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use indexmap::IndexMap;
 use serde_json::{Value, json};
@@ -31,6 +31,21 @@ pub fn parse_query(raw: Option<&str>) -> IndexMap<String, String> {
     query
 }
 
+/// `%text%` for `LIKE ... ESCAPE '\'`, with what `LIKE` reads as a pattern
+/// (`%`, `_`, `\`) escaped: the text is matched as it is written.
+pub(crate) fn containing(text: &str) -> String {
+    let mut pattern = String::with_capacity(text.len() + 2);
+    pattern.push('%');
+    for character in text.chars() {
+        if matches!(character, '\\' | '%' | '_') {
+            pattern.push('\\');
+        }
+        pattern.push(character);
+    }
+    pattern.push('%');
+    pattern
+}
+
 pub(crate) fn header<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
     headers.get(name).and_then(|value| value.to_str().ok())
 }
@@ -43,7 +58,102 @@ pub(crate) fn json_object_body(body: &[u8]) -> JsonMap {
     }
 }
 
-/// An unexpected failure: logged, and reported as a bare 500.
+/// A short id that ties a response to the log line of its error.
+pub(crate) fn error_id() -> String {
+    uuid::Uuid::new_v4().simple().to_string()[..12].to_string()
+}
+
+/// An error whose message is meant for the client: a refused input, a missing
+/// resource. The Admin API and the MCP endpoint show the message of this error
+/// as it is; any other error that reaches them is logged under an id, and the
+/// client reads the id: the text of an error that nobody wrote for a client
+/// can hold a query, an address, a key or a value of the caller.
+///
+/// `bail!(PublicError::new("shop is not installed"))`
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PublicError(pub String);
+
+impl PublicError {
+    pub fn new(message: impl Into<String>) -> Self {
+        Self(message.into())
+    }
+}
+
+impl std::fmt::Display for PublicError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for PublicError {}
+
+/// A [`PublicError`] as an `anyhow::Error`, for the errors the framework raises
+/// for a client.
+pub(crate) fn public_error(message: impl Into<String>) -> anyhow::Error {
+    PublicError::new(message).into()
+}
+
+/// The message of the first error of the chain that is written for a client.
+fn public_message(error: &anyhow::Error) -> Option<String> {
+    use crate::admin::AdminPublicError;
+    use crate::declare::InvalidInput;
+    use crate::engine::errors::{FlowConcurrencyError, InvalidFlowInput, UnknownFlowError};
+    use crate::server::log_query::InvalidLogQuery;
+
+    error.chain().find_map(|cause| {
+        if let Some(public) = cause.downcast_ref::<PublicError>() {
+            return Some(public.to_string());
+        }
+        macro_rules! shown {
+            ($($kind:ty),*) => {
+                $(if let Some(known) = cause.downcast_ref::<$kind>() {
+                    return Some(known.to_string());
+                })*
+            };
+        }
+        shown!(
+            AdminPublicError,
+            InvalidInput,
+            FlowConcurrencyError,
+            InvalidFlowInput,
+            UnknownFlowError,
+            InvalidLogQuery
+        );
+        None
+    })
+}
+
+/// What a client may read about a failure.
+pub(crate) struct ClientError {
+    pub message: String,
+    /// Set for an internal error: the id of the log line that has the cause.
+    pub error_id: Option<String>,
+}
+
+/// The message of an error written for the client, as it is. Any other error is
+/// logged and reported with a new id, and the client gets a generic message and
+/// that id.
+pub(crate) fn client_error(what: &str, error: &anyhow::Error) -> ClientError {
+    if let Some(message) = public_message(error) {
+        return ClientError {
+            message,
+            error_id: None,
+        };
+    }
+    let id = error_id();
+    logger::error_with(
+        format!("[openshop] {what}"),
+        json!({ "errorId": id, "error": error_message(error) }),
+    );
+    report::error(error);
+    ClientError {
+        message: format!("Internal error (error id {id})"),
+        error_id: Some(id),
+    }
+}
+
+/// An unexpected failure: logged with an id, and reported as a bare 500 that
+/// carries the id in `x-error-id`.
 pub(crate) struct ApiError(anyhow::Error);
 
 impl<E: Into<anyhow::Error>> From<E> for ApiError {
@@ -54,12 +164,17 @@ impl<E: Into<anyhow::Error>> From<E> for ApiError {
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
+        let id = error_id();
         logger::error_with(
             "[openshop] Unhandled request error",
-            json!({ "error": error_message(&self.0) }),
+            json!({ "errorId": id, "error": error_message(&self.0) }),
         );
         report::error(&self.0);
-        (StatusCode::INTERNAL_SERVER_ERROR, "Internal Server Error").into_response()
+        let mut response = (StatusCode::INTERNAL_SERVER_ERROR, "Internal Server Error").into_response();
+        if let Ok(value) = HeaderValue::from_str(&id) {
+            response.headers_mut().insert("x-error-id", value);
+        }
+        response
     }
 }
 

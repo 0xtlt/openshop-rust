@@ -27,24 +27,7 @@ use crate::runtime::report::{self, Panicked};
 use crate::runtime::logger;
 use crate::types::{CustomAdminPageAccess, CustomAdminPagesResponse, JsonMap};
 use openshop_shared::match_custom_admin_path;
-
-/// JavaScript's `decodeURIComponent`; `None` for malformed input.
-fn decode_uri_component(value: &str) -> Option<String> {
-    let bytes = value.as_bytes();
-    let mut decoded = Vec::with_capacity(bytes.len());
-    let mut index = 0;
-    while index < bytes.len() {
-        if bytes[index] == b'%' {
-            let hex = value.get(index + 1..index + 3)?;
-            decoded.push(u8::from_str_radix(hex, 16).ok()?);
-            index += 3;
-        } else {
-            decoded.push(bytes[index]);
-            index += 1;
-        }
-    }
-    String::from_utf8(decoded).ok()
-}
+use openshop_shared::rpc::decode_uri_component;
 
 fn extract_params(pattern: &str, pathname: &str) -> Option<IndexMap<String, String>> {
     if !match_custom_admin_path(pattern, pathname) {
@@ -368,16 +351,6 @@ pub fn create_custom_admin_page_routes() -> Router<OpenShop> {
 mod tests {
     use super::*;
     use crate::admin::{AdminPage, resolve_custom_admin_pages};
-
-    #[test]
-    fn decodes_uri_components() {
-        assert_eq!(decode_uri_component("save%20review").as_deref(), Some("save review"));
-        assert_eq!(decode_uri_component("caf%C3%A9").as_deref(), Some("café"));
-        assert_eq!(decode_uri_component("plain").as_deref(), Some("plain"));
-        assert_eq!(decode_uri_component("%"), None);
-        assert_eq!(decode_uri_component("%zz"), None);
-        assert_eq!(decode_uri_component("%ff"), None);
-    }
 
     #[test]
     fn extracts_route_params() {

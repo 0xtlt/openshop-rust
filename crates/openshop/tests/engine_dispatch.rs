@@ -4,8 +4,11 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use common::{TEST_SHOP, TestApp, create_config, noop_flow};
+use openshop::builder::InputSchema;
 use openshop::db::schema::FlowRun;
-use openshop::{Concurrency, DispatchOptions, FlowConcurrencyError, RetryPolicy, json};
+use openshop::{
+    Concurrency, DispatchOptions, FlowConcurrencyError, InvalidFlowInput, RetryPolicy, UnknownFlowError, Value, json,
+};
 use uuid::Uuid;
 
 async fn find_run(test: &TestApp, run_id: Uuid) -> FlowRun {
@@ -71,6 +74,81 @@ async fn fails_on_unknown_flow() {
             format!("Flow \"{flow_name}\" not found. Available: test-flow")
         );
     }
+    test.cleanup().await;
+}
+
+fn order_flow() -> openshop::builder::Flow {
+    noop_flow("order-flow").input_schema(InputSchema::custom(
+        json!({ "type": "object", "required": ["orderId"] }),
+        |value| match value.get("orderId") {
+            Some(Value::Number(_)) => Ok(value),
+            Some(Value::String(text)) if text == "explode" => panic!("validator exploded"),
+            _ => Err("orderId must be a number".to_string()),
+        },
+    ))
+}
+
+async fn run_count(test: &TestApp) -> i64 {
+    sqlx::query_scalar("SELECT count(*) FROM flow_runs")
+        .fetch_one(&test.db)
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn refuses_input_that_fails_the_input_schema_before_queueing_a_run() {
+    let test = TestApp::new(create_config([order_flow()])).await;
+    for input in [None, Some(json!({})), Some(json!({ "orderId": "12" }))] {
+        let mut options = DispatchOptions::new("order-flow", TEST_SHOP);
+        options.input = input;
+        let error = test.app.dispatch_flow(options).await.unwrap_err();
+        let invalid = error.downcast_ref::<InvalidFlowInput>().expect("typed error");
+        assert_eq!(invalid.flow_name, "order-flow");
+        assert_eq!(invalid.summary, "orderId must be a number");
+        assert_eq!(
+            error.to_string(),
+            "Invalid input for flow \"order-flow\": orderId must be a number"
+        );
+    }
+    assert_eq!(run_count(&test).await, 0);
+
+    let queued = test
+        .app
+        .dispatch_flow(DispatchOptions::new("order-flow", TEST_SHOP).input(json!({ "orderId": 12 })))
+        .await
+        .unwrap();
+    assert_eq!(
+        find_run(&test, queued.run_id).await.input,
+        Some(json!({ "orderId": 12 }))
+    );
+    test.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_validator_that_panics_fails_the_dispatch_not_the_caller() {
+    let test = TestApp::new(create_config([order_flow()])).await;
+    let error = test
+        .app
+        .dispatch_flow(DispatchOptions::new("order-flow", TEST_SHOP).input(json!({ "orderId": "explode" })))
+        .await
+        .unwrap_err();
+    assert!(error.downcast_ref::<InvalidFlowInput>().is_none());
+    assert_eq!(error.to_string(), "The input validator of flow \"order-flow\" panicked");
+    assert_eq!(run_count(&test).await, 0);
+    test.cleanup().await;
+}
+
+#[tokio::test]
+async fn an_unknown_flow_is_a_typed_error() {
+    let test = TestApp::new(create_config([noop_flow("test-flow")])).await;
+    let error = test
+        .app
+        .dispatch_flow(DispatchOptions::new("nope", TEST_SHOP))
+        .await
+        .unwrap_err();
+    let unknown = error.downcast_ref::<UnknownFlowError>().expect("typed error");
+    assert_eq!(unknown.flow_name, "nope");
+    assert_eq!(unknown.available, ["test-flow"]);
     test.cleanup().await;
 }
 

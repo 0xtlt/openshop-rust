@@ -136,6 +136,63 @@
   (`migrate check` fails until it is there). The TypeScript runtime does not
   use the table. Until now, N replicas fired every cron N times, and the
   documentation told to keep a single web replica.
+- The queries of the Admin API are bounded and escaped. Behaviour change:
+  `GET /api/runs` and `GET /api/flows/:name/runs` answer `400` for an `offset`
+  above 10,000 (a deeper page makes the database read every row before it;
+  narrow the list with the filters), and `search` is text, where `%`, `_` and
+  `\` used to be a pattern. The Shopify Functions listings read every
+  page of Shopify's connections (50 at a time, up to 20 pages) instead of the
+  first 50; the cart transform listing makes one request for the functions of
+  the app and one for the cart transforms. On `/ops`, `Older` cuts a page on
+  the time and the id of the last row, so rows created at the same instant are
+  no longer skipped; an old `before` with the time alone still works. The
+  percent-decoder of the custom admin pages and the one of the static assets
+  are one (`openshop_shared::rpc::decode_uri_component`): `%+1` is no longer
+  read as `%01`. Assets of the admin UI have a strong `ETag` and answer `304`
+  to `If-None-Match`, are sent with `X-Content-Type-Options: nosniff` (the
+  shell too), are not copied for each request when they are compiled in, and
+  are read from a directory without blocking the runtime.
+- Retrying, canceling and deleting a run are decided by the write, not by the
+  status the request read before: a cancel no longer overwrites a run that
+  completed meanwhile, a retry no longer resets a run that started again, and
+  a delete (single or bulk) no longer removes a run that just started and its
+  steps and logs; the request answers `409` with the current status, or `404`
+  if the run is gone. Behaviour change: a retry follows the concurrency of the
+  flow like a dispatch, under the same lock; when the flow rejects concurrent
+  runs (the default) and another run of it is active for the shop, it answers
+  `409` with `existingRunId` and the run stays as it was, where it used to run
+  beside the other one. A cancel tells the worker of the run while it
+  still holds the row, so a retry and a new claim of the run cannot take place
+  before the signal and receive it.
+- The Admin API answers what the caller got wrong with a `4xx`, and no longer
+  shows what the server got wrong. Behaviour change:
+  `POST /api/flows/:name/run` answers `404` for an unknown flow, and `422`
+  with the reason when the input fails the input schema of the flow, instead
+  of `500` and of `202` for a run that was bound to fail; the MCP tool
+  `openshop.flows.run` checks the input too. A log query with an invalid or
+  rejected regex, or past its limits (2,000 characters, 20 filters), answers
+  `400` instead of an empty list, in the MCP tool as in the API; the regex is
+  compiled once per query, not once per line, and `C:`, `A:` and `B:` counts
+  are capped at 100. An unexpected failure keeps its `500` and gets an
+  `x-error-id` header; an error of the database, the network or a file in an
+  MCP tool or in a provider check is logged under an id, and the client reads
+  `Internal error (error id <id>)` and that id, not the text, which can hold a
+  query or a URL with a key. Errors a tool raises itself are shown as before.
+  A provider check that takes more than 10 seconds answers `504`. Only an
+  error written for the client is shown by the MCP endpoint and by a provider
+  check: `openshop::PublicError`, `InvalidInput`, `InvalidFlowInput`,
+  `FlowConcurrencyError` and the errors of the core tools. Any other error,
+  including a decoding error that quotes a stored credential, gets the id.
+  Behaviour change for an application: an MCP tool or a provider checker that
+  returned a plain `anyhow!("…")` and wants it read by the client returns
+  `PublicError::new("…")` instead. `app.dispatch_flow` (so `#[flow]`'s
+  `dispatch`) now refuses input that fails the input schema of the flow with
+  `InvalidFlowInput`, and a flow that is not registered with
+  `UnknownFlowError`, before it queues a run; from a webhook handler this is a
+  logged handler error, and Shopify still gets its `200`. A `last:` that
+  reaches back further than the calendar answers `400` instead of panicking.
+  The run page of the admin shows the reason when the server refuses a log
+  search, instead of keeping the previous lines.
 - `openshop init` makes a project from one of three templates: `minimal`, one
   provider and one flow, as before; `custom`, a custom app with every building
   block and a page of its own next to the built-in admin; `public`, a public

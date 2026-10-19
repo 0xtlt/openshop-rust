@@ -369,8 +369,16 @@ impl<T, E: Into<anyhow::Error>> MethodResult for std::result::Result<T, E> {
 
 /// The stored configuration of a provider as the type its methods expect.
 fn typed_provider_config<C: DeserializeOwned>(provider: &str, config: JsonMap) -> Result<C> {
-    serde_json::from_value(Value::Object(config))
-        .map_err(|error| anyhow!("Invalid configuration for provider \"{provider}\": {error}"))
+    serde_json::from_value(Value::Object(config)).map_err(|error| {
+        let message = format!("Invalid configuration for provider \"{provider}\": {error}");
+        // A missing field names the field and nothing else; any other serde
+        // error quotes the stored value, which can be a credential.
+        if error.to_string().starts_with("missing field") {
+            crate::server::http::public_error(message)
+        } else {
+            anyhow!(message)
+        }
+    })
 }
 
 /// The arguments of a call as the type its method expects.

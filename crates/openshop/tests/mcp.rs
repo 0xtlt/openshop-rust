@@ -14,7 +14,8 @@ use openshop::server::mcp::core::latest_stable_shopify_admin_api_version;
 use openshop::testing::{MockTransport, TestContext, TestOptions, session_token};
 use openshop::{
     AdminPageId, AdminPageMode, CancellationToken, Cron, DispatchOptions, FlowContext, IndexMap, McpConfig, McpContext,
-    McpPermission, McpResourceContent, OpenShopConfig, ShopifyAppConfig, ShopifyConfig, Value, anyhow, json,
+    McpPermission, McpResourceContent, OpenShopConfig, PublicError, ShopifyAppConfig, ShopifyConfig, Value, anyhow,
+    json,
 };
 use reqwest::{Method, RequestBuilder};
 use uuid::Uuid;
@@ -1708,7 +1709,31 @@ fn showcase_mcp() -> McpConfig {
         )
         .tool(
             "demo.fail",
-            McpTool::new("Always fails", |_ctx, _input| async { Err(anyhow!("boom")) }),
+            McpTool::new("Always fails", |_ctx, _input| async {
+                Err(PublicError::new("boom").into())
+            }),
+        )
+        .tool(
+            "demo.plain",
+            McpTool::new("Fails with a plain error", |_ctx, _input| async {
+                Err(anyhow!("plain detail"))
+            }),
+        )
+        .tool(
+            "demo.decode",
+            McpTool::new("Fails to decode a value", |_ctx, _input| async {
+                let _: u64 = serde_json::from_value(json!("secret-checker-credential"))?;
+                Ok(Value::Null)
+            }),
+        )
+        .tool(
+            "demo.leak",
+            McpTool::new("Fails inside the server", |_ctx, _input| async {
+                Err(anyhow::Error::new(sqlx::Error::Protocol(
+                    "relation \"secret_table\" at postgres://user:hunter2@db.internal/shop".to_string(),
+                ))
+                .context("counting the secrets"))
+            }),
         )
         .tool(
             "demo.panic",
@@ -1736,7 +1761,7 @@ fn showcase_mcp() -> McpConfig {
         )
         .resource(
             "demo://broken",
-            McpResource::new("Broken", |_ctx| async { Err(anyhow!("unreadable")) }),
+            McpResource::new("Broken", |_ctx| async { Err(PublicError::new("unreadable").into()) }),
         )
 }
 
@@ -1846,6 +1871,46 @@ async fn tool_and_resource_errors_are_reported_and_audited(ctx: &TestContext) {
     assert_eq!(recorded[1].capability_name.as_deref(), Some("demo://broken"));
     assert_eq!(recorded[1].status, "error");
     assert_eq!(recorded[1].error.as_deref(), Some("unreadable"));
+}
+
+#[openshop::test(TestContext::new(config_with(showcase_mcp())))]
+async fn a_tool_failing_inside_the_server_shows_an_id_and_not_the_cause(ctx: &TestContext) {
+    let issued = create_token(ctx, &[]).await;
+
+    let body = call_tool(ctx, &issued.token, "demo.leak", json!({})).await;
+    assert_eq!(body["error"]["code"], -32000);
+    let message = body["error"]["message"].as_str().unwrap();
+    for secret in [
+        "hunter2",
+        "secret_table",
+        "postgres://",
+        "counting the secrets",
+        "Protocol",
+    ] {
+        assert!(!message.contains(secret), "{secret} in {message}");
+    }
+    let id = message
+        .strip_prefix("Internal error (error id ")
+        .and_then(|rest| rest.strip_suffix(')'))
+        .unwrap_or_else(|| panic!("{message}"));
+    assert_eq!(id.len(), 12);
+
+    // The audit log, which the admin reads, has no more than the client.
+    let recorded = audits(ctx, &issued.token_id).await;
+    assert_eq!(recorded[0].error.as_deref(), Some(message));
+
+    // An error nobody wrote for a client is hidden whatever its type: a decoding
+    // error quotes the value it refused.
+    for tool in ["demo.plain", "demo.decode"] {
+        let body = call_tool(ctx, &issued.token, tool, json!({})).await;
+        let message = body["error"]["message"].as_str().unwrap();
+        assert!(message.starts_with("Internal error (error id "), "{tool}: {message}");
+        assert!(!message.contains("secret-checker-credential") && !message.contains("plain detail"));
+    }
+
+    // An error written for the client is told as it is.
+    let body = call_tool(ctx, &issued.token, "demo.fail", json!({})).await;
+    assert_eq!(body["error"]["message"], "boom");
 }
 
 #[openshop::test(TestContext::new(config_with(showcase_mcp())))]
@@ -2324,7 +2389,10 @@ async fn openshop_admin_graphql_reports_shopify_failures_without_hiding_them(ctx
 
     ctx.transport.respond_with(|_| Err(anyhow!("network down")));
     let body = call_tool(ctx, &issued.token, "openshop.admin.graphql", arguments).await;
-    assert_eq!(body["error"], json!({ "code": -32000, "message": "network down" }));
+    // The error of a transport is the server's: the client reads an id.
+    let message = body["error"]["message"].as_str().unwrap();
+    assert!(message.starts_with("Internal error (error id "), "{message}");
+    assert!(!message.contains("network down"));
 
     let statuses: Vec<String> = audits(ctx, &issued.token_id)
         .await
@@ -2445,6 +2513,68 @@ async fn openshop_logs_search_returns_logs_for_the_token_shop_and_writes_audit(c
         strings(&body["result"]["structuredContent"]["logs"], "message"),
         ["mcp info"]
     );
+}
+
+#[openshop::test(TestContext::new(
+    OpenShopConfig::builder()
+        .flow(
+            Flow::new("order-flow", |_ctx: FlowContext| async { Ok(()) }).input_schema(InputSchema::custom(
+                json!({ "type": "object" }),
+                |value| match value.get("orderId") {
+                    Some(Value::Number(_)) => Ok(value),
+                    _ => Err("orderId must be a number".to_string()),
+                },
+            ))
+        )
+        .mcp(demo_mcp())
+        .build()
+        .unwrap()
+))]
+async fn mcp_flow_run_refuses_input_the_flow_refuses(ctx: &TestContext) {
+    let issued = create_token(ctx, &["run_flows"]).await;
+
+    let body = call_tool(
+        ctx,
+        &issued.token,
+        "openshop.flows.run",
+        json!({ "flow": "order-flow" }),
+    )
+    .await;
+    assert_eq!(
+        body["error"],
+        json!({ "code": -32000, "message": "Invalid input for flow \"order-flow\": orderId must be a number" })
+    );
+    let (runs,): (i64,) = sqlx::query_as("SELECT count(*) FROM flow_runs")
+        .fetch_one(&ctx.db)
+        .await
+        .unwrap();
+    assert_eq!(runs, 0);
+
+    let body = call_tool(
+        ctx,
+        &issued.token,
+        "openshop.flows.run",
+        json!({ "flow": "order-flow", "input": { "orderId": 7 } }),
+    )
+    .await;
+    assert_eq!(body["result"]["structuredContent"]["status"], "pending");
+}
+
+#[openshop::test(context())]
+async fn mcp_log_search_refuses_an_invalid_regex(ctx: &TestContext) {
+    let run_id = logged_run(ctx, "default", &ctx.shop).await;
+    let issued = create_token(ctx, &["read_logs"]).await;
+
+    let body = call_tool(
+        ctx,
+        &issued.token,
+        "openshop.logs.search",
+        json!({ "runId": run_id, "q": "|~ \"[bad\"" }),
+    )
+    .await;
+    assert_eq!(body["error"]["code"], -32000);
+    let message = body["error"]["message"].as_str().unwrap();
+    assert!(message.starts_with("Invalid regex \"[bad\": "), "{message}");
 }
 
 #[openshop::test(context())]

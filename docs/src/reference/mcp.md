@@ -286,7 +286,7 @@ Built-in resources are:
 | `openshop.admin.graphql` | `shopify_admin_graphql` | `shop` and `query` required; `variables` defaults `{}`; `apiVersion` is `YYYY-MM` or `latest` and defaults to the latest stable version. |
 | `openshop.logs.search` | `read_logs` | `runId` required; `q` uses the [log query syntax](logging.md#log-query-syntax); `levels` defaults to `info,warn,error`; `includeContext` defaults to true; `limit` 50, max 200. |
 | `openshop.flows.list` | `read_flows` | Includes input schemas and configured crons. |
-| `openshop.flows.run` | `run_flows` | `flow` required; `input` defaults `{}`; runs only for token shop. |
+| `openshop.flows.run` | `run_flows` | `flow` required; `input` defaults `{}` and must satisfy the input schema of the flow; runs only for token shop. |
 | `openshop.crons.list` | `read_crons` | Includes per-token-shop override state. |
 | `openshop.crons.set_enabled` | `manage_crons` | Requires `key` and boolean `enabled`. |
 
@@ -317,7 +317,7 @@ body limit. Tool and resource executions time out after 30,000 ms and their
 | `-32601` | Unsupported method. |
 | `-32602` | Unknown capability or invalid arguments. |
 | `-32003` | Permission denied. |
-| `-32000` | Tool/resource error, panic, or timeout. |
+| `-32000` | Tool/resource error, panic, or timeout. Only an error written for the client is shown: a `PublicError`, `InvalidInput`, `InvalidFlowInput`, a flow concurrency conflict, and the errors of the core tools. Any other error a tool or a resource returns is logged under an id, and the message is `Internal error (error id <id>)`. |
 
 Application-level JSON-RPC errors normally use HTTP 200. Authentication and
 payload errors use their explicit HTTP status and a body of the form

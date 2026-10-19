@@ -9,6 +9,7 @@ use chrono::{DateTime, SubsecRound, Utc};
 use common::{create_config, noop_flow};
 use openshop::builder::{Field, Flow, Function, FunctionType, Provider};
 use openshop::db::schema::FlowRun;
+use openshop::engine::abort::register_abort;
 use openshop::engine::{RunFlowOptions, run_flow};
 use openshop::runtime::time::to_iso;
 use openshop::server::ServerOptions;
@@ -216,6 +217,50 @@ async fn execute(ctx: &TestContext, run_id: Uuid, flow_name: &str) -> RunOutcome
     run_flow(&ctx.app, RunFlowOptions::new(run_id, flow_name, ctx.shop.clone()))
         .await
         .unwrap()
+}
+
+/// A transaction that has changed a run and not committed yet: the requests
+/// that write the run wait for it. Committing it plays a concurrent request
+/// that won the race.
+struct RaceWinner {
+    tx: sqlx::Transaction<'static, sqlx::Postgres>,
+    pid: i32,
+}
+
+/// Starts the transaction with a statement over the run (`$1`).
+async fn race_winner(ctx: &TestContext, run_id: Uuid, statement: &str) -> RaceWinner {
+    let mut tx = ctx.db.begin().await.unwrap();
+    let (pid,): (i32,) = sqlx::query_as("SELECT pg_backend_pid()")
+        .fetch_one(&mut *tx)
+        .await
+        .unwrap();
+    sqlx::query(statement).bind(run_id).execute(&mut *tx).await.unwrap();
+    RaceWinner { tx, pid }
+}
+
+/// Waits until a statement is stuck behind the backend `pid`.
+async fn wait_until_blocked_by(db: &PgPool, pid: i32) {
+    for _ in 0..500 {
+        let (waiting,): (i64,) =
+            sqlx::query_as("SELECT count(*) FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid))")
+                .bind(pid)
+                .fetch_one(db)
+                .await
+                .unwrap();
+        if waiting > 0 {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("nothing waits for backend {pid}");
+}
+
+impl RaceWinner {
+    /// Waits until a request is stuck behind this transaction, then commits it.
+    async fn win(self, db: &PgPool) {
+        wait_until_blocked_by(db, self.pid).await;
+        self.tx.commit().await.unwrap();
+    }
 }
 
 fn strings(values: &Value, key: &str) -> Vec<String> {
@@ -438,6 +483,40 @@ async fn get_runs_supports_search(ctx: &TestContext) {
 }
 
 #[openshop::test(api_context())]
+async fn run_search_is_text_not_a_pattern(ctx: &TestContext) {
+    let base = base_time();
+    let percent = seed_run(ctx, "ship-100%-done", "completed", base).await;
+    let underscore = seed_run(ctx, "ship_it", "completed", base).await;
+    let backslash = seed_run(ctx, "ship\\it", "completed", base).await;
+    let plain = seed_run(ctx, "shipXit", "completed", base).await;
+    let _ = plain;
+
+    for (search, expected) in [
+        ("%", percent),
+        ("100%", percent),
+        ("p_i", underscore),
+        ("\\", backslash),
+        ("p\\i", backslash),
+    ] {
+        let (status, data) = send(ctx.get("/api/runs").query(&[("search", search)])).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(strings(&data, "id"), [expected.to_string()], "search={search}");
+    }
+}
+
+#[openshop::test(api_context())]
+async fn run_list_refuses_an_offset_past_the_cap(ctx: &TestContext) {
+    for path in ["/api/runs", "/api/flows/test-flow/runs"] {
+        let (status, data) = send(ctx.get(&format!("{path}?offset=10000"))).await;
+        assert_eq!(status, StatusCode::OK, "{path}");
+        assert_eq!(data, json!([]));
+        let (status, data) = send(ctx.get(&format!("{path}?offset=10001"))).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{path}");
+        assert_eq!(data, error("offset must be at most 10000"));
+    }
+}
+
+#[openshop::test(api_context())]
 async fn get_flow_runs_returns_filtered_runs(ctx: &TestContext) {
     let base = base_time();
     let own = seed_run(ctx, "test-flow", "completed", base).await;
@@ -656,14 +735,60 @@ async fn post_flow_run_triggers_a_flow(ctx: &TestContext) {
 #[openshop::test(api_context())]
 async fn post_flow_run_rejects_unknown_flow(ctx: &TestContext) {
     let (status, body) = send(ctx.post("/api/flows/nope/run").json(&json!({ "input": {} }))).await;
-    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
-    assert_eq!(body, "Internal Server Error");
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body, error("Flow \"nope\" not found"));
 
     let (runs,): (i64,) = sqlx::query_as("SELECT count(*) FROM flow_runs")
         .fetch_one(&ctx.db)
         .await
         .unwrap();
     assert_eq!(runs, 0);
+}
+
+/// A flow whose input is `{ "orderId": <number> }`.
+fn order_flow() -> Flow {
+    noop_flow("order-flow")
+        .concurrency(Concurrency::Allow)
+        .input_schema(openshop::builder::InputSchema::custom(
+            json!({ "type": "object", "required": ["orderId"] }),
+            |value| match value.get("orderId") {
+                Some(Value::Number(_)) => Ok(value),
+                _ => Err("orderId must be a number".to_string()),
+            },
+        ))
+}
+
+#[openshop::test(context(create_config([order_flow()])))]
+async fn post_flow_run_rejects_input_the_flow_refuses(ctx: &TestContext) {
+    for input in [json!({}), json!({ "orderId": "12" }), Value::Null] {
+        let (status, body) = send(ctx.post("/api/flows/order-flow/run").json(&json!({ "input": input }))).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{input}");
+        assert_eq!(
+            body,
+            error("Invalid input for flow \"order-flow\": orderId must be a number")
+        );
+    }
+    // No input at all is `{}`, which the flow refuses too.
+    let (status, _) = send(ctx.post("/api/flows/order-flow/run")).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+
+    let (runs,): (i64,) = sqlx::query_as("SELECT count(*) FROM flow_runs")
+        .fetch_one(&ctx.db)
+        .await
+        .unwrap();
+    assert_eq!(runs, 0);
+
+    let (status, data) = send(
+        ctx.post("/api/flows/order-flow/run")
+            .json(&json!({ "input": { "orderId": 12 } })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    let run_id = Uuid::parse_str(data["runId"].as_str().expect("runId")).unwrap();
+    assert_eq!(
+        find_run(&ctx.db, run_id).await.expect("run").input,
+        Some(json!({ "orderId": 12 }))
+    );
 }
 
 #[openshop::test(context(api_config_with(noop_flow("test-flow").concurrency(Concurrency::Allow))))]
@@ -879,19 +1004,249 @@ async fn post_run_retry_resume_keeps_completed_steps_and_reset_discards_them() {
 async fn post_run_retry_rejects_active_runs(ctx: &TestContext) {
     let base = base_time();
 
+    // Another flow, so that the active runs do not make `test-flow` refuse the
+    // retries below.
     for status in ["pending", "running", "sleeping"] {
-        let run_id = seed_run(ctx, "test-flow", status, base).await;
+        let run_id = seed_run(ctx, "other-flow", status, base).await;
         let (code, body) = send(ctx.post(&format!("/api/runs/{run_id}/retry"))).await;
         assert_eq!(code, StatusCode::CONFLICT);
         assert_eq!(body, error(&format!("Cannot retry a run with status \"{status}\"")));
         assert_eq!(run_status(&ctx.db, run_id).await, status);
     }
-    for status in ["completed", "canceled"] {
-        let run_id = seed_run(ctx, "test-flow", status, base).await;
+    // One flow each: a retried run is active, and `test-flow` rejects a second one.
+    for (flow_name, status) in [("test-flow", "completed"), ("third-flow", "canceled")] {
+        let run_id = seed_run(ctx, flow_name, status, base).await;
         let (code, _) = send(ctx.post(&format!("/api/runs/{run_id}/retry"))).await;
         assert_eq!(code, StatusCode::OK);
         assert_eq!(run_status(&ctx.db, run_id).await, "pending");
     }
+}
+
+// A request reads the run, then writes it. These tests let another transaction
+// change the run in between, and check that the request notices.
+
+#[openshop::test(api_context())]
+async fn post_run_cancel_does_not_overwrite_a_run_that_completed_meanwhile(ctx: &TestContext) {
+    let run_id = seed_run(ctx, "test-flow", "running", base_time()).await;
+    let abort = register_abort(&run_id.to_string(), None);
+    let winner = race_winner(
+        ctx,
+        run_id,
+        "UPDATE flow_runs SET status = 'completed', completed_at = now() WHERE id = $1",
+    )
+    .await;
+
+    let request = tokio::spawn(send(ctx.post(&format!("/api/runs/{run_id}/cancel"))));
+    winner.win(&ctx.db).await;
+    let (code, body) = request.await.unwrap();
+
+    assert_eq!(code, StatusCode::CONFLICT);
+    assert_eq!(body, error("Cannot cancel a run with status \"completed\""));
+    assert_eq!(run_status(&ctx.db, run_id).await, "completed");
+    assert!(
+        !abort.token.is_cancelled(),
+        "the worker of a run that completed is left alone"
+    );
+    abort.cleanup();
+}
+
+/// A cancel tells the worker while it still holds the row of the run, before
+/// the cancellation is visible: nobody can retry the run, and see a worker claim
+/// it again, in between, so the signal cannot reach a new execution.
+/// The commit of the cancellation is held back by a deferred trigger that waits
+/// for an advisory lock of the test.
+#[openshop::test(api_context())]
+async fn post_run_cancel_signals_the_worker_before_the_cancellation_is_visible(ctx: &TestContext) {
+    let run_id = seed_run(ctx, "test-flow", "running", base_time()).await;
+    let abort = register_abort(&run_id.to_string(), None);
+    let key = i64::from(Uuid::new_v4().as_u128() as u32);
+    sqlx::raw_sql(&format!(
+        "CREATE FUNCTION hold_cancellation() RETURNS trigger LANGUAGE plpgsql AS $$ \
+         BEGIN PERFORM pg_advisory_lock({key}); PERFORM pg_advisory_unlock({key}); RETURN NULL; END $$; \
+         CREATE CONSTRAINT TRIGGER hold_cancellation AFTER UPDATE ON flow_runs \
+           DEFERRABLE INITIALLY DEFERRED FOR EACH ROW WHEN (NEW.status = 'canceled') \
+           EXECUTE FUNCTION hold_cancellation();"
+    ))
+    .execute(&ctx.db)
+    .await
+    .unwrap();
+    let mut holder = ctx.db.acquire().await.unwrap();
+    let (pid,): (i32,) = sqlx::query_as("SELECT pg_backend_pid()")
+        .fetch_one(&mut *holder)
+        .await
+        .unwrap();
+    sqlx::query("SELECT pg_advisory_lock($1)")
+        .bind(key)
+        .execute(&mut *holder)
+        .await
+        .unwrap();
+
+    let canceling = tokio::spawn(send(ctx.post(&format!("/api/runs/{run_id}/cancel"))));
+    wait_until_blocked_by(&ctx.db, pid).await;
+    assert!(abort.token.is_cancelled(), "the worker is told before the commit");
+    assert_eq!(run_status(&ctx.db, run_id).await, "running", "not visible yet");
+
+    // A retry cannot slip in before the cancellation: the run is still running.
+    let (code, body) = send(ctx.post(&format!("/api/runs/{run_id}/retry"))).await;
+    assert_eq!(code, StatusCode::CONFLICT);
+    assert_eq!(body, error("Cannot retry a run with status \"running\""));
+
+    sqlx::query("SELECT pg_advisory_unlock($1)")
+        .bind(key)
+        .execute(&mut *holder)
+        .await
+        .unwrap();
+    drop(holder);
+    let (code, body) = canceling.await.unwrap();
+    assert_eq!((code, body), (StatusCode::OK, json!({ "ok": true })));
+    assert_eq!(run_status(&ctx.db, run_id).await, "canceled");
+}
+
+#[openshop::test(api_context())]
+async fn post_run_retry_of_a_run_deleted_meanwhile_is_not_found(ctx: &TestContext) {
+    let run_id = seed_run(ctx, "test-flow", "completed", base_time()).await;
+    let winner = race_winner(ctx, run_id, "DELETE FROM flow_runs WHERE id = $1").await;
+
+    let request = tokio::spawn(send(ctx.post(&format!("/api/runs/{run_id}/retry"))));
+    winner.win(&ctx.db).await;
+    let (code, body) = request.await.unwrap();
+
+    assert_eq!(code, StatusCode::NOT_FOUND);
+    assert_eq!(body, error("Run not found"));
+    assert!(find_run(&ctx.db, run_id).await.is_none());
+}
+
+#[openshop::test(api_context())]
+async fn post_run_retry_does_not_reset_a_run_that_started_again_meanwhile(ctx: &TestContext) {
+    let base = base_time();
+    let run_id = seed_run(ctx, "test-flow", "failed", base).await;
+    seed_step(&ctx.db, run_id, "push", "failed", base).await;
+    let winner = race_winner(
+        ctx,
+        run_id,
+        "UPDATE flow_runs SET status = 'running', worker_id = 'w1', attempts = 3 WHERE id = $1",
+    )
+    .await;
+
+    let request = tokio::spawn(send(ctx.post(&format!("/api/runs/{run_id}/retry"))));
+    winner.win(&ctx.db).await;
+    let (code, body) = request.await.unwrap();
+
+    assert_eq!(code, StatusCode::CONFLICT);
+    assert_eq!(body, error("Cannot retry a run with status \"running\""));
+    let run = find_run(&ctx.db, run_id).await.expect("run");
+    assert_eq!((run.status.as_str(), run.attempts), ("running", 3));
+    assert_eq!(run.worker_id.as_deref(), Some("w1"));
+    assert_eq!(step_names(&ctx.db, run_id).await, ["push"], "the steps are kept");
+    assert!(log_messages(&ctx.db, run_id).await.is_empty());
+}
+
+#[openshop::test(api_context())]
+async fn delete_run_does_not_remove_a_run_that_started_meanwhile(ctx: &TestContext) {
+    let base = base_time();
+    let run_id = seed_run(ctx, "test-flow", "completed", base).await;
+    seed_step(&ctx.db, run_id, "step", "completed", base).await;
+    seed_log(&ctx.db, run_id, "info", "line", json!({}), base).await;
+    let winner = race_winner(
+        ctx,
+        run_id,
+        "UPDATE flow_runs SET status = 'running', worker_id = 'w1' WHERE id = $1",
+    )
+    .await;
+
+    let request = tokio::spawn(send(ctx.delete(&format!("/api/runs/{run_id}"))));
+    winner.win(&ctx.db).await;
+    let (code, body) = request.await.unwrap();
+
+    assert_eq!(code, StatusCode::CONFLICT);
+    assert_eq!(body, error("Cannot delete an active run — cancel it first"));
+    assert_eq!(run_status(&ctx.db, run_id).await, "running");
+    assert_eq!(step_names(&ctx.db, run_id).await, ["step"]);
+    assert_eq!(log_messages(&ctx.db, run_id).await, ["line"]);
+}
+
+#[openshop::test(api_context())]
+async fn post_runs_bulk_delete_skips_a_run_that_started_meanwhile(ctx: &TestContext) {
+    let base = base_time();
+    let started = seed_run(ctx, "test-flow", "completed", base).await;
+    let finished = seed_run(ctx, "test-flow", "failed", base).await;
+    for id in [started, finished] {
+        seed_step(&ctx.db, id, "step", "completed", base).await;
+    }
+    let winner = race_winner(
+        ctx,
+        started,
+        "UPDATE flow_runs SET status = 'running', worker_id = 'w1' WHERE id = $1",
+    )
+    .await;
+
+    let request = tokio::spawn(send(
+        ctx.post("/api/runs/bulk-delete")
+            .json(&json!({ "ids": [started, finished] })),
+    ));
+    winner.win(&ctx.db).await;
+    let (code, body) = request.await.unwrap();
+
+    assert_eq!(code, StatusCode::OK);
+    assert_eq!(body, json!({ "deleted": 1, "skipped": 1 }));
+    assert_eq!(run_status(&ctx.db, started).await, "running");
+    assert_eq!(step_names(&ctx.db, started).await, ["step"]);
+    assert!(find_run(&ctx.db, finished).await.is_none());
+    assert!(step_names(&ctx.db, finished).await.is_empty());
+}
+
+#[openshop::test(api_context())]
+async fn post_run_retry_refuses_what_the_concurrency_of_the_flow_refuses(ctx: &TestContext) {
+    let base = base_time();
+    let failed = seed_run(ctx, "test-flow", "failed", base).await;
+    seed_step(&ctx.db, failed, "push", "failed", base).await;
+    let active = seed_run(ctx, "test-flow", "sleeping", base).await;
+    let other_shop = seed_run_for(&ctx.db, "default", OTHER_SHOP, "test-flow", "running", base).await;
+
+    // `test-flow` rejects concurrent runs by default, like a dispatch does.
+    let (code, body) = send(ctx.post(&format!("/api/runs/{failed}/retry"))).await;
+    assert_eq!(code, StatusCode::CONFLICT);
+    assert_eq!(
+        body,
+        json!({
+            "error": format!("Flow \"test-flow\" is already running for shop \"{}\" (run #{active})", ctx.shop),
+            "existingRunId": active,
+        })
+    );
+    assert_eq!(run_status(&ctx.db, failed).await, "failed");
+    assert_eq!(step_names(&ctx.db, failed).await, ["push"], "nothing was changed");
+    assert!(log_messages(&ctx.db, failed).await.is_empty());
+
+    // The run of the shop is the only one in the way: not the run of another shop.
+    sqlx::query("UPDATE flow_runs SET status = 'completed' WHERE id = $1")
+        .bind(active)
+        .execute(&ctx.db)
+        .await
+        .unwrap();
+    let (code, _) = send(ctx.post(&format!("/api/runs/{failed}/retry"))).await;
+    assert_eq!(code, StatusCode::OK);
+    assert_eq!(run_status(&ctx.db, failed).await, "pending");
+    assert_eq!(run_status(&ctx.db, other_shop).await, "running");
+
+    // Now `failed` is the active run: another finished run cannot be retried.
+    let (code, body) = send(ctx.post(&format!("/api/runs/{active}/retry"))).await;
+    assert_eq!(code, StatusCode::CONFLICT);
+    assert_eq!(body["existingRunId"], json!(failed));
+    assert_eq!(run_status(&ctx.db, active).await, "completed");
+}
+
+#[tokio::test]
+async fn post_run_retry_of_a_flow_that_allows_concurrency_runs_beside_an_active_run() {
+    let ctx = context(api_config_with(noop_flow("test-flow").concurrency(Concurrency::Allow))).await;
+    let base = base_time();
+    let failed = seed_run(&ctx, "test-flow", "failed", base).await;
+    let active = seed_run(&ctx, "test-flow", "running", base).await;
+
+    let (code, _) = send(ctx.post(&format!("/api/runs/{failed}/retry"))).await;
+    assert_eq!(code, StatusCode::OK);
+    assert_eq!(run_status(&ctx.db, failed).await, "pending");
+    assert_eq!(run_status(&ctx.db, active).await, "running");
+    ctx.shutdown().await.unwrap();
 }
 
 #[openshop::test(api_context())]
@@ -1276,7 +1631,7 @@ async fn get_run_logs_supports_the_query_syntax(ctx: &TestContext) {
         ]
     );
 
-    let cases: [(&str, &[&str]); 10] = [
+    let cases: [(&str, &[&str]); 8] = [
         (
             "ORDER",
             &[
@@ -1299,8 +1654,6 @@ async fn get_run_logs_supports_the_query_syntax(ctx: &TestContext) {
         ("orderid=1002", &["Order 1002 failed"]),
         ("reason=timeout", &["Order 1002 failed"]),
         (r#"!= "order""#, &["Done", "Rate limit hit"]),
-        (r#"|~ "(a+)+""#, &[]),
-        (r#"|~ "(""#, &[]),
     ];
     for (query, expected) in cases {
         let logs = query_logs(ctx, run_id, &[("q", query)]).await;
@@ -1316,6 +1669,78 @@ async fn get_run_logs_supports_the_query_syntax(ctx: &TestContext) {
 
     let none = query_logs(ctx, run_id, &[("levels", "debug")]).await;
     assert_eq!(none, json!([]));
+}
+
+#[openshop::test(api_context())]
+async fn get_run_logs_refuses_a_query_it_cannot_run(ctx: &TestContext) {
+    let (run_id, _) = seed_order_logs(ctx).await;
+    let too_long = format!("|= \"{}\"", "a".repeat(2_000));
+    let too_many = r#"|= "a" "#.repeat(21);
+    let cases = [
+        (r#"|~ "(""#.to_string(), "Invalid regex \"(\": "),
+        (r#"|~ "[invalid""#.to_string(), "Invalid regex \"[invalid\": "),
+        (
+            r#"|~ "(a+)+""#.to_string(),
+            "Invalid regex \"(a+)+\": it repeats a repeated group",
+        ),
+        (r#"|~ "(o)\1""#.to_string(), "it uses a backreference"),
+        (
+            format!("|~ \"{}\"", "o".repeat(121)),
+            "it is longer than 120 characters",
+        ),
+        (too_long, "Log query is longer than 2000 characters"),
+        (too_many, "Too many filters: 20 at most, got 21"),
+    ];
+    for (query, expected) in cases {
+        for path in [
+            format!("/api/runs/{run_id}/logs"),
+            format!("/api/runs/{run_id}/logs/export"),
+        ] {
+            let (status, body) = send(ctx.get(&path).query(&[("q", query.as_str())])).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{path} q={query}");
+            let message = body["error"].as_str().unwrap_or_else(|| panic!("{body}"));
+            assert!(message.contains(expected), "{message} should contain {expected}");
+            assert!(!message.contains('\n'), "{message}");
+        }
+    }
+}
+
+#[openshop::test(api_context())]
+async fn get_run_logs_refuses_a_last_beyond_the_calendar(ctx: &TestContext) {
+    let (run_id, _) = seed_order_logs(ctx).await;
+    for query in ["last:9223372036854775807s", "last:99999999999999999999999999d"] {
+        let (status, body) = send(ctx.get(&format!("/api/runs/{run_id}/logs")).query(&[("q", query)])).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{query}");
+        assert!(
+            body["error"].as_str().unwrap().contains("further than the calendar"),
+            "{body}"
+        );
+    }
+    // The server is still up.
+    let (status, _) = send(ctx.get(&format!("/api/runs/{run_id}/logs"))).await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+#[openshop::test(api_context())]
+async fn get_run_logs_caps_the_context_around_matches(ctx: &TestContext) {
+    let base = base_time();
+    let run_id = seed_run(ctx, "test-flow", "completed", base).await;
+    for index in 0..300 {
+        let at = base + chrono::Duration::seconds(index);
+        seed_log(&ctx.db, run_id, "info", &format!("line {index:03}"), json!({}), at).await;
+    }
+    // Newest first: the match is the 150th newest line, line 150.
+    for query in ["line 150 C:100000", "line 150 C:99999999999999999999999999"] {
+        let (status, data) = send(ctx.get(&format!("/api/runs/{run_id}/logs")).query(&[("q", query)])).await;
+        assert_eq!(status, StatusCode::OK, "{query}");
+        assert_eq!(data["logs"].as_array().unwrap().len(), 201, "{query}");
+    }
+    let (_, data) = send(
+        ctx.get(&format!("/api/runs/{run_id}/logs"))
+            .query(&[("q", "line 150 B:2 A:1")]),
+    )
+    .await;
+    assert_eq!(data["logs"].as_array().unwrap().len(), 4);
 }
 
 #[openshop::test(api_context())]
@@ -1890,6 +2315,7 @@ async fn post_providers_check_reports_checker_failures() {
         .checker(|config| async move {
             match config.get("token").and_then(Value::as_str) {
                 Some("panic") => panic!("checker exploded"),
+                Some("public") => Err(openshop::PublicError::new("connection refused").into()),
                 _ => Err(anyhow!("connection refused")),
             }
         });
@@ -1906,6 +2332,19 @@ async fn post_providers_check_reports_checker_failures() {
     .await;
     assert_eq!(status, StatusCode::OK);
 
+    let (status, body) = send(ctx.post("/api/providers/flaky/check")).await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    // A plain error is the checker's own business: the client reads an id.
+    assert_eq!(body["ok"], false);
+    assert!(body["errorId"].is_string(), "{body}");
+    assert!(!body.to_string().contains("connection refused"), "{body}");
+
+    let (status, _) = send(
+        ctx.put("/api/providers/flaky")
+            .json(&json!({ "config": { "token": "public" } })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
     let (status, body) = send(ctx.post("/api/providers/flaky/check")).await;
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
     assert_eq!(body, json!({ "ok": false, "error": "Error: connection refused" }));
@@ -1928,6 +2367,175 @@ async fn post_providers_check_reports_checker_failures() {
     let (status, _) = send(ctx.get("/api/providers")).await;
     assert_eq!(status, StatusCode::OK);
     ctx.shutdown().await.unwrap();
+}
+
+/// Keeps every line logged while it is installed.
+#[derive(Default)]
+struct Lines(std::sync::Mutex<Vec<String>>);
+
+impl openshop::runtime::RuntimeLogger for Lines {
+    fn info(&self, message: &str, context: Option<&Value>) {
+        self.0.lock().unwrap().push(format!("{message} {context:?}"));
+    }
+    fn warn(&self, message: &str, context: Option<&Value>) {
+        self.info(message, context);
+    }
+    fn error(&self, message: &str, context: Option<&Value>) {
+        self.info(message, context);
+    }
+}
+
+static LOGGING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+#[tokio::test]
+async fn a_checker_failing_inside_the_server_is_logged_and_never_shown() {
+    let _logging = LOGGING.lock().await;
+    let leaky = Provider::new("leaky")
+        .field("token", Field::password("Token"))
+        .checker(|config| async move {
+            match config.get("token").and_then(Value::as_str) {
+                Some("wrapped") => Err(anyhow::Error::new(sqlx::Error::Protocol(
+                    "relation \"secret_table\" at postgres://user:hunter2@db.internal/shop".to_string(),
+                ))
+                .context("loading the key")),
+                _ => Err(sqlx::Error::Protocol("password=hunter2".to_string()).into()),
+            }
+        });
+    let config = OpenShopConfig::builder()
+        .flow(noop_flow("test-flow"))
+        .provider(leaky)
+        .build()
+        .unwrap();
+    let ctx = context(config).await;
+    let lines = Arc::new(Lines::default());
+    let previous = openshop::runtime::set_logger(lines.clone());
+
+    let mut ids = Vec::new();
+    for token in ["plain", "wrapped"] {
+        let (status, _) = send(
+            ctx.put("/api/providers/leaky")
+                .json(&json!({ "config": { "token": token } })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, body) = send(ctx.post("/api/providers/leaky/check")).await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        let text = body.to_string();
+        for secret in ["hunter2", "secret_table", "postgres://", "loading the key", "Protocol"] {
+            assert!(!text.contains(secret), "{secret} in {text}");
+        }
+        assert_eq!(body["ok"], false);
+        let id = body["errorId"].as_str().expect("an error id").to_string();
+        assert_eq!(id.len(), 12);
+        assert_eq!(body["error"], format!("Error: Internal error (error id {id})"));
+        ids.push(id);
+    }
+    assert_ne!(ids[0], ids[1]);
+
+    // The cause is in the log, under the id.
+    openshop::runtime::set_logger(previous);
+    let logged = lines.0.lock().unwrap().join("\n");
+    for id in &ids {
+        let line = logged.lines().find(|line| line.contains(id.as_str())).expect("a line");
+        assert!(line.contains("hunter2"), "{line}");
+    }
+    ctx.shutdown().await.unwrap();
+}
+
+#[derive(serde::Deserialize)]
+struct NumericCredentials {
+    #[serde(rename = "apiKey")]
+    _api_key: u64,
+}
+
+#[tokio::test]
+async fn a_typed_checker_does_not_echo_a_saved_credential_it_cannot_decode() {
+    let config = OpenShopConfig::builder()
+        .provider(
+            Provider::new("warehouse")
+                .field("apiKey", Field::password("API key"))
+                .typed_checker(|_: NumericCredentials| async { Ok(true) }),
+        )
+        .build()
+        .unwrap();
+    let ctx = TestContext::with_options(
+        config,
+        TestOptions {
+            encryption_key: Some(ENCRYPTION_KEY.to_string()),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let (status, _) = send(
+        ctx.put("/api/providers/warehouse")
+            .json(&json!({ "config": { "apiKey": "secret-checker-credential" } })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, body) = send(ctx.post("/api/providers/warehouse/check")).await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert!(!body.to_string().contains("secret-checker-credential"), "{body}");
+    assert!(body["errorId"].is_string(), "{body}");
+    ctx.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_checker_that_never_answers_times_out() {
+    let hung = Provider::new("hung")
+        .field("token", Field::password("Token"))
+        .checker(|_config| async move {
+            tokio::time::sleep(Duration::from_secs(60)).await;
+            Ok(true)
+        });
+    let config = OpenShopConfig::builder()
+        .flow(noop_flow("test-flow"))
+        .provider(hung)
+        .build()
+        .unwrap();
+    let ctx = context(config).await;
+    let (status, _) = send(
+        ctx.put("/api/providers/hung")
+            .json(&json!({ "config": { "token": "t" } })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let started = std::time::Instant::now();
+    let (status, body) = send(ctx.post("/api/providers/hung/check")).await;
+    assert_eq!(status, StatusCode::GATEWAY_TIMEOUT);
+    assert_eq!(
+        body,
+        json!({ "ok": false, "error": "Error: the check timed out after 10 seconds" })
+    );
+    assert!(started.elapsed() < Duration::from_secs(30));
+
+    // The server keeps serving, and the stored check is untouched.
+    let (_, list) = send(ctx.get("/api/providers")).await;
+    assert_eq!(list[0]["lastCheckOk"], Value::Null);
+    ctx.shutdown().await.unwrap();
+}
+
+#[openshop::test(api_context())]
+async fn an_unexpected_failure_has_an_id_in_a_header_and_in_the_log(ctx: &TestContext) {
+    let _logging = LOGGING.lock().await;
+    let lines = Arc::new(Lines::default());
+    let previous = openshop::runtime::set_logger(lines.clone());
+    sqlx::query("DROP TABLE flow_runs CASCADE")
+        .execute(&ctx.db)
+        .await
+        .unwrap();
+
+    let response = ctx.get("/api/runs").send().await.expect("response");
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let id = response.headers()["x-error-id"].to_str().unwrap().to_string();
+    assert_eq!(response.text().await.unwrap(), "Internal Server Error");
+
+    openshop::runtime::set_logger(previous);
+    let logged = lines.0.lock().unwrap().join("\n");
+    let line = logged.lines().find(|line| line.contains(&id)).expect("a line");
+    assert!(line.contains("flow_runs"), "{line}");
 }
 
 // ─── Health ──────────────────────────────────────────────────────────

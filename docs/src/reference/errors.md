@@ -116,7 +116,7 @@ non-zero status before serving anything. See
 
 Error bodies generally contain an `error` message. MCP protocol failures use a
 JSON-RPC error object instead, and unexpected Admin API failures answer with
-the plain text `Internal Server Error`. Treat message text as diagnostic, not
+the plain text `Internal Server Error` with an `x-error-id` header. Treat message text as diagnostic, not
 as a stable machine-readable code unless the endpoint documents one.
 
 ## Application error hook

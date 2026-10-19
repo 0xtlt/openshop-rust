@@ -14,7 +14,8 @@ pub use abort::cancel_run;
 pub use backoff::{DEFAULT_RETRY_POLICY, compute_backoff_ms, compute_next_retry_at, resolve_retry_policy};
 pub use dispatch::{DispatchOptions, QueuedRun, dispatch_flow};
 pub use errors::{
-    FlowCanceledError, FlowConcurrencyError, FlowTimeoutError, LeaseLostError, SleepSignal, StepTimeoutError,
+    FlowCanceledError, FlowConcurrencyError, FlowTimeoutError, InvalidFlowInput, LeaseLostError, SleepSignal,
+    StepTimeoutError, UnknownFlowError,
 };
 pub use runner::{RunFlowOptions, RunOutcome, run_flow};
 pub use scheduler::Scheduler;

@@ -54,7 +54,10 @@ in the address as `range=1h`, `24h`, `7d`, or `30d`.
 | `/ops/login` | The sign-in form. |
 
 Lists show 100 rows; `Older` at their end leads to the next ones, with
-`before`, an RFC 3339 timestamp, in the address. A filter in force is shown
+`before`, the timestamp and the id of the last row shown (`<RFC 3339>_<id>`),
+in the address: rows created at the same instant are neither skipped nor shown
+twice. A `before` with the timestamp alone is still read, and then leaves out
+every row of that instant. A filter in force is shown
 as a chip that removes it. A row of a table is a link wherever it is clicked:
 to the run, the shop, or the runs of the flow it is about.
 

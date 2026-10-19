@@ -4,7 +4,7 @@
 use axum::extract::{Path, RawQuery, State};
 use axum::http::StatusCode;
 use axum::response::Response;
-use chrono::{DateTime, SecondsFormat, Utc};
+use chrono::{DateTime, Utc};
 use indexmap::IndexMap;
 use uuid::Uuid;
 
@@ -14,7 +14,7 @@ use super::html::{
     kpis, legend, level, link, message_page, mono, muted, note, page, panel, row, status, status_as, table, time, wide,
 };
 use super::html_response;
-use super::queries::{self, Counts, LogFilter, LogLine, Range, RunFilter, SHOP_STATES, Shop, Tally};
+use super::queries::{self, Counts, Cursor, LogFilter, LogLine, Range, RunFilter, SHOP_STATES, Shop, Tally};
 use crate::app::OpenShop;
 use crate::db::{FlowRun, Installation, LogRow, StepResult};
 use crate::engine::scheduler::next_occurrence;
@@ -70,11 +70,9 @@ impl Params {
         self.get(name).map(str::to_string)
     }
 
-    /// Where a page of results ends: the timestamp the previous one stopped at.
-    fn before(&self) -> Option<DateTime<Utc>> {
-        self.get("before")
-            .and_then(|before| DateTime::parse_from_rfc3339(before).ok())
-            .map(|before| before.with_timezone(&Utc))
+    /// Where a page of results ends: the row the previous one stopped at.
+    fn before(&self) -> Option<Cursor> {
+        self.get("before").and_then(Cursor::parse)
     }
 
     /// The address of `path` with the parameters `keep` of this request, and
@@ -274,10 +272,10 @@ fn run_table(runs: &[FlowRun], with_app: bool, empty: &str) -> String {
 }
 
 /// The link to the results that come after `last`, when the page is full.
-fn older(params: &Params, path: &str, keep: &[&str], shown: usize, last: Option<DateTime<Utc>>) -> String {
+fn older(params: &Params, path: &str, keep: &[&str], shown: usize, last: Option<Cursor>) -> String {
     match last.filter(|_| shown as i64 == PER_PAGE) {
         Some(last) => {
-            let before = last.to_rfc3339_opts(SecondsFormat::Micros, true);
+            let before = last.param();
             let href = params.href(path, keep, &[("before", Some(before.as_str()))]);
             format!("<div class=\"more\">{}</div>", link(&href, "Older"))
         }
@@ -431,7 +429,7 @@ pub(super) async fn runs(State(app): State<OpenShop>, RawQuery(raw): RawQuery) -
             ("q", "Error has"),
         ],
     );
-    let last = runs.last().map(|run| run.created_at);
+    let last = runs.last().map(|run| Cursor::new(run.created_at, run.id));
     let content = [
         panel(
             &format!("Runs, {}", range.label()),
@@ -652,7 +650,7 @@ pub(super) async fn logs(State(app): State<OpenShop>, RawQuery(raw): RawQuery) -
         ],
     );
     let rows: Vec<Row> = lines.iter().map(log_line_row).collect();
-    let last = lines.last().map(|line| line.created_at);
+    let last = lines.last().map(|line| Cursor::new(line.created_at, line.id));
     let content = [
         panel(
             &format!("Log lines, {}", range.label()),

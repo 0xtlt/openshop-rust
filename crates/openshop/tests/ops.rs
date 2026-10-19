@@ -610,3 +610,72 @@ async fn the_dashboard_only_reads(ctx: &TestContext) {
         .unwrap();
     assert_eq!(status, "failed");
 }
+
+/// The address of the "Older" link of a page, when it has one.
+fn older(html: &str) -> Option<String> {
+    let opening = "<div class=\"more\"><a href=\"";
+    let start = html.find(opening)? + opening.len();
+    let end = start + html[start..].find('"')?;
+    Some(html[start..end].replace("&amp;", "&"))
+}
+
+#[openshop::test(context(with_dashboard()))]
+async fn pages_walk_rows_created_at_the_same_instant_without_skipping_any(ctx: &TestContext) {
+    // 250 runs and 250 log lines at one instant: a page cut on the time alone
+    // would stop at the first page, or repeat it.
+    sqlx::query(
+        "INSERT INTO flow_runs (shop, flow_name, status, input, created_at) \
+         SELECT $1, 'sync', 'completed', '{}'::json, now() - interval '5 minutes' FROM generate_series(1, 250)",
+    )
+    .bind(SHOP)
+    .execute(&ctx.db)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO logs (level, message, created_at) \
+         SELECT 'error', 'line ' || n, now() - interval '5 minutes' FROM generate_series(1, 250) AS n",
+    )
+    .execute(&ctx.db)
+    .await
+    .unwrap();
+    let cookie = sign_in(ctx).await;
+
+    for (start, marker, expected) in [("/ops/runs", "href=\"/ops/runs/", 250), ("/ops/logs", ">line ", 250)] {
+        let mut path = start.to_string();
+        let mut seen = std::collections::BTreeSet::new();
+        let mut rows = 0;
+        for _ in 0..10 {
+            let html = page(ctx, &path, &cookie).await;
+            for part in html.split("<tr").filter(|part| part.contains(marker)) {
+                rows += 1;
+                let from = part.find(marker).expect(marker) + marker.len();
+                let id: String = part[from..]
+                    .chars()
+                    .take_while(|c| c.is_ascii_alphanumeric() || *c == '-')
+                    .collect();
+                seen.insert(id);
+            }
+            match older(&html) {
+                Some(next) => path = next,
+                None => break,
+            }
+        }
+        assert_eq!(rows, expected, "{start}: rows shown");
+        assert_eq!(seen.len(), expected, "{start}: distinct rows");
+    }
+}
+
+#[openshop::test(context(with_dashboard()))]
+async fn an_address_without_the_id_of_a_row_still_cuts_a_page_on_the_time(ctx: &TestContext) {
+    let completed = run(&ctx.db, SHOP, "completed", None).await;
+    let cookie = sign_in(ctx).await;
+    let completed = completed.to_string();
+
+    let before_it = page(ctx, "/ops/runs?before=2000-01-01T00:00:00Z", &cookie).await;
+    assert!(before_it.contains("No run matches."), "{before_it}");
+    let after_it = page(ctx, "/ops/runs?before=2999-01-01T00:00:00Z", &cookie).await;
+    assert!(after_it.contains(&completed), "{after_it}");
+    // An id that is not one is no cursor: the first page.
+    let broken = page(ctx, "/ops/runs?before=2000-01-01T00:00:00Z_nope", &cookie).await;
+    assert!(broken.contains(&completed), "{broken}");
+}

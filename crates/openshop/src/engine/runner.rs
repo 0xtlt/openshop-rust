@@ -16,6 +16,7 @@ use uuid::Uuid;
 use super::abort::{Abort, register_abort};
 use super::backoff::compute_next_retry_at;
 use super::dispatch::unknown_flow;
+use super::errors::InvalidFlowInput;
 use super::errors::{FlowCanceledError, FlowTimeoutError, LeaseLostError, SleepSignal};
 use super::step::{RunOwner, StepExecutor, error_message};
 use super::transient::retry;
@@ -372,7 +373,12 @@ async fn run_attempt(app: &OpenShop, opts: RunFlowOptions) -> Result<RunOutcome>
         let validated_input = match &flow.input {
             Some(schema) => schema
                 .parse(input)
-                .map_err(|summary| anyhow!("Invalid input for flow \"{flow_name}\": {summary}"))?,
+                .map_err(|summary| {
+                    anyhow::Error::new(InvalidFlowInput {
+                        flow_name: flow_name.to_string(),
+                        summary,
+                    })
+                })?,
             None => input,
         };
 

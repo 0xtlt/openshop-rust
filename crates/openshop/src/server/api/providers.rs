@@ -1,4 +1,5 @@
 use std::panic::AssertUnwindSafe;
+use std::time::Duration;
 
 use axum::Router;
 use axum::body::Bytes;
@@ -10,9 +11,8 @@ use serde_json::{Value, json};
 
 use crate::app::OpenShop;
 use crate::db::schema::ProviderConfigRow;
-use crate::engine::step::error_message;
 use crate::runtime::time::to_iso;
-use crate::server::http::{ApiResult, json_error, json_object_body, json_response};
+use crate::server::http::{ApiResult, client_error, public_error, json_error, json_object_body, json_response};
 use crate::server::provider_config::{
     parse_provider_config, provider_config_is_complete, provider_fields_for_response, public_provider_config,
 };
@@ -110,10 +110,10 @@ async fn check_provider(
         let config = app
             .crypto()
             .decrypt_config(stored.as_ref().and_then(|row| row.config.as_ref()))?;
-        let ok = AssertUnwindSafe(checker(config))
-            .catch_unwind()
+        let ok = tokio::time::timeout(CHECK_TIMEOUT, AssertUnwindSafe(checker(config)).catch_unwind())
             .await
-            .unwrap_or_else(|_| Err(anyhow::anyhow!("checker panicked")))?;
+            .map_err(|_| CheckTimedOut)?
+            .unwrap_or_else(|_| Err(public_error("checker panicked")))?;
 
         if let Some(stored) = &stored {
             sqlx::query("UPDATE provider_configs SET last_checked_at = now(), last_check_ok = $1 WHERE id = $2")
@@ -128,12 +128,34 @@ async fn check_provider(
 
     Ok(match outcome {
         Ok(ok) => json_response(StatusCode::OK, json!({ "ok": ok })),
-        Err(error) => json_response(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            json!({ "ok": false, "error": format!("Error: {}", error_message(&error)) }),
+        Err(error) if error.is::<CheckTimedOut>() => json_response(
+            StatusCode::GATEWAY_TIMEOUT,
+            json!({ "ok": false, "error": format!("Error: {error}") }),
         ),
+        Err(error) => {
+            let failure = client_error(&format!("Check of provider \"{name}\" failed"), &error);
+            let mut body = json!({ "ok": false, "error": format!("Error: {}", failure.message) });
+            if let Some(id) = failure.error_id {
+                body["errorId"] = json!(id);
+            }
+            json_response(StatusCode::INTERNAL_SERVER_ERROR, body)
+        }
     })
 }
+
+/// The longest a connection check may take: the admin waits for the answer.
+const CHECK_TIMEOUT: Duration = Duration::from_secs(10);
+
+#[derive(Debug)]
+struct CheckTimedOut;
+
+impl std::fmt::Display for CheckTimedOut {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "the check timed out after {} seconds", CHECK_TIMEOUT.as_secs())
+    }
+}
+
+impl std::error::Error for CheckTimedOut {}
 
 pub fn routes() -> Router<OpenShop> {
     Router::new()

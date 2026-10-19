@@ -116,9 +116,10 @@ without `serde` or `schemars` among the dependencies of the application.
 `#[input]` is the short form. The function accepts any type that implements
 `Deserialize` and `JsonSchema`; `dispatch` needs `Serialize` as well.
 
-The type gives the flow a JSON Schema. In the worker, the dispatched value
-must satisfy that schema and deserialize into the type; otherwise the run
-fails with `Invalid input for flow "<key>": <summary>`, for example
+The type gives the flow a JSON Schema. The dispatched value must satisfy that
+schema and deserialize into the type. A dispatch refuses a value that does not
+before it queues a run, with an `InvalidFlowInput` error (`422` on the Admin
+API); a run that holds such a value anyway fails with `Invalid input for flow "<key>": <summary>`, for example
 `Invalid input for flow "syncOrders": input.limit must be >= 1`. The schema is
 also what `GET /api/flows` and the MCP tool `openshop.flows.list` return as
 `inputSchema`. A function without a second argument declares a flow without a
@@ -129,8 +130,9 @@ The schema check understands the keywords listed under
 expressed with other keywords are enforced only if deserialization into the
 type enforces them.
 
-Input is validated when a worker starts the run, not at dispatch. A dispatched
-input that is not a JSON object is replaced with `{}` before validation. The
+Input is validated at dispatch, and again when a worker starts the run. A
+dispatched input that is not a JSON object is replaced with `{}` before
+validation. The
 `input` of a [cron](configuration.md#crons) is also checked when the
 configuration is built.
 

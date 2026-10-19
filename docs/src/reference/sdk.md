@@ -338,7 +338,7 @@ async fn queue_sync(app: &OpenShop) -> Result<()> {
 | --- | --- | --- | --- |
 | `flow_name` | `DispatchOptions::new` | `String` | Registered flow key, such as `sync_orders::NAME`. |
 | `shop` | `DispatchOptions::new` | `String` | Target `*.myshopify.com` domain, or the cron global sentinel when used internally. |
-| `input` | `.input(…)` | `serde_json::Value` | Defaults to `{}`. Validated by the worker, not at dispatch. |
+| `input` | `.input(…)` | `serde_json::Value` | Defaults to `{}`. A dispatch fails with `InvalidFlowInput` when it fails the input schema of the flow, and with `UnknownFlowError` for a flow that is not registered; no run is queued. |
 | `shopify_app` | `.shopify_app(…)` | `String` | Defaults to the `default` app handle. |
 | `parent_run_id` | `.parent_run_id(…)` | `String` | Optional parent run relationship. |
 | `delay` | `.delay(…)` | `Duration` | Delays the initial `available_at`. |

@@ -8,7 +8,7 @@ use crate::{
     components::table_header::TableHeader,
     dom::{self, every, locale_date_time},
     events::event_value,
-    fetch::{api_json, api_request},
+    fetch::{api_fetch, api_json, api_request},
     format::{elapsed_ms, summary_duration},
     http::Method,
     query::QueryParams,
@@ -42,6 +42,13 @@ async fn load_run(id: &str, run: RwSignal<Option<RunDetail>>, load_error: RwSign
     }
 }
 
+/// The server's reason, or a plain one when it gave none.
+fn logs_error_message(reason: Option<String>) -> String {
+    reason
+        .filter(|reason| !reason.is_empty())
+        .unwrap_or_else(|| "The logs could not be loaded.".to_string())
+}
+
 fn is_finished(status: &str) -> bool {
     matches!(status, "failed" | "completed" | "canceled")
 }
@@ -65,6 +72,8 @@ pub fn FlowRun() -> impl IntoView {
     let initial_load = StoredValue::new(true);
     let debounce = StoredValue::new_local(None::<Timeout>);
     let retrying = RwSignal::new(false);
+    // Why the logs cannot be shown, such as an invalid regular expression.
+    let logs_error = RwSignal::new(None::<String>);
 
     // App Bridge mirrors `replaceState` to the admin address bar.
     let sync_url = |query: &str, levels: &[String]| {
@@ -87,21 +96,30 @@ pub fn FlowRun() -> impl IntoView {
         let Some(id) = id.get_untracked() else { return };
         let filtered_url = logs_url(&id, &query.get_untracked(), &levels.get_untracked());
         spawn_local(async move {
-            // Polled like the run: logged, and tried again by the next poll.
-            match api_json::<LogsResponse>(&filtered_url).await {
+            // Polled like the run: a failure is logged, and the next poll tries again.
+            match api_fetch(&filtered_url).await {
                 Err(error) => log_error("Could not load the logs", &error),
-                Ok(data) => {
-                    let initial = initial_load.try_get_value().unwrap_or(false);
-                    let fresh = known_log_ids
-                        .try_update_value(|known| note_logs(known, &data.logs, initial))
-                        .unwrap_or_default();
-                    initial_load.try_set_value(false);
-                    if !fresh.is_empty() {
-                        new_log_ids.set(fresh);
-                        Timeout::new(5_000, move || new_log_ids.set(HashSet::new())).forget();
+                // A query the server refuses must not leave the lines of the
+                // previous one on screen as if they were its result.
+                Ok(refused) if !refused.ok => {
+                    logs_error.set(Some(logs_error_message(refused.error())));
+                    set_if_changed(filtered_logs, Vec::new());
+                }
+                Ok(response) => {
+                    if let Ok(data) = response.json::<LogsResponse>() {
+                        logs_error.set(None);
+                        let initial = initial_load.try_get_value().unwrap_or(false);
+                        let fresh = known_log_ids
+                            .try_update_value(|known| note_logs(known, &data.logs, initial))
+                            .unwrap_or_default();
+                        initial_load.try_set_value(false);
+                        if !fresh.is_empty() {
+                            new_log_ids.set(fresh);
+                            Timeout::new(5_000, move || new_log_ids.set(HashSet::new())).forget();
+                        }
+                        set_if_changed(filtered_logs, data.logs);
+                        set_if_changed(total_logs, data.total);
                     }
-                    set_if_changed(filtered_logs, data.logs);
-                    set_if_changed(total_logs, data.total);
                 }
             }
             // All logs once more for the level counters, in the same cycle.
@@ -291,6 +309,7 @@ pub fn FlowRun() -> impl IntoView {
                     levels
                     level_counts
                     filtered_logs
+                    logs_error
                     total_logs
                     new_log_ids
                     show_help
@@ -319,5 +338,20 @@ pub fn FlowRun() -> impl IntoView {
             }
             .into_any()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_refused_search_shows_the_reason_of_the_server() {
+        assert_eq!(
+            logs_error_message(Some("Invalid regex \"(\": unclosed group".to_string())),
+            "Invalid regex \"(\": unclosed group"
+        );
+        assert_eq!(logs_error_message(None), "The logs could not be loaded.");
+        assert_eq!(logs_error_message(Some(String::new())), "The logs could not be loaded.");
     }
 }

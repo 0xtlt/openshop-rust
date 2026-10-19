@@ -4,11 +4,12 @@
 //! configuration of a provider.
 
 use anyhow::Result;
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Duration, SecondsFormat, Utc};
 use sqlx::{FromRow, PgPool, Postgres, QueryBuilder};
 use uuid::Uuid;
 
 use crate::db::FlowRun;
+use crate::server::http::containing;
 
 /// The periods a page can look at, with the size of a point of its chart.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -82,21 +83,54 @@ impl Range {
     }
 }
 
-/// `%text%` for `ILIKE`, with what `LIKE` reads as a pattern escaped.
-fn containing(text: &str) -> String {
-    let mut pattern = String::with_capacity(text.len() + 2);
-    pattern.push('%');
-    for character in text.chars() {
-        if matches!(character, '\\' | '%' | '_') {
-            pattern.push('\\');
-        }
-        pattern.push(character);
-    }
-    pattern.push('%');
-    pattern
+type Sql = QueryBuilder<'static, Postgres>;
+
+/// Where a page of results stops: the last row it showed. Rows are ordered by
+/// `created_at` and then `id`, so rows created at the same instant are neither
+/// skipped nor shown twice between two pages.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct Cursor {
+    pub at: DateTime<Utc>,
+    /// Absent in an address made before pages were cut on the id too: the page
+    /// then stops before every row of that instant.
+    pub id: Option<Uuid>,
 }
 
-type Sql = QueryBuilder<'static, Postgres>;
+impl Cursor {
+    pub(super) fn new(at: DateTime<Utc>, id: Uuid) -> Self {
+        Self { at, id: Some(id) }
+    }
+
+    /// `2026-10-11T08:00:00.000000Z` or `2026-10-11T08:00:00.000000Z_<id>`.
+    pub(super) fn parse(value: &str) -> Option<Self> {
+        let (at, id) = match value.split_once('_') {
+            Some((at, id)) => (at, Some(Uuid::parse_str(id).ok()?)),
+            None => (value, None),
+        };
+        let at = DateTime::parse_from_rfc3339(at).ok()?.with_timezone(&Utc);
+        Some(Self { at, id })
+    }
+
+    pub(super) fn param(&self) -> String {
+        let at = self.at.to_rfc3339_opts(SecondsFormat::Micros, true);
+        match self.id {
+            Some(id) => format!("{at}_{id}"),
+            None => at,
+        }
+    }
+
+    fn push(&self, query: &mut Sql, at: &str, id: &str) {
+        match self.id {
+            Some(cursor_id) => {
+                query.push(format!("({at}, {id}) < ("));
+                query.push_bind(self.at).push(", ").push_bind(cursor_id).push(")");
+            }
+            None => {
+                query.push(format!("{at} < ")).push_bind(self.at);
+            }
+        }
+    }
+}
 
 /// Appends ` WHERE` before the first condition and ` AND` before the others.
 struct Conditions {
@@ -119,7 +153,7 @@ impl Conditions {
 #[derive(Debug, Clone, Default)]
 pub(super) struct RunFilter {
     pub since: Option<DateTime<Utc>>,
-    pub before: Option<DateTime<Utc>>,
+    pub before: Option<Cursor>,
     pub status: Option<String>,
     pub flow: Option<String>,
     pub shop: Option<String>,
@@ -136,7 +170,7 @@ impl RunFilter {
         }
         if let Some(before) = self.before {
             conditions.next(query);
-            query.push("created_at < ").push_bind(before);
+            before.push(query, "created_at", "id");
         }
         if let Some(status) = &self.status {
             conditions.next(query);
@@ -165,7 +199,7 @@ impl RunFilter {
 pub(super) async fn runs(db: &PgPool, filter: &RunFilter, limit: i64) -> Result<Vec<FlowRun>> {
     let mut query = Sql::new("SELECT * FROM flow_runs");
     filter.push(&mut query);
-    query.push(" ORDER BY created_at DESC LIMIT ").push_bind(limit);
+    query.push(" ORDER BY created_at DESC, id DESC LIMIT ").push_bind(limit);
     Ok(query.build_query_as().fetch_all(db).await?)
 }
 
@@ -228,7 +262,7 @@ pub(super) async fn run_counts(
 #[derive(Debug, Clone, Default)]
 pub(super) struct LogFilter {
     pub since: Option<DateTime<Utc>>,
-    pub before: Option<DateTime<Utc>>,
+    pub before: Option<Cursor>,
     pub level: Option<String>,
     pub flow: Option<String>,
     pub shop: Option<String>,
@@ -244,7 +278,7 @@ impl LogFilter {
         }
         if let Some(before) = self.before {
             conditions.next(query);
-            query.push("l.created_at < ").push_bind(before);
+            before.push(query, "l.created_at", "l.id");
         }
         if let Some(level) = &self.level {
             conditions.next(query);
@@ -268,6 +302,7 @@ impl LogFilter {
 /// A log line, with the run that wrote it.
 #[derive(Debug, FromRow)]
 pub(super) struct LogLine {
+    pub id: Uuid,
     pub created_at: DateTime<Utc>,
     pub level: String,
     pub message: Option<String>,
@@ -281,10 +316,10 @@ const LOGS_WITH_RUNS: &str = " FROM logs l LEFT JOIN flow_runs r ON r.id::text =
 
 /// The log lines a filter keeps, the latest first.
 pub(super) async fn logs(db: &PgPool, filter: &LogFilter, limit: i64) -> Result<Vec<LogLine>> {
-    let mut query = Sql::new("SELECT l.created_at, l.level, l.message, l.flow_run_id, r.shop, r.flow_name");
+    let mut query = Sql::new("SELECT l.id, l.created_at, l.level, l.message, l.flow_run_id, r.shop, r.flow_name");
     query.push(LOGS_WITH_RUNS);
     filter.push(&mut query);
-    query.push(" ORDER BY l.created_at DESC LIMIT ").push_bind(limit);
+    query.push(" ORDER BY l.created_at DESC, l.id DESC LIMIT ").push_bind(limit);
     Ok(query.build_query_as().fetch_all(db).await?)
 }
 

@@ -4,11 +4,11 @@ use anyhow::{Result, bail};
 use chrono::{DateTime, Duration, Utc};
 use serde::Serialize;
 use serde_json::Value;
-use sqlx::PgPool;
+use sqlx::{PgConnection, PgPool};
 use uuid::Uuid;
 
 use super::backoff::resolve_retry_policy;
-use super::errors::FlowConcurrencyError;
+use super::errors::{FlowConcurrencyError, InvalidFlowInput, UnknownFlowError};
 use crate::app::OpenShopConfig;
 use crate::runtime::time::millis;
 use crate::server::shopify_apps::DEFAULT_SHOPIFY_APP_HANDLE;
@@ -80,11 +80,59 @@ pub struct QueuedRun {
 }
 
 pub(crate) fn unknown_flow(config: &OpenShopConfig, flow_name: &str) -> anyhow::Error {
-    let available: Vec<&str> = config.flows.keys().map(String::as_str).collect();
-    anyhow::anyhow!("Flow \"{flow_name}\" not found. Available: {}", available.join(", "))
+    anyhow::Error::new(UnknownFlowError {
+        flow_name: flow_name.to_string(),
+        available: config.flows.keys().cloned().collect(),
+    })
 }
 
-/// Inserts a `pending` run. Concurrency is decided under an advisory lock scoped
+/// Takes, until the end of the transaction, the lock that serializes the runs
+/// of a flow for a shop: whoever makes a run active takes it first.
+pub(crate) async fn lock_flow(tx: &mut PgConnection, shopify_app: &str, shop: &str, flow_name: &str) -> Result<()> {
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1))")
+        .bind(format!("{shopify_app}:{shop}:{flow_name}"))
+        .execute(tx)
+        .await?;
+    Ok(())
+}
+
+/// Fails with a [`FlowConcurrencyError`] when another run of the flow is active
+/// for the shop. Meant to be called under [`lock_flow`], for a flow that rejects
+/// concurrent runs; `except` is the run that is about to become active.
+pub(crate) async fn reject_when_active(
+    tx: &mut PgConnection,
+    shopify_app: &str,
+    shop: &str,
+    flow_name: &str,
+    except: Option<Uuid>,
+) -> Result<()> {
+    let existing: Option<(Uuid,)> = sqlx::query_as(
+        "SELECT id FROM flow_runs \
+         WHERE app_handle = $1 AND shop = $2 AND flow_name = $3 \
+           AND status IN ('pending', 'running', 'sleeping') \
+           AND ($4::uuid IS NULL OR id <> $4) \
+         LIMIT 1",
+    )
+    .bind(shopify_app)
+    .bind(shop)
+    .bind(flow_name)
+    .bind(except)
+    .fetch_optional(tx)
+    .await?;
+
+    if let Some((existing_run_id,)) = existing {
+        bail!(FlowConcurrencyError {
+            flow_name: flow_name.to_string(),
+            shop: shop.to_string(),
+            existing_run_id: existing_run_id.to_string(),
+        });
+    }
+    Ok(())
+}
+
+/// Inserts a `pending` run. Fails with [`UnknownFlowError`] for a flow that is
+/// not registered, and with [`InvalidFlowInput`] when the input fails the input
+/// schema of the flow. Concurrency is decided under an advisory lock scoped
 /// to `(app, shop, flow)` so that simultaneous dispatches cannot both pass.
 pub async fn dispatch_flow(db: &PgPool, config: &OpenShopConfig, options: DispatchOptions) -> Result<QueuedRun> {
     Ok(queue_run(db, config, options, None)
@@ -138,11 +186,18 @@ async fn queue_run(
         return Err(unknown_flow(config, &flow_name));
     };
 
+    // The caller's mistake, before a run is queued that could only fail.
+    if let Some(schema) = &flow.input {
+        // A validator is the code of the application: it may panic.
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| schema.parse(input.clone()))) {
+            Ok(Ok(_)) => {}
+            Ok(Err(summary)) => return Err(InvalidFlowInput { flow_name, summary }.into()),
+            Err(_) => bail!("The input validator of flow \"{flow_name}\" panicked"),
+        }
+    }
+
     let mut tx = db.begin().await?;
-    sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1))")
-        .bind(format!("{shopify_app}:{shop}:{flow_name}"))
-        .execute(&mut *tx)
-        .await?;
+    lock_flow(&mut tx, &shopify_app, &shop, &flow_name).await?;
 
     if let Some(tick) = tick {
         let claimed = sqlx::query(
@@ -164,25 +219,7 @@ async fn queue_run(
     }
 
     if flow.concurrency.unwrap_or_default() == Concurrency::Reject {
-        let existing: Option<(Uuid,)> = sqlx::query_as(
-            "SELECT id FROM flow_runs \
-             WHERE app_handle = $1 AND shop = $2 AND flow_name = $3 \
-               AND status IN ('pending', 'running', 'sleeping') \
-             LIMIT 1",
-        )
-        .bind(&shopify_app)
-        .bind(&shop)
-        .bind(&flow_name)
-        .fetch_optional(&mut *tx)
-        .await?;
-
-        if let Some((existing_run_id,)) = existing {
-            bail!(FlowConcurrencyError {
-                flow_name,
-                shop,
-                existing_run_id: existing_run_id.to_string(),
-            });
-        }
+        reject_when_active(&mut tx, &shopify_app, &shop, &flow_name, None).await?;
     }
 
     // The deadline and the date from which the run can be claimed are dates of the

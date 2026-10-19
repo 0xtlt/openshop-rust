@@ -113,6 +113,10 @@ larger configurations easier to split:
   `404 Cron not found`, and stores nothing.
 - `POST /api/runs/bulk-delete` answers `400 No IDs provided` for a missing or
   invalid body; identifiers that are not UUIDs count as skipped.
+- Retry, cancel and delete check the status of the run in the write itself, so
+  a run that changed meanwhile is answered `409`. A retry of a flow that
+  rejects concurrent runs answers `409` with `existingRunId` while another
+  run of it is active for the shop.
 - Log export uses JSON for any `format` other than `csv`, and only letters and
   digits are kept in the file extension.
 - Run details list steps in creation order.
@@ -177,7 +181,8 @@ larger configurations easier to split:
   the `OPENSHOP_UI_DIR` environment variable.
 - Assets whose file name carries a content hash are served with
   `Cache-Control: public, max-age=31536000, immutable`; other files with
-  `no-cache`.
+  `no-cache`. They have an `ETag` and answer `304` to `If-None-Match`, and are
+  sent with `X-Content-Type-Options: nosniff`.
 - Custom admin pages are Rust components registered in your own UI bundle
   instead of `page.tsx` files compiled by Vite.
 - In `dev`, the shell is served by the application itself (there is no separate
