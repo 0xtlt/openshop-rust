@@ -177,6 +177,49 @@ pub async fn get_client_migration_status(pool: &PgPool, cwd: &Path) -> Result<Mi
     Ok(status)
 }
 
+/// Refuses to go on while `./migrations` holds a migration the database has not
+/// applied, or lacks part of the framework schema. The processes that serve and
+/// run flows start with it: against a schema that is behind, they fail at the
+/// first statement that needs what is missing, or worse.
+///
+/// Without a `./migrations` folder there is nothing to compare the database
+/// with, and it passes. It reads the database and writes nothing.
+pub async fn assert_migrated(pool: &PgPool, cwd: &Path) -> Result<()> {
+    let Some(folder) = resolve_client_migrations_folder(cwd) else {
+        return Ok(());
+    };
+    let files = read_migration_files(&folder)?;
+    if !missing_framework_migrations(&files).is_empty() {
+        bail!(
+            "[openshop] Not starting: the current OpenShop schema is not covered by ./migrations. {GENERATE_THEN_MIGRATE}"
+        );
+    }
+
+    let applied: Vec<(String,)> = match sqlx::query_as(&format!("SELECT tag FROM {MIGRATIONS_TABLE}"))
+        .fetch_all(pool)
+        .await
+    {
+        Ok(applied) => applied,
+        // `undefined_table`: no migration was ever applied.
+        Err(sqlx::Error::Database(error)) if error.code().as_deref() == Some("42P01") => Vec::new(),
+        Err(error) => return Err(error.into()),
+    };
+    let pending: Vec<&str> = files
+        .iter()
+        .map(|file| file.tag.as_str())
+        .filter(|tag| !applied.iter().any(|(applied,)| applied == tag))
+        .collect();
+    if !pending.is_empty() {
+        bail!(
+            "[openshop] Not starting: {} migration{} not applied ({}). Run `migrate` first.",
+            pending.len(),
+            if pending.len() == 1 { " is" } else { "s are" },
+            pending.join(", ")
+        );
+    }
+    Ok(())
+}
+
 const NO_MIGRATIONS: &str = "[openshop] No client migrations found in ./migrations. Run `openshop migrate generate`, review the generated SQL, then run `openshop migrate`.";
 
 /// Applies pending migrations, each in its own transaction. Returns the applied tags.

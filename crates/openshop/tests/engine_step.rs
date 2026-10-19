@@ -667,8 +667,7 @@ async fn a_nul_byte_in_a_line_does_not_lose_the_lines_around_it() {
     let messages: Vec<&str> = lines.iter().map(|(message, _)| message.as_str()).collect();
     assert_eq!(messages, ["before", "badbyte", "after"]);
     assert_eq!(
-        lines[1].1,
-        r#"{"name":"value","list":["x",1],"nested":{"k":""}}"#,
+        lines[1].1, r#"{"name":"value","list":["x",1],"nested":{"k":""}}"#,
         "no NUL, and not its escape either"
     );
     test.cleanup().await;
