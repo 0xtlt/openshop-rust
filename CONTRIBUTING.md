@@ -24,6 +24,13 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 ```
 
+The errors of the macros are checked with `trybuild` in
+`crates/openshop/tests/macros.rs`: each file of `tests/macros/fail` is refused
+with the error of its `.stderr`, those of `tests/macros/pass` compile and run.
+The `.stderr` files are the output of the compiler pinned in `mise.toml`; after
+a change of a macro or of the compiler, `TRYBUILD=overwrite cargo test -p
+openshop --test macros` rewrites them, and the diff is what to review.
+
 The admin UI is its own workspace:
 
 ```bash

@@ -1,0 +1,5 @@
+error: unknown method; expected GET, POST, PUT, DELETE, PATCH
+ --> tests/macros/fail/proxy_unknown_method.rs:3:9
+  |
+3 | #[proxy(FETCH, "/widgets")]
+  |         ^^^^^

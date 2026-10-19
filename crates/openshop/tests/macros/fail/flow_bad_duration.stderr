@@ -1,0 +1,5 @@
+error: expected a duration such as "30s", "10m" or "1h30m" (units: ms, s, m, h, d), or an expression
+ --> tests/macros/fail/flow_bad_duration.rs:3:18
+  |
+3 | #[flow(timeout = "ten minutes")]
+  |                  ^^^^^^^^^^^^^

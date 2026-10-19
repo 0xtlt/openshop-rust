@@ -1,0 +1,5 @@
+error: `#[flow]` goes on `async fn(ctx: FlowContext) -> Result<()>` or `async fn(ctx: FlowContext, input: Input) -> Result<()>`
+ --> tests/macros/fail/flow_not_async.rs:4:4
+  |
+4 | fn sync_orders(_ctx: FlowContext) -> Result<()> {
+  |    ^^^^^^^^^^^

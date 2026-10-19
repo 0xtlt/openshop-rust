@@ -4,15 +4,26 @@ use proc_macro2::TokenStream;
 use quote::quote;
 use syn::DeriveInput;
 
-/// Whether the type states how its fields are named outside Rust.
+/// Whether the type states how its fields are named outside Rust: a
+/// `rename_all` among the options of a `#[serde(…)]`. Not `rename_all_fields`,
+/// nor the text `"rename_all"` as the value of another option.
 fn names_its_fields(item: &DeriveInput) -> bool {
-    item.attrs
-        .iter()
-        .filter(|attribute| attribute.path().is_ident("serde"))
-        .any(|attribute| match &attribute.meta {
-            syn::Meta::List(list) => list.tokens.to_string().contains("rename_all"),
-            _ => false,
-        })
+    let mut named = false;
+    for attribute in item.attrs.iter().filter(|attribute| attribute.path().is_ident("serde")) {
+        // An option serde cannot read is serde's to report.
+        let _ = attribute.parse_nested_meta(|meta| {
+            named |= meta.path.is_ident("rename_all");
+            if meta.input.peek(syn::Token![=]) {
+                meta.value()?.parse::<syn::Expr>()?;
+            } else if meta.input.peek(syn::token::Paren) {
+                let content;
+                syn::parenthesized!(content in meta.input);
+                content.parse::<TokenStream>()?;
+            }
+            Ok(())
+        });
+    }
+    named
 }
 
 pub fn input(arguments: TokenStream, item: DeriveInput) -> syn::Result<TokenStream> {
@@ -70,6 +81,27 @@ mod tests {
             "{generated}"
         );
         assert!(!generated.contains("camelCase"), "{generated}");
+    }
+
+    #[test]
+    fn only_a_rename_all_option_names_the_fields() {
+        for (attributes, named) in [
+            (quote!(#[serde(rename_all = "snake_case")]), true),
+            (quote!(#[serde(deny_unknown_fields, rename_all = "kebab-case")]), true),
+            (
+                quote!(#[serde(rename_all(serialize = "snake_case", deserialize = "snake_case"))]),
+                true,
+            ),
+            (quote!(#[serde(rename_all = "snake_case")] #[serde(default)]), true),
+            (quote!(#[serde(rename_all_fields = "snake_case")]), false),
+            (quote!(#[serde(rename = "rename_all")]), false),
+            (quote!(#[serde(alias = "rename_all", default)]), false),
+            (quote!(#[doc = "rename_all"]), false),
+            (quote!(#[derive(Debug)]), false),
+        ] {
+            let item: DeriveInput = syn::parse2(quote!(#attributes struct Input;)).unwrap();
+            assert_eq!(names_its_fields(&item), named, "{attributes}");
+        }
     }
 
     #[test]

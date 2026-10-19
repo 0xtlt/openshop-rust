@@ -1,0 +1,5 @@
+error: a provider method is `async fn(&self, …) -> Result<…>`; a private method stays out of the provider
+  --> tests/macros/fail/provider_method_not_async.rs:10:12
+   |
+10 |     pub fn ping(&self) -> Result<String> {
+   |            ^^^^

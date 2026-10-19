@@ -1,0 +1,5 @@
+error: two fields are saved as `apiUrl`
+ --> tests/macros/fail/provider_config_same_key.rs:7:5
+  |
+7 |     url: String,
+  |     ^^^

@@ -140,7 +140,15 @@ pub fn flow(arguments: Arguments, item: ItemFn) -> syn::Result<TokenStream> {
 
     let mut name: Option<LitStr> = None;
     let mut options = Vec::new();
+    let mut given: Vec<String> = Vec::new();
     for argument in &arguments.0 {
+        // A second value would silently win over the first.
+        if let Some(option) = argument.name().filter(|option| FLOW_OPTIONS.contains(&option.as_str())) {
+            if given.contains(&option) {
+                return Err(syn::Error::new(argument.span(), format!("`{option}` is given twice")));
+            }
+            given.push(option);
+        }
         match argument {
             Argument::Text(text) => set_once(&mut name, argument, text.clone())?,
             Argument::Value(option, value) if option == "concurrency" => {
@@ -790,6 +798,17 @@ mod tests {
             "unknown flow option; expected the name of the flow, `timeout`, `step_timeout`, `concurrency` or `retry_policy`"
         );
         assert_eq!(refusal(flow, quote!("a", "b"), item.clone()), "given twice");
+        for (arguments, option) in [
+            (quote!(timeout = "1m", timeout = "2m"), "timeout"),
+            (quote!(step_timeout = "1m", "sync", step_timeout = "2m"), "step_timeout"),
+            (quote!(concurrency = allow, concurrency = reject), "concurrency"),
+            (quote!(retry_policy = a, retry_policy = b), "retry_policy"),
+        ] {
+            assert_eq!(
+                refusal(flow, arguments, item.clone()),
+                format!("`{option}` is given twice")
+            );
+        }
         assert_eq!(refusal(flow, quote!(" "), item), "a flow needs a name");
     }
 

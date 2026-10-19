@@ -1,0 +1,5 @@
+error: the constant `TABLE` of this field would hide `Record::TABLE`: name the field differently and keep the column with `#[model(column = "table")]`
+ --> tests/macros/fail/model_column_hides_a_constant.rs:7:5
+  |
+7 |     table: String,
+  |     ^^^^^

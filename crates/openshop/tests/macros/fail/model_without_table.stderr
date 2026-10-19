@@ -1,0 +1,5 @@
+error: a model names its table: add `#[model("…")]`
+ --> tests/macros/fail/model_without_table.rs:4:8
+  |
+4 | struct Review {
+  |        ^^^^^^

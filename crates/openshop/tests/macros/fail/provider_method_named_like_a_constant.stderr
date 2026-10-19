@@ -1,0 +1,5 @@
+error: the call of this method would be the constant `NAME`, which `#[provider]` declares: give the method another name
+  --> tests/macros/fail/provider_method_named_like_a_constant.rs:10:18
+   |
+10 |     pub async fn name(&self) -> Result<String> {
+   |                  ^^^^

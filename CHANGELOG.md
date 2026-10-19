@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+- The macros refuse more of what they used to take, each with an error at the
+  item: an option of `#[flow]` given twice (`timeout`, `step_timeout`,
+  `concurrency`, `retry_policy`); a field of a `Model` named `table`,
+  `columns` or `has_shop`, whose constant would hide `Record::TABLE`,
+  `Record::COLUMNS` or `Model::HAS_SHOP`, and two fields that give the same
+  constant; an item of a `#[provider]` block named `NAME`, `provider` or `on`,
+  or a method whose constant (`name` is `NAME`) is already in the block; an
+  item named `PATH`, or like the constant of a loader or an action, in an
+  `#[admin_page]` block. `#[input]` leaves the naming of the fields to a type
+  only when its `#[serde(…)]` has a `rename_all` option, no longer when the
+  text appears anywhere in it.
+- `graphql!` checks the default value of a variable against its type, and
+  refuses an integer literal beyond the 32 bits of `Int`. When `openshop
+  codegen` creates `graphql/admin.schema.json`, it touches `src/main.rs` and
+  `src/lib.rs`, so that the crate is built again with the schema; `cargo` did
+  not know a file that did not exist at the first build.
+
 - `openshop init` makes a project from one of three templates: `minimal`, one
   provider and one flow, as before; `custom`, a custom app with every building
   block and a page of its own next to the built-in admin; `public`, a public

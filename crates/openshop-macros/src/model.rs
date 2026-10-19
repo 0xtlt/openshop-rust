@@ -13,6 +13,9 @@ const MAX_IDENTIFIER: usize = 63;
 /// The columns every model can have, filled by the database or by the rows of a shop.
 const CONVENTIONAL: [&str; 4] = ["id", "shop", "created_at", "updated_at"];
 
+/// The constants of the traits a model implements: a field named like one would hide it.
+const TRAIT_CONSTANTS: [(&str, &str); 3] = [("TABLE", "Record"), ("COLUMNS", "Record"), ("HAS_SHOP", "Model")];
+
 struct IndexSpec {
     /// The fields, as written.
     fields: Vec<Ident>,
@@ -319,6 +322,28 @@ pub fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
                     ),
                 ));
             }
+        }
+    }
+    // Each field is a constant of the struct, next to those of the traits it implements.
+    for (index, field) in fields.iter().enumerate() {
+        let constant = constant_ident(&field.ident).to_string();
+        if let Some(owner) = TRAIT_CONSTANTS.iter().find(|(reserved, _)| *reserved == constant) {
+            return Err(syn::Error::new(
+                field.ident.span(),
+                format!(
+                    "the constant `{constant}` of this field would hide `{}::{constant}`: name the field differently and keep the column with `#[model(column = \"{}\")]`",
+                    owner.1, field.column
+                ),
+            ));
+        }
+        if fields[..index]
+            .iter()
+            .any(|earlier| constant_ident(&earlier.ident) == constant)
+        {
+            return Err(syn::Error::new(
+                field.ident.span(),
+                format!("two fields would both be the constant `{constant}`"),
+            ));
         }
     }
     let Some(id_field) = fields.iter().find(|field| field.column == "id") else {
@@ -764,6 +789,28 @@ mod tests {
             refusal(parse_quote! { #[model("reviews")] struct Review<T> { id: Uuid, value: T } }),
             "a model cannot be generic"
         );
+    }
+
+    #[test]
+    fn refuses_a_field_whose_constant_would_hide_one_of_the_traits() {
+        assert_eq!(
+            refusal(parse_quote! { #[model("settings")] struct Setting { id: Uuid, table: String } }),
+            "the constant `TABLE` of this field would hide `Record::TABLE`: name the field differently and keep the column with `#[model(column = \"table\")]`"
+        );
+        assert!(
+            refusal(parse_quote! { #[model("t")] struct T { id: Uuid, #[model(column = "c")] columns: String } })
+                .starts_with("the constant `COLUMNS` of this field would hide `Record::COLUMNS`")
+        );
+        assert!(
+            refusal(parse_quote! { #[model("t")] struct T { id: Uuid, has_shop: bool } })
+                .contains("would hide `Model::HAS_SHOP`")
+        );
+        assert_eq!(
+            refusal(parse_quote! { #[model("t")] struct T { id: Uuid, size: i32, Size: i32 } }),
+            "two fields would both be the constant `SIZE`"
+        );
+        // Not a constant of a trait: `table_name` is `TABLE_NAME`.
+        assert!(expand(parse_quote! { #[model("t")] struct T { id: Uuid, table_name: String } }).is_ok());
     }
 
     #[test]
