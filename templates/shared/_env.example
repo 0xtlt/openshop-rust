@@ -18,7 +18,8 @@ SHOPIFY_API_SECRET=
 # HOST=https://my-app.example.com
 
 # Credential encryption (64 hex chars = 32 bytes). Generate with: openssl rand -hex 32
-# Required in production (OPENSHOP_ENV=production). If unset, configs are stored in plaintext.
+# Required unless OPENSHOP_ENV is development or test: without it, `start` and
+# `worker` do not start. `dev` stores secrets in plaintext when it is unset.
 # ENCRYPTION_KEY=
 
 # Password of the operator dashboard at /ops: every shop, read-only, outside

@@ -194,8 +194,9 @@ The generated `.gitignore` excludes `target/`, `.env`, `.shopify/`, and `dist/`.
 - `docker-compose.yml` starts a local PostgreSQL 17 with the `openshop` role
   and database expected by the default `DATABASE_URL`.
 - `.env.example` lists the variables to copy into `.env`. `ENCRYPTION_KEY` is
-  commented out: development stores credentials in plaintext until you set
-  it. See [Environment variables](environment-variables.md).
+  commented out: `openshop dev` stores credentials in plaintext until you set
+  it. `start` and `worker` refuse to run without it unless
+  `OPENSHOP_ENV=development`. See [Environment variables](environment-variables.md).
 
 ## Generated files
 

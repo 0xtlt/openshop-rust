@@ -298,6 +298,23 @@
   naming several shops shows only the shop of the caller. Switching a cron
   that the shop does not see is refused (`Unknown cron` through MCP, `404
   Cron not found` on `POST /api/crons/toggle`).
+- **Breaking:** secrets are no longer stored in plaintext by default. Without
+  an `ENCRYPTION_KEY`, the offline access tokens of Shopify and the
+  credentials of providers were stored in plaintext unless `OPENSHOP_ENV` was
+  exactly `production`, so `staging`, `prod`, a typo or no `OPENSHOP_ENV` at
+  all silently stored them in clear. Now an application without a key does not
+  start (`OpenShop::new` fails with `ENCRYPTION_KEY must be set …`, which
+  names how to set one), unless the environment is explicitly a development
+  one: `OPENSHOP_ENV` is `development` or `test` (`NODE_ENV` does not count),
+  or the command is `openshop dev`. `OPENSHOP_ENV=production` never allows plaintext.
+  `start` and `worker` run locally without a key now need a key or
+  `OPENSHOP_ENV=development`; set `ENCRYPTION_KEY` in every deployed
+  environment. Rows already stored in plaintext are still read, and the
+  encryption format is unchanged. A `RuntimeEnv` built by hand gets a
+  `development` field (false by default) that
+  `RuntimeEnv::allows_plaintext_secrets()` reads, and `TestOptions` a
+  `development` field, true by default, so tests keep working without a key;
+  with `false` and no key the context does not start.
 - `openshop init` makes a project from one of three templates: `minimal`, one
   provider and one flow, as before; `custom`, a custom app with every building
   block and a page of its own next to the built-in admin; `public`, a public

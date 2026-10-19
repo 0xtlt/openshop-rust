@@ -36,8 +36,11 @@ HOST=https://your-app.example.com
 ENCRYPTION_KEY=replace-with-64-hex-characters
 ```
 
-`OPENSHOP_ENV=production` turns on production mode: `ENCRYPTION_KEY` becomes
-mandatory for storing credentials, and migration generation is refused.
+`OPENSHOP_ENV=production` turns on production mode: migration generation and
+the schema push are refused. `ENCRYPTION_KEY` is mandatory in any environment
+that is not explicitly `development` or `test`: without it, the web and worker
+processes do not start, instead of storing credentials and access tokens in
+plaintext.
 Generate `ENCRYPTION_KEY` once with `openssl rand -hex 32`, store it securely, and
 reuse it across deployments. Both services need the same key, database, and
 Shopify configuration. Production commands do not load `.env` automatically.

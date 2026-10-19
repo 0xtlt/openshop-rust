@@ -19,7 +19,12 @@ use crate::types::WorkerConfig;
 pub async fn start_dev(config: OpenShopConfig) -> Result<()> {
     // Already done by `run`, which found nothing left to set; here for a caller of `start_dev`.
     load_env_file(&std::env::current_dir()?);
-    let env = RuntimeEnv::from_env();
+    // The `dev` command is a development environment: secrets may be stored
+    // in plaintext without an `ENCRYPTION_KEY`, unless `OPENSHOP_ENV` says production.
+    let env = RuntimeEnv {
+        development: true,
+        ..RuntimeEnv::from_env()
+    };
     let port = port(3000);
 
     println!("[openshop] Starting dev server...");

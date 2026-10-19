@@ -970,27 +970,6 @@ async fn get_auth_callback_stores_the_token_in_plaintext_without_an_encryption_k
 }
 
 #[tokio::test]
-async fn get_auth_callback_in_production_without_an_encryption_key_refuses_to_store_the_token() {
-    let options = TestOptions {
-        production: true,
-        encryption_key: None,
-        ..Default::default()
-    };
-    let ctx = TestContext::with_options(config(), options).await.unwrap();
-    let shop = "production.myshopify.com";
-    let started = begin(&ctx, shop).await;
-    grant_access_token(&ctx, "production-token");
-
-    let response = finish(&ctx, shop, &started, SECRET).await;
-    assert_eq!(response.status(), 500);
-    let body = response.text().await.unwrap();
-    assert_eq!(body, "Internal Server Error");
-
-    assert_eq!(installation_count(&ctx).await, 0);
-    ctx.shutdown().await.unwrap();
-}
-
-#[tokio::test]
 async fn access_token_encrypted_by_the_typescript_implementation_is_still_usable() {
     // `encryptString("shpat_from_typescript")` from node:crypto with ENCRYPTION_KEY and a fixed IV.
     let stored = "enc:aes-256-gcm:000102030405060708090a0b:8a9b7b52670a17e1bc5b07b96fc873f4:\
@@ -1464,22 +1443,39 @@ async fn token_exchange_stores_the_token_in_plaintext_without_an_encryption_key(
 }
 
 #[tokio::test]
-async fn token_exchange_in_production_without_an_encryption_key_never_writes_plaintext() {
-    let options = TestOptions {
-        production: true,
-        encryption_key: None,
-        ..Default::default()
-    };
-    let ctx = TestContext::with_options(config(), options).await.unwrap();
-    grant_access_token(&ctx, "production-token");
+async fn an_application_without_an_encryption_key_does_not_start_outside_development() {
+    // Production, but also unset, `prod`, `staging`, a typo: all of them are
+    // `development: false`. None of them stores a token in plaintext.
+    for (production, development) in [(true, false), (false, false), (true, true)] {
+        let options = TestOptions {
+            production,
+            development,
+            encryption_key: None,
+            ..Default::default()
+        };
+        let error = TestContext::with_options(config(), options).await.err().unwrap();
+        let error = error.to_string();
+        assert!(error.starts_with("ENCRYPTION_KEY must be set"), "{error}");
+        assert!(error.contains("openssl rand -hex 32"), "{error}");
+        assert!(error.contains("OPENSHOP_ENV=development"), "{error}");
+    }
+}
 
-    // The request itself is served: installation is best-effort.
-    assert_eq!(ctx.get("/api/flows").send().await.unwrap().status(), 200);
-
-    assert_eq!(ctx.transport.requests().len(), 1);
-    let stored = find_installation(&ctx, "default", SHOP).await;
-    assert!(stored.is_none_or(|row| row.access_token.is_none()));
-    ctx.shutdown().await.unwrap();
+#[tokio::test]
+async fn an_application_with_an_encryption_key_starts_whatever_the_environment() {
+    for (production, development) in [(true, false), (false, false), (false, true)] {
+        let options = TestOptions {
+            production,
+            development,
+            ..with_encryption()
+        };
+        let ctx = TestContext::with_options(config(), options).await.unwrap();
+        grant_access_token(&ctx, "keyed-token");
+        assert_eq!(ctx.get("/api/flows").send().await.unwrap().status(), 200);
+        let stored = installation(&ctx, "default", SHOP).await.access_token.unwrap();
+        assert!(stored.starts_with(ENCRYPTED_PREFIX), "{stored}");
+        ctx.shutdown().await.unwrap();
+    }
 }
 
 #[tokio::test]

@@ -159,9 +159,10 @@ in a test that ends with `ctx.shutdown().await`.
 | `api_key` | `test-app` | Shopify API key of the single-app setup. Session-token audience. |
 | `access_token` | `None`; `test-access-token` with `TestOptions::installed()` | Inserts an installation so Shopify client calls and factories can run. |
 | `encryption_key` | `None` | `ENCRYPTION_KEY` of the application. |
+| `development` | `true` | A development environment: without an `encryption_key`, secrets are stored in plaintext. With `false` (or `production: true`) and no key, the context does not start. |
 | `client_credentials_shop` | `None` | The `client_credentials_shop` setting of the application, in place of the one its configuration gives: the shop background work may get a token for with the [client credentials grant](authentication.md#client-credentials-grant), from the mock transport. A token stored by `access_token` is used as it is. |
 | `host` | `None` | `HOST` of the application. |
-| `production` | `false` | Production mode, for example to test encryption enforcement. |
+| `production` | `false` | Production mode, for example to test the checks it turns on. |
 | `cwd` | A directory without Shopify TOML files | Project root used to resolve Shopify TOML files. |
 | `server` | `ServerOptions::default()` | API only: no admin UI is served. |
 | `transport` | A new `MockTransport` | Transport shared with other contexts or prepared in advance. |

@@ -2137,11 +2137,11 @@ async fn legacy_plaintext_provider_config_is_read_and_encrypted_on_save() {
 }
 
 #[tokio::test]
-async fn production_refuses_to_store_secrets_without_an_encryption_key() {
+async fn a_malformed_encryption_key_refuses_to_store_secrets() {
     let ctx = TestContext::with_options(
         api_config(),
         TestOptions {
-            production: true,
+            encryption_key: Some("too-short".to_string()),
             ..Default::default()
         },
     )

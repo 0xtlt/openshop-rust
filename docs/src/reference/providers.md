@@ -455,6 +455,6 @@ check yet shows **Configured**, `lastCheckOk: true` shows **Connected**, and
 Password values are excluded from provider read responses. Their field metadata
 contains `hasValue` instead. The whole stored config is encrypted when
 `ENCRYPTION_KEY` is set. Development without a key logs a warning and stores
-plaintext; production without a key fails. The key must contain exactly 64 hex
+plaintext; anywhere else, the application does not start without a key. The key must contain exactly 64 hex
 characters (32 bytes). Preserve it across deployments. See
 [Security](security.md#encryption-at-rest).

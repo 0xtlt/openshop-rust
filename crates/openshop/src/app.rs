@@ -451,7 +451,8 @@ impl OpenShop {
         validate_openshop_config(&config)?;
         crate::server::ops::check_password(config.ops_password.as_deref(), env.production)?;
         let apps = ShopifyApps::resolve(config.shopify.as_ref(), &env)?;
-        let crypto = Crypto::new(env.encryption_key.clone(), env.production);
+        let crypto = Crypto::new(env.encryption_key.clone(), env.allows_plaintext_secrets());
+        crypto.check_configured()?;
         let client_credentials = ClientCredentials::new(config.client_credentials_shop.as_deref())?;
         let custom_pages = config.resolved_admin_pages()?;
         let mcp_registry = build_mcp_registry(config.mcp.as_ref(), &create_core_mcp_capabilities())?;
