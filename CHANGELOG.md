@@ -18,8 +18,10 @@
   the SHA-256 of its release before it runs, and both base images are named by
   digest (Dependabot proposes the next ones). A private `openshop` repository
   is fetched with the optional build secret `gitconfig` (a git configuration
-  with a token, never written to a layer): `docker build --secret
-  id=gitconfig,src=./gitconfig .`; without it the build is the same as before.
+  with a token, kept outside the project so that `COPY . .` cannot copy it, and
+  never written to a layer): `docker build --secret id=gitconfig,src=<file> .`;
+  without it the build is the same as before. `gitconfig` is in the generated
+  `.dockerignore` and `.gitignore`.
 - CI is hardened. Every action is pinned to the commit of a release, the
   workflows only get `contents: read`, trunk and cargo-deny are installed from
   their release with a SHA-256 written in the repository (a release asset can

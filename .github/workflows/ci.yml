@@ -239,7 +239,8 @@ jobs:
   # project of a template with admin views (`custom`, which builds the bundle)
   # and one without (`minimal`), built into an image. The repository is private,
   # so the build gets the token the way `init-git` does, as a BuildKit secret: a
-  # `gitconfig` that is never written to a layer.
+  # `gitconfig` that is never written to a layer. It lives in the runner temp
+  # directory, outside the project, which is the build context.
   docker:
     runs-on: ubuntu-latest
     strategy:

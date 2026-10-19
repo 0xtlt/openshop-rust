@@ -26,6 +26,23 @@ work=/tmp/openshop-ui-build
 sysroot=$(rustc --print sysroot)
 commit=$(rustc -vV | sed -n 's/^commit-hash: //p')
 
+# The place is shared by every checkout: one build at a time, from the copy of
+# the sources to the end. `mkdir` is the lock that every platform has; a lock
+# left by a process that is gone is taken over.
+lock=$work.lock
+until mkdir "$lock" 2>/dev/null; do
+  holder=$(cat "$lock/pid" 2>/dev/null || true)
+  if [ -n "$holder" ] && ! kill -0 "$holder" 2>/dev/null; then
+    rm -rf "$lock"
+  else
+    echo "Waiting for the build of another checkout (${holder:-?})" >&2
+    sleep 2
+  fi
+done
+echo $$ > "$lock/pid"
+trap 'rm -rf "$lock"' EXIT
+trap 'exit 1' INT TERM
+
 # The sources the bundle is made of: the admin UI and what it depends on.
 mkdir -p "$work/crates"
 rm -rf "$work/crates/openshop-ui" "$work/crates/openshop-shared"

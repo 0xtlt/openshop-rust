@@ -5,7 +5,8 @@ FROM rust:1-bookworm@sha256:e12566d5abc17a0da741628782cdb504b68b8961f5bfcf677936
 # build secret `gitconfig`: a `url.<base>.insteadOf` that adds a token, for a
 # repository that is private. Without the secret git reads no configuration,
 # and the repository has to be public.
-#   docker build --secret id=gitconfig,src=./gitconfig .
+#   docker build --secret id=gitconfig,src=/path/outside/the/project/gitconfig .
+# The file stays outside the project: `COPY . .` would copy it into a layer.
 ENV CARGO_NET_GIT_FETCH_WITH_CLI=true GIT_CONFIG_GLOBAL=/run/secrets/gitconfig
 # if views
 # What builds the admin UI bundle: the WebAssembly target, trunk, and the
