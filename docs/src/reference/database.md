@@ -419,7 +419,7 @@ unless noted.
 | Table | Purpose | Other columns | Unique indexes |
 | --- | --- | --- | --- |
 | `installations` | Installed shops and their access tokens | `access_token`, `scopes`, `nonce`, `installed_at`, `uninstalled_at` | `(app_handle, shop)` |
-| `flow_runs` | Queue and history of flow runs | `flow_name`, `status`, `input`, `error`, `deadline_at`, `parent_run_id`, `attempts`, `available_at`, `worker_id`, `retry_policy`, `started_at`, `completed_at`, `created_at` | — |
+| `flow_runs` | Queue and history of flow runs | `flow_name`, `status`, `input`, `error`, `deadline_at`, `parent_run_id`, `attempts`, `available_at`, `worker_id`, `retry_policy`, `started_at`, `completed_at`, `created_at`; `lease_id` (Rust only, null or the uuid of the claim that holds the run; the TypeScript runtime ignores it and the Admin API does not return it) | — |
 | `step_results` | Checkpoints; scoped by `flow_run_id` | `step_name`, `attempt`, `status`, `output`, `error`, `duration_ms`, `created_at` | `(flow_run_id, step_name, attempt)` |
 | `provider_configs` | Saved provider configuration | `provider_name`, `config`, `last_checked_at`, `last_check_ok`, `updated_at` | `(app_handle, shop, provider_name)` |
 | `cron_overrides` | Per-shop cron enabled state | `cron_key`, `enabled`, `updated_at` | `(app_handle, shop, cron_key)` |

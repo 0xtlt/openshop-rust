@@ -706,7 +706,16 @@ async fn fails_a_run_that_used_all_its_attempts_instead_of_claiming_it_again() {
     test.cleanup().await;
 }
 
-/// A run claimed twice by one worker: the first execution, whose lease expired,
+/// How a run still executing comes to be claimed again.
+#[derive(Clone, Copy, Debug)]
+enum Takeover {
+    /// Its lease expired.
+    LeaseExpired,
+    /// It was canceled and retried from the Admin API, which resets its attempts.
+    CanceledAndRetried,
+}
+
+/// A run claimed twice by one worker: the first execution, which lost the run,
 /// is still going while the second one runs.
 struct Reclaimed {
     test: TestApp,
@@ -720,7 +729,7 @@ struct Reclaimed {
     stopped: [Arc<AtomicUsize>; 2],
 }
 
-async fn reclaim_a_run_in_flight() -> Reclaimed {
+async fn reclaim_a_run_in_flight(takeover: Takeover) -> Reclaimed {
     let starts = Arc::new(AtomicUsize::new(0));
     let stopped = [Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0))];
     let started = Arc::new(Notify::new());
@@ -752,16 +761,20 @@ async fn reclaim_a_run_in_flight() -> Reclaimed {
         .expect("run claimed");
     assert_eq!(find_run(&test, run_id).await.attempts, 1);
 
-    // Its lease expires while it is still running: the same worker claims it again.
-    sqlx::query("UPDATE flow_runs SET available_at = now() - interval '1 second' WHERE id = $1")
-        .bind(run_id)
-        .execute(&test.db)
-        .await
-        .unwrap();
+    // The same worker claims it again while the first execution is still going.
+    let lose = match takeover {
+        Takeover::LeaseExpired => "UPDATE flow_runs SET available_at = now() - interval '1 second' WHERE id = $1",
+        // Cancel, then retry: what the two endpoints write, without the signal
+        // that would stop the first execution.
+        Takeover::CanceledAndRetried => {
+            "UPDATE flow_runs SET status = 'pending', error = NULL, available_at = now(), completed_at = NULL, \
+               worker_id = NULL, attempts = 0, started_at = NULL WHERE id = $1"
+        }
+    };
+    sqlx::query(lose).bind(run_id).execute(&test.db).await.unwrap();
     tokio::time::timeout(TIMEOUT, started.notified())
         .await
         .expect("run claimed again");
-    assert_eq!(find_run(&test, run_id).await.attempts, 2);
     assert_eq!(worker.active_count(), 2);
 
     Reclaimed {
@@ -774,67 +787,81 @@ async fn reclaim_a_run_in_flight() -> Reclaimed {
     }
 }
 
+const TAKEOVERS: [(Takeover, i32); 2] = [(Takeover::LeaseExpired, 2), (Takeover::CanceledAndRetried, 1)];
+
 #[tokio::test]
 async fn an_execution_that_lost_its_run_cannot_finish_it() {
-    let Reclaimed {
-        test,
-        worker,
-        run_id,
-        release_first,
-        release_second,
-        ..
-    } = reclaim_a_run_in_flight().await;
+    // The attempts of the second claim: 2, or 1 again once a retry reset them.
+    for (takeover, attempts) in TAKEOVERS {
+        let Reclaimed {
+            test,
+            worker,
+            run_id,
+            release_first,
+            release_second,
+            ..
+        } = reclaim_a_run_in_flight(takeover).await;
 
-    // The old execution returns first, successfully.
-    release_first.cancel();
-    wait_until("the old execution to end", || worker.active_count() == 1).await;
-    let run = find_run(&test, run_id).await;
-    assert_eq!(run.status, "running", "the old execution did not finish the run");
-    assert_eq!(run.attempts, 2);
-    assert_eq!(run.worker_id.as_deref(), Some(worker.worker_id()));
-    assert!(run.completed_at.is_none());
+        // The old execution returns first, successfully.
+        release_first.cancel();
+        wait_until("the old execution to end", || worker.active_count() == 1).await;
+        let run = find_run(&test, run_id).await;
+        assert_eq!(
+            run.status, "running",
+            "{takeover:?}: the old execution finished the run"
+        );
+        assert_eq!(run.attempts, attempts, "{takeover:?}");
+        assert_eq!(run.worker_id.as_deref(), Some(worker.worker_id()), "{takeover:?}");
+        assert!(run.completed_at.is_none(), "{takeover:?}");
 
-    // The current execution is the one that counts.
-    release_second.cancel();
-    let run = wait_for_status(&test, run_id, "completed").await;
-    assert_eq!(run.attempts, 2);
-    assert_eq!(run.error, None);
-    worker.stop().await;
-    test.cleanup().await;
+        // The current execution is the one that counts.
+        release_second.cancel();
+        let run = wait_for_status(&test, run_id, "completed").await;
+        assert_eq!(run.attempts, attempts, "{takeover:?}");
+        assert_eq!(run.error, None, "{takeover:?}");
+        worker.stop().await;
+        test.cleanup().await;
+    }
 }
 
 #[tokio::test]
 async fn an_execution_that_lost_its_run_stops_at_its_next_heartbeat() {
-    let Reclaimed {
-        test,
-        worker,
-        run_id,
-        release_second,
-        stopped,
-        ..
-    } = reclaim_a_run_in_flight().await;
+    for (takeover, attempts) in TAKEOVERS {
+        let Reclaimed {
+            test,
+            worker,
+            run_id,
+            release_second,
+            stopped,
+            ..
+        } = reclaim_a_run_in_flight(takeover).await;
 
-    // Both executions send a heartbeat; only the current one extends the lease.
-    skip_to_next_heartbeat().await;
-    wait_until("the old execution to be told to stop", || {
-        stopped[0].load(Ordering::SeqCst) == 1
-    })
-    .await;
-    wait_until("the old execution to end", || worker.active_count() == 1).await;
-    let run = find_run(&test, run_id).await;
-    assert_eq!((run.status.as_str(), run.attempts), ("running", 2));
-    assert!(run.available_at.is_some_and(|lease| lease > chrono::Utc::now()));
-    assert_eq!(stopped[1].load(Ordering::SeqCst), 0);
+        // Both executions send a heartbeat; only the current one extends the lease.
+        skip_to_next_heartbeat().await;
+        wait_until("the old execution to be told to stop", || {
+            stopped[0].load(Ordering::SeqCst) == 1
+        })
+        .await;
+        wait_until("the old execution to end", || worker.active_count() == 1).await;
+        let run = find_run(&test, run_id).await;
+        assert_eq!(
+            (run.status.as_str(), run.attempts),
+            ("running", attempts),
+            "{takeover:?}"
+        );
+        assert!(run.available_at.is_some_and(|lease| lease > chrono::Utc::now()));
+        assert_eq!(stopped[1].load(Ordering::SeqCst), 0, "{takeover:?}");
 
-    // A cancellation still reaches the current execution.
-    assert!(cancel_run(&run_id.to_string()));
-    wait_until("the current execution to be told to stop", || {
-        stopped[1].load(Ordering::SeqCst) == 1
-    })
-    .await;
-    release_second.cancel();
-    worker.stop().await;
-    test.cleanup().await;
+        // A cancellation still reaches the current execution.
+        assert!(cancel_run(&run_id.to_string()), "{takeover:?}");
+        wait_until("the current execution to be told to stop", || {
+            stopped[1].load(Ordering::SeqCst) == 1
+        })
+        .await;
+        release_second.cancel();
+        worker.stop().await;
+        test.cleanup().await;
+    }
 }
 
 /// A flow that checkpoints a step, then ends; counts its executions.
@@ -1605,7 +1632,7 @@ async fn shutdown_hands_back_the_runs_it_still_holds() {
 }
 
 #[tokio::test]
-async fn shutdown_does_not_take_back_a_run_another_worker_owns() {
+async fn shutdown_does_not_take_back_a_run_claimed_again() {
     let (started, release) = (Arc::new(Notify::new()), CancellationToken::new());
     let flow = gated_flow("slow-flow", started.clone(), release.clone());
     let test = TestApp::new(create_config([flow])).await;
@@ -1621,8 +1648,9 @@ async fn shutdown_does_not_take_back_a_run_another_worker_owns() {
     tokio::time::timeout(TIMEOUT, started.notified())
         .await
         .expect("run claimed");
-    // Another worker took the run over, as after an expired lease.
-    sqlx::query("UPDATE flow_runs SET worker_id = 'other-worker', attempts = 2 WHERE id = $1")
+    // The run was claimed again, as after an expired lease: by another claim, which
+    // here is the same worker's, so only the claim tells it from the execution.
+    sqlx::query("UPDATE flow_runs SET lease_id = gen_random_uuid(), attempts = 2 WHERE id = $1")
         .bind(run_id)
         .execute(&test.db)
         .await
@@ -1631,7 +1659,7 @@ async fn shutdown_does_not_take_back_a_run_another_worker_owns() {
     first.stop().await;
     let run = find_run(&test, run_id).await;
     assert_eq!((run.status.as_str(), run.attempts), ("running", 2));
-    assert_eq!(run.worker_id.as_deref(), Some("other-worker"));
+    assert_eq!(run.worker_id.as_deref(), Some(first.worker_id()));
     release.cancel();
     test.cleanup().await;
 }

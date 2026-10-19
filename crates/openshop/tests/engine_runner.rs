@@ -148,10 +148,10 @@ async fn returns_lease_lost_when_the_worker_no_longer_owns_the_run() {
 
 #[tokio::test]
 async fn an_execution_whose_run_was_claimed_again_by_the_same_worker_cannot_record_its_outcome() {
-    // The same worker takes the run over after its lease expired: only the claim
-    // counter tells the old execution from the new one.
+    // The same worker claims the run again, with the same attempts as the first
+    // claim since a retry reset them: only the lease tells the executions apart.
     let flow = Flow::new(FLOW, |ctx: FlowContext| async move {
-        sqlx::query("UPDATE flow_runs SET attempts = 2 WHERE worker_id = 'worker-a'")
+        sqlx::query("UPDATE flow_runs SET lease_id = gen_random_uuid() WHERE worker_id = 'worker-a'")
             .execute(&ctx.db)
             .await?;
         if ctx.input["then"] == "fail" {
@@ -164,18 +164,23 @@ async fn an_execution_whose_run_was_claimed_again_by_the_same_worker_cannot_reco
 
     for then in ["complete", "fail"] {
         let run_id = dispatch(&test).await;
-        sqlx::query("UPDATE flow_runs SET status = 'running', worker_id = 'worker-a', attempts = 1 WHERE id = $1")
-            .bind(run_id)
-            .execute(&test.db)
-            .await
-            .unwrap();
+        let lease_id = Uuid::new_v4();
+        sqlx::query(
+            "UPDATE flow_runs SET status = 'running', worker_id = 'worker-a', attempts = 1, lease_id = $2 WHERE id = $1",
+        )
+        .bind(run_id)
+        .bind(lease_id)
+        .execute(&test.db)
+        .await
+        .unwrap();
 
         let result = run_flow(
             &test.app,
             options(run_id)
                 .input(json!({ "then": then }))
                 .worker_id("worker-a")
-                .attempt(1),
+                .attempt(1)
+                .lease_id(Some(lease_id)),
         )
         .await
         .unwrap();
@@ -184,7 +189,7 @@ async fn an_execution_whose_run_was_claimed_again_by_the_same_worker_cannot_reco
         let run = find_run(&test, run_id).await;
         assert_eq!(run.status, "running", "{then}");
         assert_eq!(run.worker_id.as_deref(), Some("worker-a"), "{then}");
-        assert_eq!(run.attempts, 2, "{then}");
+        assert_eq!(run.attempts, 1, "{then}");
         assert_eq!(run.error, None, "{then}");
         assert!(run.completed_at.is_none(), "{then}");
     }
@@ -193,11 +198,12 @@ async fn an_execution_whose_run_was_claimed_again_by_the_same_worker_cannot_reco
 
 #[tokio::test]
 async fn an_execution_that_lost_its_run_cannot_store_a_step_result() {
-    // The run is claimed again by the same worker, so the old execution is
-    // still going when it reaches the end of a step, or the start of the next.
+    // The run is claimed again by the same worker, with the same `attempts` as
+    // after a cancel and a retry, so the old execution is still going when it
+    // reaches the end of a step, or the start of the next.
     let flow = Flow::new(FLOW, |ctx: FlowContext| async move {
         let reclaim = || async {
-            sqlx::query("UPDATE flow_runs SET attempts = 2 WHERE worker_id = 'worker-a'")
+            sqlx::query("UPDATE flow_runs SET lease_id = gen_random_uuid() WHERE worker_id = 'worker-a'")
                 .execute(&ctx.db)
                 .await
         };
@@ -232,9 +238,13 @@ async fn an_execution_that_lost_its_run_cannot_store_a_step_result() {
 
     for when in ["during", "failing", "before"] {
         let run_id = dispatch(&test).await;
-        sqlx::query("UPDATE flow_runs SET status = 'running', worker_id = 'worker-a', attempts = 1 WHERE id = $1")
-            .bind(run_id)
-            .execute(&test.db)
+        let lease_id = Uuid::new_v4();
+        sqlx::query(
+            "UPDATE flow_runs SET status = 'running', worker_id = 'worker-a', attempts = 1, lease_id = $2 WHERE id = $1",
+        )
+        .bind(run_id)
+        .bind(lease_id)
+        .execute(&test.db)
             .await
             .unwrap();
 
@@ -243,7 +253,8 @@ async fn an_execution_that_lost_its_run_cannot_store_a_step_result() {
             options(run_id)
                 .input(json!({ "when": when }))
                 .worker_id("worker-a")
-                .attempt(1),
+                .attempt(1)
+                .lease_id(Some(lease_id)),
         )
         .await
         .unwrap();
@@ -257,7 +268,7 @@ async fn an_execution_that_lost_its_run_cannot_store_a_step_result() {
         );
         assert_eq!(steps.len(), usize::from(when != "before"), "{when}");
         let run = find_run(&test, run_id).await;
-        assert_eq!((run.status.as_str(), run.attempts), ("running", 2), "{when}");
+        assert_eq!((run.status.as_str(), run.attempts), ("running", 1), "{when}");
         assert_eq!(run.error, None, "{when}");
     }
     test.cleanup().await;

@@ -215,3 +215,133 @@ pub async fn app_with_a_clock_ahead(test: &TestApp, config: OpenShopConfig) -> (
     let app = OpenShop::with_transport(config, pool.clone(), test_env(), test.transport.clone()).unwrap();
     (app, pool)
 }
+
+/// A TCP proxy in front of the test database. Armed with a statement, it
+/// cuts the first connection that sends it once the server has answered and
+/// committed it, without passing the answer on: the client sees a lost
+/// connection for a statement that went through.
+pub struct DropProxy {
+    port: u16,
+    armed: Arc<std::sync::Mutex<Option<String>>>,
+    cuts: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl DropProxy {
+    pub async fn start(db: &PgPool) -> Self {
+        let options = db.connect_options();
+        let upstream = (options.get_host().to_string(), options.get_port());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("proxy port");
+        let port = listener.local_addr().unwrap().port();
+        let armed = Arc::new(std::sync::Mutex::new(None));
+        let cuts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        tokio::spawn({
+            let (armed, cuts) = (armed.clone(), cuts.clone());
+            async move {
+                while let Ok((client, _)) = listener.accept().await {
+                    let Ok(server) = tokio::net::TcpStream::connect(upstream.clone()).await else {
+                        continue;
+                    };
+                    tokio::spawn(pipe(client, server, armed.clone(), cuts.clone()));
+                }
+            }
+        });
+        Self { port, armed, cuts }
+    }
+
+    /// Cuts the connection that sends a statement containing `statement`, after
+    /// the server committed it.
+    pub fn drop_answer_of(&self, statement: &str) {
+        *self.armed.lock().unwrap() = Some(statement.to_string());
+    }
+
+    /// How many connections were cut.
+    pub fn cuts(&self) -> usize {
+        self.cuts.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// A pool of the test database that goes through the proxy.
+    pub async fn pool(&self, db: &PgPool) -> PgPool {
+        let options = (*db.connect_options())
+            .clone()
+            .host("127.0.0.1")
+            .port(self.port)
+            .ssl_mode(sqlx::postgres::PgSslMode::Disable);
+        sqlx::postgres::PgPoolOptions::new()
+            .max_connections(2)
+            .connect_with(options)
+            .await
+            .expect("pool through the proxy")
+    }
+}
+
+/// Where a connection stands: a statement is prepared in a round trip of its
+/// own, then executed in the next one, which is the one that gets cut.
+const IDLE: u8 = 0;
+const PREPARING: u8 = 1;
+const PREPARED: u8 = 2;
+const EXECUTING: u8 = 3;
+
+async fn pipe(
+    client: tokio::net::TcpStream,
+    server: tokio::net::TcpStream,
+    armed: Arc<std::sync::Mutex<Option<String>>>,
+    cuts: Arc<std::sync::atomic::AtomicUsize>,
+) {
+    use std::sync::atomic::{AtomicU8, Ordering};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let phase = Arc::new(AtomicU8::new(IDLE));
+    let (mut client_read, mut client_write) = client.into_split();
+    let (mut server_read, mut server_write) = server.into_split();
+    let upstream = {
+        let phase = phase.clone();
+        async move {
+            let mut buffer = vec![0u8; 16 * 1024];
+            while let Ok(read) = client_read.read(&mut buffer).await {
+                if read == 0 {
+                    break;
+                }
+                let text = String::from_utf8_lossy(&buffer[..read]).to_string();
+                {
+                    let mut armed = armed.lock().unwrap();
+                    if phase.load(Ordering::SeqCst) == PREPARED {
+                        phase.store(EXECUTING, Ordering::SeqCst);
+                    } else if armed.as_deref().is_some_and(|statement| text.contains(statement)) {
+                        *armed = None;
+                        phase.store(PREPARING, Ordering::SeqCst);
+                    }
+                }
+                if server_write.write_all(&buffer[..read]).await.is_err() {
+                    break;
+                }
+            }
+        }
+    };
+    let downstream = async move {
+        // ReadyForQuery, idle: the server finished the round trip.
+        let ready = b"Z\0\0\0\x05I";
+        let mut buffer = vec![0u8; 16 * 1024];
+        while let Ok(read) = server_read.read(&mut buffer).await {
+            if read == 0 {
+                break;
+            }
+            if buffer[..read].windows(ready.len()).any(|window| window == ready) {
+                match phase.load(Ordering::SeqCst) {
+                    PREPARING => phase.store(PREPARED, Ordering::SeqCst),
+                    EXECUTING => {
+                        cuts.fetch_add(1, Ordering::SeqCst);
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+            if client_write.write_all(&buffer[..read]).await.is_err() {
+                break;
+            }
+        }
+    };
+    tokio::select! {
+        _ = upstream => {}
+        _ = downstream => {}
+    }
+}

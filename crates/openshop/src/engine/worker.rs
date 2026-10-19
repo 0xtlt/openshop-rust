@@ -73,18 +73,18 @@ const EXPIRE_SQL: &str = "\
     RETURNING id, flow_name, app_handle, shop, error";
 
 /// Extends the lease of a run, if its execution still owns it: `$1` is the
-/// lease in milliseconds, `$2` the run, `$3` the worker, `$4` the attempt.
+/// lease in milliseconds, `$2` the run, `$3` the worker, `$4` the claim.
 const HEARTBEAT_SQL: &str = "\
     UPDATE flow_runs SET available_at = now() + $1::bigint * interval '1 millisecond' \
-    WHERE id = $2 AND worker_id = $3 AND status = 'running' AND attempts = $4";
+    WHERE id = $2 AND worker_id = $3 AND status = 'running' AND lease_id IS NOT DISTINCT FROM $4";
 
 /// Hands a run back to the queue, if its execution still owns it: `$1` is the
-/// run, `$2` the worker, `$3` the attempt. The run is claimable right away.
-/// Its `attempts` is left as it is: the interrupted attempt is the key of its
-/// step rows, so the next claim must take a new one.
+/// run, `$2` the worker, `$3` the claim. The run is claimable right away. Its
+/// `attempts` is left as it is: the interrupted attempt is the key of its step
+/// rows, so the next claim must take a new one.
 const RELEASE_SQL: &str = "\
-    UPDATE flow_runs SET status = 'pending', worker_id = NULL, available_at = now() \
-    WHERE id = $1 AND worker_id = $2 AND status = 'running' AND attempts = $3";
+    UPDATE flow_runs SET status = 'pending', worker_id = NULL, lease_id = NULL, available_at = now() \
+    WHERE id = $1 AND worker_id = $2 AND status = 'running' AND lease_id IS NOT DISTINCT FROM $3";
 
 /// A run failed without an attempt.
 #[derive(Debug, Clone, sqlx::FromRow)]
@@ -139,18 +139,19 @@ const CLAIM_SQL: &str = "\
       UPDATE flow_runs SET \
         status = 'failed', \
         error = 'Run abandoned: its worker stopped after ' || attempts || ' attempts without recording an outcome', \
-        worker_id = NULL, available_at = NULL, completed_at = now() \
+        worker_id = NULL, lease_id = NULL, available_at = NULL, completed_at = now() \
       WHERE id = ANY(ARRAY(SELECT id FROM candidate WHERE exhausted)) \
-      RETURNING id, flow_name, app_handle, shop, input, attempts, error \
+      RETURNING id, flow_name, app_handle, shop, input, attempts, error, NULL::uuid AS lease_id \
     ), claimed AS ( \
       UPDATE flow_runs SET \
         status = 'running', \
         attempts = CASE WHEN status = 'sleeping' THEN GREATEST(attempts, 1) ELSE attempts + 1 END, \
         worker_id = $1, \
+        lease_id = gen_random_uuid(), \
         available_at = now() + $2::bigint * interval '1 millisecond', \
         started_at = COALESCE(started_at, now()) \
       WHERE id = ANY(ARRAY(SELECT id FROM candidate WHERE NOT exhausted)) \
-      RETURNING id, flow_name, app_handle, shop, input, attempts, NULL::text AS error \
+      RETURNING id, flow_name, app_handle, shop, input, attempts, NULL::text AS error, lease_id \
     ) \
     SELECT run.*, candidate.exhausted FROM ( \
       SELECT * FROM claimed UNION ALL SELECT * FROM failed \
@@ -168,13 +169,15 @@ struct ClaimedRun {
     input: Option<Value>,
     attempts: i32,
     error: Option<String>,
+    /// Names this claim: the claim sets it, and every write of the execution checks it.
+    lease_id: Option<Uuid>,
     exhausted: bool,
 }
 
-/// A run this worker executes: the attempt it claimed it at, and the token
-/// that stops the execution without recording an outcome.
+/// A run this worker executes: the claim it holds, and the token that stops
+/// the execution without recording an outcome.
 struct Held {
-    attempt: i32,
+    lease_id: Option<Uuid>,
     interrupt: CancellationToken,
 }
 
@@ -364,11 +367,11 @@ impl Inner {
     fn process_run(self: Arc<Self>, claimed: ClaimedRun) {
         self.active.fetch_add(1, Ordering::SeqCst);
         let interrupt = CancellationToken::new();
-        let (run_id, attempt) = (claimed.id, claimed.attempts);
+        let (run_id, lease_id) = (claimed.id, claimed.lease_id);
         self.held().insert(
             run_id,
             Held {
-                attempt,
+                lease_id,
                 interrupt: interrupt.clone(),
             },
         );
@@ -376,7 +379,7 @@ impl Inner {
             self.execute(claimed, interrupt).await;
             // Not if a newer claim of the same run, by this worker, replaced it.
             let mut held = self.held();
-            if held.get(&run_id).is_some_and(|held| held.attempt == attempt) {
+            if held.get(&run_id).is_some_and(|held| held.lease_id == lease_id) {
                 held.remove(&run_id);
             }
             drop(held);
@@ -388,29 +391,31 @@ impl Inner {
     /// Hands back the runs this worker still executes, once it stopped
     /// claiming and waited for them. Each goes back to `pending`, claimable
     /// at once, and its execution is interrupted: the flow is cancelled, but
-    /// no outcome is recorded for it, because the run is not owned any more. The release is fenced like every write of an execution, by
-    /// worker and attempt, so it cannot take a run another worker has claimed
-    /// after its lease expired.
+    /// no outcome is recorded for it, because the run is not owned any more.
+    /// The release is fenced like every write of an execution, by worker and
+    /// claim (`lease_id`, which it clears), so it cannot take a run another
+    /// worker has claimed after its lease expired.
     ///
-    /// The interrupted attempt stays counted in `attempts`: that number keys
-    /// the step rows of the attempt, which the next claim must not reuse.
+    /// The interrupted attempt stays counted in `attempts`: the claim is told
+    /// apart by `lease_id`, but the step rows are still keyed by attempt and
+    /// the interrupted one may have left a row, which the next claim must not reuse.
     /// A release is never an abandoned run, though: a run `pending` is claimed
     /// whatever its `attempts`, even with `max_attempts(1)`.
     async fn release_held(&self) {
-        let held: Vec<(Uuid, i32, CancellationToken)> = self
+        let held: Vec<(Uuid, Option<Uuid>, CancellationToken)> = self
             .held()
             .iter()
-            .map(|(run, held)| (*run, held.attempt, held.interrupt.clone()))
+            .map(|(run, held)| (*run, held.lease_id, held.interrupt.clone()))
             .collect();
         if held.is_empty() {
             return;
         }
-        for (run_id, attempt, interrupt) in &held {
+        for (run_id, lease_id, interrupt) in &held {
             let released = retry(format!("releasing run {run_id}"), || async {
                 let result = sqlx::query(RELEASE_SQL)
                     .bind(run_id)
                     .bind(&self.worker_id)
-                    .bind(attempt)
+                    .bind(lease_id)
                     .execute(self.app.db())
                     .await?;
                 Ok(result.rows_affected() > 0)
@@ -433,19 +438,20 @@ impl Inner {
         }
     }
 
-    /// Fails a run this worker still owns, at the attempt it claimed. A
+    /// Fails a run this worker still owns, under the claim it holds. A
     /// transient error is retried. If the write fails for good, the lease
     /// expires and the run is claimed again.
-    async fn fail_run(&self, run_id: Uuid, attempt: i32, error: String) {
+    async fn fail_run(&self, run_id: Uuid, lease_id: Option<Uuid>, error: String) {
         let failed = retry(format!("failing run {run_id}"), || async {
             sqlx::query(
-                "UPDATE flow_runs SET status = 'failed', error = $2, worker_id = NULL, completed_at = now() \
-                 WHERE id = $1 AND worker_id = $3 AND status = 'running' AND attempts = $4",
+                "UPDATE flow_runs SET status = 'failed', error = $2, worker_id = NULL, lease_id = NULL, \
+                   completed_at = now() \
+                 WHERE id = $1 AND worker_id = $3 AND status = 'running' AND lease_id IS NOT DISTINCT FROM $4",
             )
             .bind(run_id)
             .bind(&error)
             .bind(&self.worker_id)
-            .bind(attempt)
+            .bind(lease_id)
             .execute(self.app.db())
             .await?;
             Ok(())
@@ -467,7 +473,7 @@ impl Inner {
                 app_handle: claimed.app_handle,
                 shop: claimed.shop,
             };
-            self.fail_run(run.id, claimed.attempts, run.error.clone()).await;
+            self.fail_run(run.id, claimed.lease_id, run.error.clone()).await;
             report_failed_run(&run);
             return;
         }
@@ -479,10 +485,10 @@ impl Inner {
 
         let heartbeat: HeartbeatFn = {
             let inner = self.clone();
-            let (run_id, attempt) = (claimed.id, claimed.attempts);
+            let (run_id, lease_id) = (claimed.id, claimed.lease_id);
             Arc::new(move || {
                 let inner = inner.clone();
-                Box::pin(async move { inner.extend_lease(run_id, attempt).await })
+                Box::pin(async move { inner.extend_lease(run_id, lease_id).await })
             })
         };
 
@@ -490,7 +496,8 @@ impl Inner {
             .input(input)
             .shopify_app(claimed.app_handle)
             .worker_id(self.worker_id.clone())
-            .attempt(claimed.attempts);
+            .attempt(claimed.attempts)
+            .lease_id(claimed.lease_id);
         options.on_heartbeat = Some(heartbeat);
         options.lease_duration = Some(Duration::from_millis(self.config.lease_duration_ms));
         options.interrupt = Some(interrupt);
@@ -518,7 +525,7 @@ impl Inner {
             Ok(Err(error)) => error_message(&error),
             Err(panic) => format!("panicked: {}", panic_message(panic)),
         };
-        self.fail_run(claimed.id, claimed.attempts, format!("Worker error: {failure}")).await;
+        self.fail_run(claimed.id, claimed.lease_id, format!("Worker error: {failure}")).await;
     }
 
     /// Extends the lease of a run, within the time it has to: a heartbeat that
@@ -529,7 +536,7 @@ impl Inner {
     /// The heartbeat shares the pool of the application. The time limit covers
     /// the wait for a connection when the pool is saturated by flows, and the
     /// server enforces it on the statement through `statement_timeout`.
-    async fn extend_lease(&self, run_id: Uuid, attempt: i32) -> Result<bool> {
+    async fn extend_lease(&self, run_id: Uuid, lease_id: Option<Uuid>) -> Result<bool> {
         let limit = self.heartbeat_timeout();
         let extend = async {
             let mut tx = self.app.db().begin().await?;
@@ -541,7 +548,7 @@ impl Inner {
                 .bind(self.lease_ms())
                 .bind(run_id)
                 .bind(&self.worker_id)
-                .bind(attempt)
+                .bind(lease_id)
                 .execute(&mut *tx)
                 .await?;
             tx.commit().await?;

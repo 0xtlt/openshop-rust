@@ -395,12 +395,17 @@
   sleep is retried as far as the policy says. Breaking: `attempts` of a run
   that slept is lower than before, and the steps run after a sleep belong to
   the attempt that slept. No schema change.
-- Only the last claim of a run can record its outcome. The write that ends an
-  attempt, the heartbeat and the failure of a run carry the worker and the
-  attempt that claimed it, so a slow execution whose lease expired and whose
-  run was claimed again, by another worker or by the same one, can no longer
-  finish, sleep, fail or cancel it, and stops at its next heartbeat. It no
-  longer takes the cancellation token of the new execution with it either.
+- Only the last claim of a run can record its outcome. Each claim sets a new
+  `lease_id` on the run, and the write that ends an attempt, the heartbeat and
+  the failure of a run only apply while the worker holds it. A slow execution
+  whose lease expired, or whose run was canceled and retried, and which was
+  claimed again by another worker or by the same one, can no longer finish,
+  sleep, fail or cancel it, and stops at its next heartbeat. It no longer takes
+  the cancellation token of the new execution with it either. The framework
+  schema has a migration for it, `openshop_run_lease`, one nullable column on
+  `flow_runs` that the TypeScript runtime ignores: run `migrate generate` then
+  `migrate` before starting the new worker (`migrate check` fails until it is
+  there; `dev` adds the column on start).
 - A transient database error no longer fails a run. The write that records the
   outcome of a run (completed, sleeping, canceled, retry or failure), the one
   that reads its retry policy, the failure of a run, and the writes of a step
@@ -411,13 +416,18 @@
   the worker leaves the run `running` and stops its heartbeat instead of
   marking it `failed` through the same database: the lease expires and the
   run is claimed again, its completed steps replayed from their checkpoints.
-- The writes of a step carry the worker and the attempt of the claim as well:
+- The writes of a step carry the worker and the lease of the claim as well:
   an execution whose run was taken over, by another worker or by the same one,
   can no longer store the result of a step, start one or suspend at a sleep.
   The step fails with the new `engine::LeaseLostError`, stops the flow, and
   the run is left to the new execution. Breaking: `StepExecutor::new` takes
   the owner (`engine::RunOwner`, `None` outside a worker) as a last argument,
   and a stale step is no longer recorded as `canceled` or `failed`.
+  The write locks the row of the run until it ends, so a claim cannot slip in
+  between the check and the write of a step that waits for its own row. A
+  step or a sleep that starts is inserted under an ID chosen before the first
+  try: when a try commits and its answer is lost, the next one recognizes its
+  row instead of failing on the unique key and failing the run.
 - A lease, a deadline, a retry and the wake-up of a sleeping run are dated by
   the clock of the database (`now()` in SQL), no longer by the one of the
   process that writes them. A replica whose clock was ahead made leases that
@@ -437,9 +447,9 @@
   one lease is over: they go back to `pending`, claimable at once, instead of
   staying `running` until the lease expires, and their executions are
   cancelled without recording an outcome. The release is fenced by worker and
-  attempt like every write of an execution. The interrupted attempt stays
-  counted in `attempts`, which keys its step rows, so the run has one retry
-  fewer; it is not failed as abandoned for that, and it runs again even with
+  claim (`lease_id`, which it clears) like every write of an execution. The
+  interrupted attempt stays counted in `attempts`, which still keys its step
+  rows, so the run has one retry fewer; it is not failed as abandoned for that, and it runs again even with
   `max_attempts(1)`.
 - Retries wait between half of the backoff and all of it, drawn at random,
   instead of exactly the backoff, so that runs that failed together, because
