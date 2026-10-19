@@ -17,7 +17,7 @@ You need Rust 1.88+, PostgreSQL 17, the Shopify CLI, and access to a
 development store.
 
 ```bash
-cargo install --git https://github.com/0xtlt/openshop-rust openshop-cli
+cargo install --locked --git https://github.com/0xtlt/openshop-rust openshop-cli
 openshop init my-app       # asks for a template: minimal, custom or public
 cd my-app
 docker compose up -d

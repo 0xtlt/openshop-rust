@@ -2,6 +2,34 @@
 
 ## Unreleased
 
+- The CLI fails on a command it does not know: `openshop frobnicate` prints
+  `[openshop] Unknown command: frobnicate` and the usage on stderr and exits
+  with status 2, where it used to print the usage and exit 0, so a script that
+  mistyped a command went on. No command, `help`, `--help` and `-h` still print
+  the usage and exit 0.
+- `openshop init` leaves no partial project behind: when it fails after it
+  started writing, it removes the directories it created, or the contents of
+  the empty directory it was given. It rewrites the manifest of a template
+  with `toml_edit` instead of line by line, so `workspace = true` is replaced
+  whatever the layout (tables on several lines, dotted keys,
+  `[dependencies.<name>]`), with comments kept. The generated projects are
+  unchanged.
+- `openshop codegen` gives up when the schema endpoint does not connect in 15
+  seconds or the download takes more than 120, with a message that names the
+  endpoint, instead of waiting for ever.
+- The install command is `cargo install --locked --git … openshop-cli` in the
+  README and the docs, so that the CLI is built with the dependency versions
+  the repository tested. CONTRIBUTING lists what keeps `openshop-cli` from
+  being published on crates.io (nothing is published).
+- The admin UI shows and logs its failures instead of swallowing them. When the
+  app cannot start, the page says why (a banner) instead of "Open this app from
+  Shopify admin", which is kept for a missing session. A failed refresh of the
+  custom pages keeps the ones shown, where it used to empty them. A request
+  that gets no answer is logged to the browser console, with a toast for a
+  write; a flow or function list that cannot be loaded, a log export that
+  fails (it saved the error body as a file), a cron toggle the server refuses
+  and a run that cannot be loaded are shown. The embedded bundle
+  (`crates/openshop/ui-dist`) is rebuilt.
 - `openshop init` makes a project that builds: its `openshop` dependency was
   pinned to the tag `v<version>` of the CLI, which the repository does not
   have, so the project of `cargo install --git … openshop-cli` followed by

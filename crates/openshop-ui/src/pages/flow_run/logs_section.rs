@@ -2,6 +2,7 @@ use super::log_query::{LOG_LEVELS, LevelCounts, export_url, payload_text};
 use crate::{
     dom::{self, localized},
     fetch::api_download,
+    report::report_error,
     types::LogEntry,
 };
 use leptos::{prelude::*, task::spawn_local};
@@ -29,8 +30,15 @@ fn log_level_color(level: &str) -> &'static str {
 fn download_logs(run_id: Option<String>, query: String, levels: Vec<String>, format: &'static str) {
     let Some(run_id) = run_id else { return };
     spawn_local(async move {
-        if let Ok((bytes, content_type)) = api_download(&export_url(&run_id, &query, &levels, format)).await {
-            dom::download_bytes(&bytes, &content_type, &format!("run-{run_id}-logs.{format}"));
+        match api_download(&export_url(&run_id, &query, &levels, format)).await {
+            Ok((bytes, content_type)) => {
+                dom::download_bytes(&bytes, &content_type, &format!("run-{run_id}-logs.{format}"));
+            }
+            Err(error) => report_error(
+                "Could not export the logs",
+                &error,
+                &format!("Could not export the logs: {error}"),
+            ),
         }
     });
 }

@@ -8,11 +8,12 @@ use crate::{
     components::table_header::TableHeader,
     dom::{self, every, locale_date_time},
     events::event_value,
-    fetch::{api_fetch, api_request},
+    fetch::{api_json, api_request},
     format::{elapsed_ms, summary_duration},
     http::Method,
     query::QueryParams,
     reactive::set_if_changed,
+    report::log_error,
     router::route,
     shopify,
     types::{LogEntry, LogsResponse, RunDetail, status_tone},
@@ -26,12 +27,18 @@ use output::{OutputModal, build_step_rows, step_row};
 use run_action_modals::{ActionFuture, RunActionModals};
 use std::collections::HashSet;
 
-async fn load_run(id: &str, run: RwSignal<Option<RunDetail>>) {
-    if let Ok(response) = api_fetch(&format!("/api/runs/{id}")).await
-        && response.ok
-        && let Ok(detail) = response.json::<RunDetail>()
-    {
-        set_if_changed(run, Some(detail));
+/// Loads the run. It is polled: a failure is logged and kept in `load_error` for the page to
+/// show, and the next poll tries again.
+async fn load_run(id: &str, run: RwSignal<Option<RunDetail>>, load_error: RwSignal<Option<String>>) {
+    match api_json::<RunDetail>(&format!("/api/runs/{id}")).await {
+        Ok(detail) => {
+            load_error.try_set(None);
+            set_if_changed(run, Some(detail));
+        }
+        Err(error) => {
+            log_error("Could not load the run", &error);
+            load_error.try_set(Some(error.to_string()));
+        }
     }
 }
 
@@ -46,6 +53,7 @@ pub fn FlowRun() -> impl IntoView {
     // Filters start from the URL search params.
     let initial_params = QueryParams::parse(&dom::location_search());
     let run = RwSignal::new(None::<RunDetail>);
+    let load_error = RwSignal::new(None::<String>);
     let filtered_logs = RwSignal::new(Vec::<LogEntry>::new());
     let total_logs = RwSignal::new(0_u64);
     let query = RwSignal::new(initial_params.get("q").unwrap_or_default().to_string());
@@ -68,7 +76,7 @@ pub fn FlowRun() -> impl IntoView {
         let Some(id) = id.get() else { return };
         let load = move || {
             let id = id.clone();
-            spawn_local(async move { load_run(&id, run).await });
+            spawn_local(async move { load_run(&id, run, load_error).await });
         };
         load();
         every(3_000, load);
@@ -79,28 +87,27 @@ pub fn FlowRun() -> impl IntoView {
         let Some(id) = id.get_untracked() else { return };
         let filtered_url = logs_url(&id, &query.get_untracked(), &levels.get_untracked());
         spawn_local(async move {
-            if let Ok(response) = api_fetch(&filtered_url).await
-                && response.ok
-                && let Ok(data) = response.json::<LogsResponse>()
-            {
-                let initial = initial_load.try_get_value().unwrap_or(false);
-                let fresh = known_log_ids
-                    .try_update_value(|known| note_logs(known, &data.logs, initial))
-                    .unwrap_or_default();
-                initial_load.try_set_value(false);
-                if !fresh.is_empty() {
-                    new_log_ids.set(fresh);
-                    Timeout::new(5_000, move || new_log_ids.set(HashSet::new())).forget();
+            // Polled like the run: logged, and tried again by the next poll.
+            match api_json::<LogsResponse>(&filtered_url).await {
+                Err(error) => log_error("Could not load the logs", &error),
+                Ok(data) => {
+                    let initial = initial_load.try_get_value().unwrap_or(false);
+                    let fresh = known_log_ids
+                        .try_update_value(|known| note_logs(known, &data.logs, initial))
+                        .unwrap_or_default();
+                    initial_load.try_set_value(false);
+                    if !fresh.is_empty() {
+                        new_log_ids.set(fresh);
+                        Timeout::new(5_000, move || new_log_ids.set(HashSet::new())).forget();
+                    }
+                    set_if_changed(filtered_logs, data.logs);
+                    set_if_changed(total_logs, data.total);
                 }
-                set_if_changed(filtered_logs, data.logs);
-                set_if_changed(total_logs, data.total);
             }
             // All logs once more for the level counters, in the same cycle.
-            if let Ok(response) = api_fetch(&all_logs_url(&id)).await
-                && response.ok
-                && let Ok(data) = response.json::<LogsResponse>()
-            {
-                set_if_changed(level_counts, count_levels(&data.logs));
+            match api_json::<LogsResponse>(&all_logs_url(&id)).await {
+                Ok(data) => set_if_changed(level_counts, count_levels(&data.logs)),
+                Err(error) => log_error("Could not load the log counts", &error),
             }
         });
     };
@@ -136,7 +143,7 @@ pub fn FlowRun() -> impl IntoView {
             let url = format!("/api/runs/{id}/retry?mode={mode}");
             if let Ok(response) = api_request(Method::Post, &url, None).await {
                 if response.ok {
-                    load_run(&id, run).await;
+                    load_run(&id, run, load_error).await;
                     shopify::toast(if mode == "reset" {
                         "Run restarted"
                     } else {
@@ -219,6 +226,11 @@ pub fn FlowRun() -> impl IntoView {
                         })
                 }}
 
+                {move || {
+                    load_error
+                        .get()
+                        .map(|error| view! { <s-banner tone="critical" heading="Could not load the run">{error}</s-banner> })
+                }}
                 {move || {
                     run.with(|run| run.as_ref().and_then(|run| run.error.clone()))
                         .filter(|error| !error.is_empty())

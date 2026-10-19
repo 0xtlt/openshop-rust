@@ -15,6 +15,7 @@ mod pages;
 mod provider_status;
 mod query;
 mod reactive;
+mod report;
 mod router;
 mod types;
 mod url;
