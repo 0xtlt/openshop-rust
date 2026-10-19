@@ -1,7 +1,7 @@
 //! Small HTTP helpers shared by the route modules.
 
 use axum::Json;
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use indexmap::IndexMap;
 use serde_json::{Value, json};
@@ -43,7 +43,54 @@ pub(crate) fn json_object_body(body: &[u8]) -> JsonMap {
     }
 }
 
-/// An unexpected failure: logged, and reported as a bare 500.
+/// A short id that ties a response to the log line of its error.
+pub(crate) fn error_id() -> String {
+    uuid::Uuid::new_v4().simple().to_string()[..12].to_string()
+}
+
+/// Whether the error comes from the server's own machinery (database,
+/// network, files, URLs) rather than from what the caller asked for. Its text
+/// can hold a query, an address or a key, so it never goes to a client.
+pub(crate) fn is_internal_error(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause.is::<sqlx::Error>()
+            || cause.is::<reqwest::Error>()
+            || cause.is::<std::io::Error>()
+            || cause.is::<url::ParseError>()
+    })
+}
+
+/// What a client may read about a failure.
+pub(crate) struct ClientError {
+    pub message: String,
+    /// Set for an internal error: the id of the log line that has the cause.
+    pub error_id: Option<String>,
+}
+
+/// The message of an error the caller can act on, as it is. An internal error
+/// is logged and reported with a new id, and the client gets a generic message
+/// and that id.
+pub(crate) fn client_error(what: &str, error: &anyhow::Error) -> ClientError {
+    if !is_internal_error(error) {
+        return ClientError {
+            message: error_message(error),
+            error_id: None,
+        };
+    }
+    let id = error_id();
+    logger::error_with(
+        format!("[openshop] {what}"),
+        json!({ "errorId": id, "error": error_message(error) }),
+    );
+    report::error(error);
+    ClientError {
+        message: format!("Internal error (error id {id})"),
+        error_id: Some(id),
+    }
+}
+
+/// An unexpected failure: logged with an id, and reported as a bare 500 that
+/// carries the id in `x-error-id`.
 pub(crate) struct ApiError(anyhow::Error);
 
 impl<E: Into<anyhow::Error>> From<E> for ApiError {
@@ -54,12 +101,17 @@ impl<E: Into<anyhow::Error>> From<E> for ApiError {
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
+        let id = error_id();
         logger::error_with(
             "[openshop] Unhandled request error",
-            json!({ "error": error_message(&self.0) }),
+            json!({ "errorId": id, "error": error_message(&self.0) }),
         );
         report::error(&self.0);
-        (StatusCode::INTERNAL_SERVER_ERROR, "Internal Server Error").into_response()
+        let mut response = (StatusCode::INTERNAL_SERVER_ERROR, "Internal Server Error").into_response();
+        if let Ok(value) = HeaderValue::from_str(&id) {
+            response.headers_mut().insert("x-error-id", value);
+        }
+        response
     }
 }
 

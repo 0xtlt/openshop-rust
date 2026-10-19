@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+- The Admin API answers what the caller got wrong with a `4xx`, and no longer
+  shows what the server got wrong. Behaviour change:
+  `POST /api/flows/:name/run` answers `404` for an unknown flow, and `422`
+  with the reason when the input fails the input schema of the flow, instead
+  of `500` and of `202` for a run that was bound to fail; the MCP tool
+  `openshop.flows.run` checks the input too. A log query with an invalid or
+  rejected regex, or past its limits (2,000 characters, 20 filters), answers
+  `400` instead of an empty list, in the MCP tool as in the API; the regex is
+  compiled once per query, not once per line, and `C:`, `A:` and `B:` counts
+  are capped at 100. An unexpected failure keeps its `500` and gets an
+  `x-error-id` header; an error of the database, the network or a file in an
+  MCP tool or in a provider check is logged under an id, and the client reads
+  `Internal error (error id <id>)` and that id, not the text, which can hold a
+  query or a URL with a key. Errors a tool raises itself are shown as before.
+  A provider check that takes more than 10 seconds answers `504`.
 - `openshop init` makes a project from one of three templates: `minimal`, one
   provider and one flow, as before; `custom`, a custom app with every building
   block and a page of its own next to the built-in admin; `public`, a public

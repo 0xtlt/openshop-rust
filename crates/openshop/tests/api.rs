@@ -638,14 +638,60 @@ async fn post_flow_run_triggers_a_flow(ctx: &TestContext) {
 #[openshop::test(api_context())]
 async fn post_flow_run_rejects_unknown_flow(ctx: &TestContext) {
     let (status, body) = send(ctx.post("/api/flows/nope/run").json(&json!({ "input": {} }))).await;
-    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
-    assert_eq!(body, "Internal Server Error");
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body, error("Flow \"nope\" not found"));
 
     let (runs,): (i64,) = sqlx::query_as("SELECT count(*) FROM flow_runs")
         .fetch_one(&ctx.db)
         .await
         .unwrap();
     assert_eq!(runs, 0);
+}
+
+/// A flow whose input is `{ "orderId": <number> }`.
+fn order_flow() -> Flow {
+    noop_flow("order-flow")
+        .concurrency(Concurrency::Allow)
+        .input_schema(openshop::builder::InputSchema::custom(
+            json!({ "type": "object", "required": ["orderId"] }),
+            |value| match value.get("orderId") {
+                Some(Value::Number(_)) => Ok(value),
+                _ => Err("orderId must be a number".to_string()),
+            },
+        ))
+}
+
+#[openshop::test(context(create_config([order_flow()])))]
+async fn post_flow_run_rejects_input_the_flow_refuses(ctx: &TestContext) {
+    for input in [json!({}), json!({ "orderId": "12" }), Value::Null] {
+        let (status, body) = send(ctx.post("/api/flows/order-flow/run").json(&json!({ "input": input }))).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{input}");
+        assert_eq!(
+            body,
+            error("Invalid input for flow \"order-flow\": orderId must be a number")
+        );
+    }
+    // No input at all is `{}`, which the flow refuses too.
+    let (status, _) = send(ctx.post("/api/flows/order-flow/run")).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+
+    let (runs,): (i64,) = sqlx::query_as("SELECT count(*) FROM flow_runs")
+        .fetch_one(&ctx.db)
+        .await
+        .unwrap();
+    assert_eq!(runs, 0);
+
+    let (status, data) = send(
+        ctx.post("/api/flows/order-flow/run")
+            .json(&json!({ "input": { "orderId": 12 } })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    let run_id = Uuid::parse_str(data["runId"].as_str().expect("runId")).unwrap();
+    assert_eq!(
+        find_run(&ctx.db, run_id).await.expect("run").input,
+        Some(json!({ "orderId": 12 }))
+    );
 }
 
 #[openshop::test(context(api_config_with(noop_flow("test-flow").concurrency(Concurrency::Allow))))]
@@ -1258,7 +1304,7 @@ async fn get_run_logs_supports_the_query_syntax(ctx: &TestContext) {
         ]
     );
 
-    let cases: [(&str, &[&str]); 10] = [
+    let cases: [(&str, &[&str]); 8] = [
         (
             "ORDER",
             &[
@@ -1281,8 +1327,6 @@ async fn get_run_logs_supports_the_query_syntax(ctx: &TestContext) {
         ("orderid=1002", &["Order 1002 failed"]),
         ("reason=timeout", &["Order 1002 failed"]),
         (r#"!= "order""#, &["Done", "Rate limit hit"]),
-        (r#"|~ "(a+)+""#, &[]),
-        (r#"|~ "(""#, &[]),
     ];
     for (query, expected) in cases {
         let logs = query_logs(ctx, run_id, &[("q", query)]).await;
@@ -1298,6 +1342,62 @@ async fn get_run_logs_supports_the_query_syntax(ctx: &TestContext) {
 
     let none = query_logs(ctx, run_id, &[("levels", "debug")]).await;
     assert_eq!(none, json!([]));
+}
+
+#[openshop::test(api_context())]
+async fn get_run_logs_refuses_a_query_it_cannot_run(ctx: &TestContext) {
+    let (run_id, _) = seed_order_logs(ctx).await;
+    let too_long = format!("|= \"{}\"", "a".repeat(2_000));
+    let too_many = r#"|= "a" "#.repeat(21);
+    let cases = [
+        (r#"|~ "(""#.to_string(), "Invalid regex \"(\": "),
+        (r#"|~ "[invalid""#.to_string(), "Invalid regex \"[invalid\": "),
+        (
+            r#"|~ "(a+)+""#.to_string(),
+            "Invalid regex \"(a+)+\": it repeats a repeated group",
+        ),
+        (r#"|~ "(o)\1""#.to_string(), "it uses a backreference"),
+        (
+            format!("|~ \"{}\"", "o".repeat(121)),
+            "it is longer than 120 characters",
+        ),
+        (too_long, "Log query is longer than 2000 characters"),
+        (too_many, "Too many filters: 20 at most, got 21"),
+    ];
+    for (query, expected) in cases {
+        for path in [
+            format!("/api/runs/{run_id}/logs"),
+            format!("/api/runs/{run_id}/logs/export"),
+        ] {
+            let (status, body) = send(ctx.get(&path).query(&[("q", query.as_str())])).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{path} q={query}");
+            let message = body["error"].as_str().unwrap_or_else(|| panic!("{body}"));
+            assert!(message.contains(expected), "{message} should contain {expected}");
+            assert!(!message.contains('\n'), "{message}");
+        }
+    }
+}
+
+#[openshop::test(api_context())]
+async fn get_run_logs_caps_the_context_around_matches(ctx: &TestContext) {
+    let base = base_time();
+    let run_id = seed_run(ctx, "test-flow", "completed", base).await;
+    for index in 0..300 {
+        let at = base + chrono::Duration::seconds(index);
+        seed_log(&ctx.db, run_id, "info", &format!("line {index:03}"), json!({}), at).await;
+    }
+    // Newest first: the match is the 150th newest line, line 150.
+    for query in ["line 150 C:100000", "line 150 C:99999999999999999999999999"] {
+        let (status, data) = send(ctx.get(&format!("/api/runs/{run_id}/logs")).query(&[("q", query)])).await;
+        assert_eq!(status, StatusCode::OK, "{query}");
+        assert_eq!(data["logs"].as_array().unwrap().len(), 201, "{query}");
+    }
+    let (_, data) = send(
+        ctx.get(&format!("/api/runs/{run_id}/logs"))
+            .query(&[("q", "line 150 B:2 A:1")]),
+    )
+    .await;
+    assert_eq!(data["logs"].as_array().unwrap().len(), 4);
 }
 
 #[openshop::test(api_context())]
@@ -1910,6 +2010,136 @@ async fn post_providers_check_reports_checker_failures() {
     let (status, _) = send(ctx.get("/api/providers")).await;
     assert_eq!(status, StatusCode::OK);
     ctx.shutdown().await.unwrap();
+}
+
+/// Keeps every line logged while it is installed.
+#[derive(Default)]
+struct Lines(std::sync::Mutex<Vec<String>>);
+
+impl openshop::runtime::RuntimeLogger for Lines {
+    fn info(&self, message: &str, context: Option<&Value>) {
+        self.0.lock().unwrap().push(format!("{message} {context:?}"));
+    }
+    fn warn(&self, message: &str, context: Option<&Value>) {
+        self.info(message, context);
+    }
+    fn error(&self, message: &str, context: Option<&Value>) {
+        self.info(message, context);
+    }
+}
+
+static LOGGING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+#[tokio::test]
+async fn a_checker_failing_inside_the_server_is_logged_and_never_shown() {
+    let _logging = LOGGING.lock().await;
+    let leaky = Provider::new("leaky")
+        .field("token", Field::password("Token"))
+        .checker(|config| async move {
+            match config.get("token").and_then(Value::as_str) {
+                Some("wrapped") => Err(anyhow::Error::new(sqlx::Error::Protocol(
+                    "relation \"secret_table\" at postgres://user:hunter2@db.internal/shop".to_string(),
+                ))
+                .context("loading the key")),
+                _ => Err(sqlx::Error::Protocol("password=hunter2".to_string()).into()),
+            }
+        });
+    let config = OpenShopConfig::builder()
+        .flow(noop_flow("test-flow"))
+        .provider(leaky)
+        .build()
+        .unwrap();
+    let ctx = context(config).await;
+    let lines = Arc::new(Lines::default());
+    let previous = openshop::runtime::set_logger(lines.clone());
+
+    let mut ids = Vec::new();
+    for token in ["plain", "wrapped"] {
+        let (status, _) = send(
+            ctx.put("/api/providers/leaky")
+                .json(&json!({ "config": { "token": token } })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, body) = send(ctx.post("/api/providers/leaky/check")).await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        let text = body.to_string();
+        for secret in ["hunter2", "secret_table", "postgres://", "loading the key", "Protocol"] {
+            assert!(!text.contains(secret), "{secret} in {text}");
+        }
+        assert_eq!(body["ok"], false);
+        let id = body["errorId"].as_str().expect("an error id").to_string();
+        assert_eq!(id.len(), 12);
+        assert_eq!(body["error"], format!("Error: Internal error (error id {id})"));
+        ids.push(id);
+    }
+    assert_ne!(ids[0], ids[1]);
+
+    // The cause is in the log, under the id.
+    openshop::runtime::set_logger(previous);
+    let logged = lines.0.lock().unwrap().join("\n");
+    for id in &ids {
+        let line = logged.lines().find(|line| line.contains(id.as_str())).expect("a line");
+        assert!(line.contains("hunter2"), "{line}");
+    }
+    ctx.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_checker_that_never_answers_times_out() {
+    let hung = Provider::new("hung")
+        .field("token", Field::password("Token"))
+        .checker(|_config| async move {
+            tokio::time::sleep(Duration::from_secs(60)).await;
+            Ok(true)
+        });
+    let config = OpenShopConfig::builder()
+        .flow(noop_flow("test-flow"))
+        .provider(hung)
+        .build()
+        .unwrap();
+    let ctx = context(config).await;
+    let (status, _) = send(
+        ctx.put("/api/providers/hung")
+            .json(&json!({ "config": { "token": "t" } })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let started = std::time::Instant::now();
+    let (status, body) = send(ctx.post("/api/providers/hung/check")).await;
+    assert_eq!(status, StatusCode::GATEWAY_TIMEOUT);
+    assert_eq!(
+        body,
+        json!({ "ok": false, "error": "Error: the check timed out after 10 seconds" })
+    );
+    assert!(started.elapsed() < Duration::from_secs(30));
+
+    // The server keeps serving, and the stored check is untouched.
+    let (_, list) = send(ctx.get("/api/providers")).await;
+    assert_eq!(list[0]["lastCheckOk"], Value::Null);
+    ctx.shutdown().await.unwrap();
+}
+
+#[openshop::test(api_context())]
+async fn an_unexpected_failure_has_an_id_in_a_header_and_in_the_log(ctx: &TestContext) {
+    let _logging = LOGGING.lock().await;
+    let lines = Arc::new(Lines::default());
+    let previous = openshop::runtime::set_logger(lines.clone());
+    sqlx::query("DROP TABLE flow_runs CASCADE")
+        .execute(&ctx.db)
+        .await
+        .unwrap();
+
+    let response = ctx.get("/api/runs").send().await.expect("response");
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let id = response.headers()["x-error-id"].to_str().unwrap().to_string();
+    assert_eq!(response.text().await.unwrap(), "Internal Server Error");
+
+    openshop::runtime::set_logger(previous);
+    let logged = lines.0.lock().unwrap().join("\n");
+    let line = logged.lines().find(|line| line.contains(&id)).expect("a line");
+    assert!(line.contains("flow_runs"), "{line}");
 }
 
 // ─── Health ──────────────────────────────────────────────────────────

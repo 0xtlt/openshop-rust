@@ -11,7 +11,7 @@ use sqlx::PgPool;
 
 use crate::db::schema::LogRow;
 use crate::runtime::time::to_iso;
-use crate::server::log_query::{apply_context_expansion, matches_log_filters, parse_log_query};
+use crate::server::log_query::{apply_context_expansion, prepare_log_query};
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct LogResponseRow {
@@ -42,6 +42,9 @@ pub async fn get_filtered_run_logs(
     flow_run_id: &str,
     options: RunLogOptions<'_>,
 ) -> Result<FilteredRunLogs> {
+    // Before reading anything: a query the engine refuses is the caller's mistake.
+    let (parsed, matcher) = prepare_log_query(options.query)?;
+
     let all_logs: Vec<LogRow> = sqlx::query_as(
         "SELECT id, flow_run_id, level, message, payload, created_at FROM logs \
          WHERE flow_run_id = $1 ORDER BY created_at DESC",
@@ -52,7 +55,6 @@ pub async fn get_filtered_run_logs(
     let total = all_logs.len();
 
     let active_levels: HashSet<&str> = options.levels.split(',').filter(|level| !level.is_empty()).collect();
-    let parsed = parse_log_query(options.query);
 
     let filtered: Vec<LogRow> = all_logs
         .into_iter()
@@ -74,7 +76,7 @@ pub async fn get_filtered_run_logs(
     let matched: HashSet<&str> = filtered
         .iter()
         .zip(&ids)
-        .filter(|(log, _)| matches_log_filters(log.message.as_deref(), log.payload.as_ref(), &parsed.filters))
+        .filter(|(log, _)| matcher.matches(log.message.as_deref(), log.payload.as_ref()))
         .map(|(_, id)| id.as_str())
         .collect();
 

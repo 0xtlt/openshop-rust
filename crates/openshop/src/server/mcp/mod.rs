@@ -27,6 +27,7 @@ use self::schema::validate_mcp_tool_arguments;
 use crate::app::OpenShop;
 use crate::engine::step::error_message;
 use crate::server::connectors::Connectors;
+use crate::server::http::client_error;
 use crate::server::shop_domain::normalize_shop_domain;
 use crate::shopify::client::ShopifyClient;
 use crate::types::{JsonMap, McpContext};
@@ -455,7 +456,9 @@ pub(crate) async fn handle(State(app): State<OpenShop>, request: Request) -> Res
     match dispatch(call, &method, &mut active).await {
         Ok(response) => response,
         Err(error) => {
-            let message = error_message(&error);
+            // What the caller did wrong is told as it is; a database or network
+            // failure is logged under an id, and only the id goes out.
+            let message = client_error(&format!("MCP {method} failed"), &error).message;
             let _ = audit(
                 &app,
                 AuditEntry {

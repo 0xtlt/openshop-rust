@@ -227,14 +227,20 @@ async fn run_flow_tool(ctx: McpContext, input: JsonMap) -> Result<Value> {
     let Some(flow) = string_input(&input, "flow") else {
         bail!("flow is required");
     };
-    if !ctx.app.config().flows.contains_key(flow) {
+    let Some(definition) = ctx.app.config().flows.get(flow) else {
         bail!("Unknown flow \"{flow}\"");
+    };
+    let flow_input = object_input(&input, "input");
+    if let Some(schema) = &definition.input
+        && let Err(summary) = schema.parse(flow_input.clone())
+    {
+        bail!("Invalid input for flow \"{flow}\": {summary}");
     }
     let result = ctx
         .app
         .dispatch_flow(
             DispatchOptions::new(flow, ctx.shop.clone())
-                .input(object_input(&input, "input"))
+                .input(flow_input)
                 .shopify_app(ctx.shopify_app.clone()),
         )
         .await?;

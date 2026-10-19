@@ -78,13 +78,15 @@ any of these terms:
 - `from:<date>`, `to:<date>` — keeps lines after, or before, a date;
 - `between:<from>,<to>` — both bounds at once.
 
-All terms must hold. Matching is case-insensitive and runs against the message
+All terms must hold. A context count above 100 is read as 100. Matching is case-insensitive and runs against the message
 followed by the top-level `key=value` pairs of an object payload, for example
 `Fetching orders limit=10`. Values of nested objects are not searchable.
 
 Regular expressions are limited to 120 characters and must not contain
 backreferences, nested quantifiers such as `(a+)+`, or repeated `.*`. A pattern
-that is rejected or invalid matches nothing.
+that is rejected, invalid, or compiles to more than 1 MiB fails the whole
+query: the Admin API answers `400` with the reason, and the MCP tool answers
+an error. A query is at most 2,000 characters and holds at most 20 filters.
 
 Dates are RFC 3339 timestamps, `YYYY-MM-DDTHH:MM[:SS]` (read as UTC), or
 `YYYY-MM-DD`. Lines are listed newest first, and context lines are taken from

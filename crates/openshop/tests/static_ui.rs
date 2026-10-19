@@ -950,7 +950,7 @@ async fn x_robots_tag_is_set_on_every_response() {
         (request(&ctx, Method::GET, "/api/flows"), StatusCode::UNAUTHORIZED),
         (ctx.get("/api/flows"), StatusCode::OK),
         (ctx.get("/api/unknown"), StatusCode::NOT_FOUND),
-        (ctx.post("/api/flows/nope/run"), StatusCode::INTERNAL_SERVER_ERROR),
+        (ctx.post("/api/flows/nope/run"), StatusCode::NOT_FOUND),
         (request(&ctx, Method::GET, "/auth"), StatusCode::BAD_REQUEST),
         (
             request(&ctx, Method::POST, "/webhooks").body("{}"),

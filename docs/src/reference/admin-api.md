@@ -40,8 +40,8 @@ still answers `401` without a valid token.
 - JSON keys are camelCase. Timestamps are UTC ISO 8601 strings with
   millisecond precision, such as `2026-04-01T12:30:05.123Z`.
 - Errors are `{ "error": "<message>" }` unless stated otherwise. An unexpected
-  failure answers `500` with the plain text `Internal Server Error`; the cause
-  is written to the runtime log.
+  failure answers `500` with the plain text `Internal Server Error` and an
+  `x-error-id` header; the cause is written to the runtime log under that id.
 - An identifier that is not a UUID is answered like an unknown one (`404`).
 - An unknown path, or an unsupported method on a known path, answers a plain
   `404 Not Found`.
@@ -96,7 +96,7 @@ error contract.
 | `GET /api/runs` | Query filters below | Run rows for the authenticated app and shop, newest first. |
 | `GET /api/flows/:name/runs` | Same filters | Run rows restricted to one flow. |
 | `GET /api/runs/:id` | — | Run row plus `steps`, in creation order. |
-| `POST /api/flows/:name/run` | `{ "input": { ... } }` | `202` with `{ runId, status: "pending" }`. |
+| `POST /api/flows/:name/run` | `{ "input": { ... } }` | `202` with `{ runId, status: "pending" }`. `404` for an unknown flow, `422` when the input fails the input schema of the flow; no run is queued. |
 | `POST /api/runs/:id/retry?mode=resume` | — | Requeues a finished run: `{ ok: true, runId, mode }`. |
 | `POST /api/runs/:id/retry?mode=reset` | — | Deletes every step result, then requeues. |
 | `POST /api/runs/:id/cancel` | — | Cancels a pending, running, or sleeping run: `{ ok: true }`. |
@@ -127,13 +127,14 @@ Active runs cannot be deleted.
 | `400` | `No IDs provided` | Bulk delete without a non-empty `ids` array. |
 | `400` | `Max 100 runs per batch` | Bulk delete with more than 100 IDs. |
 | `404` | `Run not found` | The run does not exist for the authenticated app and shop. |
+| `404` | `Flow "<name>" not found` | Dispatch of an unregistered flow name. |
+| `422` | `Invalid input for flow "<name>": <reason>` | The input fails the input schema of the flow. |
 | `409` | `Cannot retry a run with status "<status>"` | Retry of an active run. |
 | `409` | `Cannot cancel a run with status "<status>"` | Cancel of a finished run. |
 | `409` | `Cannot delete an active run — cancel it first` | Delete of an active run. |
 | `409` | `Flow "<name>" is already running for shop "<shop>" (run #<id>)` | Flow concurrency conflict. The body also contains `existingRunId`. |
 
-Dispatching an unregistered flow name is an unexpected failure (`500`). In a
-bulk delete, IDs that are unknown, active, or not UUIDs count as skipped.
+In a bulk delete, IDs that are unknown, active, or not UUIDs count as skipped.
 
 ## Run logs
 
@@ -144,6 +145,8 @@ bulk delete, IDs that are unknown, active, or not UUIDs count as skipped.
 
 A log has the keys `id`, `flowRunId`, `level`, `message`, `payload`, and
 `createdAt`. `total` is the number of log lines of the run before filtering.
+A `q` the engine refuses (an invalid or rejected regular expression, a query
+over its limits) answers `400` with the reason.
 
 `levels` is a comma-separated subset of `info,warn,error`; all three are enabled by
 default. `q` uses the [log query syntax](logging.md#log-query-syntax), including
@@ -174,7 +177,7 @@ with `key and enabled are required`.
 | --- | --- | --- |
 | `GET /api/providers` | — | `[{ name, fields, config, configured, lastCheckedAt, lastCheckOk }]`: definitions, public config, and last health check. |
 | `PUT /api/providers/:name` | `{ "config": { ... } }` | Validates, keeps stored passwords left blank, encrypts, and stores config: `{ ok: true }`. |
-| `POST /api/providers/:name/check` | — | `{ ok }`, or `{ ok: false, error }` with `500`. |
+| `POST /api/providers/:name/check` | — | `{ ok }`; `{ ok: false, error }` with `500` when the checker fails; `{ ok: false, error }` with `504` when it takes longer than 10 seconds. |
 
 Each entry of `fields` has `type`, `label`, and, when set, `placeholder`,
 `options`, and `required`; password fields also have `hasValue`. Password
@@ -265,9 +268,11 @@ its ID and fingerprint.
 | `200` | Read or mutation completed. |
 | `201` | Function instance or MCP token created. |
 | `202` | Flow accepted for asynchronous execution. |
-| `400` | Invalid request, provider config, function config, or MCP permission. |
+| `400` | Invalid request, provider config, function config, MCP permission, or log query. |
 | `401` | Missing, expired, malformed, or invalid Shopify session token. |
 | `404` | Resource not found within the authenticated app and shop, unknown path, or the admin page is `disabled`. |
 | `409` | Lifecycle or concurrency conflict. |
+| `422` | Flow input that fails the input schema of the flow. |
 | `413` | Request body larger than the request body limit. |
 | `500` | Provider checker or unexpected server failure. |
+| `504` | Provider checker that took longer than 10 seconds. |

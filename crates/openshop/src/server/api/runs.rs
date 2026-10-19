@@ -17,6 +17,7 @@ use crate::engine::dispatch::DispatchOptions;
 use crate::engine::errors::FlowConcurrencyError;
 use crate::runtime::time::parse_date;
 use crate::server::http::{ApiResult, json_error, json_object_body, json_response, parse_query};
+use crate::server::log_query::InvalidLogQuery;
 use crate::server::shop::ShopSession;
 use crate::types::{ACTIVE_RUN_STATUSES, ALL_RUN_STATUSES};
 
@@ -140,8 +141,20 @@ async fn run_logs(
             include_context: true,
         },
     )
-    .await?;
-    Ok(json_response(StatusCode::OK, json!(logs)))
+    .await;
+    match logs {
+        Ok(logs) => Ok(json_response(StatusCode::OK, json!(logs))),
+        Err(error) => log_query_failure(error),
+    }
+}
+
+/// A query the engine refuses is a `400` with the reason; any other failure is
+/// unexpected.
+pub(super) fn log_query_failure(error: anyhow::Error) -> ApiResult {
+    match error.downcast_ref::<InvalidLogQuery>() {
+        Some(invalid) => Ok(json_error(StatusCode::BAD_REQUEST, invalid.to_string())),
+        None => Err(error.into()),
+    }
 }
 
 async fn export_run_logs(
@@ -164,7 +177,11 @@ async fn export_run_logs(
             include_context: false,
         },
     )
-    .await?;
+    .await;
+    let result = match result {
+        Ok(result) => result,
+        Err(error) => return log_query_failure(error),
+    };
     let format = query.get("format").map(String::as_str).unwrap_or("json");
     Ok(create_log_export_response(&run_id, format, &result.logs))
 }
@@ -180,6 +197,20 @@ async fn run_flow(
         Some(Value::Null) | None => json!({}),
         Some(input) => input.clone(),
     };
+
+    // The caller's mistakes, before a run is queued: a run that could only fail
+    // would otherwise be accepted.
+    let Some(flow) = app.config().flows.get(&name) else {
+        return Ok(json_error(StatusCode::NOT_FOUND, format!("Flow \"{name}\" not found")));
+    };
+    if let Some(schema) = &flow.input
+        && let Err(summary) = schema.parse(input.clone())
+    {
+        return Ok(json_error(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            format!("Invalid input for flow \"{name}\": {summary}"),
+        ));
+    }
 
     let dispatched = app
         .dispatch_flow(
