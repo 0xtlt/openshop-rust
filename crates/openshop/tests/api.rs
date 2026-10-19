@@ -1115,6 +1115,10 @@ async fn session_token_exchange_installs_the_shop_once() {
     );
     ctx.transport.clear();
 
+    // A failed exchange is not tried again for thirty seconds.
+    tokio::time::pause();
+    tokio::time::advance(std::time::Duration::from_secs(31)).await;
+    tokio::time::resume();
     ctx.transport
         .respond_json(json!({ "access_token": "shpat_offline", "scope": "read_products" }));
     let token = ctx.session_token();

@@ -2,6 +2,29 @@
 
 ## Unreleased
 
+- The token exchange of the session token, run by the first `/api` request of
+  a shop without a token, is bounded: one request at a time exchanges for an
+  app and shop, and the requests that arrive meanwhile wait for it and use its
+  token, where each asked Shopify on its own, for up to the 60 seconds of the
+  HTTP client. Shopify is asked for five seconds at most, and a failed
+  exchange is not tried again for thirty seconds. A shop never waits for the
+  exchange of another. After a timeout, the request is served without asking
+  the client credentials grant too. `MockTransport::delay_responses` makes the
+  mock answer late, for tests of a slow Shopify.
+- `/auth` no longer writes to the database, and no longer overwrites the nonce
+  of an installation in progress, which anybody could do by calling it for a
+  shop. The `state` of the authorization is signed with the secret of the app
+  (app handle, shop, expiry of ten minutes, nonce, browser) and bound to the
+  browser by the cookie `openshop_oauth` (`HttpOnly`, `SameSite=Lax`, `Secure`
+  on an `https` application URL, ten minutes). Several installations of a shop
+  may be pending; the callback compares the signature in constant time,
+  refuses a `state` that is expired, altered, of another browser, shop or app,
+  or already spent, and creates the row of the installation if there is none.
+  The `installations.nonce` column is no longer read or written, so an
+  installation begun in the TypeScript runtime is not finished in this one,
+  nor the reverse; `pending` in the operator dashboard only shows rows left by
+  earlier versions. A callback whose token request fails has spent its
+  `state`: the merchant starts again at `/auth`.
 - `openshop init` makes a project from one of three templates: `minimal`, one
   provider and one flow, as before; `custom`, a custom app with every building
   block and a page of its own next to the built-in admin; `public`, a public
