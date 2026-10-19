@@ -15,8 +15,9 @@ migrations/
   20261006143115_openshop_init.sql
   20261006143116_openshop_queue_indexes.sql
   20261006143117_openshop_cron_ticks.sql
-  20261006143118_openshop_run_lease.sql
-  20261006143119_openshop_drop_flow_runs_status_index.sql
+  20261006143118_openshop_logs_indexes.sql
+  20261006143119_openshop_run_lease.sql
+  20261006143120_openshop_drop_flow_runs_status_index.sql
 ```
 
 Each file starts with a marker line:

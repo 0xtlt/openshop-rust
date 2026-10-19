@@ -20,7 +20,8 @@ use openshop::{
 };
 use reqwest::header::{
     ACCESS_CONTROL_ALLOW_HEADERS, ACCESS_CONTROL_ALLOW_METHODS, ACCESS_CONTROL_ALLOW_ORIGIN,
-    ACCESS_CONTROL_REQUEST_HEADERS, ACCESS_CONTROL_REQUEST_METHOD, CONTENT_DISPOSITION, CONTENT_TYPE, ORIGIN,
+    ACCESS_CONTROL_REQUEST_HEADERS, ACCESS_CONTROL_REQUEST_METHOD, CONTENT_DISPOSITION, CONTENT_LENGTH, CONTENT_TYPE,
+    ORIGIN,
 };
 use reqwest::{Method, RequestBuilder, StatusCode};
 use uuid::Uuid;
@@ -1957,6 +1958,269 @@ async fn get_run_logs_export_sanitizes_unknown_formats(ctx: &TestContext) {
         let logs: Value = response.json().await.unwrap();
         assert_eq!(logs.as_array().unwrap().len(), 6);
     }
+}
+
+/// Follows `next` from the first page until it is null, with the query given.
+async fn read_log_pages(ctx: &TestContext, run_id: Uuid, params: &[(&str, &str)]) -> Vec<Value> {
+    let mut pages = Vec::new();
+    let mut cursor: Option<String> = None;
+    loop {
+        let mut query: Vec<(&str, &str)> = params.to_vec();
+        if let Some(cursor) = &cursor {
+            query.push(("cursor", cursor));
+        }
+        let (status, page) = send(ctx.get(&format!("/api/runs/{run_id}/logs")).query(&query)).await;
+        assert_eq!(status, StatusCode::OK, "{page}");
+        cursor = page["next"].as_str().map(str::to_string);
+        pages.push(page);
+        assert!(pages.len() < 100, "next never ends");
+        if cursor.is_none() {
+            return pages;
+        }
+    }
+}
+
+fn log_ids(pages: &[Value]) -> Vec<String> {
+    pages
+        .iter()
+        .flat_map(|page| page["logs"].as_array().unwrap())
+        .map(|log| log["id"].as_str().unwrap().to_string())
+        .collect()
+}
+
+#[openshop::test(api_context())]
+async fn get_run_logs_pages_with_a_cursor(ctx: &TestContext) {
+    let base = base_time();
+    let run_id = seed_run(ctx, "test-flow", "completed", base).await;
+    // Lines that share a timestamp, to check that the order is total.
+    for index in 0..25 {
+        let at = base + chrono::Duration::seconds(index / 5);
+        seed_log(&ctx.db, run_id, "info", &format!("line {index}"), json!({}), at).await;
+    }
+
+    let (_, everything) = send(ctx.get(&format!("/api/runs/{run_id}/logs?limit=100"))).await;
+    assert_eq!(everything["logs"].as_array().unwrap().len(), 25);
+    assert!(everything["next"].is_null());
+    assert_eq!(everything["total"], 25);
+
+    let pages = read_log_pages(ctx, run_id, &[("limit", "10")]).await;
+    let sizes: Vec<usize> = pages
+        .iter()
+        .map(|page| page["logs"].as_array().unwrap().len())
+        .collect();
+    assert_eq!(sizes, [10, 10, 5]);
+    assert!(pages.iter().all(|page| page["total"] == 25));
+    assert_eq!(log_ids(&pages), log_ids(std::slice::from_ref(&everything)));
+
+    // An exact multiple of the limit ends without an empty page.
+    let pages = read_log_pages(ctx, run_id, &[("limit", "5")]).await;
+    assert_eq!(pages.len(), 5);
+
+    // The default and the cap of the limit: nothing to refuse, nothing unbounded.
+    let (status, defaults) = send(ctx.get(&format!("/api/runs/{run_id}/logs?limit=abc"))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(defaults["logs"].as_array().unwrap().len(), 25);
+    let (status, _) = send(ctx.get(&format!("/api/runs/{run_id}/logs?limit=999999999"))).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, body) = send(ctx.get(&format!("/api/runs/{run_id}/logs?cursor=nope"))).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body, error("Invalid cursor"));
+}
+
+#[openshop::test(api_context())]
+async fn get_run_logs_counts_the_lines_of_each_level(ctx: &TestContext) {
+    let (run_id, _) = seed_order_logs(ctx).await;
+    let (_, data) = send(ctx.get(&format!("/api/runs/{run_id}/logs?levels=error&limit=1"))).await;
+    assert_eq!(data["levelCounts"], json!({ "info": 4, "warn": 1, "error": 1 }));
+    assert_eq!(data["total"], 6);
+}
+
+/// A page is bounded by its limit, whatever the matches and the context asked
+/// for, and the pages put end to end are the list of one unbounded request.
+#[openshop::test(api_context())]
+async fn get_run_logs_pages_are_bounded_with_consecutive_matches_and_wide_context(ctx: &TestContext) {
+    let base = base_time();
+    let run_id = seed_run(ctx, "test-flow", "completed", base).await;
+    // Newest first, the lines are `line 60` down to `line 1`; every 7th is marked.
+    for index in 1..=60 {
+        let message = if index % 7 == 0 {
+            format!("line {index} mark")
+        } else {
+            format!("line {index}")
+        };
+        let at = base + chrono::Duration::seconds(index);
+        seed_log(&ctx.db, run_id, "info", &message, json!({}), at).await;
+    }
+
+    // What the query shows, from the definition: a match, and `before` lines
+    // newer / `after` lines older around it (the list runs newest first).
+    let expected = |marked_only: bool, before: usize, after: usize| -> Vec<String> {
+        let lines: Vec<(String, bool)> = (1..=60)
+            .rev()
+            .map(|index| (format!("line {index}"), !marked_only || index % 7 == 0))
+            .collect();
+        let mut visible = vec![false; lines.len()];
+        for (position, (_, matched)) in lines.iter().enumerate() {
+            if *matched {
+                let start = position.saturating_sub(before);
+                let end = (position + after).min(lines.len() - 1);
+                visible[start..=end].iter_mut().for_each(|flag| *flag = true);
+            }
+        }
+        lines
+            .into_iter()
+            .zip(visible)
+            .filter(|(_, visible)| *visible)
+            .map(|(line, _)| line.0)
+            .collect()
+    };
+    let names = |pages: &[Value]| -> Vec<String> {
+        pages
+            .iter()
+            .flat_map(|page| strings(&page["logs"], "message"))
+            .map(|message| message.trim_end_matches(" mark").to_string())
+            .collect()
+    };
+
+    let cases = [
+        // (query, marked only, before, after)
+        (r#"|= "line" A:1"#, false, 0, 1),
+        (r#"|= "line" C:3"#, false, 3, 3),
+        (r#"|= "line" A:100000"#, false, 0, 100_000),
+        (r#"|= "line" B:100000 A:100000"#, false, 1_000, 100_000),
+        (r#"|= "mark" A:1"#, true, 0, 1),
+        (r#"|= "mark" B:2 A:4"#, true, 2, 4),
+        (r#"|= "mark" C:100000"#, true, 1_000, 100_000),
+        (r#"|= "mark""#, true, 0, 0),
+    ];
+    for (query, marked_only, before, after) in cases {
+        let want = expected(marked_only, before, after);
+        for limit in [1_usize, 2, 3, 7, 25] {
+            let pages = read_log_pages(ctx, run_id, &[("q", query), ("limit", &limit.to_string())]).await;
+            // A match is never split from the lines before it, which can be more than the limit.
+            let most = limit.max(before + 1);
+            for page in &pages {
+                let size = page["logs"].as_array().unwrap().len();
+                assert!(size <= most, "q={query} limit={limit}: {size} lines");
+            }
+            assert_eq!(names(&pages), want, "q={query} limit={limit}");
+        }
+        let (_, all) = send(
+            ctx.get(&format!("/api/runs/{run_id}/logs"))
+                .query(&[("q", query), ("limit", "5000")]),
+        )
+        .await;
+        assert_eq!(names(&[all]), want, "q={query} unbounded");
+    }
+}
+
+#[openshop::test(api_context())]
+async fn get_run_logs_pages_through_a_query_and_its_context(ctx: &TestContext) {
+    let (run_id, _) = seed_order_logs(ctx).await;
+    let messages = |pages: &[Value]| -> Vec<String> {
+        pages
+            .iter()
+            .flat_map(|page| strings(&page["logs"], "message"))
+            .collect()
+    };
+
+    let pages = read_log_pages(ctx, run_id, &[("q", "synced"), ("limit", "1")]).await;
+    assert_eq!(messages(&pages), ["Order 1003 synced", "Order 1001 synced"]);
+    assert_eq!(pages.len(), 2);
+
+    // Whatever the limit, the pages put end to end are the list of one request,
+    // context lines included.
+    let query = "synced C:1";
+    let (_, all) = send(
+        ctx.get(&format!("/api/runs/{run_id}/logs"))
+            .query(&[("q", query), ("limit", "100")]),
+    )
+    .await;
+    assert_eq!(all["logs"].as_array().unwrap().len(), 6);
+    for limit in ["1", "2", "3", "4"] {
+        let pages = read_log_pages(ctx, run_id, &[("q", query), ("limit", limit)]).await;
+        assert_eq!(log_ids(&pages), log_ids(std::slice::from_ref(&all)), "limit={limit}");
+        let flags: Vec<&Value> = pages
+            .iter()
+            .flat_map(|page| page["logs"].as_array().unwrap())
+            .map(|log| &log["_matched"])
+            .collect();
+        let expected: Vec<&Value> = all["logs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|log| &log["_matched"])
+            .collect();
+        assert_eq!(flags, expected, "limit={limit}");
+    }
+}
+
+/// Inserts `count` lines for a run in one statement, newest last.
+async fn seed_many_logs(ctx: &TestContext, run_id: Uuid, count: i32) {
+    sqlx::query(
+        "INSERT INTO logs (flow_run_id, level, message, payload, created_at) \
+         SELECT $1, CASE WHEN n % 10 = 0 THEN 'error' ELSE 'info' END, 'line ' || n, \
+                json_build_object('n', n), $2::timestamptz + n * interval '1 millisecond' \
+         FROM generate_series(1, $3) AS n",
+    )
+    .bind(run_id.to_string())
+    .bind(base_time())
+    .bind(count)
+    .execute(&ctx.db)
+    .await
+    .unwrap();
+}
+
+#[openshop::test(api_context())]
+async fn get_run_logs_export_streams_a_large_run(ctx: &TestContext) {
+    let run_id = seed_run(ctx, "test-flow", "completed", base_time()).await;
+    seed_many_logs(ctx, run_id, 5_000).await;
+
+    let response = ctx
+        .get(&format!("/api/runs/{run_id}/logs/export?format=csv"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(response.headers().get(CONTENT_LENGTH).is_none(), "streamed");
+    let text = response.text().await.unwrap();
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines.len(), 5_001);
+    assert_eq!(lines[0], "id,level,message,payload,createdAt");
+    assert!(lines[1].contains("\"line 5000\""), "{}", lines[1]);
+    assert!(lines[5_000].contains("\"line 1\""), "{}", lines[5_000]);
+
+    let response = ctx
+        .get(&format!("/api/runs/{run_id}/logs/export?levels=error"))
+        .send()
+        .await
+        .unwrap();
+    let logs: Value = response.json().await.unwrap();
+    let logs = logs.as_array().unwrap();
+    assert_eq!(logs.len(), 500);
+    assert_eq!(logs[0]["message"], "line 5000");
+    assert_eq!(logs[499]["message"], "line 10");
+
+    // A query filters the stream too, in the pages of the scan.
+    let response = ctx
+        .get(&format!("/api/runs/{run_id}/logs/export"))
+        .query(&[("q", "line 4999"), ("format", "csv")])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.text().await.unwrap().lines().count(), 2);
+
+    // Nothing to export is still a valid file.
+    let empty = seed_run(ctx, "test-flow", "completed", base_time()).await;
+    let response = ctx.get(&format!("/api/runs/{empty}/logs/export")).send().await.unwrap();
+    assert_eq!(response.text().await.unwrap(), "[]");
+    let response = ctx
+        .get(&format!("/api/runs/{empty}/logs/export?format=csv"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.text().await.unwrap(), "id,level,message,payload,createdAt");
 }
 
 // ─── Providers ───────────────────────────────────────────────────────

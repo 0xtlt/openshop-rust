@@ -79,7 +79,12 @@ theme, and on a narrow screen show each row of a table as a card.
 
 Counting over a period reads the runs and the log lines of that period. On a
 large history, prefer a short period: the longest ones take the time it takes
-to read them.
+to read them. The log lines are read through the indexes of the
+[framework schema](database.md#framework-tables) on their time and their
+level, and a statement of the dashboard is cancelled after 10 seconds: a page
+that cannot be computed in that time answers with an error and does not hold
+the database. Set [`log_retention`](configuration.md#settings) to keep the
+table, and so the pages, small.
 
 ## Session
 

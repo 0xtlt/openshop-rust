@@ -9,7 +9,9 @@ use serde_json::{Value, json};
 use sqlx::{Postgres, QueryBuilder};
 use uuid::Uuid;
 
-use super::run_logs::{RunLogOptions, create_log_export_response, get_filtered_run_logs};
+use super::run_logs::{
+    DEFAULT_LIMIT, LogCursor, MAX_LIMIT, RunLogOptions, create_log_export_response, get_filtered_run_logs,
+};
 use crate::app::OpenShop;
 use crate::db::schema::{FlowRun, StepResult};
 use crate::engine::abort::cancel_run;
@@ -143,6 +145,14 @@ async fn run_logs(
     let Some(run) = find_run(&app, &session, &id).await? else {
         return Ok(run_not_found());
     };
+    let cursor = match query.get("cursor").filter(|cursor| !cursor.is_empty()) {
+        Some(cursor) => match LogCursor::parse(cursor) {
+            Some(cursor) => Some(cursor),
+            None => return Ok(json_error(StatusCode::BAD_REQUEST, "Invalid cursor")),
+        },
+        None => None,
+    };
+    let limit = number_param(&query, "limit", DEFAULT_LIMIT as i64).clamp(1, MAX_LIMIT as i64);
     let logs = get_filtered_run_logs(
         app.db(),
         &run.id.to_string(),
@@ -150,6 +160,8 @@ async fn run_logs(
             query: query.get("q").map(String::as_str).unwrap_or_default(),
             levels: query.get("levels").map(String::as_str).unwrap_or("info,warn,error"),
             include_context: true,
+            limit: limit as usize,
+            cursor,
         },
     )
     .await;
@@ -178,23 +190,23 @@ async fn export_run_logs(
     let Some(run) = find_run(&app, &session, &id).await? else {
         return Ok(run_not_found());
     };
-    let run_id = run.id.to_string();
-    let result = get_filtered_run_logs(
-        app.db(),
-        &run_id,
+    let format = query.get("format").map(String::as_str).unwrap_or("json");
+    let response = create_log_export_response(
+        app.db().clone(),
+        &run.id.to_string(),
+        format,
         RunLogOptions {
             query: query.get("q").map(String::as_str).unwrap_or_default(),
             levels: query.get("levels").map(String::as_str).unwrap_or("info,warn,error"),
             include_context: false,
+            limit: MAX_LIMIT,
+            cursor: None,
         },
-    )
-    .await;
-    let result = match result {
-        Ok(result) => result,
-        Err(error) => return log_query_failure(error),
-    };
-    let format = query.get("format").map(String::as_str).unwrap_or("json");
-    Ok(create_log_export_response(&run_id, format, &result.logs))
+    );
+    match response {
+        Ok(response) => Ok(response),
+        Err(invalid) => Ok(json_error(StatusCode::BAD_REQUEST, invalid.to_string())),
+    }
 }
 
 async fn run_flow(

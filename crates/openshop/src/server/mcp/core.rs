@@ -205,13 +205,18 @@ async fn search_logs(ctx: McpContext, input: JsonMap) -> Result<Value> {
             query: string_input(&input, "q").unwrap_or_default(),
             levels: string_input(&input, "levels").unwrap_or("info,warn,error"),
             include_context: boolean_input(&input, "includeContext").unwrap_or(true),
+            limit,
+            cursor: None,
         },
     )
     .await?;
+    // Context lines of the last match can come past the limit.
     result.logs.truncate(limit);
 
     let returned = result.logs.len();
     let mut value = serde_json::to_value(result)?;
+    // The tool has a limit and no pages.
+    value.as_object_mut().map(|fields| fields.remove("next"));
     value["returned"] = Value::from(returned);
     Ok(structured_result(value))
 }

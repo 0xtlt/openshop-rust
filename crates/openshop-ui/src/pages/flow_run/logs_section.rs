@@ -52,6 +52,7 @@ pub fn LogsSection(
     filtered_logs: RwSignal<Vec<LogEntry>>,
     logs_error: RwSignal<Option<String>>,
     total_logs: RwSignal<u64>,
+    has_more_logs: RwSignal<bool>,
     new_log_ids: RwSignal<HashSet<String>>,
     show_help: RwSignal<bool>,
     on_query_input: Callback<web_sys::Event>,
@@ -235,6 +236,11 @@ pub fn LogsSection(
                                 children=log_line
                             />
                         </div>
+                        <Show when=move || has_more_logs.get()>
+                            <s-text color="subdued">
+                                "Showing the newest lines only. Export the logs for the whole run."
+                            </s-text>
+                        </Show>
                     }
                         .into_any()
                 } else {

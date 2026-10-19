@@ -574,10 +574,14 @@ function __wbg_get_imports() {
                     state0.a = 0;
                     try {
 <<<<<<<< HEAD:crates/openshop/ui-dist/openshop-ui-b6df5a48206fc639.js
+<<<<<<<< HEAD:crates/openshop/ui-dist/openshop-ui-b6df5a48206fc639.js
                         return __wasm_bindgen_func_elem_5444(a, state0.b, arg0, arg1);
 ========
                         return __wasm_bindgen_func_elem_526(a, state0.b, arg0, arg1);
 >>>>>>>> origin/fix/api-ops-minors:crates/openshop/ui-dist/openshop-ui-6380cbf1f55faef6.js
+========
+                        return __wasm_bindgen_func_elem_5451(a, state0.b, arg0, arg1);
+>>>>>>>> origin/perf/logs-retention-and-paging:crates/openshop/ui-dist/openshop-ui-789d5b9947574979.js
                     } finally {
                         state0.a = a;
                     }
@@ -875,6 +879,7 @@ function __wbg_get_imports() {
         },
         __wbindgen_generic_0000000000000001: function(arg0, arg1) {
 <<<<<<<< HEAD:crates/openshop/ui-dist/openshop-ui-b6df5a48206fc639.js
+<<<<<<<< HEAD:crates/openshop/ui-dist/openshop-ui-b6df5a48206fc639.js
             // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 384, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, __wasm_bindgen_func_elem_5359);
             return addHeapObject(ret);
@@ -911,6 +916,25 @@ function __wbg_get_imports() {
             // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [], shim_idx: 23, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, __wasm_bindgen_func_elem_423);
 >>>>>>>> origin/fix/api-ops-minors:crates/openshop/ui-dist/openshop-ui-6380cbf1f55faef6.js
+========
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 379, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+            const ret = makeMutClosure(arg0, arg1, __wasm_bindgen_func_elem_5366);
+            return addHeapObject(ret);
+        },
+        __wbindgen_generic_0000000000000002: function(arg0, arg1) {
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 646, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
+            const ret = makeMutClosure(arg0, arg1, __wasm_bindgen_func_elem_5389);
+            return addHeapObject(ret);
+        },
+        __wbindgen_generic_0000000000000003: function(arg0, arg1) {
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [NamedExternref("Event")], shim_idx: 379, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+            const ret = makeMutClosure(arg0, arg1, __wasm_bindgen_func_elem_5366_13);
+            return addHeapObject(ret);
+        },
+        __wbindgen_generic_0000000000000004: function(arg0, arg1) {
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [], shim_idx: 371, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+            const ret = makeMutClosure(arg0, arg1, __wasm_bindgen_func_elem_5368);
+>>>>>>>> origin/perf/logs-retention-and-paging:crates/openshop/ui-dist/openshop-ui-789d5b9947574979.js
             return addHeapObject(ret);
         },
         __wbindgen_generic_0000000000000005: function(arg0) {
@@ -937,6 +961,7 @@ function __wbg_get_imports() {
     };
 }
 
+<<<<<<<< HEAD:crates/openshop/ui-dist/openshop-ui-b6df5a48206fc639.js
 <<<<<<<< HEAD:crates/openshop/ui-dist/openshop-ui-b6df5a48206fc639.js
 function __wasm_bindgen_func_elem_5361(arg0, arg1) {
     wasm.__wasm_bindgen_func_elem_5361(arg0, arg1);
@@ -980,6 +1005,28 @@ function __wasm_bindgen_func_elem_460(arg0, arg1, arg2) {
         const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
         wasm.__wasm_bindgen_func_elem_460(retptr, arg0, arg1, addHeapObject(arg2));
 >>>>>>>> origin/fix/api-ops-minors:crates/openshop/ui-dist/openshop-ui-6380cbf1f55faef6.js
+========
+function __wasm_bindgen_func_elem_5368(arg0, arg1) {
+    wasm.__wasm_bindgen_func_elem_5368(arg0, arg1);
+}
+
+function __wasm_bindgen_func_elem_5366(arg0, arg1, arg2) {
+    wasm.__wasm_bindgen_func_elem_5366(arg0, arg1, addHeapObject(arg2));
+}
+
+function __wasm_bindgen_func_elem_5366_13(arg0, arg1, arg2) {
+    wasm.__wasm_bindgen_func_elem_5366_13(arg0, arg1, addHeapObject(arg2));
+}
+
+function __wasm_bindgen_func_elem_5451(arg0, arg1, arg2, arg3) {
+    wasm.__wasm_bindgen_func_elem_5451(arg0, arg1, addHeapObject(arg2), addHeapObject(arg3));
+}
+
+function __wasm_bindgen_func_elem_5389(arg0, arg1, arg2) {
+    try {
+        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+        wasm.__wasm_bindgen_func_elem_5389(retptr, arg0, arg1, addHeapObject(arg2));
+>>>>>>>> origin/perf/logs-retention-and-paging:crates/openshop/ui-dist/openshop-ui-789d5b9947574979.js
         var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
         var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
         if (r1) {

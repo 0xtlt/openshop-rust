@@ -487,6 +487,66 @@ async fn generate_then_migrate_upgrades_a_deployed_framework_schema() {
     db.cleanup().await.unwrap();
 }
 
+const LOGS_INDEXES: [&str; 2] = ["logs_created_at_idx", "logs_level_created_at_idx"];
+
+#[tokio::test]
+async fn the_logs_indexes_come_with_a_migration_that_keeps_the_table_as_it_is() {
+    // A project deployed with the first two framework migrations, whose logs
+    // table is shared with the TypeScript runtime and has lines in it.
+    let db = empty_database().await;
+    let project = TempProject::new();
+    for (stamp, migration) in ["20260101000000", "20260101000001"].iter().zip(FRAMEWORK_MIGRATIONS) {
+        project.write(
+            &format!("{stamp}_{}", migration.name),
+            &format!("-- openshop:framework {}\n\n{}", migration.id, migration.sql),
+        );
+    }
+    migrate_schema(&db.pool, project.path()).await.unwrap();
+    sqlx::query("INSERT INTO logs (flow_run_id, level, message) VALUES ('not-a-uuid', 'info', 'kept')")
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    let definition = || async {
+        sqlx::query_as::<_, (String, String, String)>(
+            "SELECT column_name::text, data_type::text, is_nullable::text FROM information_schema.columns \
+             WHERE table_schema = current_schema() AND table_name = 'logs' ORDER BY ordinal_position",
+        )
+        .fetch_all(&db.pool)
+        .await
+        .unwrap()
+    };
+    let before = definition().await;
+    let indexes_before = indexes(&db.pool, "logs").await;
+    assert!(
+        LOGS_INDEXES
+            .iter()
+            .all(|index| !indexes_before.contains(&index.to_string()))
+    );
+
+    let created = generate(project.path(), &[], false).unwrap();
+    assert_eq!(created.len(), FRAMEWORK_MIGRATIONS.len() - 2);
+    migrate_schema(&db.pool, project.path()).await.unwrap();
+
+    let after = indexes(&db.pool, "logs").await;
+    assert!(
+        LOGS_INDEXES.iter().all(|index| after.contains(&index.to_string())),
+        "{after:?}"
+    );
+    assert!(indexes_before.iter().all(|index| after.contains(index)), "{after:?}");
+    assert!(
+        indexes(&db.pool, "flow_runs")
+            .await
+            .contains(&"flow_runs_id_text_idx".to_string())
+    );
+    assert_eq!(definition().await, before);
+    let (kept,): (i64,) = sqlx::query_as("SELECT count(*) FROM logs WHERE message = 'kept'")
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(kept, 1);
+    db.cleanup().await.unwrap();
+}
+
 #[tokio::test]
 async fn generated_and_hand_written_migrations_apply_together() {
     let db = empty_database().await;

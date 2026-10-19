@@ -1,5 +1,7 @@
 //! Admin API payloads, limited to the fields the UI reads. Dates are ISO-8601 strings.
 
+use std::collections::HashMap;
+
 use indexmap::IndexMap;
 use serde::Deserialize;
 use serde_json::Value;
@@ -73,6 +75,12 @@ pub struct LogsResponse {
     pub logs: Vec<LogEntry>,
     #[serde(default)]
     pub total: u64,
+    /// Lines of each level in the whole run, whatever the filters.
+    #[serde(default, rename = "levelCounts")]
+    pub level_counts: HashMap<String, u64>,
+    /// Where the next page starts; the response holds the newest lines only.
+    #[serde(default)]
+    pub next: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -293,10 +301,13 @@ mod tests {
     fn deserializes_logs_crons_and_providers() {
         let logs: LogsResponse = serde_json::from_str(
             r#"{"logs":[{"id":"a","flowRunId":"r","level":"warn","message":null,"payload":null,
-                "createdAt":"2026-10-06T12:00:00.000Z","_matched":false}],"total":7}"#,
+                "createdAt":"2026-10-06T12:00:00.000Z","_matched":false}],"total":7,
+                "levelCounts":{"warn":3,"info":4},"next":"1.abc"}"#,
         )
         .unwrap();
         assert_eq!(logs.total, 7);
+        assert_eq!(logs.level_counts["warn"], 3);
+        assert_eq!(logs.next.as_deref(), Some("1.abc"));
         assert_eq!(logs.logs[0].matched, Some(false));
 
         let crons: Vec<CronItem> = serde_json::from_str(

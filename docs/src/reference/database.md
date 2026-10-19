@@ -440,6 +440,29 @@ Workers read `flow_runs` through two partial indexes limited to `pending`,
 `deadline_at` to fail the runs past their deadline. A claim costs the same
 whatever the number of runs waiting.
 
+The log lines are read and purged through two indexes on `logs`,
+`logs_created_at_idx` on `(created_at)` and `logs_level_created_at_idx` on
+`(level, created_at)`, next to `(flow_run_id, created_at)` for the lines of one
+run. The operator dashboard joins a line to its run with `flow_runs.id::text =
+logs.flow_run_id`, since the column is text; `flow_runs_id_text_idx` on
+`((id::text))` lets that join use an index. The columns stay as they are: the
+migration `openshop_logs_indexes` only adds indexes, and the TypeScript runtime
+reads and writes the same table. On a `logs` table with many rows, creating an
+index blocks writes to it until it is built, and a migration runs in a
+transaction, which rules out `CREATE INDEX CONCURRENTLY`: run these statements
+by hand first (the migration then finds them and does nothing):
+
+```sql
+CREATE INDEX CONCURRENTLY IF NOT EXISTS logs_created_at_idx ON logs (created_at);
+CREATE INDEX CONCURRENTLY IF NOT EXISTS logs_level_created_at_idx ON logs (level, created_at);
+CREATE INDEX CONCURRENTLY IF NOT EXISTS flow_runs_id_text_idx ON flow_runs ((id::text));
+```
+
+`logs` grows with every line a flow writes. The
+[`log_retention`](configuration.md#settings) setting has the workers remove the
+lines past an age, in batches of 5,000 selected `FOR UPDATE SKIP LOCKED`;
+without it nothing is removed.
+
 The row types are exported from `openshop::db::schema` (`InstallationRow`,
 `FlowRun`, `StepResult`, `ProviderConfigRow`, `CronOverride`, `LogRow`,
 `McpToken`, `McpAuditLog`) and implement `sqlx::FromRow` and `Serialize`.
