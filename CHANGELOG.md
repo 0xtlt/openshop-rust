@@ -13,7 +13,15 @@
   `extra=1,2`; it was verified as `extra=1`, and refused), and the pairs are
   sorted as the `key=value` strings Shopify sorts, not by key. `shop`,
   `timestamp`, `path_prefix`, `logged_in_customer_id` and `signature` cannot be
-  repeated. All of these answer `401 Invalid proxy signature`. The signature
+  repeated. A `=` is not the only way to move the end of a value into the
+  next key: a parameter of the visitor is also refused when the value before
+  it, glued to its name, ends with `shop`, `timestamp`, `path_prefix` or
+  `logged_in_customer_id` (a request of an anonymous visitor could be read as
+  the one of customer 42); `timestamp` must be digits, `path_prefix` a plain
+  path, and `shop` exactly a `<name>.myshopify.com` domain (`shop` used to be
+  read as a URL, and `a.myshopify.comt@b.myshopify.com` is one for `b`; it is
+  answered `Invalid shop parameter`). All of these answer `401 Invalid proxy
+  signature`. The signature
   still covers neither the path, the method nor the body, which Shopify does
   not sign. Breaking for code that calls `server::hmac::verify_proxy_signature`
   (it takes the query pairs and the current Unix time) or signs proxy queries

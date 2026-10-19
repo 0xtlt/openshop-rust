@@ -17,10 +17,9 @@ use indexmap::IndexMap;
 use serde_json::{Value, json};
 
 use super::file_routes::{resolve_route_paths, to_router_path};
-use super::hmac::verify_proxy_signature;
+use super::hmac::{proxy_shop, verify_proxy_signature};
 use super::http::{json_error, not_found, parse_query};
 use super::jwt::{customer_id_from_jwt_sub, read_jwt_audience, verify_session_token};
-use super::shop_domain::normalize_shop_domain;
 use super::shopify_apps::ResolvedShopifyApp;
 use crate::app::OpenShop;
 use crate::declare::InvalidInput;
@@ -82,7 +81,7 @@ fn resolve_proxy_auth(
         let [shopify_app] = matches[..] else {
             return Err("Invalid proxy signature");
         };
-        let Some(shop) = query.get("shop").and_then(|shop| normalize_shop_domain(shop)) else {
+        let Some(shop) = proxy_shop(pairs) else {
             return Err("Invalid shop parameter");
         };
         return Ok(ResolvedProxyAuth {

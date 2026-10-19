@@ -287,6 +287,22 @@ is accepted. OpenShop therefore also checks the query itself:
 - A parameter repeated in the query is signed with its values joined by `,`, as
   Shopify does, and verified that way. `shop`, `timestamp`, `path_prefix`,
   `logged_in_customer_id` and `signature` are set by Shopify and appear once.
+- Even without a `=`, the characters between two of them can be read as the end
+  of a value or as the start of the next key. So that a signed query cannot be
+  read as another shop, another customer or another time, a parameter of the
+  visitor is refused when the end of the value before it, glued to its name,
+  ends with `shop`, `timestamp`, `path_prefix` or `logged_in_customer_id`
+  (`myshop`, or a value ending `logged_in_customer_` followed by `id`);
+  `timestamp` must be digits; `path_prefix` a plain path (letters, digits,
+  `/`, `-`, `_`); and `shop` exactly a `<name>.myshopify.com` domain, not a
+  URL, with no blank. A `shop` that is not one is answered
+  `Invalid shop parameter`.
+
+  The end of `path_prefix` can still be cut into the name of the parameter that
+  follows it, so do not take decisions on it: `ctx.shop`, `ctx.shopify_app` and
+  `ctx.customer_id` are the verified identity. This holds because Shopify sends
+  all its parameters on every request, `logged_in_customer_id` empty for a
+  visitor without account.
 
 A request refused for one of these reasons gets the `Invalid proxy signature`
 answer like any other bad signature.

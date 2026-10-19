@@ -286,6 +286,93 @@ async fn a_signed_query_cannot_be_split_again_to_change_its_shop(ctx: &TestConte
     assert_error(response, 401, "Invalid proxy signature").await;
 }
 
+/// Without any `=` in a key or a value, the characters that stand between two
+/// `=` still go to the value before them or to the key after them. Here the
+/// request of an anonymous visitor is read as the one of customer 42, with the
+/// signature of the first.
+#[openshop::test(TestContext::new(ping_config()))]
+async fn a_signed_query_cannot_be_cut_again_to_log_a_customer_in(ctx: &TestContext) {
+    let timestamp = now().to_string();
+    let shared = [
+        ("path_prefix", "/apps/openshop"),
+        ("shop", "test.myshopify.com"),
+        ("timestamp", timestamp.as_str()),
+    ];
+    let original = [
+        &[
+            ("1", "foo"),
+            ("2logged_in_customer_id", "4"),
+            ("2m", "o"),
+            ("logged_in_customer_id", ""),
+        ][..],
+        &shared,
+    ]
+    .concat();
+    let signed = signed_as_given(&original, &ctx.secret);
+    let signature = signed.rsplit("signature=").next().unwrap();
+
+    let forged = [
+        &[
+            ("1", "foo2"),
+            ("logged_in_customer_id", "42"),
+            ("m", ""),
+            ("ologged_in_customer_id", ""),
+        ][..],
+        &shared,
+        &[("signature", signature)],
+    ]
+    .concat();
+    let forged = forged
+        .iter()
+        .map(|(key, value)| (key.to_string(), value.to_string()))
+        .collect::<Vec<_>>();
+    // The two read the same to the signature.
+    let query = url::form_urlencoded::Serializer::new(String::new())
+        .extend_pairs(&forged)
+        .finish();
+    let response = get(ctx, &format!("/proxy/ping?{query}")).send().await.unwrap();
+    assert_error(response, 401, "Invalid proxy signature").await;
+
+    // What the visitor had Shopify sign is not a request of a customer either.
+    let response = get(ctx, &format!("/proxy/ping?{signed}")).send().await.unwrap();
+    assert_error(response, 401, "Invalid proxy signature").await;
+}
+
+/// `a.myshopify.comt@b.myshopify.com` is a URL whose host is `b.myshopify.com`:
+/// a shop that was cut out of the beginning of a parameter of the visitor.
+#[openshop::test(TestContext::new(ping_config()))]
+async fn a_signed_query_cannot_be_cut_again_to_take_the_shop_of_a_url(ctx: &TestContext) {
+    let timestamp = now().to_string();
+    let signed = signed_as_given(
+        &[
+            ("logged_in_customer_id", ""),
+            ("path_prefix", "/apps/openshop"),
+            ("shop", "test.myshopify.com"),
+            ("t@victim.myshopify.comta", "1"),
+            ("timestamp", &timestamp),
+        ],
+        &ctx.secret,
+    );
+    let response = get(ctx, &format!("/proxy/ping?{signed}")).send().await.unwrap();
+    assert_eq!(response.status(), 200);
+    assert_eq!(json_body(response).await["shop"], "test.myshopify.com");
+
+    let signature = signed.rsplit("signature=").next().unwrap();
+    let forged = to_query_string(&IndexMap::from([
+        ("logged_in_customer_id".to_string(), String::new()),
+        ("path_prefix".to_string(), "/apps/openshop".to_string()),
+        (
+            "shop".to_string(),
+            "test.myshopify.comt@victim.myshopify.com".to_string(),
+        ),
+        ("ta".to_string(), "1".to_string()),
+        ("timestamp".to_string(), timestamp),
+        ("signature".to_string(), signature.to_string()),
+    ]));
+    let response = get(ctx, &format!("/proxy/ping?{forged}")).send().await.unwrap();
+    assert_error(response, 401, "Invalid shop parameter").await;
+}
+
 #[openshop::test(TestContext::new(ping_config()))]
 async fn get_with_valid_hmac_returns_handler_json(ctx: &TestContext) {
     let query = signed_query(
