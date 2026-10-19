@@ -185,16 +185,52 @@ fn toml_string(value: &str) -> String {
     format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
-/// How the generated project depends on the framework.
-fn openshop_source(openshop_path: Option<&Path>) -> String {
-    match openshop_path {
-        Some(path) => format!("path = {}", toml_string(&path.display().to_string())),
-        // Pinned to the release that created the project.
-        None => format!(
-            "git = {}, tag = {}",
-            toml_string(OPENSHOP_REPOSITORY),
-            toml_string(&format!("v{OPENSHOP_VERSION}"))
-        ),
+/// Where the generated project gets the framework from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Source {
+    /// A local checkout, `--openshop-path`.
+    Path(PathBuf),
+    /// A commit of the git repository, `--openshop-rev`.
+    Rev(String),
+    /// A tag of the git repository, `--openshop-tag`.
+    Tag(String),
+    /// A branch of the git repository, `--openshop-branch`.
+    Branch(String),
+    /// The tag of the version of this CLI, for a CLI built without git: nothing
+    /// says the tag exists.
+    ReleaseTag(String),
+}
+
+impl Source {
+    /// What a project depends on when it is not told: the commit the CLI was
+    /// built from, which exists wherever the CLI was installed from, or else
+    /// the tag of its version.
+    fn default_for(commit: Option<&str>) -> Source {
+        match commit {
+            Some(commit) => Source::Rev(commit.to_string()),
+            None => Source::ReleaseTag(format!("v{OPENSHOP_VERSION}")),
+        }
+    }
+
+    fn default() -> Source {
+        Source::default_for(option_env!("OPENSHOP_GIT_COMMIT"))
+    }
+
+    /// How the manifest of the project names it.
+    fn dependency(&self) -> String {
+        let git = |key: &str, value: &str| {
+            format!(
+                "git = {}, {key} = {}",
+                toml_string(OPENSHOP_REPOSITORY),
+                toml_string(value)
+            )
+        };
+        match self {
+            Source::Path(path) => format!("path = {}", toml_string(&path.display().to_string())),
+            Source::Rev(rev) => git("rev", rev),
+            Source::Tag(tag) | Source::ReleaseTag(tag) => git("tag", tag),
+            Source::Branch(branch) => git("branch", branch),
+        }
     }
 }
 
@@ -447,22 +483,44 @@ pub fn run_init_ui(cwd: &Path) -> Result<()> {
 
 const INIT_USAGE: &str = "Usage: openshop init [<dir>] [--template=<name>]";
 
+/// A flag, with its `=`, and the source its value names.
+type SourceFlag = (&'static str, fn(&str) -> Source);
+
+/// The flags that name where `openshop` comes from, one at most.
+const SOURCE_FLAGS: &[SourceFlag] = &[
+    ("--openshop-path=", |value| Source::Path(value.into())),
+    ("--openshop-rev=", |value| Source::Rev(value.to_string())),
+    ("--openshop-tag=", |value| Source::Tag(value.to_string())),
+    ("--openshop-branch=", |value| Source::Branch(value.to_string())),
+];
+
 /// What `openshop init` was given.
 #[derive(Debug, Default, PartialEq, Eq)]
 struct InitArgs {
     target: Option<String>,
     template: Option<String>,
-    /// `--openshop-path=<dir>`: depend on a local checkout of the framework
-    /// instead of its git repository.
-    openshop_path: Option<PathBuf>,
+    /// Where the project gets `openshop` from, instead of the default.
+    source: Option<Source>,
 }
 
 fn parse_init_args(args: &[String]) -> Result<InitArgs> {
     let mut parsed = InitArgs::default();
     let mut args = args.iter();
     while let Some(arg) = args.next() {
-        if let Some(path) = arg.strip_prefix("--openshop-path=") {
-            parsed.openshop_path = Some(path.into());
+        if let Some((flag, source, value)) = SOURCE_FLAGS
+            .iter()
+            .find_map(|(flag, source)| arg.strip_prefix(flag).map(|value| (*flag, source, value)))
+        {
+            if value.is_empty() {
+                bail!("[openshop] {flag}<value> needs a value");
+            }
+            if parsed.source.is_some() {
+                bail!(
+                    "[openshop] Name one source for `openshop`: {flag}… comes after another of \
+                     --openshop-path, --openshop-rev, --openshop-tag and --openshop-branch, which exclude each other"
+                );
+            }
+            parsed.source = Some(source(value));
         } else if let Some(name) = arg.strip_prefix("--template=") {
             parsed.template = Some(name.to_string());
         } else if arg == "--template" || arg == "-t" {
@@ -569,16 +627,22 @@ fn init_from_args(cwd: &Path, args: &[String], interactive: bool) -> Result<Init
             template_list()
         ),
     };
-    init(cwd, &target, template, args.openshop_path.as_deref())
+    init(cwd, &target, template, args.source)
 }
 
-/// Creates `target`, a project made from `template`.
-pub fn init(cwd: &Path, target: &str, template: &Template, openshop_path: Option<&Path>) -> Result<InitResult> {
+/// Creates `target`, a project made from `template`, that depends on
+/// `openshop` from `source`, or from the default one.
+fn init(cwd: &Path, target: &str, template: &Template, source: Option<Source>) -> Result<InitResult> {
     let target_dir = cwd.join(target);
     check_target(&target_dir)?;
-    let openshop_path = openshop_path
-        .map(|path| path.canonicalize().context("[openshop] --openshop-path does not exist"))
-        .transpose()?;
+    let source = match source {
+        Some(Source::Path(path)) => Source::Path(
+            path.canonicalize()
+                .context("[openshop] --openshop-path does not exist")?,
+        ),
+        Some(source) => source,
+        None => Source::default(),
+    };
     let created = !target_dir.exists();
     std::fs::create_dir_all(&target_dir)?;
     let target_dir = target_dir.canonicalize()?;
@@ -602,7 +666,7 @@ pub fn init(cwd: &Path, target: &str, template: &Template, openshop_path: Option
             "[openshop] A project cannot be named `{package_name}`: it depends on `{dependency}`. Choose another directory name."
         );
     }
-    let openshop = openshop_source(openshop_path.as_deref());
+    let openshop = source.dependency();
     let project = Project {
         app_name: &app_name,
         package_name: &package_name,
@@ -631,6 +695,15 @@ pub fn init(cwd: &Path, target: &str, template: &Template, openshop_path: Option
         println!("  rustup target add wasm32-unknown-unknown && cargo install trunk    # once, for the admin pages");
     }
     println!("  openshop dev");
+    if let Source::ReleaseTag(tag) = &source {
+        println!();
+        println!(
+            "Note: this CLI was built without git, so the project depends on `openshop` at the tag {tag} of\n\
+             {OPENSHOP_REPOSITORY}, which must exist. If it does not, name another source with\n\
+             --openshop-rev=<commit>, --openshop-tag=<tag> or --openshop-branch=<name>, or edit `openshop`\n\
+             in Cargo.toml."
+        );
+    }
 
     Ok(InitResult {
         target_dir,
@@ -681,7 +754,7 @@ mod tests {
         let expected = InitArgs {
             target: Some("my-app".to_string()),
             template: Some("public".to_string()),
-            openshop_path: None,
+            source: None,
         };
         assert_eq!(
             parse_init_args(&args(&["my-app", "--template=public"])).unwrap(),
@@ -697,7 +770,7 @@ mod tests {
             InitArgs {
                 target: Some("my-app".to_string()),
                 template: None,
-                openshop_path: Some("../openshop".into()),
+                source: Some(Source::Path("../openshop".into())),
             }
         );
 
@@ -716,6 +789,103 @@ mod tests {
         );
     }
 
+    const COMMIT: &str = "8c520e6d1a0f4b7c9e3a5d2f6b8c0e1a3d5f7b9c";
+    const GIT: &str = "git = \"https://github.com/0xtlt/openshop-rust\"";
+
+    #[test]
+    fn depends_on_the_commit_the_cli_is_built_from() {
+        assert_eq!(
+            Source::default_for(Some(COMMIT)).dependency(),
+            format!("{GIT}, rev = \"{COMMIT}\"")
+        );
+        assert_eq!(Source::default_for(Some(COMMIT)), Source::Rev(COMMIT.to_string()));
+    }
+
+    #[test]
+    fn falls_back_to_the_tag_of_its_version_without_a_commit() {
+        let tag = format!("v{OPENSHOP_VERSION}");
+        let source = Source::default_for(None);
+        assert_eq!(source, Source::ReleaseTag(tag.clone()));
+        assert_eq!(source.dependency(), format!("{GIT}, tag = \"{tag}\""));
+    }
+
+    #[test]
+    fn writes_each_source_it_is_given() {
+        let source = |flag: &str| {
+            parse_init_args(&args(&[flag, "my-app"]))
+                .unwrap()
+                .source
+                .unwrap()
+                .dependency()
+        };
+        assert_eq!(source("--openshop-rev=abc1234"), format!("{GIT}, rev = \"abc1234\""));
+        assert_eq!(source("--openshop-tag=v1.2.3"), format!("{GIT}, tag = \"v1.2.3\""));
+        assert_eq!(
+            source("--openshop-branch=feat/x"),
+            format!("{GIT}, branch = \"feat/x\"")
+        );
+        assert_eq!(source("--openshop-path=../openshop"), "path = \"../openshop\"");
+        // Not given, the default applies.
+        assert_eq!(parse_init_args(&args(&["my-app"])).unwrap().source, None);
+    }
+
+    #[test]
+    fn refuses_two_sources_and_an_empty_one() {
+        for (first, second) in [
+            ("--openshop-rev=abc", "--openshop-tag=v1"),
+            ("--openshop-tag=v1", "--openshop-branch=main"),
+            ("--openshop-path=../o", "--openshop-rev=abc"),
+            ("--openshop-rev=abc", "--openshop-path=../o"),
+            ("--openshop-rev=abc", "--openshop-rev=def"),
+        ] {
+            let error = parse_init_args(&args(&[first, "my-app", second]))
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.starts_with("[openshop] Name one source for `openshop`"),
+                "{error}"
+            );
+        }
+        let error = parse_init_args(&args(&["--openshop-rev=", "my-app"]))
+            .unwrap_err()
+            .to_string();
+        assert_eq!(error, "[openshop] --openshop-rev=<value> needs a value");
+    }
+
+    #[test]
+    fn scaffolds_a_project_that_names_a_source_that_exists() {
+        let cwd = temp_dir("source");
+        let manifest = |name: &str, args: &[&str]| {
+            let mut all = vec![name];
+            all.extend(args);
+            init_from_args(&cwd, &self::args(&all), false).unwrap();
+            std::fs::read_to_string(cwd.join(name).join("Cargo.toml")).unwrap()
+        };
+
+        let default = manifest("default", &["--template=minimal"]);
+        let rev = manifest("rev", &["--template=minimal", "--openshop-rev=abc1234"]);
+        assert!(
+            rev.contains(&format!("openshop = {{ {GIT}, rev = \"abc1234\" }}")),
+            "{rev}"
+        );
+        assert!(
+            rev.contains(&format!("{GIT}, rev = \"abc1234\", features = [\"testing\"]")),
+            "{rev}"
+        );
+
+        // Built from a checkout of the repository, as every CI and `cargo install
+        // --git` build is, the project depends on a commit: no tag is needed.
+        match option_env!("OPENSHOP_GIT_COMMIT") {
+            Some(commit) => {
+                assert_eq!(commit.len(), 40, "{commit}");
+                assert!(default.contains(&format!("{GIT}, rev = \"{commit}\"")), "{default}");
+                assert!(!default.contains("tag ="), "{default}");
+            }
+            None => assert!(default.contains(&format!("tag = \"v{OPENSHOP_VERSION}\"")), "{default}"),
+        }
+        std::fs::remove_dir_all(cwd).ok();
+    }
+
     #[test]
     fn scaffolds_the_minimal_template() {
         let cwd = temp_dir("scaffold");
@@ -729,7 +899,7 @@ mod tests {
         assert!(manifest.starts_with(
             "[package]\nname = \"my-shop-app\"\nversion = \"0.1.0\"\nedition = \"2024\"\npublish = false\n"
         ));
-        let source = format!("git = \"https://github.com/0xtlt/openshop-rust\", tag = \"v{OPENSHOP_VERSION}\"");
+        let source = Source::default().dependency();
         assert!(manifest.contains(&format!("[dependencies]\nopenshop = {{ {source} }}\n")));
         assert!(manifest.contains("serde = { version = \"1\", features = [\"derive\"] }"));
         assert!(manifest.contains(&format!("openshop = {{ {source}, features = [\"testing\"] }}")));
@@ -937,7 +1107,7 @@ mod tests {
         let cwd = temp_dir("local");
         let framework = cwd.join("framework");
         std::fs::create_dir_all(&framework).unwrap();
-        let result = init(&cwd, "app", minimal(), Some(&framework)).unwrap();
+        let result = init(&cwd, "app", minimal(), Some(Source::Path(framework.clone()))).unwrap();
 
         let manifest = std::fs::read_to_string(result.target_dir.join("Cargo.toml")).unwrap();
         let expected = format!(
@@ -966,7 +1136,7 @@ mod tests {
         assert_eq!(read(".gitignore"), "target/\n.env\n.shopify/\ndist/\n");
 
         let manifest = read("Cargo.toml");
-        let source = format!("git = \"https://github.com/0xtlt/openshop-rust\", tag = \"v{OPENSHOP_VERSION}\"");
+        let source = Source::default().dependency();
         assert!(manifest.contains(&format!(
             "[dependencies]\nopenshop = {{ {source}, features = [\"ui\"] }}\n# The views of the admin pages.\nleptos = \"0.8\"\n"
         )));

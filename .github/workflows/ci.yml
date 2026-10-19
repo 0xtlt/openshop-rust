@@ -99,3 +99,33 @@ jobs:
             cp Cargo.lock "$RUNNER_TEMP/app-$template/"
             (cd "$RUNNER_TEMP/app-$template" && cargo fmt --check && CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target" cargo check --all-targets)
           done
+
+  # What a user gets from `cargo install --git` then `openshop init`, with no
+  # path: a project that depends on the framework through git, on the commit
+  # under test, which cargo has to fetch from GitHub.
+  init-git:
+    runs-on: ubuntu-latest
+    env:
+      CARGO_PROFILE_DEV_DEBUG: 0
+      # The repository is private: cargo fetches it with git, which is given
+      # the token of the job.
+      CARGO_NET_GIT_FETCH_WITH_CLI: true
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # The head of a pull request, which GitHub serves, not its merge commit.
+      COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: git config --global url."https://x-access-token:${GH_TOKEN}@github.com/".insteadOf "https://github.com/"
+      - run: cargo build -p openshop-cli
+      - name: Depend on the commit the CLI is built from
+        run: |
+          target/debug/openshop init "$RUNNER_TEMP/default" --template=minimal
+          grep -F "rev = \"$(git rev-parse HEAD)\"" "$RUNNER_TEMP/default/Cargo.toml"
+      - name: Check a project that depends on the commit under test
+        run: |
+          target/debug/openshop init "$RUNNER_TEMP/app" --template=minimal --openshop-rev="$COMMIT"
+          cp Cargo.lock "$RUNNER_TEMP/app/"
+          cd "$RUNNER_TEMP/app"
+          CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target" cargo check --all-targets

@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- `openshop init` makes a project that builds: its `openshop` dependency was
+  pinned to the tag `v<version>` of the CLI, which the repository does not
+  have, so the project of `cargo install --git … openshop-cli` followed by
+  `openshop init` failed on its first `cargo` command. The CLI now records the
+  commit it is built from, and the project depends on that commit (`rev`). A
+  CLI built without git, from a package say, falls back to the tag and says at
+  the end of `init` that the tag has to exist. `--openshop-rev=<commit>`,
+  `--openshop-tag=<tag>` and `--openshop-branch=<name>` name another source,
+  next to `--openshop-path=<dir>`; at most one of the four. CI checks a project of
+  the `minimal` template that depends on the commit under test through git.
 - `openshop init` makes a project from one of three templates: `minimal`, one
   provider and one flow, as before; `custom`, a custom app with every building
   block and a page of its own next to the built-in admin; `public`, a public

@@ -17,7 +17,10 @@ const USAGE: &str = "
 
   Commands:
     init [<dir>]                Scaffold a new OpenShop project from a template; asks for what
-                                it is not given (--template=minimal|custom|public)
+                                it is not given (--template=minimal|custom|public). The project
+                                depends on the commit this CLI was built from; name another
+                                source with --openshop-rev=<commit>, --openshop-tag=<tag>,
+                                --openshop-branch=<name> or --openshop-path=<dir>
     init-ui                     Scaffold a custom admin page with its view
     dev                         Start the app in dev mode and restart it when sources change
     codegen                     Download the Shopify Admin GraphQL schema of another API version
