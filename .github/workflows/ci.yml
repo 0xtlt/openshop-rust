@@ -18,7 +18,9 @@ permissions:
 # next to it: a tag can be moved, a commit cannot. Dependabot proposes the next
 # one. `dtolnay/rust-toolchain` has no release, its commit is the one of its
 # `master` branch, and the toolchain is the one of `mise.toml`, so that CI runs
-# what a contributor runs.
+# what a contributor runs. trunk (`.github/actions/install-trunk`) and
+# cargo-deny are not installed by an action that downloads a binary unchecked:
+# their release archive is checked against a SHA-256 written in the repository.
 
 jobs:
   check:
@@ -77,9 +79,7 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --target wasm32-unknown-unknown --locked -- -D warnings
       - run: cargo test --locked
-      - uses: jetli/trunk-action@1346cc09eace4beb84e403e199a471346d4684c9 # v0.5.1
-        with:
-          version: v0.21.14
+      - uses: ./.github/actions/install-trunk
       - run: trunk build --release --locked --dist target/ui-dist
 
   # The custom and public templates have admin pages with a view: `openshop
@@ -95,9 +95,7 @@ jobs:
           toolchain: "1.98.1"
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-      - uses: jetli/trunk-action@1346cc09eace4beb84e403e199a471346d4684c9 # v0.5.1
-        with:
-          version: v0.21.14
+      - uses: ./.github/actions/install-trunk
       - run: cargo run -p openshop-cli --locked -- build-ui
         working-directory: templates/custom
       - run: cargo run -p openshop-cli --locked -- build-ui
@@ -193,7 +191,22 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
-      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
-      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
-        with:
-          manifest-path: crates/openshop-ui/Cargo.toml
+      # cargo-deny is not installed through its action, whose image fetches an
+      # archive without checking it: the release asset is checked against the
+      # SHA-256 written here (the `.sha256` of the release, confirmed by hashing
+      # the download).
+      - name: Install cargo-deny
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: 0.20.2
+          SHA256: 9f12ed4c49936e09b48bf862b595cde2fe64fcbd9d74dfacac6131ca824c8d5f
+        run: |
+          set -euo pipefail
+          asset="cargo-deny-$VERSION-x86_64-unknown-linux-musl.tar.gz"
+          gh release download "$VERSION" --repo EmbarkStudios/cargo-deny --pattern "$asset" --dir "$RUNNER_TEMP"
+          echo "$SHA256  $RUNNER_TEMP/$asset" | sha256sum --check -
+          mkdir -p "$HOME/.local/bin"
+          tar -xzf "$RUNNER_TEMP/$asset" -C "$HOME/.local/bin" --strip-components=1 "cargo-deny-$VERSION-x86_64-unknown-linux-musl/cargo-deny"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - run: cargo-deny --all-features check
+      - run: cargo-deny --all-features --manifest-path crates/openshop-ui/Cargo.toml check

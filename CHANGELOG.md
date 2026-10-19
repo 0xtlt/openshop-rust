@@ -3,7 +3,9 @@
 ## Unreleased
 
 - CI is hardened. Every action is pinned to the commit of a release, the
-  workflows only get `contents: read`, checkouts keep no credentials, and
+  workflows only get `contents: read`, trunk and cargo-deny are installed from
+  their release with a SHA-256 written in the repository (a release asset can
+  be replaced), checkouts keep no credentials, and
   cargo runs with `--locked` (in `mise.toml` too) so a build never moves
   `Cargo.lock`. The toolchain is the one of `mise.toml` (1.98.1) instead of
   whatever `stable` is that day. Two jobs are new: `msrv`, which checks the
