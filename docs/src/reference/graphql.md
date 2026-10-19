@@ -199,7 +199,10 @@ openshop codegen --api-version=2026-07
 This downloads the schema from Shopify's public endpoint,
 `https://shopify.dev/admin-graphql-direct-proxy/<version>`, and writes
 `graphql/admin.schema.json` next to `Cargo.toml`. `graphql!` then checks every
-operation of the crate against it. Commit the file: builds need it.
+operation of the crate against it. Commit the file: builds need it. `cargo`
+follows the file once a build has read it; when `codegen` creates it, it touches
+`src/main.rs` and `src/lib.rs` so that the next build uses it. A file you add by
+hand needs the same: touch a source file of the crate.
 
 | Source, in order | |
 | --- | --- |

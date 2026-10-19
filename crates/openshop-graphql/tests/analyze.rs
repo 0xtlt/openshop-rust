@@ -324,6 +324,45 @@ fn refuses_literals_that_do_not_fit() {
 }
 
 #[test]
+fn int_literals_are_32_bit_integers() {
+    check("{ orders(first: 2147483647) { nodes { id } } }");
+    check("query($first: Int = -2147483648) { orders(first: $first) { nodes { id } } }");
+    assert_eq!(
+        refusal("{ orders(first: 2147483648) { nodes { id } } }"),
+        "The integer is outside the range of `Int`, a 32-bit integer, given for argument `first` of `QueryRoot.orders` (line 1, column 3)"
+    );
+    assert_eq!(
+        refusal("{ orders(first: -2147483649) { nodes { id } } }"),
+        "The integer is outside the range of `Int`, a 32-bit integer, given for argument `first` of `QueryRoot.orders` (line 1, column 3)"
+    );
+    // A float, an ID or a custom scalar is not bounded by `Int`.
+    check("{ orders(first: 1) { nodes { id } } product(id: 99999999999) { id } }");
+}
+
+#[test]
+fn default_values_fit_the_type_of_their_variable() {
+    check(
+        "query($first: Int! = 10, $sort: OrderSortKeys = CREATED_AT, $ids: [ID!] = [\"1\"]) { orders(first: $first, sortKey: $sort) { nodes { id } } nodes(ids: $ids) { id } }",
+    );
+    assert_eq!(
+        refusal("query($first: Int = \"ten\") { orders(first: $first) { nodes { id } } }"),
+        "a string is given for the default value of `$first`, of type `Int` (line 1, column 7)"
+    );
+    assert_eq!(
+        refusal("query($first: Int! = null) { orders(first: $first) { nodes { id } } }"),
+        "`null` is not allowed for the default value of `$first`, of type `Int!` (line 1, column 7)"
+    );
+    assert_eq!(
+        refusal("query($sort: OrderSortKeys = CREATED) { orders(first: 1, sortKey: $sort) { nodes { id } } }"),
+        "`CREATED` is not a value of the enum `OrderSortKeys` (did you mean `CREATED_AT`?) (in the default value of `$sort`) (line 1, column 7)"
+    );
+    assert_eq!(
+        refusal("query($first: Int = 3000000000) { orders(first: $first) { nodes { id } } }"),
+        "The integer is outside the range of `Int`, a 32-bit integer, given for the default value of `$first` (line 1, column 7)"
+    );
+}
+
+#[test]
 fn checks_input_object_literals() {
     assert_eq!(
         refusal(
