@@ -44,9 +44,9 @@ run = [
 ]
 
 [tasks."ui:build"]
-description = "Rebuild the embedded admin UI into crates/openshop/ui-dist (committed)"
+description = "Rebuild the embedded admin UI into crates/openshop/ui-dist (committed) and the hash of its sources, ui-dist.sha256"
 dir = "crates/openshop-ui"
-run = "trunk build --release"
+run = "./build-dist.sh"
 
 [tasks."templates:ui"]
 description = "Build the admin UI bundle of the custom and public templates, from their admin pages, into their dist"
