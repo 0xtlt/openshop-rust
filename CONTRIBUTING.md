@@ -20,17 +20,25 @@ so they run in parallel against a single database. They never touch the
 
 ```bash
 cargo fmt --all --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
+cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo test --workspace --locked
 ```
+
+CI builds with `--locked`: `Cargo.lock` is committed, and a change to a
+dependency commits the lockfile with it. It also checks that the workspace
+builds with the oldest Rust it claims (`rust-version` in `Cargo.toml`), and runs
+[cargo-deny](https://embarkstudios.github.io/cargo-deny/) on the dependencies,
+as `deny.toml` configures it (`cargo install --locked cargo-deny`, then
+`cargo deny check`). Every action of the workflows is pinned to a commit;
+Dependabot proposes the updates.
 
 The admin UI is its own workspace:
 
 ```bash
 cd crates/openshop-ui
 cargo fmt --check
-cargo clippy --target wasm32-unknown-unknown -- -D warnings
-cargo test
+cargo clippy --target wasm32-unknown-unknown --locked -- -D warnings
+cargo test --locked
 trunk build --release      # writes crates/openshop/ui-dist
 ```
 

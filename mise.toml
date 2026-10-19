@@ -23,12 +23,12 @@ run = [
 
 [tasks.lint]
 description = "Clippy on the whole workspace, warnings are errors"
-run = "cargo clippy --workspace --all-targets -- -D warnings"
+run = "cargo clippy --workspace --all-targets --locked -- -D warnings"
 
 [tasks.test]
 description = "Run the test suite (needs PostgreSQL: `mise run db:up`, or set DATABASE_URL)"
 # Each test owns a schema and a small pool: cap parallelism to stay under max_connections.
-run = "cargo test --workspace -- --test-threads=4"
+run = "cargo test --workspace --locked -- --test-threads=4"
 
 [tasks.check]
 description = "fmt check + clippy + tests"
@@ -39,8 +39,8 @@ run = "cargo fmt --all -- --check"
 description = "fmt check + clippy (wasm32) + tests of the admin UI workspace"
 run = [
   "cargo fmt --manifest-path crates/openshop-ui/Cargo.toml -- --check",
-  "cargo clippy --manifest-path crates/openshop-ui/Cargo.toml --target wasm32-unknown-unknown -- -D warnings",
-  "cargo test --manifest-path crates/openshop-ui/Cargo.toml",
+  "cargo clippy --manifest-path crates/openshop-ui/Cargo.toml --target wasm32-unknown-unknown --locked -- -D warnings",
+  "cargo test --manifest-path crates/openshop-ui/Cargo.toml --locked",
 ]
 
 [tasks."ui:build"]

@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- CI is hardened. Every action is pinned to the commit of a release, the
+  workflows only get `contents: read`, checkouts keep no credentials, and
+  cargo runs with `--locked` (in `mise.toml` too) so a build never moves
+  `Cargo.lock`. The toolchain is the one of `mise.toml` (1.98.1) instead of
+  whatever `stable` is that day. Two jobs are new: `msrv`, which checks the
+  workspace and the admin UI on Rust 1.88, the `rust-version` we promise, and
+  `deny`, which runs cargo-deny on both lockfiles (advisories, licenses,
+  sources; `deny.toml`). Dependabot proposes weekly updates of the crates and
+  of the actions. Both found something: `openshop-ui` did not build on 1.88
+  (a temporary borrowed in a struct literal, fixed), and the lockfile had
+  `rustls` 0.23.45, which has four advisories fixed in 0.23.46 (updated).
 - `openshop init` makes a project that builds: its `openshop` dependency was
   pinned to the tag `v<version>` of the CLI, which the repository does not
   have, so the project of `cargo install --git … openshop-cli` followed by

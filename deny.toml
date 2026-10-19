@@ -1,0 +1,49 @@
+# cargo-deny: `cargo deny check`, run by the `deny` job of CI. It covers the
+# workspace; the admin UI workspace (`crates/openshop-ui`) has its own
+# lockfile and is checked with `--manifest-path crates/openshop-ui/Cargo.toml`.
+
+[advisories]
+# A vulnerability or a yanked crate fails the check. An unmaintained crate
+# fails it only when the workspace depends on it directly, not through a
+# dependency we cannot change (`paste`, a build-time proc-macro of leptos).
+#
+# RUSTSEC-2023-0071 (`rsa`, no fix) is not ignored because it is not reached:
+# `rsa` is in Cargo.lock only through `sqlx-mysql`, an optional dependency of
+# `sqlx-macros-core` that is never compiled (`cargo tree -i rsa` is empty), so
+# cargo-deny, which reads the dependency graph, does not see it. If a
+# dependency starts to compile it, ignore the advisory here with that reason
+# or drop the dependency.
+unmaintained = "workspace"
+
+[licenses]
+# What the dependency tree uses, all permissive. `r-efi` is offered under
+# `MIT OR Apache-2.0 OR LGPL-2.1-or-later`: the first two are taken.
+allow = [
+  "0BSD",
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "BSL-1.0",
+  "CC0-1.0",
+  "CDLA-Permissive-2.0",
+  "ISC",
+  "MIT",
+  "Unicode-3.0",
+  "Unlicense",
+  "Zlib",
+]
+confidence-threshold = 0.8
+
+[bans]
+# Several versions of a crate (rand, digest, getrandom, base64 ...) come in
+# through dependencies that have not caught up: a warning, not a failure.
+multiple-versions = "warn"
+wildcards = "allow"
+
+[sources]
+# crates.io, and nothing else: no unknown registry, no git dependency.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []
