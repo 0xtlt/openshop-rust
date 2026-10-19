@@ -107,7 +107,13 @@ larger configurations easier to split:
 - An identifier that is not a UUID returns `404` (`Run not found`,
   `Token not found`) instead of a database error.
 - `POST /api/crons/toggle` requires `key` (string) and `enabled` (boolean) and
-  answers `400` otherwise.
+  answers `400` otherwise, and `404` (`Cron not found`) for a key that is not
+  a cron the shop sees.
+- A shop only sees the crons that apply to it: those that run once without a
+  shop, those of every shop, and those that name it. `GET /api/crons`,
+  `GET /api/flows` and the MCP tools `openshop.crons.list` and
+  `openshop.flows.list` leave out the crons of other shops, and show only the
+  shop of the caller among the shops a cron names.
 - `POST /api/runs/bulk-delete` answers `400 No IDs provided` for a missing or
   invalid body; identifiers that are not UUIDs count as skipped.
 - Log export uses JSON for any `format` other than `csv`, and only letters and

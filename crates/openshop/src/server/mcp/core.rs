@@ -221,8 +221,8 @@ fn list_flows(ctx: &McpContext) -> Value {
             let crons: Vec<Value> = config
                 .crons
                 .iter()
-                .filter(|cron| cron.flow == *name)
-                .map(|cron| json!({ "name": cron.name, "schedule": cron.schedule, "shops": cron.shops_json() }))
+                .filter(|cron| cron.flow == *name && cron.is_visible_to(&ctx.shop))
+                .map(|cron| json!({ "name": cron.name, "schedule": cron.schedule, "shops": cron.shops_json_for(&ctx.shop) }))
                 .collect();
             json!({
                 "name": name,
@@ -270,6 +270,7 @@ pub(crate) async fn cron_items(
         .crons
         .iter()
         .enumerate()
+        .filter(|(_, cron)| cron.is_visible_to(shop))
         .map(|(index, cron)| {
             let key = cron.key();
             let enabled = overrides
@@ -283,11 +284,11 @@ pub(crate) async fn cron_items(
             item.insert("flow".into(), Value::from(cron.flow.clone()));
             item.insert("schedule".into(), Value::from(cron.schedule.clone()));
             if shops_first {
-                item.insert("shops".into(), cron.shops_json());
+                item.insert("shops".into(), cron.shops_json_for(shop));
                 item.insert("input".into(), json!(cron.input));
             } else {
                 item.insert("input".into(), json!(cron.input));
-                item.insert("shops".into(), cron.shops_json());
+                item.insert("shops".into(), cron.shops_json_for(shop));
             }
             item.insert("enabled".into(), Value::from(enabled));
             Value::Object(item)
@@ -295,13 +296,23 @@ pub(crate) async fn cron_items(
         .collect())
 }
 
+/// Enables or disables a cron of the shop. `false` when no cron of that key is
+/// visible to the shop: nothing is written then.
 pub(crate) async fn set_cron_enabled(
     app: &crate::app::OpenShop,
     app_handle: &str,
     shop: &str,
     key: &str,
     enabled: bool,
-) -> Result<()> {
+) -> Result<bool> {
+    if !app
+        .config()
+        .crons
+        .iter()
+        .any(|cron| cron.key() == key && cron.is_visible_to(shop))
+    {
+        return Ok(false);
+    }
     sqlx::query(
         "INSERT INTO cron_overrides (app_handle, shop, cron_key, enabled) VALUES ($1, $2, $3, $4) \
          ON CONFLICT (app_handle, shop, cron_key) DO UPDATE SET enabled = EXCLUDED.enabled, updated_at = now()",
@@ -312,7 +323,7 @@ pub(crate) async fn set_cron_enabled(
     .bind(enabled)
     .execute(app.db())
     .await?;
-    Ok(())
+    Ok(true)
 }
 
 async fn set_cron_enabled_tool(ctx: McpContext, input: JsonMap) -> Result<Value> {
@@ -322,7 +333,9 @@ async fn set_cron_enabled_tool(ctx: McpContext, input: JsonMap) -> Result<Value>
     let Some(enabled) = boolean_input(&input, "enabled") else {
         bail!("enabled is required");
     };
-    set_cron_enabled(&ctx.app, &ctx.shopify_app, &ctx.shop, key, enabled).await?;
+    if !set_cron_enabled(&ctx.app, &ctx.shopify_app, &ctx.shop, key, enabled).await? {
+        bail!("Unknown cron \"{key}\"");
+    }
     Ok(structured_result(json!({ "ok": true, "key": key, "enabled": enabled })))
 }
 

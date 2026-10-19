@@ -714,6 +714,28 @@ impl CronShops {
     }
 }
 
+impl CronShops {
+    /// Whether a shop may see a cron: one that runs for no shop or for every
+    /// shop says nothing about others, one that names shops is seen by those.
+    pub fn is_visible_to(&self, shop: &str) -> bool {
+        match self {
+            Self::Global | Self::All => true,
+            Self::Shop(named) => named == shop,
+            Self::Shops(named) => named.iter().any(|named| named == shop),
+        }
+    }
+
+    /// [`CronShops::to_json`] for a shop that sees the cron: the shops it
+    /// names are reduced to that shop, never the others.
+    pub fn to_json_for(&self, shop: &str) -> Value {
+        match self {
+            Self::Shop(_) => Value::from(shop),
+            Self::Shops(_) => Value::from(vec![shop]),
+            Self::Global | Self::All => self.to_json(),
+        }
+    }
+}
+
 impl From<Vec<String>> for CronShops {
     fn from(value: Vec<String>) -> Self {
         Self::Shops(value)
@@ -781,6 +803,16 @@ impl Cron {
 
     pub fn shops_json(&self) -> Value {
         self.shops.clone().unwrap_or_default().to_json()
+    }
+
+    /// Whether a shop may see this cron, its input and its shops.
+    pub fn is_visible_to(&self, shop: &str) -> bool {
+        self.shops.clone().unwrap_or_default().is_visible_to(shop)
+    }
+
+    /// The shops of the cron as a shop sees them: only itself among those named.
+    pub fn shops_json_for(&self, shop: &str) -> Value {
+        self.shops.clone().unwrap_or_default().to_json_for(shop)
     }
 }
 

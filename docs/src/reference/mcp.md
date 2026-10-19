@@ -285,10 +285,10 @@ Built-in resources are:
 | `openshop.shops.list` | `shopify_admin_graphql` | Shows the installation of the token's shop (scopes, install date) when it is installed; never another shop. |
 | `openshop.admin.graphql` | `shopify_admin_graphql` | `query` required; `shop` is optional and, when given, must be the token's shop; `variables` defaults `{}`; `apiVersion` is `YYYY-MM` or `latest` and defaults to the latest stable version. |
 | `openshop.logs.search` | `read_logs` | `runId` required; `q` uses the [log query syntax](logging.md#log-query-syntax); `levels` defaults to `info,warn,error`; `includeContext` defaults to true; `limit` 50, max 200. |
-| `openshop.flows.list` | `read_flows` | Includes input schemas and configured crons. |
+| `openshop.flows.list` | `read_flows` | Includes input schemas and the crons that apply to the token's shop. |
 | `openshop.flows.run` | `run_flows` | `flow` required; `input` defaults `{}`; runs only for token shop. |
-| `openshop.crons.list` | `read_crons` | Includes per-token-shop override state. |
-| `openshop.crons.set_enabled` | `manage_crons` | Requires `key` and boolean `enabled`. |
+| `openshop.crons.list` | `read_crons` | The crons that apply to the token's shop (shared ones and those naming it), with its override state. A cron naming several shops shows only the token's shop. |
+| `openshop.crons.set_enabled` | `manage_crons` | Requires `key` and boolean `enabled`; the key must be of a cron listed by `openshop.crons.list`. |
 
 Every core tool acts on the `(app handle, shop)` pair of the token and on
 nothing else. The GraphQL tool always runs against the token's own shop: the

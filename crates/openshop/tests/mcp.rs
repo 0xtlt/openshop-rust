@@ -2836,6 +2836,103 @@ async fn openshop_crons_list_and_set_enabled_are_scoped_to_the_token_shop(ctx: &
     assert_eq!(overrides, [(true,)]);
 }
 
+/// Crons aimed at shops: one at `SHOP_B` with an input of its own, one at the
+/// context's shop and `SHOP_B`, one at a third shop, next to the shared ones.
+fn named_shops_config() -> OpenShopConfig {
+    OpenShopConfig::builder()
+        .flow(log_flow())
+        .cron(Cron::new("0 * * * *", "log-flow").name("global"))
+        .cron(Cron::new("1 * * * *", "log-flow").all_shops())
+        .cron(
+            Cron::new("2 * * * *", "log-flow")
+                .shop(SHOP_B)
+                .input(json!({ "customer": "secret-of-b" })),
+        )
+        .cron(Cron::new("3 * * * *", "log-flow").shops(["test.myshopify.com", SHOP_B]))
+        .cron(Cron::new("4 * * * *", "log-flow").shop("third.myshopify.com"))
+        .build()
+        .unwrap()
+}
+
+#[openshop::test(TestContext::new(named_shops_config()))]
+async fn crons_and_flows_only_show_what_applies_to_the_token_shop(ctx: &TestContext) {
+    let shop = ctx.shop.clone();
+    let token_a = create_token(ctx, &["read_crons", "manage_crons", "read_flows"]).await;
+    let token_b = create_token_as(ctx, SHOP_B, &["read_crons", "manage_crons", "read_flows"], json!({})).await;
+
+    let keys = |body: &Value| strings(&body["result"]["structuredContent"]["crons"], "key");
+    let body = call_tool(ctx, &token_a.token, "openshop.crons.list", json!({})).await;
+    assert_eq!(
+        keys(&body),
+        ["log-flow:0 * * * *", "log-flow:1 * * * *", "log-flow:3 * * * *"]
+    );
+    let crons = &body["result"]["structuredContent"]["crons"];
+    assert_eq!(crons[0]["shops"], "global");
+    assert_eq!(crons[1]["shops"], "all");
+    // A cron naming several shops only says the shop of the token.
+    assert_eq!(crons[2]["shops"], json!([shop]));
+    // The indexes are those of the configuration.
+    assert_eq!(crons[2]["index"], 3);
+    let text = body.to_string();
+    for secret in [SHOP_B, "secret-of-b", "third.myshopify.com"] {
+        assert!(!text.contains(secret), "{secret}: {text}");
+    }
+
+    let body = call_tool(ctx, &token_a.token, "openshop.flows.list", json!({})).await;
+    let flow_crons = &body["result"]["structuredContent"]["flows"][0]["crons"];
+    assert_eq!(strings(flow_crons, "schedule"), ["0 * * * *", "1 * * * *", "3 * * * *"]);
+    assert_eq!(flow_crons[2]["shops"], json!([shop]));
+    let text = body.to_string();
+    for secret in [SHOP_B, "secret-of-b", "third.myshopify.com"] {
+        assert!(!text.contains(secret), "{secret}: {text}");
+    }
+
+    // The shop it is named by sees its own cron, with its input.
+    let body = call_tool(ctx, &token_b.token, "openshop.crons.list", json!({})).await;
+    assert_eq!(
+        keys(&body),
+        [
+            "log-flow:0 * * * *",
+            "log-flow:1 * * * *",
+            "log-flow:2 * * * *",
+            "log-flow:3 * * * *"
+        ]
+    );
+    let crons = &body["result"]["structuredContent"]["crons"];
+    assert_eq!(crons[2]["shops"], SHOP_B);
+    assert_eq!(crons[2]["input"], json!({ "customer": "secret-of-b" }));
+    assert_eq!(crons[3]["shops"], json!([SHOP_B]));
+    assert!(!body.to_string().contains("test.myshopify.com"));
+
+    // A cron that does not apply to the token shop cannot be switched.
+    for hidden in ["log-flow:2 * * * *", "log-flow:4 * * * *", "log-flow:9 * * * *"] {
+        let body = call_tool(
+            ctx,
+            &token_a.token,
+            "openshop.crons.set_enabled",
+            json!({ "key": hidden, "enabled": false }),
+        )
+        .await;
+        assert_eq!(
+            body["error"],
+            json!({ "code": -32000, "message": format!("Unknown cron \"{hidden}\"") })
+        );
+    }
+    let (overrides,): (i64,) = sqlx::query_as("SELECT count(*) FROM cron_overrides")
+        .fetch_one(&ctx.db)
+        .await
+        .unwrap();
+    assert_eq!(overrides, 0);
+    let body = call_tool(
+        ctx,
+        &token_a.token,
+        "openshop.crons.set_enabled",
+        json!({ "key": "log-flow:3 * * * *", "enabled": false }),
+    )
+    .await;
+    assert_eq!(body["result"]["structuredContent"]["ok"], true);
+}
+
 // ─── Isolation between Shopify apps ──────────────────────────────────
 
 #[openshop::test(multi_app_context())]

@@ -12,6 +12,14 @@
   the token's shop only, and needs the `shopify_admin_graphql` permission; a
   token without it no longer sees the tool. A client that passed another shop
   must use a token of that shop.
+- A shop only sees the crons that apply to it. `openshop.crons.list`,
+  `openshop.flows.list`, `GET /api/crons` and `GET /api/flows` returned every
+  configured cron, with its input and the shops it names, so a shop read the
+  input and the domain of another shop's cron. They now list the crons that run
+  without a shop, those of every shop and those that name the shop, and a cron
+  naming several shops shows only the shop of the caller. Switching a cron
+  that the shop does not see is refused (`Unknown cron` through MCP, `404
+  Cron not found` on `POST /api/crons/toggle`).
 - `openshop init` makes a project from one of three templates: `minimal`, one
   provider and one flow, as before; `custom`, a custom app with every building
   block and a page of its own next to the built-in admin; `public`, a public
