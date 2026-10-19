@@ -13,12 +13,14 @@ the views of custom admin pages are written with, re-exported as `openshop::ui`.
 rustup target add wasm32-unknown-unknown
 cargo install trunk --locked
 
-trunk build --release
+trunk build --release --dist target/ui-dist   # to look at it
+./build-dist.sh                                # the committed bundle
 ```
 
-The bundle (`index.html` and a hashed `.js` / `.wasm` pair) is written to
-`../openshop/ui-dist`. This crate is its own cargo workspace: run `cargo` and `trunk` from this
-directory.
+The bundle (`index.html` and a hashed `.js` / `.wasm` pair) committed in
+`../openshop/ui-dist` is built by `build-dist.sh` (`mise run ui:build`), which keeps the paths of
+your machine out of it and writes `ui-dist.sha256`, the hash of its sources that CI checks. This
+crate is its own cargo workspace: run `cargo` and `trunk` from this directory.
 
 ```bash
 cargo test                                               # pure logic, on the host

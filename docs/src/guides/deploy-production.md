@@ -61,13 +61,31 @@ UI bundle; see [Ship the bundle](add-admin-page.md#ship-the-bundle).
 
 The generated `Dockerfile` is a starting point: it builds the binary, installs
 it as `app`, copies `migrations/` and `shopify.app*.toml`, sets
-`OPENSHOP_ENV=production` and `PORT=3000`, and starts the web process. With
-the `custom` and `public` templates, it builds the admin UI bundle first and
-serves it from `/app/dist`.
+`OPENSHOP_ENV=production` and `PORT=3000`, and starts the web process, as a
+user without privileges (`app`, uid 10001): the app only reads the files copied
+into the image. With the `custom` and `public` templates, it builds the admin UI
+bundle first and serves it from `/app/dist`. The base images are named by
+digest, and trunk is checked against the SHA-256 of its release; keep both when
+you edit the file.
 
 ```bash
 docker build -t my-app .
 ```
+
+While the `openshop` repository is private, cargo needs a token to fetch it.
+Give it to the build as a secret, which stays out of the image. Write the file
+outside the project: whatever is in the directory is in the build context, and
+`COPY . .` would put the token in a layer.
+
+```bash
+secret=$(mktemp)
+printf '[url "https://x-access-token:%s@github.com/"]\n\tinsteadOf = https://github.com/\n' "$GITHUB_TOKEN" > "$secret"
+docker build --secret id=gitconfig,src="$secret" -t my-app .
+rm "$secret"
+```
+
+The generated `.dockerignore` and `.gitignore` list `gitconfig` as a second
+guard.
 
 One container runs one process. Start workers and the migration job from the
 same image with a different command, as the generated `Procfile` does:

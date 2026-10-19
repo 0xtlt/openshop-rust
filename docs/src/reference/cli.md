@@ -55,7 +55,9 @@ a script or CI, it needs both, and fails with the list of templates.
 
 The target must be an empty or nonexistent directory. `init` derives the Cargo
 package name from the directory name, pins the `openshop` dependency to the
-Git tag of the CLI's own version (`tag = "v<version>"`), and writes the
+Git commit the CLI was built from (`rev = "<commit>"`; a CLI built without git
+pins the tag `v<version>` of its version instead, and says that the tag has to
+exist), and writes the
 migrations of the template in `migrations/`: the framework schema, and the
 tables of its models. It does not update an existing app. See the
 [first-app tutorial](../tutorials/first-app.md) for the full setup and
@@ -65,7 +67,17 @@ tables of its models. It does not update an existing app. See the
 | --- | --- |
 | `<dir>` | Target directory, relative to the current directory. Asked for in a terminal; elsewhere the command fails with `Usage: openshop init [<dir>] [--template=<name>]`. |
 | `--template=<name>`, `--template <name>`, `-t <name>` | `minimal`, `custom` or `public`. Asked for in a terminal; elsewhere the command fails with ``[openshop] Name a template: openshop init <dir> --template=<name>`` and the list. An unknown name fails with `[openshop] Unknown template: <name>`. |
-| `--openshop-path=<dir>` | Make the generated `Cargo.toml` depend on a local checkout of the `openshop` crate (`path = "…"`) instead of the tagged Git repository. The directory must exist. |
+| `--openshop-rev=<commit>` | Make the generated `Cargo.toml` depend on this commit of the Git repository (`rev = "…"`) instead of the commit the CLI was built from. |
+| `--openshop-tag=<tag>` | Depend on this tag of the Git repository (`tag = "…"`). |
+| `--openshop-branch=<name>` | Depend on this branch of the Git repository (`branch = "…"`). |
+| `--openshop-path=<dir>` | Depend on a local checkout of the `openshop` crate (`path = "…"`). The directory must exist. |
+
+At most one of the four `--openshop-*` arguments; a second one fails with
+``[openshop] Name one source for `openshop` ``. The commit the CLI was built from
+is the one `cargo install --git` took; for a CLI built from a local checkout,
+make sure it is pushed, or pass `--openshop-path`. The `Dockerfile` of a project
+with admin views installs the CLI of the `rev`, `tag` or `branch` of the
+manifest, so it follows any of them.
 
 A non-empty target fails with
 `[openshop] Target directory is not empty: <path>`, before any question about

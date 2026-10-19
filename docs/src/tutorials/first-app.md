@@ -41,7 +41,7 @@ This tutorial starts from the `minimal` template. Without `--template`,
 The CLI prints `[openshop] Created my-app in` followed by the project path. Keep
 this terminal in `my-app` for the remaining commands. The generated project pins
 the OpenShop version that created it: its `Cargo.toml` depends on `openshop` at
-the matching git tag, and on `serde`.
+the git commit the CLI was built from, and on `serde`.
 
 Open these three files:
 

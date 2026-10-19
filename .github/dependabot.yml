@@ -1,0 +1,35 @@
+# Weekly updates, one pull request per ecosystem and directory rather than one
+# per crate. `Cargo.lock` is committed and CI builds with `--locked`: the
+# pull request is what moves it.
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      cargo:
+        patterns: ["*"]
+
+  # The admin UI is a workspace of its own, with its own lockfile.
+  - package-ecosystem: cargo
+    directory: /crates/openshop-ui
+    schedule:
+      interval: weekly
+    groups:
+      cargo-ui:
+        patterns: ["*"]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
+
+  # The base images of the Dockerfile of the generated projects, named by digest.
+  - package-ecosystem: docker
+    directory: /templates/shared
+    schedule:
+      interval: weekly

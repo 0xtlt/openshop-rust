@@ -2,6 +2,49 @@
 
 ## Unreleased
 
+- CI checks three things it did not. The committed admin UI bundle
+  (`crates/openshop/ui-dist`) is compared with its sources: `mise run ui:build`
+  (now `crates/openshop-ui/build-dist.sh`) writes the hash of what the bundle is
+  built from to `crates/openshop-ui/ui-dist.sha256`, and the `ui-dist` job fails
+  when the sources moved without a new bundle. The bundle was already stale (the
+  admin UI was fixed for Rust 1.88 without rebuilding it) and carried the paths
+  of the machine that built it: it is rebuilt, from a fixed place with the paths
+  rewritten. The bytes of a bundle depend on the platform that builds it, so CI
+  cannot compare them. The `docker` job makes a project of the `minimal` and of
+  the `custom` template and builds its image; the `docs` job builds the guide;
+  the `windows` job checks that `openshop` and the CLI compile there.
+- The `Dockerfile` of a generated project is stricter. The image runs as a user
+  without privileges (`app`, uid 10001) instead of root, trunk is checked against
+  the SHA-256 of its release before it runs, and both base images are named by
+  digest (Dependabot proposes the next ones). A private `openshop` repository
+  is fetched with the optional build secret `gitconfig` (a git configuration
+  with a token, kept outside the project so that `COPY . .` cannot copy it, and
+  never written to a layer): `docker build --secret id=gitconfig,src=<file> .`;
+  without it the build is the same as before. `gitconfig` is in the generated
+  `.dockerignore` and `.gitignore`.
+- CI is hardened. Every action is pinned to the commit of a release, the
+  workflows only get `contents: read`, trunk and cargo-deny are installed from
+  their release with a SHA-256 written in the repository (a release asset can
+  be replaced), checkouts keep no credentials, and
+  cargo runs with `--locked` (in `mise.toml` too) so a build never moves
+  `Cargo.lock`. The toolchain is the one of `mise.toml` (1.98.1) instead of
+  whatever `stable` is that day. Two jobs are new: `msrv`, which checks the
+  workspace and the admin UI on Rust 1.88, the `rust-version` we promise, and
+  `deny`, which runs cargo-deny on both lockfiles (advisories, licenses,
+  sources; `deny.toml`). Dependabot proposes weekly updates of the crates and
+  of the actions. Both found something: `openshop-ui` did not build on 1.88
+  (a temporary borrowed in a struct literal, fixed), and the lockfile had
+  `rustls` 0.23.45, which has four advisories fixed in 0.23.46 (updated).
+- `openshop init` makes a project that builds: its `openshop` dependency was
+  pinned to the tag `v<version>` of the CLI, which the repository does not
+  have, so the project of `cargo install --git … openshop-cli` followed by
+  `openshop init` failed on its first `cargo` command. The CLI now records the
+  commit it is built from, and the project depends on that commit (`rev`). A
+  CLI built without git, from a package say, falls back to the tag and says at
+  the end of `init` that the tag has to exist. `--openshop-rev=<commit>`,
+  `--openshop-tag=<tag>` and `--openshop-branch=<name>` name another source,
+  next to `--openshop-path=<dir>`; at most one of the four. CI checks a project of
+  the `minimal` template that depends on the commit under test through git.
 - `openshop init` makes a project from one of three templates: `minimal`, one
   provider and one flow, as before; `custom`, a custom app with every building
   block and a page of its own next to the built-in admin; `public`, a public

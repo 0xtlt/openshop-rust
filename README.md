@@ -25,6 +25,12 @@ cp .env.example .env
 openshop dev
 ```
 
+The project depends on `openshop` at the commit the CLI was built from, which
+`cargo install --git` takes from the repository. To follow another commit, tag
+or branch, or a local checkout, pass `--openshop-rev=<commit>`,
+`--openshop-tag=<tag>`, `--openshop-branch=<name>` or `--openshop-path=<dir>`
+to `openshop init`.
+
 `openshop dev` pushes the database schema, then serves the API, the admin UI,
 a worker and the cron scheduler on `http://localhost:3000`. It restarts when
 sources change, and the admin UI reloads by itself. Run it through

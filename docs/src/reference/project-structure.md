@@ -92,9 +92,10 @@ src/
 
 Declares the package and its dependencies:
 
-- `openshop`, from the Git repository, pinned to the tag of the release that
-  created the project (`tag = "v<version>"`), or from a local path when the
-  project was created with `--openshop-path`;
+- `openshop`, from the Git repository, pinned to the commit of the CLI that
+  created the project (`rev = "<commit>"`), or to the `tag` or `branch` it was
+  given, or from a local path when the project was created with
+  `--openshop-path`;
 - `serde`, used to derive `Serialize` and `Deserialize` on the types the
   application exchanges, such as the arguments of a provider method or the
   payload of a webhook;

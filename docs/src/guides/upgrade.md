@@ -13,8 +13,10 @@ a non-production environment before changing production.
    ```
 
 2. Update to an explicit version first. The generated `Cargo.toml` pins the
-   release that created the project with a Git tag, `v` followed by the
-   version. Change the tag on both `openshop` entries:
+   commit of the CLI that created the project (`rev`), unless the project was
+   created with `--openshop-tag`, or by a CLI built without git, which pins
+   the tag `v` followed by its version. Point both `openshop` entries at the
+   release, here a tag:
 
    ```toml
    [dependencies]

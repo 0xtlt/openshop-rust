@@ -20,23 +20,49 @@ so they run in parallel against a single database. They never touch the
 
 ```bash
 cargo fmt --all --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
+cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo test --workspace --locked
 ```
+
+CI builds with `--locked`: `Cargo.lock` is committed, and a change to a
+dependency commits the lockfile with it. It also checks that the workspace
+builds with the oldest Rust it claims (`rust-version` in `Cargo.toml`), and runs
+[cargo-deny](https://embarkstudios.github.io/cargo-deny/) on the dependencies,
+as `deny.toml` configures it (`cargo install --locked cargo-deny`, then
+`cargo deny check`; `cargo audit`, which reads `Cargo.lock` itself, is
+configured in `.cargo/audit.toml`). Every action of the workflows is pinned to a commit;
+Dependabot proposes the updates. Three jobs check what no test runs: `docker`
+makes a project of the `minimal` and of the `custom` template and builds its
+image, `docs` builds the guide (`mise run docs:build`), and `windows` checks
+that `openshop` and the CLI compile there.
 
 The admin UI is its own workspace:
 
 ```bash
 cd crates/openshop-ui
 cargo fmt --check
-cargo clippy --target wasm32-unknown-unknown -- -D warnings
-cargo test
-trunk build --release      # writes crates/openshop/ui-dist
+cargo clippy --target wasm32-unknown-unknown --locked -- -D warnings
+cargo test --locked
 ```
 
 `crates/openshop/ui-dist` is committed so that applications depending on the
 framework get the admin UI without installing trunk. Rebuild and commit it when
-you change `crates/openshop-ui`.
+you change `crates/openshop-ui` (or `openshop-shared`, or update the
+dependencies of the admin UI):
+
+```bash
+mise run ui:build          # crates/openshop-ui/build-dist.sh
+```
+
+The script builds on a copy of the sources, in a fixed place, with the paths of
+your machine rewritten, so that the bundle does not carry them and a checkout
+anywhere builds the same bytes. It also writes `crates/openshop-ui/ui-dist.sha256`,
+the hash of the sources the bundle is built from. CI computes it again
+(`crates/openshop-ui/sources-hash.sh`) and fails when the sources moved without
+a new bundle. It does not compare the bytes of a bundle it builds itself: they
+depend on the platform (the compiler orders the functions differently on macOS
+and on Linux, on x86_64 and on aarch64), so a bundle built on a Mac is never the
+one built by CI.
 
 The custom and public templates have admin pages with a view, so each has an
 admin UI bundle of its own, compiled from its `admin` module. Build them into

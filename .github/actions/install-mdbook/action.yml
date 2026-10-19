@@ -1,0 +1,24 @@
+name: Install mdbook
+description: >-
+  Installs mdbook from its GitHub release, after checking the SHA-256 of the
+  archive that is written here: a release asset can be replaced, this fails
+  when it is. Keep the version in step with mise.toml; a new version needs the
+  digest of its x86_64-unknown-linux-gnu archive (the `digest` of the asset in
+  the release API, confirmed by `sha256sum` of the download).
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        VERSION: v0.5.4
+        SHA256: 3f28de05dafca9d0f2eab99c662116b0e37b89b1d96a08f8f430b9eeae958cd7
+      run: |
+        set -euo pipefail
+        asset="mdbook-$VERSION-x86_64-unknown-linux-gnu.tar.gz"
+        dir="$(mktemp -d)"
+        gh release download "$VERSION" --repo rust-lang/mdBook --pattern "$asset" --dir "$dir"
+        echo "$SHA256  $dir/$asset" | sha256sum --check -
+        mkdir -p "$HOME/.local/bin"
+        tar -xzf "$dir/$asset" -C "$HOME/.local/bin" mdbook
+        echo "$HOME/.local/bin" >> "$GITHUB_PATH"
