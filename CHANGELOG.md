@@ -8,8 +8,8 @@
   mistyped a command went on. No command, `help`, `--help` and `-h` still print
   the usage and exit 0.
 - `openshop init` leaves no partial project behind: when it fails after it
-  started writing, it removes the directories it created, or the contents of
-  the empty directory it was given. It rewrites the manifest of a template
+  started writing, it removes the files it wrote and the directories it made,
+  and nothing else (another `init` may write next to it). It rewrites the manifest of a template
   with `toml_edit` instead of line by line, so `workspace = true` is replaced
   whatever the layout (tables on several lines, dotted keys,
   `[dependencies.<name>]`), with comments kept. The generated projects are

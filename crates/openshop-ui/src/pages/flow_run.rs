@@ -307,9 +307,14 @@ pub fn FlowRun() -> impl IntoView {
         } else {
             view! {
                 <Page heading="Run">
-                    <s-section>
-                        <s-spinner />
-                    </s-section>
+                    // A run that cannot be loaded says why, instead of spinning for ever.
+                    {move || match load_error.get() {
+                        Some(error) => {
+                            view! { <s-banner tone="critical" heading="Could not load the run">{error}</s-banner> }
+                                .into_any()
+                        }
+                        None => view! { <s-section><s-spinner /></s-section> }.into_any(),
+                    }}
                 </Page>
             }
             .into_any()

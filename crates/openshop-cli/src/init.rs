@@ -699,8 +699,8 @@ fn init(cwd: &Path, target: &str, template: &Template, source: Option<Source>) -
         Some(source) => source,
         None => Source::default(),
     };
-    let created = Created::before(&target_dir);
-    match write_project(&target_dir, target, template, source) {
+    let mut created = Created::default();
+    match write_project(&mut created, &target_dir, target, template, source) {
         Ok(result) => Ok(result),
         Err(error) => {
             created.take_back();
@@ -709,38 +709,46 @@ fn init(cwd: &Path, target: &str, template: &Template, source: Option<Source>) -
     }
 }
 
-/// What `init` creates in the target: all of it is taken back when `init`
-/// fails, and nothing else, as the target is new or empty.
-enum Created {
-    /// The target did not exist: the first directory of its path that did not,
-    /// with what is under it.
-    Directory(PathBuf),
-    /// The target is an empty directory, which stays: what is in it.
-    Contents(PathBuf),
+/// What one `init` created: the files it wrote and the directories it made, in
+/// order. When it fails it takes back those and nothing else, as another
+/// `init` may be writing next to it, in a directory both created.
+#[derive(Default)]
+struct Created {
+    /// `(path, is a directory)`.
+    paths: Vec<(PathBuf, bool)>,
 }
 
 impl Created {
-    fn before(target_dir: &Path) -> Created {
-        if target_dir.exists() {
-            return Created::Contents(target_dir.to_path_buf());
+    /// Makes `directory` and the ones above it that do not exist.
+    fn directory(&mut self, directory: &Path) -> std::io::Result<()> {
+        let missing: Vec<&Path> = directory.ancestors().take_while(|path| !path.exists()).collect();
+        for path in missing.into_iter().rev() {
+            match std::fs::create_dir(path) {
+                Ok(()) => self.paths.push((path.to_path_buf(), true)),
+                // Made by another `init` since: it is theirs.
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(error) => return Err(error),
+            }
         }
-        let new = target_dir.ancestors().take_while(|path| !path.exists()).last();
-        Created::Directory(new.unwrap_or(target_dir).to_path_buf())
+        Ok(())
     }
 
+    fn file(&mut self, file: &Path, content: &str) -> std::io::Result<()> {
+        if let Some(parent) = file.parent() {
+            self.directory(parent)?;
+        }
+        self.paths.push((file.to_path_buf(), false));
+        std::fs::write(file, content)
+    }
+
+    /// Removes the files, then the directories, last made first. A directory
+    /// that holds something this `init` did not make stays.
     fn take_back(&self) {
-        match self {
-            Created::Directory(path) => {
-                std::fs::remove_dir_all(path).ok();
-            }
-            Created::Contents(directory) => {
-                for entry in std::fs::read_dir(directory).into_iter().flatten().flatten() {
-                    let path = entry.path();
-                    match entry.file_type() {
-                        Ok(kind) if kind.is_dir() => std::fs::remove_dir_all(path).ok(),
-                        _ => std::fs::remove_file(path).ok(),
-                    };
-                }
+        for (path, is_directory) in self.paths.iter().rev() {
+            if *is_directory {
+                std::fs::remove_dir(path).ok();
+            } else {
+                std::fs::remove_file(path).ok();
             }
         }
     }
@@ -748,8 +756,14 @@ impl Created {
 
 /// Writes the project into `target_dir`, creating it if need be. It leaves
 /// the files it wrote when it fails: see [`Created`].
-fn write_project(target_dir: &Path, target: &str, template: &Template, source: Source) -> Result<InitResult> {
-    std::fs::create_dir_all(target_dir)?;
+fn write_project(
+    created: &mut Created,
+    target_dir: &Path,
+    target: &str,
+    template: &Template,
+    source: Source,
+) -> Result<InitResult> {
+    created.directory(target_dir)?;
     let target_dir = target_dir.canonicalize()?;
 
     let app_name = target_dir
@@ -776,11 +790,10 @@ fn write_project(target_dir: &Path, target: &str, template: &Template, source: S
     };
 
     for &(path, content) in template.files.iter().chain(files::SHARED) {
-        let file = target_dir.join(path);
-        if let Some(parent) = file.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        std::fs::write(&file, project_file(path, content, template, &project)?)?;
+        created.file(
+            &target_dir.join(path),
+            &project_file(path, content, template, &project)?,
+        )?;
     }
 
     println!(
@@ -1203,6 +1216,26 @@ mod tests {
         // A project that works is still made in a directory that failed before.
         init(&cwd, "empty", minimal(), None).unwrap();
         assert!(cwd.join("empty/Cargo.toml").is_file());
+        std::fs::remove_dir_all(cwd).ok();
+    }
+
+    #[test]
+    fn taking_back_leaves_what_another_init_wrote_in_a_directory_they_share() {
+        let cwd = temp_dir("shared");
+        let mut first = Created::default();
+        first.file(&cwd.join("apps/a/Cargo.toml"), "a").unwrap();
+        // Another `init`, meanwhile, in the `apps` the first one made.
+        let mut second = Created::default();
+        second.file(&cwd.join("apps/b/Cargo.toml"), "b").unwrap();
+
+        first.take_back();
+        assert!(!cwd.join("apps/a").exists());
+        assert_eq!(std::fs::read_to_string(cwd.join("apps/b/Cargo.toml")).unwrap(), "b");
+
+        // The shared directory was the first one's to remove, and it was not empty.
+        assert!(cwd.join("apps").is_dir());
+        second.take_back();
+        assert!(!cwd.join("apps/b").exists());
         std::fs::remove_dir_all(cwd).ok();
     }
 

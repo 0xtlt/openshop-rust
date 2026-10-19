@@ -87,8 +87,9 @@ the template. The `custom` and `public` templates have admin pages with a
 view, compiled to WebAssembly: install the toolchain once with
 `rustup target add wasm32-unknown-unknown` and `cargo install trunk`.
 
-If `init` fails after it started writing, it removes what it created: the
-directories it made, or the contents of the empty directory it was given. A
+If `init` fails after it started writing, it removes the files it wrote and the
+directories it made, nothing else: a directory it shares with another `init`
+stays if that one wrote in it. A
 directory that already had something in it is refused before anything is
 written.
 
