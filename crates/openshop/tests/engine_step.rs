@@ -924,3 +924,64 @@ async fn a_sleep_stored_but_not_answered_still_suspends_the_run() {
     assert_eq!(stored[0].status, "sleeping");
     test.cleanup().await;
 }
+
+#[tokio::test]
+async fn a_step_is_recognized_when_the_answer_to_the_check_is_lost_too() {
+    let test = new_test().await;
+    let run_id = create_run(&test).await;
+    let proxy = DropProxy::start(&test.db).await;
+    let step = StepExecutor::new(
+        proxy.pool(&test.db).await,
+        run_id.to_string(),
+        FlowLogger::new(test.db.clone(), run_id.to_string()),
+        None,
+        None,
+        1,
+        None,
+    );
+
+    // The insert commits and its answer is lost; the retry meets its own row
+    // and asks for it, and the answer to that is lost as well.
+    proxy.drop_answer_of("INSERT INTO step_results");
+    proxy.drop_answer_of("SELECT 1 FROM step_results WHERE id");
+    let runs = Arc::new(AtomicUsize::new(0));
+    let counted = runs.clone();
+    let value: u32 = step
+        .run("charge", || async move {
+            counted.fetch_add(1, Ordering::SeqCst);
+            Ok(5)
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(proxy.cuts(), 2, "both answers were lost");
+    assert_eq!((value, runs.load(Ordering::SeqCst)), (5, 1));
+    assert_eq!(find_steps(&test, run_id).await[0].status, "completed");
+    test.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_sleep_is_recognized_when_the_answer_to_the_check_is_lost_too() {
+    let test = new_test().await;
+    let run_id = create_run(&test).await;
+    let proxy = DropProxy::start(&test.db).await;
+    let step = StepExecutor::new(
+        proxy.pool(&test.db).await,
+        run_id.to_string(),
+        FlowLogger::new(test.db.clone(), run_id.to_string()),
+        None,
+        None,
+        1,
+        None,
+    );
+
+    proxy.drop_answer_of("INSERT INTO step_results");
+    proxy.drop_answer_of("SELECT 1 FROM step_results WHERE id");
+    let error = step.sleep("pause", Duration::from_secs(60)).await.unwrap_err();
+
+    assert_eq!(proxy.cuts(), 2, "both answers were lost");
+    assert!(error.downcast_ref::<SleepSignal>().is_some(), "{error:#}");
+    let stored = find_steps(&test, run_id).await;
+    assert_eq!((stored.len(), stored[0].status.as_str()), (1, "sleeping"));
+    test.cleanup().await;
+}
