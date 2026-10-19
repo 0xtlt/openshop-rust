@@ -647,8 +647,9 @@ async fn writes_a_line_without_waiting_for_the_end_of_the_run() {
 /// acts for that claim.
 async fn owned_executor(test: &TestApp) -> (Uuid, StepExecutor, CancellationToken) {
     let run_id = create_run(test).await;
-    sqlx::query("UPDATE flow_runs SET worker_id = 'worker-a', attempts = 1 WHERE id = $1")
+    sqlx::query("UPDATE flow_runs SET worker_id = 'worker-a', attempts = 1, lease_id = $2 WHERE id = $1")
         .bind(run_id)
+        .bind(first_lease())
         .execute(&test.db)
         .await
         .unwrap();
@@ -656,8 +657,14 @@ async fn owned_executor(test: &TestApp) -> (Uuid, StepExecutor, CancellationToke
     (run_id, step, signal)
 }
 
-/// An execution of `worker-a` at attempt 1, with its own cancellation signal.
+/// The lease of the first claim of the run.
+fn first_lease() -> Uuid {
+    Uuid::from_u128(1)
+}
+
+/// An execution of `worker-a` under the first lease, with its own cancellation signal.
 fn owner_of(test: &TestApp, run_id: Uuid) -> (StepExecutor, CancellationToken) {
+    let lease_id = first_lease();
     let signal = CancellationToken::new();
     let step = StepExecutor::new(
         test.db.clone(),
@@ -668,15 +675,16 @@ fn owner_of(test: &TestApp, run_id: Uuid) -> (StepExecutor, CancellationToken) {
         1,
         Some(RunOwner {
             worker_id: "worker-a".to_string(),
-            attempt: Some(1),
+            lease_id: Some(lease_id),
         }),
     );
     (step, signal)
 }
 
-/// Another execution takes the run over.
+/// Another claim takes the run over: the same worker, which claims it again
+/// after a cancel and a retry, so with the same `attempts` and a new lease.
 async fn take_over(test: &TestApp, run_id: Uuid) {
-    sqlx::query("UPDATE flow_runs SET attempts = 2 WHERE id = $1")
+    sqlx::query("UPDATE flow_runs SET lease_id = gen_random_uuid() WHERE id = $1")
         .bind(run_id)
         .execute(&test.db)
         .await
@@ -835,7 +843,7 @@ async fn a_step_write_that_waits_for_its_row_blocks_the_takeover_of_the_run() {
     let takeover = tokio::spawn({
         let db = db.clone();
         async move {
-            sqlx::query("UPDATE flow_runs SET worker_id = 'worker-b', attempts = 2 WHERE id = $1")
+            sqlx::query("UPDATE flow_runs SET worker_id = 'worker-b', lease_id = gen_random_uuid() WHERE id = $1")
                 .bind(run_id)
                 .execute(&db)
                 .await

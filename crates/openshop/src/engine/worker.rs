@@ -113,18 +113,19 @@ const CLAIM_SQL: &str = "\
       UPDATE flow_runs SET \
         status = 'failed', \
         error = 'Run abandoned: its worker stopped after ' || attempts || ' attempts without recording an outcome', \
-        worker_id = NULL, available_at = NULL, completed_at = $1 \
+        worker_id = NULL, lease_id = NULL, available_at = NULL, completed_at = $1 \
       WHERE id = ANY(ARRAY(SELECT id FROM candidate WHERE exhausted)) \
-      RETURNING id, flow_name, app_handle, shop, input, attempts, error \
+      RETURNING id, flow_name, app_handle, shop, input, attempts, error, NULL::uuid AS lease_id \
     ), claimed AS ( \
       UPDATE flow_runs SET \
         status = 'running', \
         attempts = CASE WHEN status = 'sleeping' THEN GREATEST(attempts, 1) ELSE attempts + 1 END, \
         worker_id = $2, \
+        lease_id = gen_random_uuid(), \
         available_at = $3, \
         started_at = COALESCE(started_at, $1) \
       WHERE id = ANY(ARRAY(SELECT id FROM candidate WHERE NOT exhausted)) \
-      RETURNING id, flow_name, app_handle, shop, input, attempts, NULL::text AS error \
+      RETURNING id, flow_name, app_handle, shop, input, attempts, NULL::text AS error, lease_id \
     ) \
     SELECT run.*, candidate.exhausted FROM ( \
       SELECT * FROM claimed UNION ALL SELECT * FROM failed \
@@ -142,6 +143,8 @@ struct ClaimedRun {
     input: Option<Value>,
     attempts: i32,
     error: Option<String>,
+    /// Names this claim: the claim sets it, and every write of the execution checks it.
+    lease_id: Option<Uuid>,
     exhausted: bool,
 }
 
@@ -326,19 +329,20 @@ impl Inner {
         });
     }
 
-    /// Fails a run this worker still owns, at the attempt it claimed. A
+    /// Fails a run this worker still owns, under the claim it holds. A
     /// transient error is retried. If the write fails for good, the lease
     /// expires and the run is claimed again.
-    async fn fail_run(&self, run_id: Uuid, attempt: i32, error: String) {
+    async fn fail_run(&self, run_id: Uuid, lease_id: Option<Uuid>, error: String) {
         let failed = retry(format!("failing run {run_id}"), || async {
             sqlx::query(
-                "UPDATE flow_runs SET status = 'failed', error = $2, worker_id = NULL, completed_at = now() \
-                 WHERE id = $1 AND worker_id = $3 AND status = 'running' AND attempts = $4",
+                "UPDATE flow_runs SET status = 'failed', error = $2, worker_id = NULL, lease_id = NULL, \
+                   completed_at = now() \
+                 WHERE id = $1 AND worker_id = $3 AND status = 'running' AND lease_id IS NOT DISTINCT FROM $4",
             )
             .bind(run_id)
             .bind(&error)
             .bind(&self.worker_id)
-            .bind(attempt)
+            .bind(lease_id)
             .execute(self.app.db())
             .await?;
             Ok(())
@@ -360,7 +364,7 @@ impl Inner {
                 app_handle: claimed.app_handle,
                 shop: claimed.shop,
             };
-            self.fail_run(run.id, claimed.attempts, run.error.clone()).await;
+            self.fail_run(run.id, claimed.lease_id, run.error.clone()).await;
             report_failed_run(&run);
             return;
         }
@@ -372,18 +376,19 @@ impl Inner {
 
         let heartbeat: HeartbeatFn = {
             let inner = self.clone();
-            let (run_id, attempt) = (claimed.id, claimed.attempts);
+            let (run_id, lease_id) = (claimed.id, claimed.lease_id);
             Arc::new(move || {
                 let inner = inner.clone();
                 Box::pin(async move {
                     let extended = sqlx::query(
                         "UPDATE flow_runs SET available_at = $1 \
-                         WHERE id = $2 AND worker_id = $3 AND status = 'running' AND attempts = $4",
+                         WHERE id = $2 AND worker_id = $3 AND status = 'running' \
+                           AND lease_id IS NOT DISTINCT FROM $4",
                     )
                     .bind(inner.lease_until())
                     .bind(run_id)
                     .bind(&inner.worker_id)
-                    .bind(attempt)
+                    .bind(lease_id)
                     .execute(inner.app.db())
                     .await?;
                     Ok(extended.rows_affected() > 0)
@@ -395,7 +400,8 @@ impl Inner {
             .input(input)
             .shopify_app(claimed.app_handle)
             .worker_id(self.worker_id.clone())
-            .attempt(claimed.attempts);
+            .attempt(claimed.attempts)
+            .lease_id(claimed.lease_id);
         options.on_heartbeat = Some(heartbeat);
         // Extend the lease at least twice per lease period.
         options.heartbeat_interval =
@@ -421,7 +427,7 @@ impl Inner {
             Ok(Err(error)) => error_message(&error),
             Err(panic) => format!("panicked: {}", panic_message(panic)),
         };
-        self.fail_run(claimed.id, claimed.attempts, format!("Worker error: {failure}")).await;
+        self.fail_run(claimed.id, claimed.lease_id, format!("Worker error: {failure}")).await;
     }
 
     fn backoff_delay(&self, consecutive: u32) -> u64 {

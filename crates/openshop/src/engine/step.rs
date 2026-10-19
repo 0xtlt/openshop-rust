@@ -59,25 +59,26 @@ fn is_unique_violation(error: &sqlx::Error) -> bool {
         .is_some_and(|error| error.is_unique_violation())
 }
 
-/// Who an execution is, when a worker leased the run for it. A claim of the
-/// run bumps its `attempts`, except when it wakes up from a sleep. So the
-/// worker and the attempt tell this execution from every other one, including
-/// an earlier one of the same worker whose lease expired.
+/// Who an execution is, when a worker leased the run for it. Every claim of
+/// the run sets a new `lease_id`, which tells this execution from every other
+/// one, including an earlier one of the same worker whose lease expired or
+/// whose run was canceled and retried, which resets `attempts`.
 #[derive(Debug, Clone)]
 pub struct RunOwner {
     pub worker_id: String,
-    /// The attempt the claim returned. Any attempt matches when unset.
-    pub attempt: Option<i32>,
+    /// The lease the claim returned. Any lease matches when unset.
+    pub lease_id: Option<Uuid>,
 }
 
 /// The condition for a write to apply: the run is still leased to the
 /// execution. The arguments are the numbers of the parameters that hold the run
-/// ID, the worker and the attempt of the owner; without an owner the last two
+/// ID, the worker and the lease of the owner; without an owner the last two
 /// are `NULL` and the condition always holds.
 ///
 /// The status of the run is not part of it: a run canceled from the API keeps
-/// its worker, and its steps still record that they were canceled. Whoever
-/// takes a run over, or finishes it, changes the worker or the attempt.
+/// its worker and its lease, and its steps still record that they were
+/// canceled. Whoever takes a run over, or finishes it, changes the worker or the
+/// lease.
 ///
 /// The row of the run is locked `FOR SHARE` until the statement ends. Reading
 /// it is not enough: the statement may wait for another one that holds the row
@@ -85,11 +86,11 @@ pub struct RunOwner {
 /// heartbeat or the end of the run wait for the write instead (or, for a claim,
 /// skip the run). The lock on the run is always taken before the one on the
 /// step, and no statement takes them the other way round.
-fn owned(run: u8, worker: u8, attempt: u8) -> String {
+fn owned(run: u8, worker: u8, lease: u8) -> String {
     format!(
         "(${worker}::text IS NULL OR EXISTS (SELECT 1 FROM flow_runs \
            WHERE id = ${run}::uuid AND worker_id = ${worker} \
-             AND attempts = COALESCE(${attempt}::int, attempts) FOR SHARE))"
+             AND (${lease}::uuid IS NULL OR lease_id = ${lease}) FOR SHARE))"
     )
 }
 
@@ -154,7 +155,7 @@ impl StepExecutor {
                 .bind(step_id)
                 .bind(&self.flow_run_id)
                 .bind(self.owner.as_ref().map(|owner| owner.worker_id.as_str()))
-                .bind(self.owner.as_ref().and_then(|owner| owner.attempt))
+                .bind(self.owner.as_ref().and_then(|owner| owner.lease_id))
                 .execute(&self.db)
                 .await?;
             Ok(result.rows_affected() > 0)
@@ -242,7 +243,7 @@ impl StepExecutor {
                 .bind(name)
                 .bind(self.attempt)
                 .bind(self.owner.as_ref().map(|owner| owner.worker_id.as_str()))
-                .bind(self.owner.as_ref().and_then(|owner| owner.attempt))
+                .bind(self.owner.as_ref().and_then(|owner| owner.lease_id))
                 .bind(new_id)
                 .fetch_optional(&self.db)
                 .await;
@@ -406,7 +407,7 @@ impl StepExecutor {
                 .bind(self.attempt)
                 .bind(Value::from(to_iso(&resume_at)).to_string())
                 .bind(self.owner.as_ref().map(|owner| owner.worker_id.as_str()))
-                .bind(self.owner.as_ref().and_then(|owner| owner.attempt))
+                .bind(self.owner.as_ref().and_then(|owner| owner.lease_id))
                 .bind(new_id)
                 .execute(&self.db)
                 .await;

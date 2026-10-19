@@ -44,6 +44,8 @@ pub struct RunFlowOptions {
     /// When set, the outcome is only recorded if this worker still owns the run.
     pub worker_id: Option<String>,
     pub attempt: Option<i32>,
+    /// The claim the worker holds on the run: the outcome is only recorded while it does.
+    pub lease_id: Option<Uuid>,
     pub on_heartbeat: Option<HeartbeatFn>,
     /// Delay between two heartbeats. Defaults to [`HEARTBEAT_INTERVAL`].
     pub heartbeat_interval: Option<Duration>,
@@ -61,6 +63,7 @@ impl RunFlowOptions {
             shopify_app: None,
             worker_id: None,
             attempt: None,
+            lease_id: None,
             on_heartbeat: None,
             heartbeat_interval: None,
             connectors: None,
@@ -84,6 +87,11 @@ impl RunFlowOptions {
 
     pub fn attempt(mut self, attempt: i32) -> Self {
         self.attempt = Some(attempt);
+        self
+    }
+
+    pub fn lease_id(mut self, lease_id: Option<Uuid>) -> Self {
+        self.lease_id = lease_id;
         self
     }
 
@@ -193,9 +201,10 @@ async fn finish_run(db: &PgPool, run_id: Uuid, owner: Option<&RunOwner>, update:
            error = CASE WHEN $2 = 'completed' THEN NULL ELSE COALESCE($3, error) END, \
            available_at = COALESCE($4, available_at), \
            completed_at = CASE WHEN $5 THEN now() ELSE completed_at END, \
-           worker_id = NULL \
+           worker_id = NULL, \
+           lease_id = NULL \
          WHERE id = $1 AND ($6::text IS NULL \
-           OR (worker_id = $6 AND status = 'running' AND attempts = COALESCE($7, attempts)))",
+           OR (worker_id = $6 AND status = 'running' AND ($7::uuid IS NULL OR lease_id = $7)))",
     )
         .bind(run_id)
         .bind(update.status)
@@ -203,7 +212,7 @@ async fn finish_run(db: &PgPool, run_id: Uuid, owner: Option<&RunOwner>, update:
         .bind(update.available_at)
         .bind(update.completed)
         .bind(owner.map(|owner| owner.worker_id.as_str()))
-        .bind(owner.and_then(|owner| owner.attempt))
+        .bind(owner.and_then(|owner| owner.lease_id))
         .execute(db)
         .await?;
         Ok(result.rows_affected() > 0)
@@ -283,7 +292,7 @@ async fn run_attempt(app: &OpenShop, opts: RunFlowOptions) -> Result<RunOutcome>
     });
     let owner = opts.worker_id.clone().map(|worker_id| RunOwner {
         worker_id,
-        attempt: opts.attempt,
+        lease_id: opts.lease_id,
     });
     let owner = owner.as_ref();
     let step = StepExecutor::new(

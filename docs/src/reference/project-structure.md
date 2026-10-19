@@ -17,7 +17,8 @@ my-app/
 │       └── warehouse.rs
 ├── migrations/
 │   ├── <timestamp>_openshop_init.sql
-│   └── <timestamp>_openshop_queue_indexes.sql
+│   ├── <timestamp>_openshop_queue_indexes.sql
+│   └── <timestamp>_openshop_run_lease.sql
 ├── Cargo.toml
 ├── shopify.app.toml
 ├── shopify.web.toml
