@@ -104,9 +104,10 @@ or process-manager entries; two sequential lines in a shell script would never
 start the worker. The web process serves HTTP and dispatches scheduled runs.
 The worker executes the queued work.
 
-Keep one web replica when using crons: every web replica starts a scheduler and
-there is no leader election. Scale workers after measuring database and provider
-capacity. See [Operate an app](operate-app.md) for that procedure.
+Several web replicas are fine with crons: every replica starts a scheduler, and
+the first to reach an occurrence of a cron for a shop queues its run, so it
+runs once. Scale workers after measuring database and provider capacity. See
+[Operate an app](operate-app.md) for that procedure.
 
 Both processes stop cleanly on `SIGTERM`. Give the worker up to its lease
 duration, 30 seconds by default, to finish active runs before the platform kills

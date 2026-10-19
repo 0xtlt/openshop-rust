@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+- Several `start` processes can run crons: an occurrence of a cron for a shop
+  is queued once, not once per process. Each process still starts a scheduler,
+  and all of them compute the same occurrences; the first to insert a row in
+  the new `cron_ticks` table `(app_handle, shop, cron_key, scheduled_at)` queues
+  the run, in the same transaction, and the others skip it. A run that
+  the flow's concurrency refuses leaves the occurrence free. There is no leader
+  and nothing to elect again when a process stops. The scheduler removes the
+  rows older than a day. The framework schema has a third migration,
+  `openshop_cron_ticks`: run `migrate generate` then `migrate` before starting
+  the new version, or every occurrence of a cron fails with a missing table
+  (`migrate check` fails until it is there). The TypeScript runtime does not
+  use the table. Until now, N replicas fired every cron N times, and the
+  documentation told to keep a single web replica.
 - `openshop init` makes a project from one of three templates: `minimal`, one
   provider and one flow, as before; `custom`, a custom app with every building
   block and a page of its own next to the built-in admin; `public`, a public

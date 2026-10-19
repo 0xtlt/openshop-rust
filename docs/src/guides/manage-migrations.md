@@ -14,6 +14,7 @@ templates, by the tables of their models:
 migrations/
   20261006143115_openshop_init.sql
   20261006143116_openshop_queue_indexes.sql
+  20261006143117_openshop_cron_ticks.sql
 ```
 
 Each file starts with a marker line:

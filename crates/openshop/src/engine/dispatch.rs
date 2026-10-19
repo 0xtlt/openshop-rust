@@ -1,7 +1,7 @@
 //! Queueing a flow run.
 
 use anyhow::{Result, bail};
-use chrono::{Duration, Utc};
+use chrono::{DateTime, Duration, Utc};
 use serde::Serialize;
 use serde_json::Value;
 use sqlx::PgPool;
@@ -87,6 +87,36 @@ pub(crate) fn unknown_flow(config: &OpenShopConfig, flow_name: &str) -> anyhow::
 /// Inserts a `pending` run. Concurrency is decided under an advisory lock scoped
 /// to `(app, shop, flow)` so that simultaneous dispatches cannot both pass.
 pub async fn dispatch_flow(db: &PgPool, config: &OpenShopConfig, options: DispatchOptions) -> Result<QueuedRun> {
+    Ok(queue_run(db, config, options, None)
+        .await?
+        .expect("a run without a tick is always queued"))
+}
+
+/// An occurrence of a cron for a shop: what the processes running the same
+/// scheduler agree on to queue its run once.
+pub(crate) struct CronTick<'a> {
+    pub cron_key: &'a str,
+    pub scheduled_at: DateTime<Utc>,
+}
+
+/// Queues the run of a cron occurrence, unless a process already did. The
+/// claim of the occurrence and the run are written in one transaction, so a
+/// run that is refused leaves the occurrence free. `None` when it was taken.
+pub(crate) async fn dispatch_cron_tick(
+    db: &PgPool,
+    config: &OpenShopConfig,
+    options: DispatchOptions,
+    tick: &CronTick<'_>,
+) -> Result<Option<QueuedRun>> {
+    queue_run(db, config, options, Some(tick)).await
+}
+
+async fn queue_run(
+    db: &PgPool,
+    config: &OpenShopConfig,
+    options: DispatchOptions,
+    tick: Option<&CronTick<'_>>,
+) -> Result<Option<QueuedRun>> {
     let DispatchOptions {
         flow_name,
         input,
@@ -108,6 +138,22 @@ pub async fn dispatch_flow(db: &PgPool, config: &OpenShopConfig, options: Dispat
         .bind(format!("{shopify_app}:{shop}:{flow_name}"))
         .execute(&mut *tx)
         .await?;
+
+    if let Some(tick) = tick {
+        let claimed = sqlx::query(
+            "INSERT INTO cron_ticks (app_handle, shop, cron_key, scheduled_at) VALUES ($1, $2, $3, $4) \
+             ON CONFLICT DO NOTHING",
+        )
+        .bind(&shopify_app)
+        .bind(&shop)
+        .bind(tick.cron_key)
+        .bind(tick.scheduled_at)
+        .execute(&mut *tx)
+        .await?;
+        if claimed.rows_affected() == 0 {
+            return Ok(None);
+        }
+    }
 
     if flow.concurrency.unwrap_or_default() == Concurrency::Reject {
         let existing: Option<(Uuid,)> = sqlx::query_as(
@@ -156,8 +202,8 @@ pub async fn dispatch_flow(db: &PgPool, config: &OpenShopConfig, options: Dispat
     .await?;
     tx.commit().await?;
 
-    Ok(QueuedRun {
+    Ok(Some(QueuedRun {
         run_id,
         status: "pending",
-    })
+    }))
 }

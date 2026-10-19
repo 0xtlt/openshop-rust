@@ -405,6 +405,7 @@ async fn generate_then_migrate_creates_the_framework_tables() {
         [
             "__openshop_migrations",
             "cron_overrides",
+            "cron_ticks",
             "flow_runs",
             "installations",
             "logs",

@@ -286,6 +286,82 @@ async fn cron_override_only_disables_its_own_shop() {
     test.cleanup().await;
 }
 
+/// The occurrence a run was queued for: runs of one tick are created within
+/// milliseconds of it, so half a second back lands them all on the same second.
+fn tick_of(run: &FlowRun) -> i64 {
+    (run.created_at.timestamp_millis() - 500).div_euclid(1_000)
+}
+
+#[tokio::test]
+async fn replicas_queue_a_tick_once_for_each_shop() {
+    let shops = vec!["shop-a.myshopify.com".to_string(), "shop-b.myshopify.com".to_string()];
+    let config = || {
+        config(
+            [concurrent_flow("quick-flow")],
+            [Cron::new(EVERY_SECOND, "quick-flow").shops(shops.clone())],
+        )
+    };
+    let test = TestApp::new(config()).await;
+    // Three processes of the same application on one database.
+    let replicas = [test.sibling(config()), test.sibling(config())];
+    let mut schedulers = vec![Scheduler::start(&test.app).unwrap()];
+    schedulers.extend(replicas.iter().map(|replica| Scheduler::start(replica).unwrap()));
+
+    // Several ticks, so that a replica that is late for one is still seen.
+    wait_for_runs(&test, "quick-flow", |runs| {
+        runs.iter().map(tick_of).collect::<BTreeSet<_>>().len() >= 3
+    })
+    .await;
+    schedulers.clear();
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    let runs = runs_of(&test, "quick-flow").await;
+    let mut seen = BTreeSet::new();
+    for run in &runs {
+        assert!(
+            seen.insert((tick_of(run), run.shop.clone())),
+            "{} was queued twice for the same tick",
+            run.shop
+        );
+    }
+    // Every tick reached both shops.
+    for tick in runs.iter().map(tick_of).collect::<BTreeSet<_>>() {
+        assert_eq!(runs.iter().filter(|run| tick_of(run) == tick).count(), 2, "tick {tick}");
+    }
+    test.cleanup().await;
+}
+
+#[tokio::test]
+async fn forgets_the_ticks_of_the_past_day() {
+    let test = TestApp::new(config(
+        [concurrent_flow("quick-flow")],
+        [Cron::new(EVERY_SECOND, "quick-flow")],
+    ))
+    .await;
+    for age in ["2 days", "1 hour"] {
+        sqlx::query(
+            "INSERT INTO cron_ticks (app_handle, shop, cron_key, scheduled_at) \
+             VALUES ('default', '__global__', $1, now() - $2::interval)",
+        )
+        .bind(format!("other-flow:{age}"))
+        .bind(age)
+        .execute(&test.db)
+        .await
+        .unwrap();
+    }
+
+    let mut scheduler = Scheduler::start(&test.app).unwrap();
+    wait_for_runs(&test, "quick-flow", |runs| !runs.is_empty()).await;
+    scheduler.stop();
+
+    let keys: Vec<String> = sqlx::query_scalar("SELECT cron_key FROM cron_ticks WHERE cron_key LIKE 'other-flow:%'")
+        .fetch_all(&test.db)
+        .await
+        .unwrap();
+    assert_eq!(keys, ["other-flow:1 hour"]);
+    test.cleanup().await;
+}
+
 #[tokio::test]
 async fn stop_clears_all_crons() {
     let test = TestApp::new(config(

@@ -1,16 +1,18 @@
 //! Cron scheduler: dispatches flows on a schedule.
 //!
-//! There is no leader election. Run one scheduler unless duplicate cron
-//! attempts are acceptable.
+//! Every `start` process runs a scheduler, and they all compute the same
+//! occurrences. The first to claim an occurrence of a cron for a shop in
+//! `cron_ticks` queues its run; the others find it taken and skip it. There is
+//! no leader, so a process that stops loses nothing the others do not cover.
 
 use anyhow::{Result, anyhow, bail};
-use chrono::Local;
+use chrono::{DateTime, Duration, Local, Utc};
 
 use croner::parser::{CronParser, Seconds};
 use serde_json::Value;
 use tokio::task::JoinHandle;
 
-use super::dispatch::DispatchOptions;
+use super::dispatch::{CronTick, DispatchOptions, dispatch_cron_tick};
 use super::errors::FlowConcurrencyError;
 use super::step::error_message;
 use crate::app::OpenShop;
@@ -181,7 +183,26 @@ impl Missed {
     }
 }
 
-async fn run_entry(app: &OpenShop, entry: &Cron) {
+/// How long the claims of past occurrences are kept. They only have to outlive
+/// the gap between the processes that fire the same occurrence.
+const TICK_RETENTION_HOURS: i64 = 24;
+
+async fn prune_ticks(app: &OpenShop) {
+    let result = sqlx::query("DELETE FROM cron_ticks WHERE scheduled_at < $1")
+        .bind(Utc::now() - Duration::hours(TICK_RETENTION_HOURS))
+        .execute(app.db())
+        .await;
+    if let Err(error) = result {
+        logger::warn(format!(
+            "[openshop] Could not remove old cron ticks: {}",
+            error_message(&error.into())
+        ));
+    }
+}
+
+/// Fires an occurrence of a cron. `scheduled_at` is the same instant in every
+/// process, and is what makes the run be queued once.
+async fn run_entry(app: &OpenShop, entry: &Cron, scheduled_at: DateTime<Utc>) {
     let flow = &entry.flow;
     let targets = match resolve_targets(app, entry).await {
         Ok(targets) => targets,
@@ -210,6 +231,11 @@ async fn run_entry(app: &OpenShop, entry: &Cron) {
     ));
 
     let cron_key = entry.key();
+    prune_ticks(app).await;
+    let tick = CronTick {
+        cron_key: &cron_key,
+        scheduled_at,
+    };
     let mut missed = Missed::default();
     for CronTarget { shopify_app, shop } in targets {
         let outcome: Result<()> = async {
@@ -232,7 +258,8 @@ async fn run_entry(app: &OpenShop, entry: &Cron) {
             if let Some(input @ Value::Object(_)) = &entry.input {
                 params = params.input(input.clone());
             }
-            app.dispatch_flow(params).await?;
+            // `None`: another process queued this occurrence.
+            dispatch_cron_tick(app.db(), app.config(), params, &tick).await?;
             Ok(())
         }
         .await;
@@ -281,9 +308,13 @@ impl Scheduler {
                     tokio::time::sleep(wait).await;
                     after = next;
 
+                    // Whole seconds: every process must name the occurrence alike.
+                    let Some(scheduled_at) = DateTime::from_timestamp(next.timestamp(), 0) else {
+                        continue;
+                    };
                     let app = app.clone();
                     let entry = job_entry.clone();
-                    tokio::spawn(async move { run_entry(&app, &entry).await });
+                    tokio::spawn(async move { run_entry(&app, &entry, scheduled_at).await });
                 }
             }));
 
