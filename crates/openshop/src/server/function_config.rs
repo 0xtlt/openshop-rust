@@ -2,7 +2,7 @@
 
 use serde_json::Value;
 
-use super::provider_config::coerce_field_value;
+use super::provider_config::{coerce_field_value, validation_error};
 use crate::types::{Fields, JsonMap, is_missing};
 
 pub fn validate_function_config(fields: &Fields, raw_config: Option<&Value>) -> Result<JsonMap, String> {
@@ -20,7 +20,7 @@ pub fn validate_function_config(fields: &Fields, raw_config: Option<&Value>) -> 
             continue;
         };
         let value = match &field.validate {
-            Some(validate) => validate(&value).map_err(|summary| format!("Field \"{name}\": {summary}"))?,
+            Some(validate) => validate(&value).map_err(|summary| validation_error(name, field, &summary))?,
             None => value,
         };
         config.insert(name.clone(), value);

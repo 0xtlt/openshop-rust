@@ -19,6 +19,16 @@ pub(crate) fn js_number(text: &str) -> Value {
     }
 }
 
+/// The error for a value a validator refused. A secret is never repeated in it:
+/// for a password the `(was …)` part of the summary is dropped.
+pub(crate) fn validation_error(name: &str, field: &Field, summary: &str) -> String {
+    let summary = match field.field_type {
+        FieldType::Password => summary.split(" (was ").next().unwrap_or(summary),
+        _ => summary,
+    };
+    format!("Field \"{name}\": {summary}")
+}
+
 /// Form inputs arrive as strings: numbers and checkboxes are coerced to their
 /// types (`"3"` is 3, `"true"` is true). A value that is not of the type of its
 /// field, even after that, is refused with an error naming the field. A null or
@@ -30,7 +40,9 @@ pub(crate) fn coerce_field_value(name: &str, field: &Field, value: Option<Value>
     };
     match (field.field_type, &value) {
         (FieldType::Text | FieldType::Password, Value::String(_)) => Ok(Some(value)),
-        (FieldType::Text | FieldType::Password, other) => refuse("a string", other),
+        (FieldType::Text, other) => refuse("a string", other),
+        // A secret is not repeated in the error.
+        (FieldType::Password, _) => Err(format!("Field \"{name}\": must be a string")),
         (FieldType::Number, Value::Number(_)) => Ok(Some(value)),
         (FieldType::Number, Value::String(text)) if !text.trim().is_empty() => match js_number(text) {
             Value::Null => refuse("a number", &value),
@@ -111,16 +123,16 @@ pub fn parse_provider_config(
     let mut data = JsonMap::new();
 
     for (name, field) in &provider.fields {
-        let mut value = input.get(name).cloned();
+        let submitted = input.get(name).cloned();
 
-        if field.field_type == FieldType::Password
-            && is_missing(value.as_ref())
-            && let Some(existing) = existing_config.get(name)
-        {
-            value = Some(existing.clone());
-        }
-
-        let value = coerce_field_value(name, field, value)?;
+        // A blank password keeps the stored value as it is: it was checked when
+        // it was saved, and it may have been changed by the transformer since.
+        let value = match existing_config.get(name) {
+            Some(existing) if field.field_type == FieldType::Password && is_missing(submitted.as_ref()) => {
+                Some(existing.clone())
+            }
+            _ => coerce_field_value(name, field, submitted)?,
+        };
         if field.is_required() && is_missing(value.as_ref()) {
             return Err(format!("Field \"{name}\" is required"));
         }
@@ -144,7 +156,7 @@ pub fn parse_provider_config(
         }
 
         if let (Some(validate), Some(value)) = (&field.validate, value.filter(|value| !is_missing(Some(value)))) {
-            let validated = validate(&value).map_err(|summary| format!("Field \"{name}\": {summary}"))?;
+            let validated = validate(&value).map_err(|summary| validation_error(name, field, &summary))?;
             transformed.insert(name.clone(), validated);
         }
     }
@@ -381,8 +393,32 @@ mod tests {
         );
         assert_eq!(
             typed_error(json!({ "mode": "live", "token": { "a": 1 } })),
-            "Field \"token\": must be a string (was {\"a\":1})"
+            "Field \"token\": must be a string"
         );
+    }
+
+    #[test]
+    fn never_repeats_a_secret_in_an_error() {
+        let provider = Provider::new("erp")
+            .field("token", Field::password("Token").validate(validators::non_empty()))
+            .transformer(|mut data| {
+                if let Some(Value::String(token)) = data.get("token").cloned() {
+                    data.insert("token".into(), json!({ "accessToken": token }));
+                }
+                Value::Object(data)
+            });
+        let error =
+            parse_provider_config(&provider, Some(&json!({ "token": "secret-token" })), &JsonMap::new()).unwrap_err();
+        assert_eq!(error, "Field \"token\": must be a string");
+
+        // A stored password is not checked again, and not repeated when a validator refuses it.
+        let stored = object(json!({ "token": { "accessToken": "secret-token" } }));
+        let error = parse_provider_config(&provider, Some(&json!({ "token": "" })), &stored).unwrap_err();
+        assert!(!error.contains("secret-token"), "{error}");
+
+        let plain = Provider::new("erp").field("token", Field::password("Token"));
+        let parsed = parse_provider_config(&plain, Some(&json!({})), &stored).unwrap();
+        assert_eq!(parsed, stored);
     }
 
     #[test]

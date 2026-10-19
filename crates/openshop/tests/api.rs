@@ -1933,6 +1933,60 @@ async fn put_providers_checks_each_value_against_its_field_type() {
 }
 
 #[tokio::test]
+async fn put_providers_never_repeats_a_secret_in_an_error() {
+    // The transformer stores the token as an object, as a provider that keeps
+    // an OAuth token might do.
+    let plain = Provider::new("plain")
+        .field("endpoint", Field::text("Endpoint"))
+        .field("token", Field::password("Token"))
+        .transformer(|mut data| {
+            if let Some(Value::String(token)) = data.get("token").cloned() {
+                data.insert("token".into(), json!({ "accessToken": token }));
+            }
+            Value::Object(data)
+        });
+    let config = OpenShopConfig::builder()
+        .flow(noop_flow("test-flow"))
+        .provider(plain)
+        .build()
+        .unwrap();
+    let ctx = TestContext::with_options(
+        config,
+        TestOptions {
+            encryption_key: Some(ENCRYPTION_KEY.to_string()),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    // Not a string: the error does not say what it was.
+    let (status, body) = send(
+        ctx.put("/api/providers/plain")
+            .json(&json!({ "config": { "endpoint": "https://erp.test", "token": { "accessToken": "secret-token" } } })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body, error("Field \"token\": must be a string"));
+
+    // A blank password keeps the stored one, whatever shape the transformer gave it.
+    let (status, _) = send(
+        ctx.put("/api/providers/plain")
+            .json(&json!({ "config": { "endpoint": "https://erp.test", "token": "secret-token" } })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, body) = send(
+        ctx.put("/api/providers/plain")
+            .json(&json!({ "config": { "endpoint": "https://erp.test/v2", "token": "" } })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    ctx.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn provider_routes_reject_unknown_providers_and_missing_checkers() {
     let config = OpenShopConfig::builder()
         .flow(noop_flow("test-flow"))

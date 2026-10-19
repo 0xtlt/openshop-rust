@@ -63,7 +63,8 @@ pub fn url() -> Validator {
 /// written as an IP address in a loopback, private (`10/8`, `172.16/12`,
 /// `192.168/16`, `fc00::/7`), link-local (`169.254/16`, `fe80::/10`, which holds
 /// the cloud metadata endpoint), shared (`100.64/10`), multicast, broadcast or
-/// unspecified range. Odd spellings such as `http://2130706433/` or
+/// unspecified range. The IPv6 ranges that embed an IPv4 address (IPv4-mapped,
+/// IPv4-compatible, NAT64, 6to4, Teredo) are refused too, as is `fec0::/10`. Odd spellings such as `http://2130706433/` or
 /// `http://0x7f.1/` are read as the IP address they mean.
 ///
 /// This only looks at the text of the URL. A public name that resolves to a
@@ -116,12 +117,23 @@ fn is_internal_ipv6(address: std::net::Ipv6Addr) -> bool {
     if let Some(mapped) = address.to_ipv4_mapped() {
         return is_internal_ipv4(mapped);
     }
-    let first = address.segments()[0];
+    let segments = address.segments();
+    let first = segments[0];
     address.is_loopback()
         || address.is_unspecified()
         || address.is_multicast()
+        // fe80::/10 link-local and fec0::/10 site-local.
         || first & 0xffc0 == 0xfe80
+        || first & 0xffc0 == 0xfec0
         || first & 0xfe00 == 0xfc00
+        // Ranges that carry an IPv4 address inside: refused whole, as the
+        // address in them can be a private one. IPv4-compatible ::a.b.c.d,
+        // NAT64 64:ff9b::/96 and the local-use 64:ff9b:1::/48, 6to4 2002::/16
+        // and Teredo 2001::/32.
+        || segments[..6].iter().all(|segment| *segment == 0)
+        || (first == 0x64 && segments[1] == 0xff9b && (segments[2..6].iter().all(|s| *s == 0) || segments[2] == 1))
+        || first == 0x2002
+        || (first == 0x2001 && segments[1] == 0)
 }
 
 /// Any finite number.
@@ -287,6 +299,15 @@ mod tests {
             "http://[::ffff:169.254.169.254]/",
             "http://[fe80::1]/",
             "http://[fd00::1]/",
+            "http://[fec0::1]/",
+            "http://[::10.0.0.1]/",
+            "http://[::a00:1]/",
+            "http://[64:ff9b::a00:1]/",
+            "http://[64:ff9b::7f00:1]/",
+            "http://[64:ff9b:1::a00:1]/",
+            "http://[2002:a00:1::1]/",
+            "http://[2002:7f00:1::]/",
+            "http://[2001:0:4136:e378:8000:63bf:3fff:fdd2]/",
             "http://10.0.0.1/",
             "http://172.16.0.1/",
             "http://172.31.255.255/",

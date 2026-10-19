@@ -197,7 +197,8 @@ its field. A value of another type is refused with `400` and
 
 A null or an empty string is no value: a required field then fails with
 `Field "…" is required`, and an optional one is not saved. A blank password
-keeps the one already saved. Keys that are not fields of the provider are
+keeps the one already saved, as it is. The error for a password never repeats
+its value. Keys that are not fields of the provider are
 ignored and not saved. A transformer runs on the checked values, before the
 validators.
 
@@ -228,8 +229,9 @@ endpoint a merchant types in, use
 `validate = validators::public_url()`: it also refuses `localhost`,
 `*.localhost`, `metadata.google.internal` and hosts written as an IP address in
 a loopback, private (`10/8`, `172.16/12`, `192.168/16`, `fc00::/7`),
-link-local (`169.254/16`, `fe80::/10`), shared (`100.64/10`), multicast or
-unspecified range. It only reads the text of the URL: a public name that
+link-local (`169.254/16`, `fe80::/10`), site-local (`fec0::/10`), shared
+(`100.64/10`), multicast or unspecified range, and the IPv6 ranges that carry
+an IPv4 address (IPv4-mapped and -compatible, NAT64, 6to4, Teredo). It only reads the text of the URL: a public name that
 resolves to a private address (DNS rebinding) passes. If that matters, also
 check the address the connection is made to when the request is sent.
 
