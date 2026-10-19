@@ -17,6 +17,7 @@ use crate::types::WorkerConfig;
 /// The `openshop dev` command of the CLI wraps this with a file watcher that
 /// rebuilds and restarts the process when sources change.
 pub async fn start_dev(config: OpenShopConfig) -> Result<()> {
+    // Already done by `run`, which found nothing left to set; here for a caller of `start_dev`.
     load_env_file(&std::env::current_dir()?);
     let env = RuntimeEnv::from_env();
     let port = port(3000);
