@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use chrono::Utc;
-use common::{TEST_SHOP, TestApp, create_config, inject_write_fault, noop_flow, write_fault_hits};
+use common::{DropProxy, TEST_SHOP, TestApp, create_config, inject_write_fault, noop_flow, write_fault_hits};
 use openshop::db::schema::StepResult;
 use openshop::engine::{LeaseLostError, RunOwner, SleepSignal, StepExecutor};
 use openshop::runtime::time::to_iso;
@@ -784,5 +784,135 @@ async fn a_step_of_a_run_canceled_from_the_api_still_records_its_cancellation() 
 
     assert!(error.downcast_ref::<FlowCanceledError>().is_some(), "{error:#}");
     assert_eq!(find_steps(&test, run_id).await[0].status, "canceled");
+    test.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_step_write_that_waits_for_its_row_blocks_the_takeover_of_the_run() {
+    let test = new_test().await;
+    let (run_id, step, _) = owned_executor(&test).await;
+    let db = test.db.clone();
+
+    // Another statement holds the row of the step, as the step ends.
+    let holder = Arc::new(tokio::sync::Mutex::new(None));
+    let locked = Arc::new(Notify::new());
+    let ending = tokio::spawn({
+        let (db, holder, locked) = (db.clone(), holder.clone(), locked.clone());
+        async move {
+            step.run("charge", || async move {
+                let mut tx = db.begin().await?;
+                sqlx::query("UPDATE step_results SET error = error WHERE step_name = 'charge'")
+                    .execute(&mut *tx)
+                    .await?;
+                *holder.lock().await = Some(tx);
+                locked.notify_one();
+                Ok(7u32)
+            })
+            .await
+        }
+    });
+    within(locked.notified()).await;
+    within(async {
+        loop {
+            let (waiting,): (i64,) = sqlx::query_as(
+                "SELECT count(*) FROM pg_stat_activity \
+                 WHERE wait_event_type = 'Lock' AND query LIKE 'UPDATE step_results SET status = $1%'",
+            )
+            .fetch_one(&db)
+            .await
+            .unwrap();
+            if waiting > 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+
+    // The step checked its owner, and waits for its row. The run cannot be
+    // taken over in between, or the step would store its result for a run
+    // that is not its own any more.
+    let takeover = tokio::spawn({
+        let db = db.clone();
+        async move {
+            sqlx::query("UPDATE flow_runs SET worker_id = 'worker-b', attempts = 2 WHERE id = $1")
+                .bind(run_id)
+                .execute(&db)
+                .await
+        }
+    });
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert!(!ending.is_finished(), "the step waits for its row");
+    assert!(!takeover.is_finished(), "the run was taken over under the step's check");
+
+    holder.lock().await.take().unwrap().commit().await.unwrap();
+    assert_eq!(within(ending).await.unwrap().unwrap(), 7);
+    within(takeover).await.unwrap().unwrap();
+    assert_eq!(find_steps(&test, run_id).await[0].status, "completed");
+    test.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_step_whose_start_was_stored_but_not_answered_runs_once() {
+    let test = new_test().await;
+    let run_id = create_run(&test).await;
+    let proxy = DropProxy::start(&test.db).await;
+    let pool = proxy.pool(&test.db).await;
+    let step = StepExecutor::new(
+        pool,
+        run_id.to_string(),
+        FlowLogger::new(test.db.clone(), run_id.to_string()),
+        None,
+        None,
+        1,
+        None,
+    );
+
+    // The first try commits and loses its answer: the second finds its own row.
+    proxy.drop_answer_of("INSERT INTO step_results");
+    let runs = Arc::new(AtomicUsize::new(0));
+    let counted = runs.clone();
+    let value: u32 = step
+        .run("charge", || async move {
+            counted.fetch_add(1, Ordering::SeqCst);
+            Ok(5)
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(proxy.cuts(), 1, "the answer was lost");
+    assert_eq!((value, runs.load(Ordering::SeqCst)), (5, 1));
+    let stored = find_steps(&test, run_id).await;
+    assert_eq!(stored.len(), 1);
+    assert_eq!(
+        (stored[0].status.as_str(), stored[0].output.clone()),
+        ("completed", Some(json!(5)))
+    );
+    test.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_sleep_stored_but_not_answered_still_suspends_the_run() {
+    let test = new_test().await;
+    let run_id = create_run(&test).await;
+    let proxy = DropProxy::start(&test.db).await;
+    let step = StepExecutor::new(
+        proxy.pool(&test.db).await,
+        run_id.to_string(),
+        FlowLogger::new(test.db.clone(), run_id.to_string()),
+        None,
+        None,
+        1,
+        None,
+    );
+
+    proxy.drop_answer_of("INSERT INTO step_results");
+    let error = step.sleep("pause", Duration::from_secs(60)).await.unwrap_err();
+
+    assert_eq!(proxy.cuts(), 1, "the answer was lost");
+    assert!(error.downcast_ref::<SleepSignal>().is_some(), "{error:#}");
+    let stored = find_steps(&test, run_id).await;
+    assert_eq!(stored.len(), 1);
+    assert_eq!(stored[0].status, "sleeping");
     test.cleanup().await;
 }

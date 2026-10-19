@@ -418,6 +418,11 @@
   the run is left to the new execution. Breaking: `StepExecutor::new` takes
   the owner (`engine::RunOwner`, `None` outside a worker) as a last argument,
   and a stale step is no longer recorded as `canceled` or `failed`.
+  The write locks the row of the run until it ends, so a claim cannot slip in
+  between the check and the write of a step that waits for its own row. A
+  step or a sleep that starts is inserted under an ID chosen before the first
+  try: when a try commits and its answer is lost, the next one recognizes its
+  row instead of failing on the unique key and failing the run.
 
 ## 0.0.12-beta.0
 
