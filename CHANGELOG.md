@@ -19,8 +19,10 @@
   a flow that logs faster than the database takes them loses the newest lines,
   never waits, and the run gets a `warn` line with the number dropped. A log
   write that fails is told to the runtime logger, and a NUL byte in a message
-  or a payload is removed, where it used to make PostgreSQL refuse every line
-  written in the same statement.
+  or a payload is replaced by U+FFFD, where it used to make PostgreSQL refuse
+  every line written in the same statement. A statement holds at most 1,000
+  lines or 1 MiB of text: a flow that logged without pause used to grow one
+  batch with everything the queue held.
 - The framework schema has a migration, `openshop_drop_flow_runs_status_index`,
   that drops the index `flow_runs_status_available_created_idx` on
   `(status, available_at, created_at)`: the partial queue indexes of the second
@@ -34,14 +36,14 @@
 - `migrate generate` no longer records in the snapshot a change it can only
   leave as a `-- TODO` line (the primary key or the constraints of a column): the
   snapshot keeps the previous state, `migrate check` fails, and a second
-  `generate` does not write the line again. Change `TODO(…)` to `DONE(…)` in the
-  migration once you wrote the statements, and the next `generate` records it.
+  `generate` does not write the line again. Once the migrations write the change,
+  `migrate generate --manual-done` records the models.
 - `APP.main()` loads `.env` for `dev` before it starts the async runtime,
   instead of calling `set_var` from inside it. `cli::env::load_env_file` returns
   the number of variables it set; a `main` with its own runtime that calls
   `APP.run()` still gets `.env`, with a warning.
 - Sentry events are scrubbed of URLs wherever they carry text: the tags, the
-  extra data, the contexts, the data of the breadcrumbs and the parameters of a
+  extra data, every kind of context, the data of the breadcrumbs and the parameters of a
   log entry, and a request the application attaches loses its query string,
   cookies and body and the headers named like a secret.
 - Several `start` processes can run crons: an occurrence of a cron for a shop

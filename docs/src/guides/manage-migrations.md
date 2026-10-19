@@ -124,13 +124,15 @@ A change that cannot be written automatically, such as the primary key or the
 constraints of a column, is left as a line in the file:
 
 ```sql
--- TODO(26142195): the constraints of reviews.product_id changed from none to `REFERENCES products(id)`. Write the statements by hand.
+-- TODO: the constraints of reviews.product_id changed from none to `REFERENCES products(id)`. Write the statements by hand.
 ```
 
-Write the statements below it, then change `TODO` to `DONE`. Until you do, the
-snapshot keeps the previous state of that column, `migrate check` fails, and
-`migrate generate` reminds you without writing the line again. Once it reads
-`DONE`, `migrate generate` records the new state.
+Write the statements below it. Until you say they are written, the snapshot
+keeps the previous state of that column, `migrate check` fails, and
+`migrate generate` reminds you without writing the line again. When the
+migrations do what the models say, run
+`cargo run -- migrate generate --manual-done`: it records the models as they
+are. The flag covers the changes pending when you run it, not later ones.
 
 Review the new SQL under `migrations/` and commit it, with the snapshot and
 the code that needs it. `migrate check` does not decide whether a schema change

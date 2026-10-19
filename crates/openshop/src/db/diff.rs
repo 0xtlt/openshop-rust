@@ -5,7 +5,6 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 
 use super::model::{ColumnDef, ForeignKeyDef, Table, quote};
 
@@ -114,17 +113,8 @@ impl Change {
     }
 }
 
-/// The line of a change to write by hand opens with this, and its identifier.
-/// The author changes `TODO` to `DONE` once the migration does what it says.
-pub const MANUAL_TODO: &str = "-- TODO(";
-pub const MANUAL_DONE: &str = "-- DONE(";
-
-/// What identifies a change to write by hand in the migrations: a few
-/// characters of its explanation, which names the table, the column and both
-/// states.
-fn manual_id(explanation: &str) -> String {
-    hex::encode(&Sha256::digest(explanation.as_bytes())[..4])
-}
+/// The line of a change to write by hand opens with this, then its explanation.
+pub const MANUAL_TODO: &str = "-- TODO: ";
 
 /// The statements of a migration, each preceded by its warning.
 pub fn render(changes: &[Change]) -> String {
@@ -136,10 +126,7 @@ pub fn render(changes: &[Change]) -> String {
                 warning: Some(warning),
             } => format!("-- WARNING: {warning}\n{sql}\n"),
             Change::Statement { sql, warning: None } => format!("{sql}\n"),
-            Change::Manual(explanation) => format!(
-                "{MANUAL_TODO}{}): {explanation}\n-- Write it below, then change TODO to DONE.\n",
-                manual_id(explanation)
-            ),
+            Change::Manual(explanation) => format!("{MANUAL_TODO}{explanation}\n"),
         })
         .collect();
     rendered.join("\n")
@@ -212,15 +199,23 @@ fn alter_column(table: &str, before: &ColumnDef, after: &ColumnDef, changes: &mu
         });
     }
     if before.primary_key != after.primary_key {
-        changes.push(Change::Manual(primary_key_note(table, &after.name)));
+        changes.push(Change::Manual(primary_key_note(table, after)));
     }
     if before.constraints != after.constraints {
         changes.push(Change::Manual(constraints_note(&place, before, after)));
     }
 }
 
-fn primary_key_note(table: &str, column: &str) -> String {
-    format!("the primary key of {table} changed on {column}. Write the constraint change by hand.")
+fn primary_key_note(table: &str, after: &ColumnDef) -> String {
+    let now = if after.primary_key {
+        "is now part of the primary key"
+    } else {
+        "is no longer part of the primary key"
+    };
+    format!(
+        "the primary key of {table} changed: {} {now}. Write the constraint change by hand.",
+        after.name
+    )
 }
 
 fn constraints_note(place: &str, before: &ColumnDef, after: &ColumnDef) -> String {
@@ -238,24 +233,27 @@ fn constraints_note(place: &str, before: &ColumnDef, after: &ColumnDef) -> Strin
     )
 }
 
-/// The changes that remain once the changes to write by hand with these
-/// identifiers are left out.
-pub fn without_manual(changes: Vec<Change>, ids: &[String]) -> Vec<Change> {
+/// The changes that remain once the changes to write by hand that `skip`
+/// accepts, by their explanation, are left out.
+pub fn without_manual(changes: Vec<Change>, skip: impl Fn(&str) -> bool) -> Vec<Change> {
     changes
         .into_iter()
         .filter(|change| match change {
-            Change::Manual(explanation) => !ids.contains(&manual_id(explanation)),
+            Change::Manual(explanation) => !skip(explanation),
             Change::Statement { .. } => true,
         })
         .collect()
 }
 
 /// The snapshot to record for `models`: the models, except that a primary key
-/// or constraints that changed keep their previous state until the migration
-/// that writes the change is marked `DONE`. Recording them earlier would make
+/// or constraints that changed keep their previous state, unless `accepted`:
+/// the author said the migrations write them. Recording them earlier would make
 /// the models and the database look in line while the database was not.
-pub fn recorded(previous: &SchemaSnapshot, models: &[Table], done: &[String]) -> SchemaSnapshot {
+pub fn recorded(previous: &SchemaSnapshot, models: &[Table], accepted: bool) -> SchemaSnapshot {
     let mut snapshot = SchemaSnapshot::of(models);
+    if accepted {
+        return snapshot;
+    }
     for table in &mut snapshot.tables {
         let Some(before) = continued(
             &previous.tables,
@@ -266,7 +264,7 @@ pub fn recorded(previous: &SchemaSnapshot, models: &[Table], done: &[String]) ->
         ) else {
             continue;
         };
-        let (name, names) = (table.table.clone(), table.columns().to_vec());
+        let names = table.columns().to_vec();
         for (column, current) in table.columns_mut().iter_mut().zip(&names) {
             let Some(was) = continued(
                 before.columns(),
@@ -277,12 +275,10 @@ pub fn recorded(previous: &SchemaSnapshot, models: &[Table], done: &[String]) ->
             ) else {
                 continue;
             };
-            let place = format!("{name}.{}", column.name);
-            let held = |note: String| !done.contains(&manual_id(&note));
-            if was.primary_key != column.primary_key && held(primary_key_note(&name, &column.name)) {
+            if was.primary_key != column.primary_key {
                 column.primary_key = was.primary_key;
             }
-            if was.constraints != column.constraints && held(constraints_note(&place, was, current)) {
+            if was.constraints != column.constraints {
                 column.constraints = was.constraints.clone();
             }
         }
@@ -780,8 +776,7 @@ mod tests {
         let changes = diff(&SchemaSnapshot::of(&[previous]), &[current]);
         assert_eq!(
             render(&changes),
-            "-- TODO(26142195): the constraints of reviews.product_id changed from none to `REFERENCES products(id)`. Write the statements by hand.\n\
-             -- Write it below, then change TODO to DONE.\n"
+            "-- TODO: the constraints of reviews.product_id changed from none to `REFERENCES products(id)`. Write the statements by hand.\n"
         );
         assert_eq!(
             summarize(&changes),
