@@ -36,10 +36,13 @@ pub(crate) struct TokenExchanges {
     held: StdMutex<HashMap<Key, Instant>>,
 }
 
-/// The turn of an app and shop to ask Shopify; given up when dropped.
+/// The turn of an app and shop to ask Shopify; given up when dropped. It
+/// exists from the moment the turn is asked for, so that a request cancelled
+/// while it waits still cleans up after itself.
 pub(crate) struct Turn<'a> {
     exchanges: &'a TokenExchanges,
     key: Key,
+    lock: Arc<Mutex<()>>,
     guard: Option<OwnedMutexGuard<()>>,
 }
 
@@ -72,20 +75,24 @@ impl TokenExchanges {
     pub async fn turn(&self, shopify_app: &str, shop: &str) -> Turn<'_> {
         let key = key(shopify_app, shop);
         let lock = locked(&self.turns).entry(key.clone()).or_default().clone();
-        Turn {
+        let mut turn = Turn {
             exchanges: self,
             key,
-            guard: Some(lock.lock_owned().await),
-        }
+            lock,
+            guard: None,
+        };
+        turn.guard = Some(turn.lock.clone().lock_owned().await);
+        turn
     }
 }
 
 impl Drop for Turn<'_> {
     fn drop(&mut self) {
-        // Released before the count: the map and the waiters hold the others.
+        // Released before the count: what is left is the map, this turn, and
+        // the turns of the requests that wait.
         drop(self.guard.take());
         let mut turns = locked(&self.exchanges.turns);
-        if turns.get(&self.key).is_some_and(|lock| Arc::strong_count(lock) == 1) {
+        if turns.get(&self.key).is_some_and(|lock| Arc::strong_count(lock) == 2) {
             turns.remove(&self.key);
         }
     }
@@ -122,6 +129,23 @@ mod tests {
         assert!(!waiting.is_finished());
         drop(first);
         waiting.await.unwrap();
+        assert!(locked(&exchanges.turns).is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_request_cancelled_while_it_waits_leaves_nothing_behind() {
+        let exchanges = Arc::new(TokenExchanges::default());
+        let first = exchanges.turn("default", "a.myshopify.com").await;
+        let waiting = tokio::spawn({
+            let exchanges = exchanges.clone();
+            async move { drop(exchanges.turn("default", "a.myshopify.com").await) }
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // The holder lets go, and the last waiter is cancelled before it runs.
+        drop(first);
+        waiting.abort();
+        let _ = waiting.await;
         assert!(locked(&exchanges.turns).is_empty());
     }
 
