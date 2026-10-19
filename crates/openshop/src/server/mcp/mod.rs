@@ -300,10 +300,11 @@ async fn dispatch(call: McpCall<'_>, method: &str, active: &mut ActiveAudit) -> 
                     Err(error) => return Ok(json_rpc_error(id, -32602, &error, ok)),
                 };
             if name == "openshop.admin.graphql" {
-                active.target_shop = input
-                    .get("shop")
-                    .and_then(Value::as_str)
-                    .and_then(normalize_shop_domain);
+                // The shop the call asked for, so a refusal shows where it aimed.
+                active.target_shop = match input.get("shop").and_then(Value::as_str) {
+                    Some(requested) => normalize_shop_domain(requested),
+                    None => Some(token.shop.clone()),
+                };
             }
 
             let run = tool.definition.run.clone();

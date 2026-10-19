@@ -96,7 +96,7 @@ Core permissions are:
 | `write_providers` | high | Provider access reserved by the capability registry. |
 | `read_functions` | low | Function access reserved by the capability registry. |
 | `manage_mcp_tokens` | high | Token management reserved by the capability registry. |
-| `shopify_admin_graphql` | high | Run arbitrary Admin GraphQL documents for installed shops. |
+| `shopify_admin_graphql` | high | Run arbitrary Admin GraphQL documents for the shop of the token, and show its installation. |
 
 Custom keys must match `namespace:action_resource`: a lowercase namespace
 (letters, digits, `-`), a colon, and lowercase words separated by `_`.
@@ -282,15 +282,22 @@ Built-in resources are:
 
 | Tool | Permission | Important inputs/defaults |
 | --- | --- | --- |
-| `openshop.shops.list` | None | Lists installed shops for the token app. |
-| `openshop.admin.graphql` | `shopify_admin_graphql` | `shop` and `query` required; `variables` defaults `{}`; `apiVersion` is `YYYY-MM` or `latest` and defaults to the latest stable version. |
+| `openshop.shops.list` | `shopify_admin_graphql` | Shows the installation of the token's shop (scopes, install date) when it is installed; never another shop. |
+| `openshop.admin.graphql` | `shopify_admin_graphql` | `query` required; `shop` is optional and, when given, must be the token's shop; `variables` defaults `{}`; `apiVersion` is `YYYY-MM` or `latest` and defaults to the latest stable version. |
 | `openshop.logs.search` | `read_logs` | `runId` required; `q` uses the [log query syntax](logging.md#log-query-syntax); `levels` defaults to `info,warn,error`; `includeContext` defaults to true; `limit` 50, max 200. |
 | `openshop.flows.list` | `read_flows` | Includes input schemas and configured crons. |
 | `openshop.flows.run` | `run_flows` | `flow` required; `input` defaults `{}`; runs only for token shop. |
 | `openshop.crons.list` | `read_crons` | Includes per-token-shop override state. |
 | `openshop.crons.set_enabled` | `manage_crons` | Requires `key` and boolean `enabled`. |
 
-The GraphQL tool accepts only shops installed for the token's app handle. Its
+Every core tool acts on the `(app handle, shop)` pair of the token and on
+nothing else. The GraphQL tool always runs against the token's own shop: the
+`shop` argument is only kept so that a client written for the earlier schema
+keeps working, and a value that is not the token's shop (after the same
+normalization as a shop domain, so a URL form is accepted) is refused with
+`This token can only act on its own shop "<shop>"` before any request is sent
+to Shopify. If the token's shop has no usable installation, the call fails with
+`Shop "<shop>" is not installed for app "<app>"`. Its
 result includes `shop`, `apiVersion`, the HTTP `status`, `ok`, and Shopify's
 parsed response; unlike the regular Shopify client, it returns GraphQL error
 payloads to the MCP caller.
@@ -301,7 +308,8 @@ payloads to the MCP caller.
 fully granted. Calling a known but unauthorized capability still fails closed.
 Tool and resource calls are audited with token, capability, permissions, status
 (`success`, `denied`, or `error`), duration, request ID, and target shop where
-applicable. Calls rejected for an unknown name or invalid arguments are not
+applicable; for the GraphQL tool it is the shop the call asked for, so a refused
+cross-shop call shows where it aimed. Calls rejected for an unknown name or invalid arguments are not
 audited.
 
 ## Limits and JSON-RPC errors

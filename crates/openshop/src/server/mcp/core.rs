@@ -109,13 +109,15 @@ fn api_version_input(input: &JsonMap) -> Result<String> {
     Ok(value)
 }
 
+/// The installation of the shop of the token. A token never sees another shop.
 async fn list_installed_shops(ctx: &McpContext) -> Result<Value> {
     let rows: Vec<(String, Option<String>, DateTime<Utc>)> = sqlx::query_as(
         "SELECT shop, scopes, installed_at FROM installations \
-         WHERE app_handle = $1 AND access_token IS NOT NULL AND uninstalled_at IS NULL \
+         WHERE app_handle = $1 AND shop = $2 AND access_token IS NOT NULL AND uninstalled_at IS NULL \
          ORDER BY shop ASC",
     )
     .bind(&ctx.shopify_app)
+    .bind(&ctx.shop)
     .fetch_all(&ctx.db)
     .await?;
 
@@ -127,9 +129,18 @@ async fn list_installed_shops(ctx: &McpContext) -> Result<Value> {
 }
 
 async fn run_admin_graphql(ctx: McpContext, input: JsonMap) -> Result<Value> {
-    let Some(shop) = string_input(&input, "shop").and_then(normalize_shop_domain) else {
-        bail!("shop must be a myshopify.com domain");
-    };
+    // The shop is the one of the token. `shop` is only accepted so that a
+    // client written for the previous schema keeps working, as long as it
+    // names that same shop.
+    let shop = ctx.shop.clone();
+    if let Some(requested) = string_input(&input, "shop") {
+        let Some(requested) = normalize_shop_domain(requested) else {
+            bail!("shop must be a myshopify.com domain");
+        };
+        if requested != shop {
+            bail!("This token can only act on its own shop \"{shop}\"");
+        }
+    }
     let Some(query) = string_input(&input, "query") else {
         bail!("query is required");
     };
@@ -366,8 +377,8 @@ pub fn create_core_mcp_capabilities() -> CoreCapabilities {
     tools.insert(
         "openshop.shops.list".to_string(),
         tool(
-            "List installed shops for this OpenShop app.",
-            &[],
+            "Show the installation of the shop of this token.",
+            &["shopify_admin_graphql"],
             McpRiskLevel::Low,
             empty_schema(),
             |ctx, _input| async move { Ok(structured_result(list_installed_shops(&ctx).await?)) },
@@ -377,15 +388,15 @@ pub fn create_core_mcp_capabilities() -> CoreCapabilities {
     tools.insert(
         "openshop.admin.graphql".to_string(),
         tool(
-            "Run arbitrary Shopify Admin GraphQL queries and mutations for an installed shop.",
+            "Run arbitrary Shopify Admin GraphQL queries and mutations for the shop of this token.",
             &["shopify_admin_graphql"],
             McpRiskLevel::High,
             json!({
                 "type": "object",
                 "additionalProperties": false,
-                "required": ["shop", "query"],
+                "required": ["query"],
                 "properties": {
-                    "shop": { "type": "string", "description": "Installed shop domain from openshop.shops.list." },
+                    "shop": { "type": "string", "description": "Optional. Must be the shop domain of the token: calls for any other shop are refused." },
                     "query": { "type": "string", "description": "Shopify Admin GraphQL query or mutation." },
                     "variables": { "type": "object", "description": "GraphQL variables object." },
                     "apiVersion": { "type": "string", "description": "Shopify Admin API version, for example 2026-04. Defaults to the latest stable version when omitted or set to \"latest\"." },
