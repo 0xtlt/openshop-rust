@@ -70,6 +70,9 @@ async fn indexes(pool: &PgPool, table: &str) -> Vec<String> {
 
 const QUEUE_INDEXES: [&str; 2] = ["flow_runs_claimable_idx", "flow_runs_deadline_idx"];
 
+/// Made redundant by the queue indexes, and dropped by a later migration.
+const DROPPED_INDEX: &str = "flow_runs_status_available_created_idx";
+
 /// Generates for an application without models and returns the files.
 fn generate(cwd: &Path, args: &[String], production: bool) -> openshop::Result<Vec<PathBuf>> {
     Ok(generate_migrations(cwd, args, production, &[])?.files)
@@ -473,7 +476,14 @@ async fn generate_then_migrate_upgrades_a_deployed_framework_schema() {
         QUEUE_INDEXES.iter().all(|index| after.contains(&index.to_string())),
         "{after:?}"
     );
-    assert!(before.iter().all(|index| after.contains(index)));
+    // Nothing is lost but the index that the queue indexes replace.
+    assert!(before.contains(&DROPPED_INDEX.to_string()) && !after.contains(&DROPPED_INDEX.to_string()));
+    assert!(
+        before
+            .iter()
+            .filter(|index| *index != DROPPED_INDEX)
+            .all(|index| after.contains(index))
+    );
     db.cleanup().await.unwrap();
 }
 

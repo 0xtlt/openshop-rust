@@ -52,6 +52,11 @@ pub const FRAMEWORK_MIGRATIONS: &[FrameworkMigration] = &[
         name: "openshop_cron_ticks",
         sql: include_str!("../../migrations/0003_openshop_cron_ticks.sql"),
     },
+    FrameworkMigration {
+        id: "0006_openshop_drop_flow_runs_status_index",
+        name: "openshop_drop_flow_runs_status_index",
+        sql: include_str!("../../migrations/0006_openshop_drop_flow_runs_status_index.sql"),
+    },
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
