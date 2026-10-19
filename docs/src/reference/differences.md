@@ -117,6 +117,12 @@ larger configurations easier to split:
 - Request bodies are limited to 2 MB (`413` above that). Set
   `max_request_body_bytes` in `app!` to change the limit. The MCP endpoint
   keeps its own 1 MB limit.
+- A request whose response has not begun after 60 seconds is answered with
+  `503`, and one that comes while 1024 are being served with `503` and
+  `Retry-After: 1`; `request_timeout` and `max_concurrent_requests` in `app!`
+  change them. Verifying an MCP token runs at most a few scrypt hashes at
+  once and remembers a right secret for five minutes; the stored hash is the
+  same.
 - Responses of 1 KB or more are compressed (gzip or Brotli) when the client
   accepts it.
 - With custom admin pages, a static page takes precedence over a dynamic

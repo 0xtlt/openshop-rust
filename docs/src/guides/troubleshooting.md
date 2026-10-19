@@ -140,6 +140,18 @@ has arrived. The server then reads what the caller still sends for up to five
 seconds, so that a caller in the middle of its upload reads the answer instead
 of a connection reset.
 
+## A request is refused with 503
+
+`Request timed out` means the handler did not produce a response within 60
+seconds; the work it was doing is cancelled. `Server is busy, try again`, with
+a `Retry-After: 1` header, means 1024 requests were already being served.
+Find out what is slow (a provider call without a timeout, a query), or raise
+the `request_timeout` and `max_concurrent_requests` settings of `app!` if the
+load is legitimate. For work that takes longer than a request should, dispatch
+a flow and answer at once. `/health` is answered even when the server is full.
+An MCP call can also answer `503` when many tokens are being checked at once;
+it is safe to retry.
+
 ## Provider secrets cannot be read back
 
 Password fields are intentionally write-only. An empty password submitted from

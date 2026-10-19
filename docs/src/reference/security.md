@@ -48,7 +48,12 @@ process starts. Rotating the key requires decrypting and re-encrypting existing
 values; replacing it without a migration makes stored secrets unreadable.
 
 MCP tokens are never stored: OpenShop keeps a salted scrypt hash and a
-display fingerprint. See [MCP](mcp.md#tokens).
+display fingerprint. See [MCP](mcp.md#tokens). Checking a secret is bounded:
+at most as many scrypt hashes as CPUs (4 at most) run at once, so a flood of
+wrong secrets cannot take the CPU or the memory of the server, and a secret
+that was right is remembered for five minutes in the memory of the process.
+Revoking, disabling, expiring or rotating a token takes effect at the next
+request.
 
 ## Authentication boundaries
 
@@ -108,6 +113,13 @@ and duration; they do not replace external security monitoring.
 Request bodies are limited to 2 MB by default (`413` above that); change the
 limit with the `max_request_body_bytes` setting of `app!`. The MCP endpoint
 has its own limit of 1,000,000 bytes.
+
+A request whose response has not begun after 60 seconds is answered with
+`503`, and a request that comes while 1024 are being served is answered with
+`503` and `Retry-After: 1` (`/health` is always answered). Change them with the
+`request_timeout` and `max_concurrent_requests` settings of `app!`. Neither
+applies to a response already streaming. A server behind a proxy should still
+set the proxy's own limits on header and body read time and on connections.
 
 ## What Sentry receives
 

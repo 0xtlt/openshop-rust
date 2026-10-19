@@ -67,6 +67,15 @@ with `mtk_`. The stored hash is `scrypt:<salt>:<hash>` (scrypt with N = 16384,
 r = 8, p = 1 and a 32-byte key), and the fingerprint is the first 16 characters
 of the base64url SHA-256 digest of the token.
 
+Checking a secret against its scrypt hash is slow on purpose, so it is
+bounded: at most as many hashes as CPUs (4 at most) run at once, and a request
+that gets no turn within five seconds is answered with HTTP 503. A secret that
+was right is remembered for five minutes, under a keyed hash that lives in the
+memory of the process only; only the scrypt step is remembered. Whether a token
+is active, revoked, or expired, and its expiry, are read from the database at
+every request, and rotating a token changes its hash, so a token is refused at
+once when it is revoked, disabled, expired, or rotated.
+
 Missing, malformed, unknown, or cryptographically invalid tokens return HTTP
 401. Disabled, revoked, and expired tokens return HTTP 403. Successful
 authentication updates `lastUsedAt`.
@@ -80,6 +89,7 @@ authentication updates `lastUsedAt`.
 | `403` | `Forbidden: MCP token is not active` |
 | `403` | `Forbidden: MCP token has expired` |
 | `403` | `MCP is disabled` (valid token, endpoint disabled) |
+| `503` | `Service Unavailable: too many MCP tokens are being checked, try again` |
 
 ## Permissions
 

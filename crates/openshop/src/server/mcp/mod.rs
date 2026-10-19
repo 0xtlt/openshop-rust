@@ -5,6 +5,7 @@ pub mod core;
 pub mod registry;
 pub mod schema;
 pub mod tokens;
+mod verifier;
 
 pub use crate::types::{McpAuditStatus, McpCapabilityType};
 

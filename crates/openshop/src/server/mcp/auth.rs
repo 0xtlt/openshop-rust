@@ -3,7 +3,8 @@
 use anyhow::Result;
 use chrono::Utc;
 
-use super::tokens::{extract_bearer_token, parse_mcp_token, verify_mcp_token};
+use super::tokens::{extract_bearer_token, parse_mcp_token};
+use super::verifier::{TokenVerifier, Verification};
 use crate::app::OpenShop;
 use crate::db::schema::McpToken;
 
@@ -51,12 +52,17 @@ pub async fn resolve_mcp_bearer_token(app: &OpenShop, authorization: Option<&str
         return Ok(rejected(401, "Unauthorized: unknown MCP token", Some(parsed.token_id)));
     };
 
-    // scrypt is deliberately slow: keep it off the async workers.
-    let token = parsed.token.clone();
-    let token_hash = stored.token_hash.clone();
-    let verified = tokio::task::spawn_blocking(move || verify_mcp_token(&token, &token_hash)).await?;
-    if !verified {
-        return Ok(rejected(401, "Unauthorized: invalid MCP token", Some(parsed.token_id)));
+    // scrypt is deliberately slow: its cost is bounded, see `verifier`.
+    match TokenVerifier::shared().verify(&parsed.token, &stored.token_hash).await? {
+        Verification::Valid => {}
+        Verification::Invalid => return Ok(rejected(401, "Unauthorized: invalid MCP token", Some(parsed.token_id))),
+        Verification::Busy => {
+            return Ok(rejected(
+                503,
+                "Service Unavailable: too many MCP tokens are being checked, try again",
+                Some(parsed.token_id),
+            ));
+        }
     }
     if stored.status != "active" || stored.revoked_at.is_some() {
         return Ok(rejected(
