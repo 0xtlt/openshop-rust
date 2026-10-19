@@ -17,8 +17,13 @@ async fn reviews_returns_the_liquid_template_with_its_variables(ctx: &TestContex
         "{}",
         response.text
     );
-    assert!(response.text.contains("Customer Reviews for {{ shop.name }}"));
-    assert!(response.text.contains("from {{ app_shop }}"));
+    assert!(response.text.contains("Customer Reviews for {{ shop.name | escape }}"));
+    assert!(response.text.contains("from {{ app_shop | escape }}"));
+    // Every value printed in the page is escaped: a customer sets their own name.
+    for output in response.text.split("{{").skip(1) {
+        let expression = output.split("}}").next().unwrap();
+        assert!(expression.contains("| escape"), "{{{{{expression}}}}} is not escaped");
+    }
 }
 
 #[openshop::test(APP)]

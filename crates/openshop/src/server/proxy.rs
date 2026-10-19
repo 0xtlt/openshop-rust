@@ -19,7 +19,7 @@ use serde_json::{Value, json};
 use super::file_routes::{resolve_route_paths, to_router_path};
 use super::hmac::verify_proxy_signature;
 use super::http::{json_error, not_found, parse_query};
-use super::jwt::{customer_id_from_jwt_sub, read_jwt_audience, verify_session_token};
+use super::jwt::{customer_id_from_jwt_sub, is_staff_subject, read_jwt_audience, verify_session_token};
 use super::shop_domain::normalize_shop_domain;
 use super::shopify_apps::ResolvedShopifyApp;
 use crate::app::OpenShop;
@@ -62,6 +62,11 @@ fn resolve_proxy_auth(
         let shopify_app = app.apps().by_api_key(&audience).map_err(|_| invalid)?;
         let verified =
             verify_session_token(token, &shopify_app.api_secret, &shopify_app.api_key).map_err(|_| invalid)?;
+        // The session token of a staff user opens the admin, not the storefront:
+        // only the tokens of customer account and checkout extensions do here.
+        if is_staff_subject(&verified.payload.sub) {
+            return Err("Unauthorized: session token was issued to a staff user");
+        }
         return Ok(ResolvedProxyAuth {
             kind: ProxyAuthKind::CustomerAccountJwt,
             shopify_app: shopify_app.clone(),

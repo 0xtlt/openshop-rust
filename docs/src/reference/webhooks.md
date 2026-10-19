@@ -118,8 +118,10 @@ pub async fn orders_create(ctx: WebhookContext, order: CreatedOrder) -> Result<(
 itself: `Review::of(&ctx)`, and `sync_orders::dispatch(&ctx, …)` as shown
 under [Idempotence and durable work](#idempotence-and-durable-work).
 
-OpenShop verifies `X-Shopify-Hmac-Sha256` against the raw request body before
-parsing JSON. In multi-app mode, exactly one configured app secret must match.
+OpenShop verifies `X-Shopify-Hmac-Sha256` against the raw bytes of the request
+body before parsing JSON: a body that is not UTF-8 is not converted first, so
+the signature is of what Shopify sent and of nothing else. In multi-app mode,
+exactly one configured app secret must match.
 
 OpenShop also serves `POST /auth/webhooks/app-uninstalled`. It verifies the
 same HMAC, marks the installation as uninstalled, and deletes its access token.
@@ -155,8 +157,22 @@ OpenShop does not provide automatic retries for webhook handlers.
 
 ## Idempotence and durable work
 
-Shopify can deliver the same event more than once. OpenShop does not
-deduplicate deliveries and the context does not expose a webhook ID.
+Shopify can deliver the same event more than once, with the same
+`X-Shopify-Webhook-Id` (or `X-Shopify-Event-Id`, when the former is missing).
+After the signature is verified, OpenShop remembers a delivery whose handler
+completed for an hour and answers `200` to a repeat without running the handler
+again. A delivery is only remembered once its handler has completed: if the
+handler returns an error or panics, or Shopify hangs up before it ends (the
+request is cancelled), nothing is remembered and the delivery that Shopify
+sends again runs. While a handler is still running, a repeat of the same
+delivery is answered `503` with `Retry-After: 5`, not `200`, so that Shopify
+comes back and finds either the handler completed or the delivery free to run. The memory is
+that of the process: another replica, or a restart, does not know a delivery,
+and a handler can still run twice for one event. The key is the app, the topic,
+the id and the signature of the body, so a request that repeats an id with
+another body is another delivery. A delivery without either header is never
+taken for a repeat. The context does not expose the id.
+
 Make side effects idempotent using a stable identifier from the payload, or
 dispatch a flow whose first step checks a durable app-owned record.
 

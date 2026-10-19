@@ -26,6 +26,7 @@ use self::registry::{McpRegistry, has_all_permissions};
 use self::schema::validate_mcp_tool_arguments;
 use crate::app::OpenShop;
 use crate::engine::step::error_message;
+use crate::server::client::request_client_ip;
 use crate::server::connectors::Connectors;
 use crate::server::http::{client_error, public_error};
 use crate::server::shop_domain::normalize_shop_domain;
@@ -398,6 +399,7 @@ async fn dispatch(call: McpCall<'_>, method: &str, active: &mut ActiveAudit) -> 
 }
 
 pub(crate) async fn handle(State(app): State<OpenShop>, request: Request) -> Response {
+    let client = request_client_ip(&request);
     let authorization = request
         .headers()
         .get(AUTHORIZATION)
@@ -406,7 +408,19 @@ pub(crate) async fn handle(State(app): State<OpenShop>, request: Request) -> Res
 
     let token = match resolve_mcp_bearer_token(&app, authorization.as_deref()).await {
         Ok(McpAuthResult::Ok(token)) => token,
-        Ok(McpAuthResult::Rejected { status, error, .. }) => return plain_error(status, error),
+        Ok(McpAuthResult::Rejected { status, error, token_id }) => {
+            // The token id names a token, never its secret.
+            crate::runtime::logger::warn_with(
+                "[openshop] MCP token refused",
+                json!({
+                    "tokenId": token_id,
+                    "reason": error,
+                    "status": status,
+                    "client": client.map(|address| address.to_string()),
+                }),
+            );
+            return plain_error(status, error);
+        }
         Err(error) => {
             crate::runtime::logger::error_with(
                 "[openshop] MCP authentication failed",

@@ -24,17 +24,20 @@ const SHOP_B: &str = "mcp-other.myshopify.com";
 const PROTOCOL_VERSION: &str = "2025-11-25";
 const MAX_PAYLOAD_BYTES: usize = 1_000_000;
 const ENCRYPTION_KEY: &str = "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2";
-const CORE_PERMISSIONS: [&str; 10] = [
+const CORE_PERMISSIONS: [&str; 6] = [
     "read_logs",
     "read_flows",
     "run_flows",
     "read_crons",
     "manage_crons",
+    "shopify_admin_graphql",
+];
+/// Permissions earlier versions offered and no tool ever checked.
+const WITHDRAWN_PERMISSIONS: [&str; 4] = [
     "read_providers",
     "write_providers",
     "read_functions",
     "manage_mcp_tokens",
-    "shopify_admin_graphql",
 ];
 const CORE_TOOLS: [&str; 7] = [
     "openshop.shops.list",
@@ -886,6 +889,45 @@ async fn token_details_report_stale_permissions(ctx: &TestContext) {
     let (_, list) = send(ctx.get("/api/mcp/tokens")).await;
     assert_eq!(list[0]["stalePermissions"], json!(["legacy:read_things"]));
 
+    let tools = call(ctx, &issued.token, "tools/list", json!({})).await;
+    assert_eq!(
+        strings(&tools["result"]["tools"], "name"),
+        ["openshop.shops.list", "openshop.logs.search"]
+    );
+}
+
+#[openshop::test(context())]
+async fn permissions_that_no_tool_checks_are_not_offered_and_old_grants_of_them_are_ignored(ctx: &TestContext) {
+    let (_, capabilities) = send(ctx.get("/api/mcp/capabilities")).await;
+    let offered = capabilities["permissions"].as_object().unwrap();
+    for permission in WITHDRAWN_PERMISSIONS {
+        assert!(!offered.contains_key(permission), "{permission}");
+        let (status, body) = send(
+            ctx.post("/api/mcp/tokens")
+                .json(&json!({ "name": "t", "permissions": [permission] })),
+        )
+        .await;
+        assert_eq!(status, 400, "{permission}");
+        assert_eq!(body["error"], format!("Unknown permission \"{permission}\""));
+    }
+
+    // A token that was granted them keeps working, with what it can still use.
+    let issued = create_token(ctx, &["read_logs"]).await;
+    for permission in WITHDRAWN_PERMISSIONS {
+        sqlx::query("INSERT INTO mcp_permission_grants (shop, token_id, permission_key) VALUES ($1, $2, $3)")
+            .bind(&ctx.shop)
+            .bind(&issued.token_id)
+            .bind(permission)
+            .execute(&ctx.db)
+            .await
+            .unwrap();
+    }
+    let detail = token_detail(ctx, &issued).await;
+    let mut stale = WITHDRAWN_PERMISSIONS.to_vec();
+    stale.sort_unstable();
+    assert_eq!(sorted(&detail["stalePermissions"]), stale);
+    let (status, _) = initialize_status(ctx, &issued.token).await;
+    assert_eq!(status, 200);
     let tools = call(ctx, &issued.token, "tools/list", json!({})).await;
     assert_eq!(
         strings(&tools["result"]["tools"], "name"),
@@ -2098,7 +2140,7 @@ async fn openshop_admin_graphql_requires_its_explicit_permission(ctx: &TestConte
     let shop = ctx.shop.clone();
     install(ctx, "default", &shop, Some("offline-admin-token")).await;
     respond_to_graphql(ctx, 200, json!({ "data": { "shop": { "name": "Forbidden" } } }));
-    let issued = create_token(ctx, &CORE_PERMISSIONS[..9]).await;
+    let issued = create_token(ctx, &CORE_PERMISSIONS[..5]).await;
 
     let body = call_tool(
         ctx,
@@ -3054,4 +3096,85 @@ fn mcp_config_is_validated_when_the_config_is_built() {
     for (mcp, message) in cases {
         assert_eq!(build_error(mcp), format!("[openshop] Invalid MCP config: {message}"));
     }
+}
+
+/// What the process logger was given: the level, the message and its context.
+#[derive(Default)]
+struct LoggedLines(std::sync::Mutex<Vec<(&'static str, String, Option<Value>)>>);
+
+impl openshop::runtime::RuntimeLogger for LoggedLines {
+    fn info(&self, message: &str, context: Option<&Value>) {
+        self.0
+            .lock()
+            .unwrap()
+            .push(("info", message.to_string(), context.cloned()));
+    }
+    fn warn(&self, message: &str, context: Option<&Value>) {
+        self.0
+            .lock()
+            .unwrap()
+            .push(("warn", message.to_string(), context.cloned()));
+    }
+    fn error(&self, message: &str, context: Option<&Value>) {
+        self.0
+            .lock()
+            .unwrap()
+            .push(("error", message.to_string(), context.cloned()));
+    }
+}
+
+#[openshop::test(context())]
+async fn mcp_logs_the_tokens_it_refuses_without_their_secret(ctx: &TestContext) {
+    let initialize = json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize" }).to_string();
+    let issued = create_token(ctx, &[]).await;
+    let secret = issued.token.split_once('.').unwrap().1.to_string();
+    let lines = std::sync::Arc::new(LoggedLines::default());
+    let previous = openshop::runtime::logger::set_logger(lines.clone());
+
+    let wrong = format!("{}x", issued.token);
+    let (status, _) = mcp_send(ctx, Some(&bearer(&wrong)), initialize.clone()).await;
+    assert_eq!(status, 401);
+    let (status, _) = mcp_send(
+        ctx,
+        Some("Bearer oshp_mcp_mtk_unknownlogged.secret"),
+        initialize.clone(),
+    )
+    .await;
+    assert_eq!(status, 401);
+    send(ctx.post(&issued.path("/revoke"))).await;
+    let (status, _) = mcp_send(ctx, Some(&bearer(&issued.token)), initialize.clone()).await;
+    assert_eq!(status, 403);
+
+    openshop::runtime::logger::set_logger(previous);
+    let logged = lines.0.lock().unwrap().clone();
+    let refusals: Vec<&Value> = logged
+        .iter()
+        .filter(|(level, message, _)| *level == "warn" && message == "[openshop] MCP token refused")
+        .filter_map(|(_, _, context)| context.as_ref())
+        .collect();
+    let reason_of = |token_id: &str| -> Vec<(&str, u64)> {
+        refusals
+            .iter()
+            .filter(|context| context["tokenId"] == token_id)
+            .map(|context| (context["reason"].as_str().unwrap(), context["status"].as_u64().unwrap()))
+            .collect()
+    };
+    assert_eq!(
+        reason_of(&issued.token_id),
+        [
+            ("Unauthorized: invalid MCP token", 401),
+            ("Forbidden: MCP token is not active", 403)
+        ]
+    );
+    assert_eq!(
+        reason_of("mtk_unknownlogged"),
+        [("Unauthorized: unknown MCP token", 401)]
+    );
+    // The client is the peer of the connection: the test server is on loopback.
+    assert!(refusals.iter().any(|context| context["client"] == "127.0.0.1"));
+
+    // A secret is never written to the log, whole or in part.
+    let everything = format!("{logged:?}");
+    assert!(!everything.contains(&secret));
+    assert!(!everything.contains(&issued.token));
 }

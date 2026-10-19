@@ -4,6 +4,7 @@
 pub mod admin_pages;
 pub mod api;
 pub mod auth;
+mod client;
 mod compression;
 pub mod connectors;
 pub mod crypto;
@@ -103,11 +104,14 @@ static SHOP_ORIGIN: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)^https://[a-z0-9][a-z0-9-]*\.myshopify\.com$").expect("valid regex"));
 const SHOPIFY_EXTENSION_ORIGIN: &str = "https://extensions.shopifycdn.com";
 
-/// Origins allowed to call the API cross-origin: local development, Shopify
-/// admin and storefronts, checkout extensions and the app's own URL.
-pub fn is_allowed_cors_origin(origin: &str, configured_origins: &[String]) -> bool {
+/// Origins allowed to call the API cross-origin: Shopify admin and
+/// storefronts, checkout extensions and the app's own URL, and in development
+/// the local hosts. In production a page on `localhost` is on the visitor's
+/// own machine, not an origin of the application: it is not allowed unless
+/// the application's URL is one.
+pub fn is_allowed_cors_origin(origin: &str, configured_origins: &[String], production: bool) -> bool {
     !origin.is_empty()
-        && (LOCAL_ORIGIN.is_match(origin)
+        && ((!production && LOCAL_ORIGIN.is_match(origin))
             || origin == "https://admin.shopify.com"
             || origin == "https://shopify.com"
             || origin == SHOPIFY_EXTENSION_ORIGIN
@@ -117,11 +121,12 @@ pub fn is_allowed_cors_origin(origin: &str, configured_origins: &[String]) -> bo
 
 fn cors_layer(app: &OpenShop) -> CorsLayer {
     let configured_origins = app.env().configured_origins();
+    let production = app.env().production;
     CorsLayer::new()
         .allow_origin(AllowOrigin::predicate(move |origin: &HeaderValue, _| {
             origin
                 .to_str()
-                .is_ok_and(|origin| is_allowed_cors_origin(origin, &configured_origins))
+                .is_ok_and(|origin| is_allowed_cors_origin(origin, &configured_origins, production))
         }))
         .allow_methods([
             Method::GET,
@@ -335,9 +340,13 @@ pub async fn serve(listener: TcpListener, router: Router) -> Result<ServerHandle
     let task = tokio::spawn(async move {
         // Served as is, a router copies its whole route table for each
         // connection. The make-service hands every connection the same one.
-        axum::serve(linger::LingeringListener(listener), ServiceExt::<Request>::into_make_service(service))
-            .with_graceful_shutdown(stopped)
-            .await
+        // Handlers that want the address of the peer read it as `ConnectInfo<Peer>`.
+        axum::serve(
+            linger::LingeringListener(listener),
+            ServiceExt::<Request>::into_make_service_with_connect_info::<linger::Peer>(service),
+        )
+        .with_graceful_shutdown(stopped)
+        .await
     });
     logger::info(format!(
         "[openshop] API server running on http://localhost:{}",
@@ -357,18 +366,30 @@ mod tests {
     #[test]
     fn allows_only_known_cors_origins() {
         let configured = vec!["https://app.example.com".to_string()];
-        for origin in [
+        let local = [
             "http://localhost:3000",
             "https://app.localhost",
             "http://127.0.0.1:8080",
             "http://[::1]:3000",
+        ];
+        for origin in local {
+            assert!(is_allowed_cors_origin(origin, &configured, false), "{origin}");
+            assert!(!is_allowed_cors_origin(origin, &configured, true), "{origin}");
+        }
+        // The application's own URL is allowed, even a local one.
+        let local_app = vec!["http://localhost:3000".to_string()];
+        assert!(is_allowed_cors_origin("http://localhost:3000", &local_app, true));
+        assert!(!is_allowed_cors_origin("http://localhost:3001", &local_app, true));
+        for origin in [
             "https://admin.shopify.com",
             "https://shopify.com",
             "https://extensions.shopifycdn.com",
             "https://Test-Shop.myshopify.com",
             "https://app.example.com",
         ] {
-            assert!(is_allowed_cors_origin(origin, &configured), "{origin}");
+            for production in [false, true] {
+                assert!(is_allowed_cors_origin(origin, &configured, production), "{origin}");
+            }
         }
         for origin in [
             "",
@@ -378,7 +399,9 @@ mod tests {
             "https://localhost.evil.com",
             "https://app.example.com.evil.com",
         ] {
-            assert!(!is_allowed_cors_origin(origin, &configured), "{origin}");
+            for production in [false, true] {
+                assert!(!is_allowed_cors_origin(origin, &configured, production), "{origin}");
+            }
         }
     }
 }

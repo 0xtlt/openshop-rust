@@ -1,7 +1,9 @@
 //! Access to the operator dashboard: one password, and a signed session
 //! cookie that needs no table.
 
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::collections::HashMap;
+use std::net::IpAddr;
+use std::sync::Mutex;
 use std::time::Duration;
 
 use anyhow::{Result, bail};
@@ -9,8 +11,9 @@ use axum::http::HeaderMap;
 use axum::http::header::COOKIE;
 use chrono::Utc;
 use sha2::{Digest, Sha256};
-use tokio::sync::Mutex;
+use tokio::time::Instant;
 
+use crate::server::client::client_key;
 use crate::server::hmac::{constant_time_eq, hmac_sha256};
 use crate::server::http::header;
 
@@ -23,6 +26,10 @@ const SESSION_SECONDS: i64 = 12 * 60 * 60;
 const KEY_LABEL: &str = "openshop:ops-session:v1:";
 const FIRST_BACKOFF: Duration = Duration::from_millis(250);
 const MAX_BACKOFF_DOUBLINGS: u32 = 5;
+/// How long a client that stopped guessing is remembered.
+const FORGET_AFTER: Duration = Duration::from_secs(15 * 60);
+/// How many clients are remembered at once.
+const MAX_CLIENTS: usize = 10_000;
 
 /// Refuses, in production, a password an attacker could guess.
 pub fn check_password(password: Option<&str>, production: bool) -> Result<()> {
@@ -41,8 +48,16 @@ pub(crate) enum Login {
     /// The `Set-Cookie` value that opens the session.
     Granted(String),
     Refused,
-    /// Another attempt is being checked: this one was not looked at.
-    Busy,
+    /// This client attempted too recently: the attempt was not looked at, and
+    /// may be made again after the delay.
+    Busy(Duration),
+}
+
+/// What the dashboard remembers of a client that guessed.
+struct Guesses {
+    failures: u32,
+    /// Until when its attempts are not looked at.
+    next_attempt: Instant,
 }
 
 pub(crate) struct OpsAuth {
@@ -50,9 +65,9 @@ pub(crate) struct OpsAuth {
     session_key: String,
     /// Off in development, where the server is reached over plain HTTP.
     secure_cookie: bool,
-    failures: AtomicU32,
-    /// Held while a password is checked, and through the delay after a wrong one.
-    attempt: Mutex<()>,
+    /// The clients that attempted, by address. Only held to read and write
+    /// these, never while a password is checked or a response waits.
+    guesses: Mutex<HashMap<Option<IpAddr>, Guesses>>,
 }
 
 fn digest(value: &str) -> [u8; 32] {
@@ -68,8 +83,7 @@ impl OpsAuth {
             password_digest: digest(password),
             session_key: hex::encode(hmac_sha256(password, label.as_bytes())),
             secure_cookie,
-            failures: AtomicU32::new(0),
-            attempt: Mutex::new(()),
+            guesses: Mutex::new(HashMap::new()),
         }
     }
 
@@ -117,20 +131,52 @@ impl OpsAuth {
             .any(|token| self.is_valid_token(token, now))
     }
 
-    /// Checks a password. One attempt is looked at at a time, and a wrong
-    /// one is answered after a delay that doubles with each failure, so that
-    /// guessing stays slow whatever the number of connections.
-    pub(crate) async fn login(&self, candidate: &str) -> Login {
-        let Ok(_attempt) = self.attempt.try_lock() else {
-            return Login::Busy;
-        };
+    /// Checks a password for a client. Each client may attempt once, then
+    /// again after a delay that doubles with each failure, so that guessing
+    /// stays slow however many connections it uses. Every client has its own
+    /// delay: one that guesses cannot keep another from signing in, and an
+    /// attempt is answered at once, whatever the delay.
+    ///
+    /// Behind a proxy that does not say who called, every client is the same
+    /// one: see [`client_ip`](crate::server::client::client_ip).
+    pub(crate) fn login(&self, client: Option<IpAddr>, candidate: &str) -> Login {
+        let client = client.map(client_key);
+        let now = Instant::now();
+        {
+            let mut guesses = self.guesses.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            if guesses.len() >= MAX_CLIENTS && !guesses.contains_key(&client) {
+                guesses.retain(|_, known| now < known.next_attempt + FORGET_AFTER);
+                if guesses.len() >= MAX_CLIENTS {
+                    // Still full: the one that attempted longest ago is forgotten.
+                    if let Some(oldest) = guesses.iter().min_by_key(|(_, known)| known.next_attempt).map(|(key, _)| *key) {
+                        guesses.remove(&oldest);
+                    }
+                }
+            }
+            let known = guesses.entry(client).or_insert(Guesses {
+                failures: 0,
+                next_attempt: now,
+            });
+            if now < known.next_attempt {
+                return Login::Busy(known.next_attempt - now);
+            }
+            // The attempt counts as a failure until the password is right, so
+            // that attempts racing each other are not all looked at.
+            if now >= known.next_attempt + FORGET_AFTER {
+                known.failures = 0;
+            }
+            known.next_attempt = now + FIRST_BACKOFF * 2u32.pow(known.failures.min(MAX_BACKOFF_DOUBLINGS));
+            known.failures = known.failures.saturating_add(1);
+        }
+
         // Digests have one length: the comparison says nothing of the password's.
         if constant_time_eq(&digest(candidate), &self.password_digest) {
-            self.failures.store(0, Ordering::Relaxed);
+            self.guesses
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .remove(&client);
             return Login::Granted(self.cookie(&self.session_token(Utc::now().timestamp()), SESSION_SECONDS));
         }
-        let failures = self.failures.fetch_add(1, Ordering::Relaxed);
-        tokio::time::sleep(FIRST_BACKOFF * 2u32.pow(failures.min(MAX_BACKOFF_DOUBLINGS))).await;
         Login::Refused
     }
 }
@@ -172,10 +218,16 @@ mod tests {
         );
     }
 
+    const RIGHT: &str = "correct horse battery staple";
+
+    fn client(address: &str) -> Option<IpAddr> {
+        Some(address.parse().unwrap())
+    }
+
     #[tokio::test(start_paused = true)]
     async fn the_right_password_opens_a_session_the_server_recognizes() {
         let auth = auth();
-        let Login::Granted(cookie) = auth.login("correct horse battery staple").await else {
+        let Login::Granted(cookie) = auth.login(client("203.0.113.1"), RIGHT) else {
             panic!("refused");
         };
         assert!(cookie.starts_with("openshop_ops=v1."), "{cookie}");
@@ -188,7 +240,7 @@ mod tests {
 
         // Development serves plain HTTP: the cookie is not `Secure` there.
         let development = OpsAuth::new("dev", None, false);
-        let Login::Granted(cookie) = development.login("dev").await else {
+        let Login::Granted(cookie) = development.login(None, "dev") else {
             panic!("refused");
         };
         assert!(cookie.ends_with("SameSite=Strict"), "{cookie}");
@@ -223,35 +275,66 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn wrong_passwords_are_answered_later_and_later() {
+    async fn a_client_may_attempt_again_after_a_delay_that_doubles() {
         let auth = auth();
-        for expected in [250, 500, 1_000, 2_000, 4_000, 8_000, 8_000] {
-            let started = tokio::time::Instant::now();
-            assert!(matches!(auth.login("guess").await, Login::Refused));
-            assert_eq!(started.elapsed().as_millis(), expected);
+        let me = client("203.0.113.1");
+        for delay in [250, 500, 1_000, 2_000, 4_000, 8_000, 8_000] {
+            assert!(matches!(auth.login(me, "guess"), Login::Refused));
+            // Too soon, whatever the password.
+            let Login::Busy(left) = auth.login(me, RIGHT) else {
+                panic!("looked at");
+            };
+            assert_eq!(left.as_millis(), delay);
+            tokio::time::advance(Duration::from_millis(delay as u64 - 1)).await;
+            assert!(matches!(auth.login(me, RIGHT), Login::Busy(_)));
+            tokio::time::advance(Duration::from_millis(1)).await;
         }
 
         // A success forgets the failures.
-        assert!(matches!(auth.login("correct horse battery staple").await, Login::Granted(_)));
-        let started = tokio::time::Instant::now();
-        assert!(matches!(auth.login("guess").await, Login::Refused));
-        assert_eq!(started.elapsed().as_millis(), 250);
+        assert!(matches!(auth.login(me, RIGHT), Login::Granted(_)));
+        assert!(matches!(auth.login(me, "guess"), Login::Refused));
+        let Login::Busy(left) = auth.login(me, "guess") else {
+            panic!("looked at");
+        };
+        assert_eq!(left.as_millis(), 250);
     }
 
     #[tokio::test(start_paused = true)]
-    async fn one_attempt_is_checked_at_a_time() {
-        let auth = std::sync::Arc::new(auth());
-        let first = tokio::spawn({
-            let auth = auth.clone();
-            async move { auth.login("guess").await }
-        });
-        // Let the first attempt reach its delay.
-        tokio::task::yield_now().await;
+    async fn a_client_that_guesses_does_not_keep_another_from_signing_in() {
+        let auth = auth();
+        let attacker = client("203.0.113.1");
+        // The attacker never stops, from as many connections as it likes.
+        for _ in 0..50 {
+            let _ = auth.login(attacker, "guess");
+        }
+        assert!(matches!(auth.login(attacker, RIGHT), Login::Busy(_)));
 
-        // Even the right password is not looked at while another attempt waits.
-        assert!(matches!(auth.login("correct horse battery staple").await, Login::Busy));
-        assert!(matches!(first.await.unwrap(), Login::Refused));
-        assert!(matches!(auth.login("correct horse battery staple").await, Login::Granted(_)));
+        // Nobody else waits for it, and the time it takes does not matter.
+        assert!(matches!(auth.login(client("203.0.113.2"), RIGHT), Login::Granted(_)));
+        assert!(matches!(auth.login(client("2001:db8::1"), "guess"), Login::Refused));
+        assert!(matches!(auth.login(client("2001:db8::1"), RIGHT), Login::Busy(_)));
+        // A client whose address is unknown is one client of its own.
+        assert!(matches!(auth.login(None, RIGHT), Login::Granted(_)));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn clients_that_stopped_guessing_are_forgotten() {
+        let auth = auth();
+        for index in 0..MAX_CLIENTS {
+            let address = IpAddr::from(std::net::Ipv4Addr::from(0x0a00_0000 + index as u32));
+            assert!(matches!(auth.login(Some(address), "guess"), Login::Refused));
+        }
+        assert_eq!(auth.guesses.lock().unwrap().len(), MAX_CLIENTS);
+        tokio::time::advance(FORGET_AFTER + Duration::from_secs(60)).await;
+        assert!(matches!(auth.login(client("203.0.113.9"), "guess"), Login::Refused));
+        assert_eq!(auth.guesses.lock().unwrap().len(), 1);
+
+        // Full of clients that are still guessing: the oldest makes room.
+        for index in 0..MAX_CLIENTS {
+            let address = IpAddr::from(std::net::Ipv4Addr::from(0x0a00_0000 + index as u32));
+            let _ = auth.login(Some(address), "guess");
+        }
+        assert!(auth.guesses.lock().unwrap().len() <= MAX_CLIENTS);
     }
 
     #[test]

@@ -20,7 +20,8 @@ pub enum ShopifyAppSource {
     Config,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// `Debug` does not show `api_secret`.
+#[derive(Clone, PartialEq, Eq)]
 pub struct ResolvedShopifyApp {
     pub handle: String,
     pub api_key: String,
@@ -29,6 +30,20 @@ pub struct ResolvedShopifyApp {
     pub scopes: String,
     pub source: ShopifyAppSource,
     pub toml: Option<String>,
+}
+
+impl std::fmt::Debug for ResolvedShopifyApp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ResolvedShopifyApp")
+            .field("handle", &self.handle)
+            .field("api_key", &self.api_key)
+            .field("api_secret", &crate::runtime::redact::redacted(&self.api_secret))
+            .field("app_url", &self.app_url)
+            .field("scopes", &self.scopes)
+            .field("source", &self.source)
+            .field("toml", &self.toml)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -245,7 +260,7 @@ impl ShopifyApps {
         }
     }
 
-    pub fn by_webhook_hmac(&self, body: &str, hmac: &str) -> Result<&ResolvedShopifyApp> {
+    pub fn by_webhook_hmac(&self, body: &[u8], hmac: &str) -> Result<&ResolvedShopifyApp> {
         let matches: Vec<&ResolvedShopifyApp> = self
             .apps
             .iter()
@@ -444,7 +459,7 @@ scopes = "read_products,read_orders"
 
         let body = r#"{"id":1}"#;
         let hmac = sign_body(body, "secret-a");
-        assert_eq!(apps.by_webhook_hmac(body, &hmac).unwrap().handle, "clientA");
+        assert_eq!(apps.by_webhook_hmac(body.as_bytes(), &hmac).unwrap().handle, "clientA");
     }
 
     #[test]
@@ -482,7 +497,7 @@ scopes = "read_products,read_orders"
 
         let body = r#"{"id":1}"#;
         let error = apps
-            .by_webhook_hmac(body, &sign_body(body, ""))
+            .by_webhook_hmac(body.as_bytes(), &sign_body(body, ""))
             .unwrap_err()
             .to_string();
         assert!(error.contains("No Shopify app matched"));

@@ -55,6 +55,7 @@ use tokio::time::Instant;
 use crate::app::OpenShop;
 use crate::runtime::{FORM_CONTENT_TYPE, HttpTransport, OutboundRequest, logger};
 use crate::server::shop_domain::strict_shop_domain;
+use crate::shopify::token_exchange::TokenExchanges;
 
 /// A token this process obtained is renewed this long before it expires.
 const RENEWAL_MARGIN: TimeDelta = TimeDelta::minutes(5);
@@ -163,6 +164,8 @@ pub(crate) struct ClientCredentials {
     entries: StdMutex<HashMap<(String, String), Entry>>,
     /// The Shopify apps whose configuration error background work reported.
     reported: StdMutex<HashSet<String>>,
+    /// The token exchange of the session token, which falls back to this grant.
+    pub(crate) exchanges: TokenExchanges,
 }
 
 /// The installation row of an app and shop.
@@ -228,6 +231,7 @@ impl ClientCredentials {
             hasher: RandomState::new(),
             entries: StdMutex::new(HashMap::new()),
             reported: StdMutex::new(HashSet::new()),
+            exchanges: TokenExchanges::default(),
         })
     }
 

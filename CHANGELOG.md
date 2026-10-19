@@ -193,6 +193,93 @@
   reaches back further than the calendar answers `400` instead of panicking.
   The run page of the admin shows the reason when the server refuses a log
   search, instead of keeping the previous lines.
+- Minor security findings of the review, one by one:
+  - A webhook's HMAC (`/webhooks` and `/auth/webhooks/app-uninstalled`) is
+    computed over the raw bytes of the body. It was computed over a lossy
+    UTF-8 conversion of it, so a body that was not UTF-8 verified against a
+    mangled payload. `verify_webhook_hmac` and `ShopifyApps::by_webhook_hmac`
+    take `&[u8]`; `sign_webhook_body` takes anything that is bytes.
+  - A webhook delivery that Shopify sends again (same `X-Shopify-Webhook-Id`,
+    or `X-Shopify-Event-Id` without it) is acknowledged and its handler is
+    not run again, within an hour, once its handler has completed. A handler
+    that fails or panics, or a request Shopify cancels by hanging up, leaves
+    nothing remembered and the repeat runs; a repeat that arrives while the
+    handler is still running is answered `503` with `Retry-After: 5`. The
+    memory is the process's, bounded to 100,000 deliveries, and keyed by app,
+    topic, id and signature; a handler must still be idempotent across
+    replicas and restarts. A delivery without either header is run as before.
+  - A refused session token on `/api` is answered `Unauthorized: invalid
+    session token`, where the answer named the claim that failed or the apps
+    configured. The reason is logged as a warning. **Behaviour change** for a
+    client that read the message.
+  - A refused MCP token is logged (`[openshop] MCP token refused`: token id,
+    reason, status, client address), never with the secret.
+  - **Behaviour change:** `read_providers`, `write_providers`, `read_functions`
+    and `manage_mcp_tokens` are no longer MCP permissions: no tool checked
+    them, so granting them promised something that did not exist. A new token
+    cannot be given them (`Unknown permission`); a token that holds one keeps
+    working, the grant is ignored and listed in `stalePermissions`.
+  - **Behaviour change:** in production, CORS no longer allows `localhost`,
+    `127.0.0.1` and `[::1]` origins (unless `HOST` or `SHOPIFY_APP_URL` is
+    one). `*.myshopify.com`, `admin.shopify.com`, `shopify.com`, Shopify's
+    extension CDN and the application's own origin are allowed as before.
+    `is_allowed_cors_origin` takes a `production` flag.
+  - The body of an answer to an outbound request (`ReqwestTransport`) is read
+    up to 10 MiB (`MAX_RESPONSE_BYTES`) and refused beyond, by
+    `Content-Length` or by counting.
+  - The sign-in of the operator dashboard no longer has one lock for everyone,
+    that a client guessing wrong passwords kept held: each client (the peer
+    address, a `/64` for IPv6, or the last `X-Forwarded-For` address when the
+    peer is on a private network) attempts once, then again after a delay that
+    doubles from 250 ms to 8 seconds. An attempt that comes sooner is `429`
+    with `Retry-After`, at once, and not looked at. The server now hands the
+    address of the peer to the handlers (`ConnectInfo`).
+  - Shop domains are read as ASCII only: `normalize_shop_domain` refuses a
+    non-ASCII name instead of lowercasing it with Unicode rules (the Kelvin
+    sign became `k`).
+  - **Behaviour change:** `/proxy/*` and `/ext/*` refuse the session token of a
+    staff user (`Unauthorized: session token was issued to a staff user`); they
+    took it for a customer-account token without a customer. Tokens of customer
+    account and checkout extensions, buyers without an account included, are
+    accepted as before.
+  - `Debug` of `ShopifyAppConfig`, `RuntimeEnv`, the resolved Shopify app, the
+    generated and parsed MCP tokens, the rows of installations, provider
+    configurations and MCP tokens, and `OutboundRequest` prints `[redacted]`
+    for secrets.
+  - The CSV export of the logs of a run prefixes a cell that starts with `=`,
+    `+`, `-`, `@`, a tab or a carriage return with `'`, so that a spreadsheet
+    does not run it.
+  - The JSON that `Liquid::assign` gives for a list or an object writes `<`,
+    `>`, `&`, U+2028 and U+2029 as `\uXXXX`, so `</script>` or `<!--` in a value
+    cannot end the `<script>` that prints it; the `custom` template prints
+    every value with `| escape`.
+  - Not addressed: the AES-GCM format has no associated data nor key id (a
+    re-encryption migration, TypeScript parity); see
+    [Security](docs/src/reference/security.md#encryption-at-rest).
+
+- The token exchange of the session token, run by the first `/api` request of
+  a shop without a token, is bounded: one request at a time exchanges for an
+  app and shop, and the requests that arrive meanwhile wait for it and use its
+  token, where each asked Shopify on its own, for up to the 60 seconds of the
+  HTTP client. Shopify is asked for five seconds at most, and a failed
+  exchange is not tried again for thirty seconds. A shop never waits for the
+  exchange of another. After a timeout, the request is served without asking
+  the client credentials grant too. `MockTransport::delay_responses` makes the
+  mock answer late, for tests of a slow Shopify.
+- `/auth` no longer writes to the database, and no longer overwrites the nonce
+  of an installation in progress, which anybody could do by calling it for a
+  shop. The `state` of the authorization is signed with the secret of the app
+  (app handle, shop, expiry of ten minutes, nonce, browser) and bound to the
+  browser by the cookie `openshop_oauth` (`HttpOnly`, `SameSite=Lax`, `Secure`
+  on an `https` application URL, ten minutes). Several installations of a shop
+  may be pending; the callback compares the signature in constant time,
+  refuses a `state` that is expired, altered, of another browser, shop or app,
+  or already spent, and creates the row of the installation if there is none.
+  The `installations.nonce` column is no longer read or written, so an
+  installation begun in the TypeScript runtime is not finished in this one,
+  nor the reverse; `pending` in the operator dashboard only shows rows left by
+  earlier versions. A callback whose token request fails has spent its
+  `state`: the merchant starts again at `/auth`.
 - `openshop init` makes a project from one of three templates: `minimal`, one
   provider and one flow, as before; `custom`, a custom app with every building
   block and a page of its own next to the built-in admin; `public`, a public

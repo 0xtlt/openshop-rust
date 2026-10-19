@@ -16,20 +16,23 @@ use std::sync::Arc;
 
 use axum::Router;
 use axum::body::Bytes;
-use axum::extract::{Extension, Request, State};
+use axum::extract::{ConnectInfo, Extension, Request, State};
 use axum::http::header::{
-    CACHE_CONTROL, CONTENT_SECURITY_POLICY, CONTENT_TYPE, LOCATION, REFERRER_POLICY, SET_COOKIE,
+    CACHE_CONTROL, CONTENT_SECURITY_POLICY, CONTENT_TYPE, LOCATION, REFERRER_POLICY, RETRY_AFTER, SET_COOKIE,
     X_CONTENT_TYPE_OPTIONS, X_FRAME_OPTIONS,
 };
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{any, get, post};
+use serde_json::json;
 
 use self::auth::{Login, OpsAuth, is_same_site};
 use self::html::{login_page, message_page};
 use crate::app::OpenShop;
 use crate::runtime::logger;
+use crate::server::client::client_ip;
+use crate::server::linger::Peer;
 
 pub use self::auth::{MIN_PRODUCTION_PASSWORD_LENGTH, check_password};
 
@@ -84,7 +87,12 @@ fn refused(status: StatusCode, problem: &str) -> Response {
     html_response(status, login_page(Some(problem)))
 }
 
-async fn login(Extension(auth): Extension<Arc<OpsAuth>>, headers: HeaderMap, body: Bytes) -> Response {
+async fn login(
+    Extension(auth): Extension<Arc<OpsAuth>>,
+    peer: Option<Extension<ConnectInfo<Peer>>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
     if !is_same_site(&headers) {
         return refused(StatusCode::FORBIDDEN, "Sign in from this page.");
     }
@@ -93,19 +101,30 @@ async fn login(Extension(auth): Extension<Arc<OpsAuth>>, headers: HeaderMap, bod
         .map(|(_, value)| value.into_owned())
         .unwrap_or_default();
 
-    match auth.login(&password).await {
+    let client = client_ip(peer.as_ref().map(|Extension(info)| info), &headers);
+    match auth.login(client, &password) {
         Login::Granted(cookie) => {
             logger::info("[openshop] Operator dashboard: signed in");
             (StatusCode::SEE_OTHER, [(LOCATION, HOME.to_string()), (SET_COOKIE, cookie)]).into_response()
         }
         Login::Refused => {
-            logger::warn("[openshop] Operator dashboard: wrong password");
+            logger::warn_with(
+                "[openshop] Operator dashboard: wrong password",
+                json!({ "client": client.map(|address| address.to_string()) }),
+            );
             refused(StatusCode::UNAUTHORIZED, "Wrong password.")
         }
-        Login::Busy => refused(
-            StatusCode::TOO_MANY_REQUESTS,
-            "Another attempt is being checked. Try again in a few seconds.",
-        ),
+        Login::Busy(delay) => {
+            let seconds = delay.as_secs() + u64::from(delay.subsec_nanos() > 0);
+            let mut response = refused(
+                StatusCode::TOO_MANY_REQUESTS,
+                "Too many attempts. Try again in a few seconds.",
+            );
+            response
+                .headers_mut()
+                .insert(RETRY_AFTER, HeaderValue::from(seconds.max(1)));
+            response
+        }
     }
 }
 

@@ -797,12 +797,18 @@ async fn with_token(ctx: &TestContext, token: &str) -> Response {
         .unwrap()
 }
 
+/// Why a token is refused is for the logs: the client is only told that it is,
+/// unless nothing about the token is revealed by the reason.
 async fn assert_unauthorized(ctx: &TestContext, token: &str, reason: &str) {
     let response = with_token(ctx, token).await;
     assert_eq!(response.status(), 401, "{reason}");
+    let told = match reason {
+        "missing token audience" | "session token was not issued to a staff user" => reason,
+        _ => "invalid session token",
+    };
     assert_eq!(
         json_body(response).await,
-        json!({ "error": format!("Unauthorized: {reason}") })
+        json!({ "error": format!("Unauthorized: {told}") })
     );
 }
 

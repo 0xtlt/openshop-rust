@@ -104,8 +104,17 @@ pub async fn get_filtered_run_logs(
     Ok(FilteredRunLogs { logs, total })
 }
 
+/// A cell, quoted. A spreadsheet reads a cell that starts with `=`, `+`, `-`,
+/// `@`, a tab or a carriage return as a formula, and a log line holds what a
+/// customer typed: such a cell starts with `'` (OWASP, CSV injection), which
+/// the spreadsheet does not show.
 fn csv_escape(value: &str) -> String {
-    format!("\"{}\"", value.replace('"', "\"\""))
+    let neutralized = if value.starts_with(['=', '+', '-', '@', '\t', '\r']) {
+        format!("'{value}")
+    } else {
+        value.to_string()
+    };
+    format!("\"{}\"", neutralized.replace('"', "\"\""))
 }
 
 pub fn logs_to_csv(logs: &[LogResponseRow]) -> String {
@@ -194,6 +203,29 @@ mod tests {
             lines[2],
             "00000000-0000-0000-0000-000000000000,info,\"\",\"\"\"\"\"\",2026-03-01T10:00:00.000Z"
         );
+    }
+
+    #[test]
+    fn exports_csv_without_formulas() {
+        for formula in [
+            "=HYPERLINK(\"http://evil.example\",\"click\")",
+            "+1+1",
+            "-2+3",
+            "@SUM(A1)",
+            "\t=1+1",
+            "\r=1+1",
+        ] {
+            let csv = logs_to_csv(&[row(Some(formula), Some(json!(formula)))]);
+            let line = csv.lines().nth(1).unwrap();
+            let message = format!("\"'{}\"", formula.replace('"', "\"\""));
+            assert!(line.contains(&format!(",info,{message},")), "{formula:?}: {line}");
+            // A cell that is a formula to a spreadsheet starts with the quote, not with the formula.
+            assert!(!line.contains(&format!(",\"{}", formula.replace('"', "\"\""))), "{formula:?}: {line}");
+        }
+        // A payload that is a JSON number or text keeps its meaning, and what is ordinary is left alone.
+        let csv = logs_to_csv(&[row(Some("a-b = c"), Some(json!(-5)))]);
+        let line = csv.lines().nth(1).unwrap();
+        assert!(line.contains(",\"a-b = c\",\"'-5\","), "{line}");
     }
 
     #[test]

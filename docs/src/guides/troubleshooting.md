@@ -43,7 +43,9 @@ requests:
 
 An `Invalid HMAC` response means the request was not signed with the secret of
 a configured app. An `Invalid state/nonce` response means the OAuth callback is
-stale or belongs to a different installation attempt.
+stale (older than ten minutes, or already used), or belongs to a different
+browser or installation attempt: start again at `/auth` in the browser that
+will finish the installation, with cookies enabled.
 
 ## The embedded UI returns 401
 

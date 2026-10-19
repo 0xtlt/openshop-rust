@@ -845,7 +845,8 @@ pub struct ShopifyConfig {
     pub apps: Option<IndexMap<String, ShopifyAppConfig>>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// `Debug` does not show `api_secret`.
+#[derive(Clone, PartialEq, Eq)]
 pub enum ShopifyAppConfig {
     Toml {
         /// Shopify app TOML path, relative to the project root. OpenShop reads client_id and app URL from it.
@@ -862,6 +863,34 @@ pub enum ShopifyAppConfig {
         /// Public app URL used for OAuth redirects.
         app_url: Option<String>,
     },
+}
+
+impl std::fmt::Debug for ShopifyAppConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        use crate::runtime::redact::redacted;
+        match self {
+            Self::Toml {
+                toml,
+                api_secret,
+                app_url,
+            } => f
+                .debug_struct("Toml")
+                .field("toml", toml)
+                .field("api_secret", &redacted(api_secret))
+                .field("app_url", app_url)
+                .finish(),
+            Self::Keys {
+                api_key,
+                api_secret,
+                app_url,
+            } => f
+                .debug_struct("Keys")
+                .field("api_key", api_key)
+                .field("api_secret", &redacted(api_secret))
+                .field("app_url", app_url)
+                .finish(),
+        }
+    }
 }
 
 impl ShopifyAppConfig {

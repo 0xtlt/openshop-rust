@@ -3,6 +3,8 @@
 
 mod common;
 
+use std::time::Duration;
+
 use chrono::Utc;
 use common::noop_flow;
 use openshop::db::schema::InstallationRow;
@@ -154,6 +156,68 @@ fn callback_path(shop: &str, code: &str, state: &str, secret: &str) -> String {
     )
 }
 
+/// An authenticated-looking GET carrying `cookie` (`name=value`), as a browser would.
+async fn get_with(ctx: &TestContext, path: &str, cookie: Option<&str>) -> Response {
+    let mut request = ctx.http.get(format!("{}{path}", ctx.url));
+    if let Some(cookie) = cookie {
+        request = request.header("cookie", cookie);
+    }
+    request.send().await.unwrap()
+}
+
+/// What `/auth` hands a browser: the `state` of the authorization and the
+/// cookie (`name=value`) it sets.
+struct Started {
+    state: String,
+    cookie: String,
+}
+
+/// Starts an installation at `path` (`/auth?shop=...`) as a browser that sends `cookie`, if it has one.
+async fn begin_with(ctx: &TestContext, path: &str, cookie: Option<&str>) -> Started {
+    let response = get_with(ctx, path, cookie).await;
+    assert_eq!(response.status(), 302);
+    let state = location(&response)
+        .rsplit_once("&state=")
+        .expect("state parameter")
+        .1
+        .to_string();
+    let cookie = response
+        .headers()
+        .get("set-cookie")
+        .expect("set-cookie header")
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_string();
+    Started { state, cookie }
+}
+
+/// A browser that has no cookie yet starts an installation of `shop`.
+async fn begin(ctx: &TestContext, shop: &str) -> Started {
+    begin_with(ctx, &format!("/auth?shop={shop}"), None).await
+}
+
+/// The callback of Shopify, signed with `secret`, in the browser of `started`.
+async fn finish(ctx: &TestContext, shop: &str, started: &Started, secret: &str) -> Response {
+    get_with(
+        ctx,
+        &callback_path(shop, "code", &started.state, secret),
+        Some(&started.cookie),
+    )
+    .await
+}
+
+/// A state as `/auth` signs it, with any expiry.
+fn signed_state(secret: &str, app_handle: &str, shop: &str, expiry: i64, nonce: &str, browser: &str) -> String {
+    use hmac::{Hmac, Mac};
+    let message = format!("openshop-oauth-state\0{app_handle}\0{shop}\0{expiry}\0{nonce}\0{browser}");
+    let mut mac = Hmac::<sha2::Sha256>::new_from_slice(secret.as_bytes()).unwrap();
+    mac.update(message.as_bytes());
+    format!("{expiry}.{nonce}.{}", hex::encode(mac.finalize().into_bytes()))
+}
+
 fn grant_access_token(ctx: &TestContext, access_token: &str) {
     ctx.transport
         .respond_json(json!({ "access_token": access_token, "scope": "read_products" }));
@@ -234,13 +298,33 @@ async fn get_auth_with_shop_builds_shopify_oauth_redirect() {
         "{location}"
     );
 
-    let nonce = installation(&ctx, "default", "redirect-shop.myshopify.com")
-        .await
-        .nonce
-        .expect("nonce");
-    assert_eq!(nonce.len(), 32);
-    assert!(nonce.bytes().all(|byte| byte.is_ascii_hexdigit()));
-    assert!(location.ends_with(&format!("&state={nonce}")), "{location}");
+    // `<expiry>.<nonce>.<signature>`, in the URL and in no row.
+    let state = location.rsplit_once("&state=").expect("state").1;
+    let parts: Vec<&str> = state.split('.').collect();
+    assert_eq!(parts.len(), 3, "{state}");
+    let expiry: i64 = parts[0].parse().unwrap();
+    let ttl = expiry - Utc::now().timestamp();
+    assert!((595..=600).contains(&ttl), "{ttl}");
+    for part in &parts[1..] {
+        assert!(part.bytes().all(|byte| byte.is_ascii_hexdigit()), "{state}");
+    }
+    assert_eq!(parts[1].len(), 32);
+    assert_eq!(installation_count(&ctx).await, 0);
+
+    // The state is bound to the browser by a cookie that script cannot read
+    // and a third party cannot send.
+    let cookie = response
+        .headers()
+        .get("set-cookie")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+    assert!(cookie.starts_with("openshop_oauth="), "{cookie}");
+    for attribute in ["Path=/auth", "Max-Age=600", "HttpOnly", "SameSite=Lax", "Secure"] {
+        assert!(cookie.contains(&format!("; {attribute}")), "{attribute} in {cookie}");
+    }
+    assert_eq!(cookie.split(';').next().unwrap().len(), "openshop_oauth=".len() + 32);
     ctx.shutdown().await.unwrap();
 }
 
@@ -284,14 +368,8 @@ async fn get_auth_with_app_handle_builds_the_matching_app_oauth_redirect(ctx: &T
         "{location}"
     );
 
-    let row = installation(ctx, "clientA", "multi-auth.myshopify.com").await;
-    assert_eq!(row.shop, "multi-auth.myshopify.com");
-    assert!(row.nonce.is_some());
-    assert!(
-        find_installation(ctx, "clientB", "multi-auth.myshopify.com")
-            .await
-            .is_none()
-    );
+    // Nothing is written until Shopify calls back.
+    assert_eq!(installation_count(ctx).await, 0);
 }
 
 #[openshop::test(single_app())]
@@ -374,33 +452,149 @@ async fn get_auth_always_redirects_to_the_normalized_shop_host(ctx: &TestContext
         );
         assert!(!location.contains("evil"), "{shop:?} -> {location}");
     }
-    assert_eq!(installation_count(ctx).await, 1);
-    assert!(
-        installation(ctx, "default", "normalized.myshopify.com")
-            .await
-            .nonce
-            .is_some()
-    );
+    assert_eq!(installation_count(ctx).await, 0);
 }
 
 #[openshop::test(single_app())]
-async fn get_auth_rotates_the_nonce_and_keeps_the_stored_token(ctx: &TestContext) {
+async fn get_auth_writes_nothing_and_leaves_the_installation_alone(ctx: &TestContext) {
     seed_installation(ctx, "default", "rotate.myshopify.com", None, Some("existing-token")).await;
+    let before = installation(ctx, "default", "rotate.myshopify.com").await;
 
-    let first = location(&get(ctx, "/auth?shop=rotate.myshopify.com").await);
-    let first_nonce = installation(ctx, "default", "rotate.myshopify.com")
-        .await
-        .nonce
-        .unwrap();
-    let second = location(&get(ctx, "/auth?shop=rotate.myshopify.com").await);
+    begin(ctx, "rotate.myshopify.com").await;
+    begin(ctx, "rotate.myshopify.com").await;
+    begin(ctx, "unknown.myshopify.com").await;
+
     let row = installation(ctx, "default", "rotate.myshopify.com").await;
-    let second_nonce = row.nonce.clone().unwrap();
-
-    assert_ne!(first_nonce, second_nonce);
-    assert!(first.ends_with(&format!("&state={first_nonce}")));
-    assert!(second.ends_with(&format!("&state={second_nonce}")));
     assert_eq!(row.access_token.as_deref(), Some("existing-token"));
+    assert_eq!(row.nonce, before.nonce);
     assert_eq!(installation_count(ctx).await, 1);
+}
+
+#[openshop::test(single_app())]
+async fn a_second_get_auth_for_a_shop_does_not_invalidate_the_first_pending_installation(ctx: &TestContext) {
+    let shop = "pending.myshopify.com";
+    // The merchant's browser starts, then somebody else's browser does.
+    let merchant = begin(ctx, shop).await;
+    let other = begin(ctx, shop).await;
+    assert_ne!(merchant.state, other.state);
+    assert_ne!(merchant.cookie, other.cookie);
+    grant_access_token(ctx, "merchant-token");
+
+    let response = finish(ctx, shop, &merchant, SECRET).await;
+    assert_eq!(response.status(), 302);
+    let row = installation(ctx, "default", shop).await;
+    assert_eq!(decrypted_token(ctx, &row).as_deref(), Some("merchant-token"));
+
+    // The other one is still good for its own browser.
+    grant_access_token(ctx, "other-token");
+    assert_eq!(finish(ctx, shop, &other, SECRET).await.status(), 302);
+}
+
+#[openshop::test(single_app())]
+async fn several_pending_installations_of_one_browser_stay_valid(ctx: &TestContext) {
+    let first = begin(ctx, "first.myshopify.com").await;
+    // The browser sends its cookie: it keeps it.
+    let second = begin_with(ctx, "/auth?shop=second.myshopify.com", Some(&first.cookie)).await;
+    let again = begin_with(ctx, "/auth?shop=first.myshopify.com", Some(&first.cookie)).await;
+    assert_eq!(first.cookie, second.cookie);
+    assert_eq!(first.cookie, again.cookie);
+    grant_access_token(ctx, "token");
+
+    assert_eq!(finish(ctx, "second.myshopify.com", &second, SECRET).await.status(), 302);
+    assert_eq!(finish(ctx, "first.myshopify.com", &again, SECRET).await.status(), 302);
+    // The first state was never used, and is as good as the others.
+    assert_eq!(finish(ctx, "first.myshopify.com", &first, SECRET).await.status(), 302);
+}
+
+#[openshop::test(single_app())]
+async fn get_auth_callback_refuses_a_state_from_another_browser(ctx: &TestContext) {
+    let shop = "browser.myshopify.com";
+    let victim = begin(ctx, shop).await;
+    let attacker = begin(ctx, shop).await;
+    grant_access_token(ctx, "must-not-be-stored");
+
+    // No cookie, the cookie of another browser, a made-up cookie.
+    let path = callback_path(shop, "code", &victim.state, SECRET);
+    assert_error(get_with(ctx, &path, None).await, 401, "Invalid state/nonce").await;
+    assert_error(
+        get_with(ctx, &path, Some(&attacker.cookie)).await,
+        401,
+        "Invalid state/nonce",
+    )
+    .await;
+    let made_up = format!("openshop_oauth={}", "0".repeat(32));
+    assert_error(get_with(ctx, &path, Some(&made_up)).await, 401, "Invalid state/nonce").await;
+
+    assert!(ctx.transport.requests().is_empty());
+    assert_eq!(installation_count(ctx).await, 0);
+    // The browser that started it still can.
+    assert_eq!(finish(ctx, shop, &victim, SECRET).await.status(), 302);
+}
+
+#[openshop::test(single_app())]
+async fn get_auth_callback_ignores_a_nonce_stored_in_the_installation(ctx: &TestContext) {
+    // What an earlier version, or the TypeScript runtime, left in the row.
+    let shop = "legacy.myshopify.com";
+    seed_installation(ctx, "default", shop, Some("legacy-nonce"), None).await;
+    grant_access_token(ctx, "must-not-be-stored");
+
+    let path = callback_path(shop, "code", "legacy-nonce", SECRET);
+    assert_error(get(ctx, &path).await, 401, "Invalid state/nonce").await;
+    assert!(ctx.transport.requests().is_empty());
+
+    // An installation completed here clears it.
+    let started = begin(ctx, shop).await;
+    assert_eq!(finish(ctx, shop, &started, SECRET).await.status(), 302);
+    let row = installation(ctx, "default", shop).await;
+    assert!(row.nonce.is_none());
+    assert!(row.access_token.is_some());
+}
+
+#[openshop::test(single_app())]
+async fn get_auth_callback_refuses_an_expired_state(ctx: &TestContext) {
+    let shop = "expired.myshopify.com";
+    let browser = "a".repeat(32);
+    let cookie = format!("openshop_oauth={browser}");
+    grant_access_token(ctx, "must-not-be-stored");
+
+    let now = Utc::now().timestamp();
+    let expired = signed_state(SECRET, "default", shop, now - 1, "b", &browser);
+    let path = callback_path(shop, "code", &expired, SECRET);
+    assert_error(get_with(ctx, &path, Some(&cookie)).await, 401, "Invalid state/nonce").await;
+    assert!(ctx.transport.requests().is_empty());
+
+    // The same state, still alive, is good: only the expiry was wrong.
+    let alive = signed_state(SECRET, "default", shop, now + 60, "b", &browser);
+    let path = callback_path(shop, "code", &alive, SECRET);
+    assert_eq!(get_with(ctx, &path, Some(&cookie)).await.status(), 302);
+}
+
+#[openshop::test(single_app())]
+async fn get_auth_callback_refuses_a_state_that_was_changed(ctx: &TestContext) {
+    let shop = "changed.myshopify.com";
+    let started = begin(ctx, shop).await;
+    grant_access_token(ctx, "must-not-be-stored");
+    let (expiry, rest) = started.state.split_once('.').unwrap();
+    let later = format!("{}.{rest}", expiry.parse::<i64>().unwrap() + 3600);
+    let mut flipped = started.state.clone();
+    let last = flipped.pop().unwrap();
+    flipped.push(if last == '0' { '1' } else { '0' });
+
+    for state in [
+        later,
+        flipped,
+        format!("{}.", started.state),
+        started.state.replace('.', ":"),
+        "nonce".to_string(),
+        String::new(),
+    ] {
+        let path = callback_path(shop, "code", &state, SECRET);
+        let response = get_with(ctx, &path, Some(&started.cookie)).await;
+        // An empty state is a missing parameter.
+        assert!(matches!(response.status().as_u16(), 400 | 401), "{state}");
+    }
+    assert!(ctx.transport.requests().is_empty());
+    assert_eq!(installation_count(ctx).await, 0);
 }
 
 // ─── GET /auth/callback ──────────────────────────────────────────────
@@ -421,23 +615,18 @@ async fn get_auth_callback_without_required_parameters_returns_400(ctx: &TestCon
 
 #[openshop::test(single_app())]
 async fn get_auth_callback_rejects_invalid_hmac(ctx: &TestContext) {
-    seed_installation(ctx, "default", "x.myshopify.com", Some("s"), None).await;
-
     let response = get(ctx, "/auth/callback?shop=x.myshopify.com&code=c&state=s&hmac=deadbeef").await;
     assert_error(response, 401, "Invalid HMAC").await;
     let response = get(ctx, "/auth/callback?shop=x.myshopify.com&code=c&state=s").await;
     assert_error(response, 401, "Invalid HMAC").await;
 
     assert!(ctx.transport.requests().is_empty());
-    assert_eq!(
-        installation(ctx, "default", "x.myshopify.com").await.nonce.as_deref(),
-        Some("s")
-    );
+    assert_eq!(installation_count(ctx).await, 0);
 }
 
 #[openshop::test(single_app())]
 async fn get_auth_callback_rejects_a_query_signed_with_another_secret(ctx: &TestContext) {
-    seed_installation(ctx, "default", "x.myshopify.com", Some("s"), None).await;
+    seed_installation(ctx, "default", "x.myshopify.com", None, None).await;
     grant_access_token(ctx, "must-not-be-stored");
 
     let path = callback_path("x.myshopify.com", "c", "s", "another-secret");
@@ -454,8 +643,8 @@ async fn get_auth_callback_rejects_a_query_signed_with_another_secret(ctx: &Test
 
 #[openshop::test(single_app())]
 async fn get_auth_callback_rejects_tampered_parameters(ctx: &TestContext) {
-    seed_installation(ctx, "default", "x.myshopify.com", Some("s"), None).await;
-    seed_installation(ctx, "default", "y.myshopify.com", Some("s"), None).await;
+    seed_installation(ctx, "default", "x.myshopify.com", None, None).await;
+    seed_installation(ctx, "default", "y.myshopify.com", None, None).await;
     grant_access_token(ctx, "must-not-be-stored");
 
     let tampered: [(&str, &str); 4] = [
@@ -489,7 +678,7 @@ async fn get_auth_callback_rejects_valid_hmac_with_invalid_shop_domain(ctx: &Tes
 
 #[openshop::test(single_app())]
 async fn get_auth_callback_rejects_shop_domain_normalization_attacks(ctx: &TestContext) {
-    seed_installation(ctx, "default", "x.myshopify.com", Some("s"), None).await;
+    seed_installation(ctx, "default", "x.myshopify.com", None, None).await;
     grant_access_token(ctx, "must-not-be-stored");
 
     for shop in [
@@ -521,11 +710,10 @@ async fn get_auth_callback_with_valid_hmac_and_mocked_token_exchange_updates_ins
     };
     let ctx = TestContext::with_options(config(), options).await.unwrap();
     let shop = "oauth-ok.myshopify.com";
-    let state = "expected-nonce-123";
-    seed_installation(&ctx, "default", shop, Some(state), None).await;
+    let started = begin(&ctx, shop).await;
     grant_access_token(&ctx, "stored-access-token");
 
-    let response = get(&ctx, &callback_path(shop, "temporary-code", state, SECRET)).await;
+    let response = finish(&ctx, shop, &started, SECRET).await;
     assert_eq!(response.status(), 302);
     assert_eq!(
         location(&response),
@@ -540,7 +728,7 @@ async fn get_auth_callback_with_valid_hmac_and_mocked_token_exchange_updates_ins
     );
     assert_eq!(
         requests[0].body,
-        json!({ "client_id": "app-key-for-callback", "client_secret": SECRET, "code": "temporary-code" })
+        json!({ "client_id": "app-key-for-callback", "client_secret": SECRET, "code": "code" })
     );
 
     let row = installation(&ctx, "default", shop).await;
@@ -558,12 +746,11 @@ async fn get_auth_callback_with_valid_hmac_and_mocked_token_exchange_updates_ins
 #[openshop::test(multi_app())]
 async fn get_auth_callback_resolves_the_app_from_hmac_and_isolates_installations_by_app(ctx: &TestContext) {
     let shop = "same-shop.myshopify.com";
-    seed_installation(ctx, "clientA", shop, Some("nonce-client-a"), None).await;
-    seed_installation(ctx, "clientB", shop, Some("nonce-client-b"), None).await;
+    let started_a = begin_with(ctx, &format!("/auth?shop={shop}&app=clientA"), None).await;
+    let started_b = begin_with(ctx, &format!("/auth?shop={shop}&app=clientB"), None).await;
     grant_access_token(ctx, "stored-token-client-b");
 
-    let path = callback_path(shop, "temporary-code-client-b", "nonce-client-b", "client-b-secret");
-    let response = get(ctx, &path).await;
+    let response = finish(ctx, shop, &started_b, "client-b-secret").await;
     assert_eq!(response.status(), 302);
     assert_eq!(
         location(&response),
@@ -577,26 +764,27 @@ async fn get_auth_callback_resolves_the_app_from_hmac_and_isolates_installations
         json!({
             "client_id": "client-b-key",
             "client_secret": "client-b-secret",
-            "code": "temporary-code-client-b",
+            "code": "code",
         })
     );
 
-    let row_a = installation(ctx, "clientA", shop).await;
+    assert!(find_installation(ctx, "clientA", shop).await.is_none());
     let row_b = installation(ctx, "clientB", shop).await;
-    assert!(row_a.access_token.is_none());
-    assert_eq!(row_a.nonce.as_deref(), Some("nonce-client-a"));
     assert_eq!(decrypted_token(ctx, &row_b).as_deref(), Some("stored-token-client-b"));
     assert!(row_b.nonce.is_none());
+
+    // The installation of the other app is still pending.
+    grant_access_token(ctx, "stored-token-client-a");
+    assert_eq!(finish(ctx, shop, &started_a, "client-a-secret").await.status(), 302);
 }
 
 #[openshop::test(single_app())]
 async fn get_auth_callback_completes_the_flow_started_by_get_auth(ctx: &TestContext) {
     let shop = "full-flow.myshopify.com";
-    let authorize = location(&get(ctx, &format!("/auth?shop={shop}")).await);
-    let state = authorize.rsplit_once("&state=").expect("state parameter").1;
+    let started = begin(ctx, shop).await;
     grant_access_token(ctx, "full-flow-token");
 
-    let response = get(ctx, &callback_path(shop, "code-1", state, SECRET)).await;
+    let response = finish(ctx, shop, &started, SECRET).await;
     assert_eq!(response.status(), 302);
     assert_eq!(
         location(&response),
@@ -614,29 +802,48 @@ async fn get_auth_callback_completes_the_flow_started_by_get_auth(ctx: &TestCont
 #[openshop::test(single_app())]
 async fn get_auth_callback_rejects_unknown_or_mismatched_state(ctx: &TestContext) {
     grant_access_token(ctx, "must-not-be-stored");
+    let started = begin(ctx, "started.myshopify.com").await;
 
-    // No authorization was ever started for this shop.
-    let path = callback_path("never-started.myshopify.com", "c", "s", SECRET);
-    assert_error(get(ctx, &path).await, 401, "Invalid state/nonce").await;
-    assert_eq!(installation_count(ctx).await, 0);
+    // No authorization was ever started for this shop: the state is for another.
+    let path = callback_path("never-started.myshopify.com", "c", &started.state, SECRET);
+    assert_error(
+        get_with(ctx, &path, Some(&started.cookie)).await,
+        401,
+        "Invalid state/nonce",
+    )
+    .await;
 
-    seed_installation(ctx, "default", "started.myshopify.com", Some("expected-nonce"), None).await;
-    for state in ["another-nonce", "expected-nonc", "expected-nonce-", "EXPECTED-NONCE"] {
+    for state in [
+        "another-nonce",
+        "null",
+        "undefined",
+        "s",
+        "1.2.3",
+        "9999999999.nonce.signature",
+    ] {
         let path = callback_path("started.myshopify.com", "c", state, SECRET);
-        assert_error(get(ctx, &path).await, 401, "Invalid state/nonce").await;
+        assert_error(
+            get_with(ctx, &path, Some(&started.cookie)).await,
+            401,
+            "Invalid state/nonce",
+        )
+        .await;
     }
 
-    // An installed shop without a pending authorization has no nonce to match.
+    // An installed shop without a pending authorization has nothing to match.
     seed_installation(ctx, "default", "installed.myshopify.com", None, Some("existing-token")).await;
     for state in ["null", "undefined", "s"] {
         let path = callback_path("installed.myshopify.com", "c", state, SECRET);
-        assert_error(get(ctx, &path).await, 401, "Invalid state/nonce").await;
+        assert_error(
+            get_with(ctx, &path, Some(&started.cookie)).await,
+            401,
+            "Invalid state/nonce",
+        )
+        .await;
     }
 
     assert!(ctx.transport.requests().is_empty());
-    let started = installation(ctx, "default", "started.myshopify.com").await;
-    assert_eq!(started.nonce.as_deref(), Some("expected-nonce"));
-    assert!(started.access_token.is_none());
+    assert_eq!(installation_count(ctx).await, 1);
     let installed = installation(ctx, "default", "installed.myshopify.com").await;
     assert_eq!(installed.access_token.as_deref(), Some("existing-token"));
 }
@@ -644,16 +851,20 @@ async fn get_auth_callback_rejects_unknown_or_mismatched_state(ctx: &TestContext
 #[openshop::test(single_app())]
 async fn get_auth_callback_rejects_a_replayed_state(ctx: &TestContext) {
     let shop = "replay.myshopify.com";
-    seed_installation(ctx, "default", shop, Some("one-time-nonce"), None).await;
+    let started = begin(ctx, shop).await;
     grant_access_token(ctx, "first-token");
 
-    let path = callback_path(shop, "code-1", "one-time-nonce", SECRET);
-    assert_eq!(get(ctx, &path).await.status(), 302);
+    assert_eq!(finish(ctx, shop, &started, SECRET).await.status(), 302);
 
     grant_access_token(ctx, "second-token");
-    assert_error(get(ctx, &path).await, 401, "Invalid state/nonce").await;
-    let path = callback_path(shop, "code-2", "one-time-nonce", SECRET);
-    assert_error(get(ctx, &path).await, 401, "Invalid state/nonce").await;
+    assert_error(finish(ctx, shop, &started, SECRET).await, 401, "Invalid state/nonce").await;
+    let path = callback_path(shop, "code-2", &started.state, SECRET);
+    assert_error(
+        get_with(ctx, &path, Some(&started.cookie)).await,
+        401,
+        "Invalid state/nonce",
+    )
+    .await;
 
     assert_eq!(ctx.transport.requests().len(), 1);
     let row = installation(ctx, "default", shop).await;
@@ -662,85 +873,95 @@ async fn get_auth_callback_rejects_a_replayed_state(ctx: &TestContext) {
 
 #[openshop::test(single_app())]
 async fn get_auth_callback_rejects_a_state_issued_for_another_shop(ctx: &TestContext) {
-    seed_installation(ctx, "default", "shop-a.myshopify.com", Some("nonce-a"), None).await;
-    seed_installation(ctx, "default", "shop-b.myshopify.com", Some("nonce-b"), None).await;
+    let started_a = begin(ctx, "shop-a.myshopify.com").await;
+    let started_b = begin_with(ctx, "/auth?shop=shop-b.myshopify.com", Some(&started_a.cookie)).await;
     grant_access_token(ctx, "must-not-be-stored");
 
-    let path = callback_path("shop-b.myshopify.com", "c", "nonce-a", SECRET);
-    assert_error(get(ctx, &path).await, 401, "Invalid state/nonce").await;
+    let path = callback_path("shop-b.myshopify.com", "c", &started_a.state, SECRET);
+    assert_error(
+        get_with(ctx, &path, Some(&started_a.cookie)).await,
+        401,
+        "Invalid state/nonce",
+    )
+    .await;
 
     assert!(ctx.transport.requests().is_empty());
-    for (shop, nonce) in [("shop-a.myshopify.com", "nonce-a"), ("shop-b.myshopify.com", "nonce-b")] {
-        let row = installation(ctx, "default", shop).await;
-        assert_eq!(row.nonce.as_deref(), Some(nonce));
-        assert!(row.access_token.is_none());
-    }
+    assert_eq!(installation_count(ctx).await, 0);
+    // Refused states are not spent.
+    assert_eq!(
+        finish(ctx, "shop-b.myshopify.com", &started_b, SECRET).await.status(),
+        302
+    );
 }
 
 #[openshop::test(multi_app())]
 async fn get_auth_callback_rejects_a_state_issued_for_another_app(ctx: &TestContext) {
     let shop = "same-shop.myshopify.com";
-    seed_installation(ctx, "clientA", shop, Some("nonce-client-a"), None).await;
-    seed_installation(ctx, "clientB", shop, Some("nonce-client-b"), None).await;
+    let started_a = begin_with(ctx, &format!("/auth?shop={shop}&app=clientA"), None).await;
     grant_access_token(ctx, "must-not-be-stored");
 
-    let path = callback_path(shop, "c", "nonce-client-a", "client-b-secret");
-    assert_error(get(ctx, &path).await, 401, "Invalid state/nonce").await;
+    let path = callback_path(shop, "c", &started_a.state, "client-b-secret");
+    assert_error(
+        get_with(ctx, &path, Some(&started_a.cookie)).await,
+        401,
+        "Invalid state/nonce",
+    )
+    .await;
     // The single-app environment secret is not an app of a multi-app instance.
-    let path = callback_path(shop, "c", "nonce-client-a", SECRET);
-    assert_error(get(ctx, &path).await, 401, "Invalid HMAC").await;
+    let path = callback_path(shop, "c", &started_a.state, SECRET);
+    assert_error(get_with(ctx, &path, Some(&started_a.cookie)).await, 401, "Invalid HMAC").await;
 
     assert!(ctx.transport.requests().is_empty());
-    for handle in ["clientA", "clientB"] {
-        assert!(installation(ctx, handle, shop).await.access_token.is_none());
-    }
+    assert_eq!(installation_count(ctx).await, 0);
 }
 
 #[openshop::test(single_app())]
 async fn get_auth_callback_reports_a_failed_token_exchange(ctx: &TestContext) {
     let shop = "exchange-fails.myshopify.com";
-    seed_installation(ctx, "default", shop, Some("nonce-1"), None).await;
+    let started = begin(ctx, shop).await;
     ctx.transport
         .respond_with(|_| Ok(MockTransport::json(400, json!({ "error": "invalid_request" }))));
 
-    let response = get(ctx, &callback_path(shop, "expired-code", "nonce-1", SECRET)).await;
+    let response = finish(ctx, shop, &started, SECRET).await;
     assert_error(response, 500, "Token exchange failed: {\"error\":\"invalid_request\"}").await;
 
+    // The code Shopify gave is spent with it: the merchant starts again.
+    let started = begin(ctx, shop).await;
     ctx.transport.respond_with(|_| Err(anyhow!("connection reset")));
-    let response = get(ctx, &callback_path(shop, "expired-code", "nonce-1", SECRET)).await;
+    let response = finish(ctx, shop, &started, SECRET).await;
     assert_eq!(response.status(), 500);
     assert_eq!(response.text().await.unwrap(), "Internal Server Error");
 
-    let row = installation(ctx, "default", shop).await;
-    assert!(row.access_token.is_none());
-    assert_eq!(row.nonce.as_deref(), Some("nonce-1"));
+    assert_eq!(installation_count(ctx).await, 0);
 }
 
 #[openshop::test(single_app())]
 async fn get_auth_callback_reinstalls_an_uninstalled_shop(ctx: &TestContext) {
     let shop = "reinstall.myshopify.com";
-    sqlx::query("INSERT INTO installations (shop, nonce, uninstalled_at) VALUES ($1, 'nonce-1', now())")
+    sqlx::query("INSERT INTO installations (shop, uninstalled_at) VALUES ($1, now())")
         .bind(shop)
         .execute(&ctx.db)
         .await
         .unwrap();
+    let started = begin(ctx, shop).await;
     grant_access_token(ctx, "fresh-token");
 
-    let response = get(ctx, &callback_path(shop, "c", "nonce-1", SECRET)).await;
+    let response = finish(ctx, shop, &started, SECRET).await;
     assert_eq!(response.status(), 302);
 
     let row = installation(ctx, "default", shop).await;
     assert!(row.uninstalled_at.is_none());
     assert_eq!(decrypted_token(ctx, &row).as_deref(), Some("fresh-token"));
+    assert_eq!(installation_count(ctx).await, 1);
 }
 
 #[openshop::test(TestContext::new(config()))]
 async fn get_auth_callback_stores_the_token_in_plaintext_without_an_encryption_key(ctx: &TestContext) {
     let shop = "plaintext.myshopify.com";
-    seed_installation(ctx, "default", shop, Some("nonce-1"), None).await;
+    let started = begin(ctx, shop).await;
     grant_access_token(ctx, "plaintext-token");
 
-    let response = get(ctx, &callback_path(shop, "c", "nonce-1", SECRET)).await;
+    let response = finish(ctx, shop, &started, SECRET).await;
     assert_eq!(response.status(), 302);
     assert_eq!(
         installation(ctx, "default", shop).await.access_token.as_deref(),
@@ -757,17 +978,15 @@ async fn get_auth_callback_in_production_without_an_encryption_key_refuses_to_st
     };
     let ctx = TestContext::with_options(config(), options).await.unwrap();
     let shop = "production.myshopify.com";
-    seed_installation(&ctx, "default", shop, Some("nonce-1"), None).await;
+    let started = begin(&ctx, shop).await;
     grant_access_token(&ctx, "production-token");
 
-    let response = get(&ctx, &callback_path(shop, "c", "nonce-1", SECRET)).await;
+    let response = finish(&ctx, shop, &started, SECRET).await;
     assert_eq!(response.status(), 500);
     let body = response.text().await.unwrap();
     assert_eq!(body, "Internal Server Error");
 
-    let row = installation(&ctx, "default", shop).await;
-    assert!(row.access_token.is_none());
-    assert_eq!(row.nonce.as_deref(), Some("nonce-1"));
+    assert_eq!(installation_count(&ctx).await, 0);
     ctx.shutdown().await.unwrap();
 }
 
@@ -816,7 +1035,7 @@ async fn ambiguous_app_resolution_fails_closed() {
     let ctx = TestContext::with_options(config, with_encryption()).await.unwrap();
     let shop = "same-shop.myshopify.com";
     for handle in ["clientA", "clientB"] {
-        seed_installation(&ctx, handle, shop, Some("nonce-1"), Some("token")).await;
+        seed_installation(&ctx, handle, shop, None, Some("token")).await;
     }
     grant_access_token(&ctx, "must-not-be-stored");
 
@@ -824,7 +1043,7 @@ async fn ambiguous_app_resolution_fails_closed() {
     assert_error(
         api_get(&ctx, "/api/flows", &token).await,
         401,
-        "Unauthorized: [openshop] Multiple Shopify apps use apiKey \"shared-key\"",
+        "Unauthorized: invalid session token",
     )
     .await;
 
@@ -839,7 +1058,6 @@ async fn ambiguous_app_resolution_fails_closed() {
     for handle in ["clientA", "clientB"] {
         let row = installation(&ctx, handle, shop).await;
         assert_eq!(row.access_token.as_deref(), Some("token"));
-        assert_eq!(row.nonce.as_deref(), Some("nonce-1"));
     }
     ctx.shutdown().await.unwrap();
 }
@@ -1077,30 +1295,125 @@ async fn session_token_request_skips_the_token_exchange_for_installed_shops() {
     ctx.shutdown().await.unwrap();
 }
 
+/// Lets `duration` pass for the process, as a timer sees it.
+async fn wait(duration: Duration) {
+    tokio::time::pause();
+    tokio::time::advance(duration).await;
+    tokio::time::resume();
+}
+
+fn exchange_requests(ctx: &TestContext) -> usize {
+    ctx.transport
+        .requests()
+        .iter()
+        .filter(|request| request.body["grant_type"] == TOKEN_EXCHANGE)
+        .count()
+}
+
+const TOKEN_EXCHANGE: &str = "urn:ietf:params:oauth:grant-type:token-exchange";
+const HELD_BACK: Duration = Duration::from_secs(31);
+
 #[openshop::test(single_app())]
 async fn session_token_request_survives_a_failed_token_exchange(ctx: &TestContext) {
     // The default mock answers 404.
     assert_eq!(ctx.get("/api/flows").send().await.unwrap().status(), 200);
+    wait(HELD_BACK).await;
     ctx.transport.respond_with(|_| Err(anyhow!("connection reset")));
     assert_eq!(ctx.get("/api/flows").send().await.unwrap().status(), 200);
+    wait(HELD_BACK).await;
     ctx.transport.respond_json(json!({ "scope": "read_products" }));
     assert_eq!(ctx.get("/api/flows").send().await.unwrap().status(), 200);
+    wait(HELD_BACK).await;
     ctx.transport
         .respond_with(|_| Ok(MockTransport::json(200, json!("not an object"))));
     assert_eq!(ctx.get("/api/flows").send().await.unwrap().status(), 200);
 
-    // After the first failed exchange, the client credentials grant fails
-    // too, and holds back for thirty seconds: four exchanges, one grant.
+    // Every failure is served: four exchanges, each followed by the grant.
     let requests = ctx.transport.requests();
-    assert_eq!(requests.len(), 5);
-    assert_eq!(requests[1].body["grant_type"], "client_credentials");
-    for index in [0, 2, 3, 4] {
-        assert_eq!(
-            requests[index].body["grant_type"],
-            "urn:ietf:params:oauth:grant-type:token-exchange"
-        );
+    assert_eq!(requests.len(), 8);
+    for pair in requests.chunks(2) {
+        assert_eq!(pair[0].body["grant_type"], TOKEN_EXCHANGE);
+        assert_eq!(pair[1].body["grant_type"], "client_credentials");
     }
     assert_eq!(installation_count(ctx).await, 0);
+}
+
+#[openshop::test(single_app())]
+async fn concurrent_requests_of_a_shop_without_a_token_share_one_token_exchange(ctx: &TestContext) {
+    grant_access_token(ctx, "shared-token");
+    // Slow enough for every request to arrive while the exchange is out.
+    ctx.transport.delay_responses(Duration::from_millis(400));
+    let token = ctx.session_token();
+
+    let statuses = futures::future::join_all((0..8).map(|_| api_get(ctx, "/api/flows", &token))).await;
+    assert!(statuses.iter().all(|response| response.status() == 200));
+
+    assert_eq!(exchange_requests(ctx), 1);
+    let row = installation(ctx, "default", SHOP).await;
+    assert_eq!(decrypted_token(ctx, &row).as_deref(), Some("shared-token"));
+}
+
+#[openshop::test(single_app())]
+async fn a_shop_does_not_wait_for_the_token_exchange_of_another(ctx: &TestContext) {
+    grant_access_token(ctx, "token");
+    ctx.transport.delay_responses(Duration::from_millis(400));
+    let token = ctx.session_token();
+    let other = ctx.session_token_for("other.myshopify.com", "1");
+
+    let started = std::time::Instant::now();
+    let (first, second) = futures::join!(api_get(ctx, "/api/flows", &token), api_get(ctx, "/api/flows", &other));
+    assert_eq!((first.status().as_u16(), second.status().as_u16()), (200, 200));
+    // Two exchanges, side by side: the second did not wait for the first.
+    assert_eq!(exchange_requests(ctx), 2);
+    assert!(
+        started.elapsed() < Duration::from_millis(780),
+        "{:?}",
+        started.elapsed()
+    );
+}
+
+#[openshop::test(single_app())]
+async fn a_refused_token_exchange_is_not_tried_again_for_thirty_seconds(ctx: &TestContext) {
+    ctx.transport
+        .respond_with(|_| Ok(MockTransport::json(400, json!({ "error": "invalid_subject_token" }))));
+    let token = ctx.session_token();
+
+    for _ in 0..4 {
+        assert_eq!(api_get(ctx, "/api/flows", &token).await.status(), 200);
+    }
+    assert_eq!(exchange_requests(ctx), 1);
+
+    // Shopify is back: the next request after the window gets the token.
+    grant_access_token(ctx, "late-token");
+    wait(HELD_BACK).await;
+    assert_eq!(api_get(ctx, "/api/flows", &token).await.status(), 200);
+    assert_eq!(exchange_requests(ctx), 2);
+    let row = installation(ctx, "default", SHOP).await;
+    assert_eq!(decrypted_token(ctx, &row).as_deref(), Some("late-token"));
+}
+
+#[openshop::test(single_app())]
+async fn a_token_exchange_slower_than_five_seconds_fails_fast(ctx: &TestContext) {
+    grant_access_token(ctx, "too-late");
+    ctx.transport.delay_responses(Duration::from_secs(3600));
+    let token = ctx.session_token();
+
+    let started = std::time::Instant::now();
+    let response = tokio::time::timeout(Duration::from_secs(9), api_get(ctx, "/api/flows", &token))
+        .await
+        .expect("the request waited for Shopify");
+    // The request is served, without a token.
+    assert_eq!(response.status(), 200);
+    assert!(started.elapsed() < Duration::from_secs(9), "{:?}", started.elapsed());
+    assert!(
+        find_installation(ctx, "default", SHOP)
+            .await
+            .is_none_or(|row| row.access_token.is_none())
+    );
+
+    // The failure is remembered like a refusal.
+    assert_eq!(api_get(ctx, "/api/flows", &token).await.status(), 200);
+    assert_eq!(exchange_requests(ctx), 1);
 }
 
 #[openshop::test(single_app())]
@@ -1109,7 +1422,7 @@ async fn rejected_session_tokens_never_trigger_a_token_exchange(ctx: &TestContex
 
     let forged = session_token(SHOP, "wrong-secret", "test-app", "1");
     let response = api_get(ctx, "/api/flows", &forged).await;
-    assert_error(response, 401, "Unauthorized: Invalid JWT signature").await;
+    assert_error(response, 401, "Unauthorized: invalid session token").await;
 
     assert!(ctx.transport.requests().is_empty());
     assert_eq!(installation_count(ctx).await, 0);
@@ -1177,15 +1490,19 @@ async fn nothing_authenticates_without_a_configured_secret() {
             ..with_encryption()
         };
         let ctx = TestContext::with_options(config(), options).await.unwrap();
-        seed_installation(&ctx, "default", SHOP, Some("nonce-1"), Some("token")).await;
+        seed_installation(&ctx, "default", SHOP, None, Some("token")).await;
         grant_access_token(&ctx, "must-not-be-stored");
 
         // Each credential is signed with the blank secret itself.
         let response = api_get(&ctx, "/api/flows", &ctx.session_token()).await;
-        assert_error(response, 401, "Unauthorized: SHOPIFY_API_SECRET is not configured").await;
+        assert_error(response, 401, "Unauthorized: invalid session token").await;
 
         let response = get(&ctx, &callback_path(SHOP, "c", "nonce-1", secret)).await;
         assert_error(response, 401, "Invalid HMAC").await;
+
+        // A state signed with a blank secret would be one anybody can make.
+        let response = get(&ctx, "/auth?shop=blank.myshopify.com").await;
+        assert_error(response, 500, "[openshop] The Shopify app has no API secret").await;
 
         let body = json!({ "myshopify_domain": SHOP }).to_string();
         let response = post_uninstall(&ctx, &body, &sign_webhook_body(&body, secret), Some(SHOP)).await;
@@ -1194,7 +1511,6 @@ async fn nothing_authenticates_without_a_configured_secret() {
         assert!(ctx.transport.requests().is_empty());
         let row = installation(&ctx, "default", SHOP).await;
         assert_eq!(row.access_token.as_deref(), Some("token"));
-        assert_eq!(row.nonce.as_deref(), Some("nonce-1"));
         assert!(row.uninstalled_at.is_none());
         ctx.shutdown().await.unwrap();
     }
@@ -1209,15 +1525,15 @@ async fn a_malformed_encryption_key_never_falls_back_to_plaintext() {
         };
         let ctx = TestContext::with_options(config(), options).await.unwrap();
         let shop = "bad-key.myshopify.com";
-        seed_installation(&ctx, "default", shop, Some("nonce-1"), None).await;
+        let started = begin(&ctx, shop).await;
         grant_access_token(&ctx, "bad-key-token");
 
-        let response = get(&ctx, &callback_path(shop, "c", "nonce-1", SECRET)).await;
+        let response = finish(&ctx, shop, &started, SECRET).await;
         assert_eq!(response.status(), 500);
         assert_eq!(response.text().await.unwrap(), "Internal Server Error");
         assert_eq!(ctx.get("/api/flows").send().await.unwrap().status(), 200);
 
-        assert!(installation(&ctx, "default", shop).await.access_token.is_none());
+        assert!(find_installation(&ctx, "default", shop).await.is_none());
         let stored = find_installation(&ctx, "default", SHOP).await;
         assert!(stored.is_none_or(|row| row.access_token.is_none()));
         ctx.shutdown().await.unwrap();
@@ -1283,27 +1599,17 @@ async fn multi_app_session_tokens_cannot_be_used_across_apps(ctx: &TestContext) 
     // Audience of app A, signed with the secret of app B.
     let crossed = session_token(shop, "client-b-secret", "client-a-key", "1");
     let response = api_get(ctx, "/api/flows", &crossed).await;
-    assert_error(response, 401, "Unauthorized: Invalid JWT signature").await;
+    assert_error(response, 401, "Unauthorized: invalid session token").await;
 
     // The environment credentials of single-app mode are not an app here.
     let env_token = ctx.session_token_for(shop, "1");
     let response = api_get(ctx, "/api/flows", &env_token).await;
-    assert_error(
-        response,
-        401,
-        "Unauthorized: [openshop] No Shopify app matches the session token audience",
-    )
-    .await;
+    assert_error(response, 401, "Unauthorized: invalid session token").await;
 
     // Neither is an app handle an audience.
     let by_handle = session_token(shop, "client-a-secret", "clientA", "1");
     let response = api_get(ctx, "/api/flows", &by_handle).await;
-    assert_error(
-        response,
-        401,
-        "Unauthorized: [openshop] No Shopify app matches the session token audience",
-    )
-    .await;
+    assert_error(response, 401, "Unauthorized: invalid session token").await;
 
     assert!(ctx.transport.requests().is_empty());
     assert_eq!(installation_count(ctx).await, 0);

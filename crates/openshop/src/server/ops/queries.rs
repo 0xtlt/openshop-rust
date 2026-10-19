@@ -441,8 +441,9 @@ pub(super) struct Shop {
 }
 
 impl Shop {
-    /// `installed`, `uninstalled`, or `pending` when the shop started the
-    /// installation without finishing it, with the time it has been so.
+    /// `installed`, `uninstalled`, or `pending` when the row has no token and
+    /// is not uninstalled (an installation started before `/auth` wrote no
+    /// row), with the time it has been so.
     pub(super) fn state(&self) -> (&'static str, &DateTime<Utc>) {
         match (&self.uninstalled_at, self.has_token) {
             (Some(uninstalled_at), _) => ("uninstalled", uninstalled_at),
