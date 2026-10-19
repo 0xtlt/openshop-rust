@@ -109,15 +109,20 @@ at most 10 s), which covers the wait for a free connection of the pool and the
 statement itself. A failed extension is logged (`Heartbeat of run … failed`: the
 first time and every tenth in a row) and tried again at the next heartbeat. When
 none succeeded for a whole lease, the lease has expired and another worker may
-own the run: the execution stops, records no outcome, and the run is claimed
-again. An application that runs many flows at once should leave room in the pool
+own the run: the flow is dropped, with whatever it was doing at its current
+`.await`, no outcome is recorded, and the run is claimed again. Code that never
+yields, or a task started with `tokio::spawn`, is not reached by a drop. An application that runs many flows at once should leave room in the pool
 for the heartbeats: a pool kept busy by the flows delays them (see
 [Database pool sizing](../reference/environment-variables.md#database-pool-sizing)).
 
 On a graceful stop, a worker waits up to one lease for its runs. A run still
 executing then goes back to `pending` at once, so that another worker takes it up
-without waiting for the lease to expire, and its execution is cancelled without
-recording an outcome. The attempt that was interrupted stays counted in
+without waiting for the lease to expire. Its flow is dropped first and no outcome
+is recorded; the run is only handed back once the flow is gone, so that nothing of
+it runs beside the next owner (a flow that does not yield within a second is left
+to its lease instead). The release waits at most two seconds for a connection and
+for a lock: a run that cannot be released in time is logged and left to its
+lease, and does not hold back the shutdown nor the other runs. The attempt that was interrupted stays counted in
 `attempts` (it keys the rows of its steps), so the run has one retry fewer; it is
 never failed as abandoned for that, and it runs again even with a single attempt.
 If the run was claimed by another worker in the meantime, it is left alone.

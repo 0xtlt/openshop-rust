@@ -28,16 +28,20 @@ pub(crate) fn error_message(error: &anyhow::Error) -> String {
 }
 
 /// Marks a step as failed when its future is dropped mid-run (flow timeout,
-/// panic), so that it does not stay `running` forever.
+/// panic), so that it does not stay `running` forever. Not when the signal of
+/// the run was cancelled: then the engine dropped the flow because the run
+/// belongs to another execution now (a lease lost, a run handed back), and the
+/// step is not this execution's to write.
 struct InterruptedStepGuard {
     db: PgPool,
     step_id: Uuid,
+    signal: CancellationToken,
     armed: bool,
 }
 
 impl Drop for InterruptedStepGuard {
     fn drop(&mut self) {
-        if !self.armed {
+        if !self.armed || self.signal.is_cancelled() {
             return;
         }
         let Ok(runtime) = tokio::runtime::Handle::try_current() else {
@@ -288,6 +292,7 @@ impl StepExecutor {
         let mut interrupted = InterruptedStepGuard {
             db: self.db.clone(),
             step_id,
+            signal: self.signal.clone(),
             armed: true,
         };
         let start = Instant::now();

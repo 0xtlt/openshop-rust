@@ -729,6 +729,20 @@ struct Reclaimed {
     stopped: [Arc<AtomicUsize>; 2],
 }
 
+/// Counts the flow that is dropped before it returned: the engine took it away.
+struct DroppedUnfinished {
+    count: Arc<AtomicUsize>,
+    finished: bool,
+}
+
+impl Drop for DroppedUnfinished {
+    fn drop(&mut self) {
+        if !self.finished {
+            self.count.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+}
+
 async fn reclaim_a_run_in_flight(takeover: Takeover) -> Reclaimed {
     let starts = Arc::new(AtomicUsize::new(0));
     let stopped = [Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0))];
@@ -743,10 +757,15 @@ async fn reclaim_a_run_in_flight(takeover: Takeover) -> Reclaimed {
             async move {
                 let nth = starts.fetch_add(1, Ordering::SeqCst).min(1);
                 started.notify_one();
+                let mut dropped = DroppedUnfinished {
+                    count: stopped[nth].clone(),
+                    finished: false,
+                };
                 tokio::select! {
                     _ = releases[nth].cancelled() => {}
                     _ = ctx.signal.cancelled() => { stopped[nth].fetch_add(1, Ordering::SeqCst); }
                 }
+                dropped.finished = true;
                 Ok(())
             }
         }
@@ -1449,7 +1468,6 @@ async fn heartbeat_extends_the_lease_of_a_long_run() {
         .await
         .expect("run claimed");
     let leased_until = find_run(&test, run_id).await.available_at.expect("lease");
-
     skip_to_next_heartbeat().await;
     let deadline = Instant::now() + TIMEOUT;
     loop {
@@ -1564,19 +1582,29 @@ async fn a_lease_is_dated_by_the_clock_of_the_database() {
 
 #[tokio::test]
 async fn shutdown_hands_back_the_runs_it_still_holds() {
-    let (starts, stopped) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+    let (starts, stopped, ticks) = (
+        Arc::new(AtomicUsize::new(0)),
+        Arc::new(AtomicUsize::new(0)),
+        Arc::new(AtomicUsize::new(0)),
+    );
     let started = Arc::new(Notify::new());
     let flow = Flow::new("slow-flow", {
-        let (starts, stopped, started) = (starts.clone(), stopped.clone(), started.clone());
-        move |ctx: FlowContext| {
-            let (starts, stopped, started) = (starts.clone(), stopped.clone(), started.clone());
+        let (starts, stopped, started, ticks) = (starts.clone(), stopped.clone(), started.clone(), ticks.clone());
+        move |_ctx: FlowContext| {
+            let (starts, stopped, started, ticks) = (starts.clone(), stopped.clone(), started.clone(), ticks.clone());
             async move {
                 started.notify_one();
                 if starts.fetch_add(1, Ordering::SeqCst) == 0 {
-                    // The first execution never ends by itself.
-                    ctx.signal.cancelled().await;
-                    stopped.fetch_add(1, Ordering::SeqCst);
-                    bail!("stopped");
+                    // The first execution never ends by itself, and does what it does
+                    // outside of any step: it ignores the signal of the run.
+                    let _dropped = DroppedUnfinished {
+                        count: stopped,
+                        finished: false,
+                    };
+                    loop {
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                        ticks.fetch_add(1, Ordering::SeqCst);
+                    }
                 }
                 Ok(())
             }
@@ -1609,7 +1637,11 @@ async fn shutdown_hands_back_the_runs_it_still_holds() {
     assert!(run.completed_at.is_none());
     assert!(run.available_at.is_some_and(|at| at <= chrono::Utc::now()));
     assert_eq!(first.active_count(), 0);
-    assert_eq!(stopped.load(Ordering::SeqCst), 1);
+    assert_eq!(stopped.load(Ordering::SeqCst), 1, "the flow was dropped");
+    // Nothing of the flow runs any more: it would go on beside the next owner.
+    let ticked = ticks.load(Ordering::SeqCst);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(ticks.load(Ordering::SeqCst), ticked, "the flow went on after the stop");
 
     let second = worker(&test.app, 1);
     let claimed_at = Instant::now();
@@ -1691,16 +1723,26 @@ impl openshop::runtime::RuntimeLogger for Lines {
 
 #[tokio::test]
 async fn a_heartbeat_that_cannot_extend_the_lease_is_logged_and_stops_the_run_before_it_is_taken_over() {
-    let (started, stopped) = (Arc::new(Notify::new()), Arc::new(AtomicUsize::new(0)));
+    let (started, stopped, ticks) = (
+        Arc::new(Notify::new()),
+        Arc::new(AtomicUsize::new(0)),
+        Arc::new(AtomicUsize::new(0)),
+    );
     let flow = Flow::new("slow-flow", {
-        let (started, stopped) = (started.clone(), stopped.clone());
-        move |ctx: FlowContext| {
-            let (started, stopped) = (started.clone(), stopped.clone());
+        let (started, stopped, ticks) = (started.clone(), stopped.clone(), ticks.clone());
+        move |_ctx: FlowContext| {
+            let (started, stopped, ticks) = (started.clone(), stopped.clone(), ticks.clone());
             async move {
                 started.notify_one();
-                ctx.signal.cancelled().await;
-                stopped.fetch_add(1, Ordering::SeqCst);
-                bail!("stopped")
+                // Does what it does outside of any step, and ignores the signal.
+                let _dropped = DroppedUnfinished {
+                    count: stopped,
+                    finished: false,
+                };
+                loop {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                    ticks.fetch_add(1, Ordering::SeqCst);
+                }
             }
         }
     });
@@ -1724,15 +1766,19 @@ async fn a_heartbeat_that_cannot_extend_the_lease_is_logged_and_stops_the_run_be
     // instead of waiting for ever.
     let lock = lock_run(&test, run_id).await;
     wait_until("the execution to be stopped", || stopped.load(Ordering::SeqCst) == 1).await;
-    lock.rollback().await.unwrap();
     openshop::runtime::set_logger(previous);
+    // The flow is dropped, not only told to stop: nothing of it runs on, beside the
+    // worker that may own the run now.
+    let ticked = ticks.load(Ordering::SeqCst);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(ticks.load(Ordering::SeqCst), ticked, "the flow went on after its lease");
 
     let lines = lines.0.lock().unwrap().clone();
     let failure = format!("Heartbeat of run {run_id} failed");
     assert!(
         lines
             .iter()
-            .any(|line| line.contains(&failure) && line.contains("timed out")),
+            .any(|line| line.contains(&failure) && (line.contains("timed out") || line.contains("statement timeout"))),
         "{lines:#?}"
     );
     assert!(
@@ -1747,6 +1793,76 @@ async fn a_heartbeat_that_cannot_extend_the_lease_is_logged_and_stops_the_run_be
     assert_eq!(run.status, "running");
     assert_eq!(run.error, None);
     assert!(run.completed_at.is_none());
+    lock.rollback().await.unwrap();
     worker.stop().await;
+    test.cleanup().await;
+}
+
+/// Makes the release of the run `run_id` wait, as a lock held by someone else would.
+async fn delay_release(test: &TestApp, run_id: Uuid) {
+    sqlx::raw_sql(&format!(
+        "CREATE FUNCTION hold_release() RETURNS trigger LANGUAGE plpgsql AS $$ \
+         BEGIN PERFORM pg_sleep(30); RETURN NEW; END $$; \
+         CREATE TRIGGER hold_release BEFORE UPDATE ON flow_runs FOR EACH ROW \
+           WHEN (OLD.id = '{run_id}' AND OLD.status = 'running' AND NEW.status = 'pending') \
+           EXECUTE FUNCTION hold_release()"
+    ))
+    .execute(&test.db)
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn a_release_that_waits_does_not_hold_back_the_shutdown_nor_the_other_releases() {
+    let (started, stopped) = (Arc::new(Notify::new()), Arc::new(AtomicUsize::new(0)));
+    let flow = Flow::new("slow-flow", {
+        let (started, stopped) = (started.clone(), stopped.clone());
+        move |_ctx: FlowContext| {
+            let (started, stopped) = (started.clone(), stopped.clone());
+            async move {
+                started.notify_one();
+                let _dropped = DroppedUnfinished {
+                    count: stopped,
+                    finished: false,
+                };
+                std::future::pending::<()>().await;
+                Ok(())
+            }
+        }
+    })
+    .concurrency(Concurrency::Allow);
+    let test = TestApp::new(create_config([flow])).await;
+    let (stuck, free) = (dispatch(&test, "slow-flow").await, dispatch(&test, "slow-flow").await);
+    delay_release(&test, stuck).await;
+
+    let worker = worker_with(
+        &test.app,
+        WorkerConfig::new()
+            .concurrency(2)
+            .lease_duration(Duration::from_millis(500)),
+    );
+    worker.start().await;
+    for _ in 0..2 {
+        tokio::time::timeout(TIMEOUT, started.notified())
+            .await
+            .expect("runs claimed");
+    }
+    // Keeps the leases alive while the worker waits for its runs, as a healthy one does.
+    let stopping = Instant::now();
+    tokio::time::timeout(Duration::from_secs(8), worker.stop())
+        .await
+        .expect("the shutdown waits for the release of a run");
+    assert!(stopping.elapsed() < Duration::from_secs(6), "{:?}", stopping.elapsed());
+
+    // Every execution is gone, whether or not its run could be released.
+    assert_eq!(worker.active_count(), 0);
+    assert_eq!(stopped.load(Ordering::SeqCst), 2);
+    // The other run was released although the first release was stuck.
+    let free = find_run(&test, free).await;
+    assert_eq!((free.status.as_str(), free.worker_id), ("pending", None));
+    // The stuck one is left to its lease: it is not released, and not lost.
+    let stuck = find_run(&test, stuck).await;
+    assert_eq!(stuck.status, "running");
+    assert_eq!(stuck.worker_id.as_deref(), Some(worker.worker_id()));
     test.cleanup().await;
 }

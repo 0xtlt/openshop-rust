@@ -2,7 +2,6 @@
 
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::{Result, anyhow};
@@ -272,29 +271,35 @@ async fn run_attempt(app: &OpenShop, opts: RunFlowOptions) -> Result<RunOutcome>
 
     let run_id = opts.run_id;
     let run_id_text = run_id.to_string();
-    let abort = register_abort(&run_id_text, opts.interrupt.as_ref());
+    // Cancelled when the engine takes the execution away from the flow: its lease
+    // ran out, the run is owned by another execution, or the worker hands it back.
+    // The flow is then dropped, not just told to stop, so that its code outside the
+    // steps does not go on beside the execution that owns the run now.
+    let halt = opts.interrupt.clone().unwrap_or_default().child_token();
+    let abort = register_abort(&run_id_text, Some(&halt));
     let signal = abort.token.clone();
 
     let heartbeat_interval = opts.heartbeat_interval.unwrap_or(HEARTBEAT_INTERVAL);
-    let lease_expired = Arc::new(AtomicBool::new(false));
     let heartbeat = opts.on_heartbeat.clone().map(|on_heartbeat| {
-        let signal = signal.clone();
-        let lease_expired = lease_expired.clone();
+        let halt = halt.clone();
         let lease = opts.lease_duration;
         tokio::spawn(async move {
             let mut ticks = tokio::time::interval(heartbeat_interval);
-            ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             ticks.tick().await;
             // The lease was taken when the run was claimed, a moment ago.
             let mut extended_at = Instant::now();
             let mut failures: u32 = 0;
             loop {
-                ticks.tick().await;
+                tokio::select! {
+                    _ = ticks.tick() => {}
+                    // Nothing to extend once the execution is taken away.
+                    _ = halt.cancelled() => return,
+                }
                 let started = Instant::now();
                 match on_heartbeat().await {
                     // Another execution owns the run, or it was canceled: stop the flow.
                     Ok(false) => {
-                        signal.cancel();
+                        halt.cancel();
                         return;
                     }
                     Ok(true) => {
@@ -322,8 +327,7 @@ async fn run_attempt(app: &OpenShop, opts: RunFlowOptions) -> Result<RunOutcome>
                                 "[openshop] Lease of run {run_id} expired without a heartbeat, \
                                  stopping its execution"
                             ));
-                            lease_expired.store(true, Ordering::SeqCst);
-                            signal.cancel();
+                            halt.cancel();
                             return;
                         }
                     }
@@ -408,7 +412,17 @@ async fn run_attempt(app: &OpenShop, opts: RunFlowOptions) -> Result<RunOutcome>
         outcome.unwrap_or_else(|panic| Err(Panicked::of_attempt(format!("Flow panicked: {}", panic_message(panic)))))
     };
 
-    let outcome = execution.await;
+    // The execution is raced against the halt, and dropped when it wins.
+    let outcome = tokio::select! {
+        biased;
+        _ = halt.cancelled() => None,
+        outcome = execution => Some(outcome),
+    };
+    let Some(outcome) = outcome else {
+        // The flow is gone. Whoever owns the run now records what comes next.
+        logger.flush().await;
+        return Ok(RunOutcome::LeaseLost);
+    };
     // What the flow logged is stored before its outcome is.
     logger.flush().await;
 
@@ -446,7 +460,7 @@ async fn run_attempt(app: &OpenShop, opts: RunFlowOptions) -> Result<RunOutcome>
                 } else {
                     RunOutcome::LeaseLost
                 }
-            } else if lease_expired.load(Ordering::SeqCst) || opts.interrupt.as_ref().is_some_and(|stop| stop.is_cancelled()) {
+            } else if halt.is_cancelled() {
                 // The engine stopped the flow, not a cancellation of the run: the lease
                 // ran out, or the worker handed the run back. Whoever owns it now records
                 // what comes next.

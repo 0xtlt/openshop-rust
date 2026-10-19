@@ -439,14 +439,20 @@
   connection of a busy pool as well as for the statement, which the server
   enforces with `statement_timeout`. A failure is logged as `Heartbeat of run
   … failed` (the first and every tenth in a row). When the lease could not be
-  extended for a whole `lease_duration`, it has expired: the execution stops
-  and records nothing, so a run another worker may have claimed is not run by
-  two at once. `RunFlowOptions` has two new fields, `lease_duration` and
+  extended for a whole `lease_duration`, it has expired: the flow is dropped
+  (not only told to stop through its signal) and nothing is recorded, so a run
+  another worker may have claimed is not run by two at once; the same when the
+  run turns out to be owned by another execution. The step that was running is
+  left as it is, as it is not this execution's to write. `RunFlowOptions` has two new fields, `lease_duration` and
   `interrupt`.
 - A worker that stops hands back the runs it still executes once its wait of
   one lease is over: they go back to `pending`, claimable at once, instead of
-  staying `running` until the lease expires, and their executions are
-  cancelled without recording an outcome. The release is fenced by worker and
+  staying `running` until the lease expires. Their flows are dropped first,
+  without recording an outcome, and a run is only released once its flow is
+  gone, so that nothing of it runs beside the next owner. The release waits at
+  most two seconds for a connection and a lock, the releases run together, and
+  one that fails is logged and left to its lease without holding back the
+  shutdown or the others. The release is fenced by worker and
   claim (`lease_id`, which it clears) like every write of an execution. The
   interrupted attempt stays counted in `attempts`, which still keys its step
   rows, so the run has one retry fewer; it is not failed as abandoned for that, and it runs again even with

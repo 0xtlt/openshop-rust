@@ -35,8 +35,12 @@ pub const DEFAULT_WORKER_CONFIG: ResolvedWorkerConfig = ResolvedWorkerConfig {
 const HEARTBEAT_MIN_TIMEOUT: Duration = Duration::from_millis(250);
 const HEARTBEAT_MAX_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// How long a shutdown waits for the executions it handed back to stop.
-const RELEASE_GRACE: Duration = Duration::from_secs(1);
+/// How long a shutdown waits for the executions it interrupts to be dropped.
+const STOP_GRACE: Duration = Duration::from_secs(1);
+
+/// How long a shutdown waits for a connection, a lock and the statement that
+/// hands a run back.
+const RELEASE_TIMEOUT: Duration = Duration::from_secs(2);
 
 fn merge(mut config: ResolvedWorkerConfig, partial: &WorkerConfig) -> ResolvedWorkerConfig {
     if let Some(value) = partial.concurrency {
@@ -72,19 +76,49 @@ const EXPIRE_SQL: &str = "\
       AND deadline_at IS NOT NULL AND deadline_at <= now() \
     RETURNING id, flow_name, app_handle, shop, error";
 
-/// Extends the lease of a run, if its execution still owns it: `$1` is the
-/// lease in milliseconds, `$2` the run, `$3` the worker, `$4` the claim.
-const HEARTBEAT_SQL: &str = "\
-    UPDATE flow_runs SET available_at = now() + $1::bigint * interval '1 millisecond' \
-    WHERE id = $2 AND worker_id = $3 AND status = 'running' AND lease_id IS NOT DISTINCT FROM $4";
+/// The statements the worker sends with literals instead of parameters, to
+/// run them with limits in one round trip (see [`bounded`]). The only values
+/// are numbers and the IDs of a run, a worker and a claim, all UUIDs.
+fn literal(text: &str) -> String {
+    format!("'{}'", text.replace('\'', "''"))
+}
 
-/// Hands a run back to the queue, if its execution still owns it: `$1` is the
-/// run, `$2` the worker, `$3` the claim. The run is claimable right away. Its
-/// `attempts` is left as it is: the interrupted attempt is the key of its step
-/// rows, so the next claim must take a new one.
-const RELEASE_SQL: &str = "\
-    UPDATE flow_runs SET status = 'pending', worker_id = NULL, lease_id = NULL, available_at = now() \
-    WHERE id = $1 AND worker_id = $2 AND status = 'running' AND lease_id IS NOT DISTINCT FROM $3";
+fn claim_literal(lease_id: Option<Uuid>) -> String {
+    lease_id.map_or_else(|| "NULL::uuid".to_string(), |id| format!("'{id}'::uuid"))
+}
+
+/// Extends the lease of a run, if its execution still owns it.
+fn heartbeat_sql(lease_ms: i64, run_id: Uuid, worker_id: &str, lease_id: Option<Uuid>) -> String {
+    format!(
+        "UPDATE flow_runs SET available_at = now() + {lease_ms} * interval '1 millisecond' \
+         WHERE id = '{run_id}' AND worker_id = {} AND status = 'running' \
+           AND lease_id IS NOT DISTINCT FROM {}",
+        literal(worker_id),
+        claim_literal(lease_id)
+    )
+}
+
+/// Hands a run back to the queue, if its execution still owns it. The run is
+/// claimable right away. Its `attempts` is left as it is: the interrupted
+/// attempt is the key of its step rows, so the next claim must take a new one.
+fn release_sql(run_id: Uuid, worker_id: &str, lease_id: Option<Uuid>) -> String {
+    format!(
+        "UPDATE flow_runs SET status = 'pending', worker_id = NULL, lease_id = NULL, available_at = now() \
+         WHERE id = '{run_id}' AND worker_id = {} AND status = 'running' \
+           AND lease_id IS NOT DISTINCT FROM {}",
+        literal(worker_id),
+        claim_literal(lease_id)
+    )
+}
+
+/// Prefixes `statement` with limits on how long the server waits for a lock
+/// and for the statement to end. Both go in the one message, which the server
+/// runs as a transaction of its own, so `SET LOCAL` limits it alone: a limit
+/// costs no round trip.
+fn bounded(limit: Duration, statement: &str) -> String {
+    let ms = limit.as_millis();
+    format!("SET LOCAL statement_timeout = {ms}; SET LOCAL lock_timeout = {ms}; {statement}")
+}
 
 /// A run failed without an attempt.
 #[derive(Debug, Clone, sqlx::FromRow)]
@@ -174,11 +208,14 @@ struct ClaimedRun {
     exhausted: bool,
 }
 
-/// A run this worker executes: the claim it holds, and the token that stops
-/// the execution without recording an outcome.
+/// A run this worker executes: the claim it holds, the token that stops the
+/// execution without recording an outcome, and the one it cancels once the
+/// execution is over.
+#[derive(Clone)]
 struct Held {
     lease_id: Option<Uuid>,
     interrupt: CancellationToken,
+    finished: CancellationToken,
 }
 
 struct Inner {
@@ -367,16 +404,19 @@ impl Inner {
     fn process_run(self: Arc<Self>, claimed: ClaimedRun) {
         self.active.fetch_add(1, Ordering::SeqCst);
         let interrupt = CancellationToken::new();
+        let finished = CancellationToken::new();
         let (run_id, lease_id) = (claimed.id, claimed.lease_id);
         self.held().insert(
             run_id,
             Held {
                 lease_id,
                 interrupt: interrupt.clone(),
+                finished: finished.clone(),
             },
         );
         tokio::spawn(async move {
             self.execute(claimed, interrupt).await;
+            finished.cancel();
             // Not if a newer claim of the same run, by this worker, replaced it.
             let mut held = self.held();
             if held.get(&run_id).is_some_and(|held| held.lease_id == lease_id) {
@@ -390,11 +430,21 @@ impl Inner {
 
     /// Hands back the runs this worker still executes, once it stopped
     /// claiming and waited for them. Each goes back to `pending`, claimable
-    /// at once, and its execution is interrupted: the flow is cancelled, but
-    /// no outcome is recorded for it, because the run is not owned any more.
+    /// at once.
+    ///
+    /// The executions are interrupted first: the runner drops the flow, with
+    /// whatever it was doing, and records no outcome. A run is only released
+    /// once its execution is gone, so that none goes on beside the worker that
+    /// takes the run up. An execution that does not end within [`STOP_GRACE`]
+    /// (blocking code never yields) is not released: its heartbeat has
+    /// stopped, and the run is left to its lease.
+    ///
     /// The release is fenced like every write of an execution, by worker and
     /// claim (`lease_id`, which it clears), so it cannot take a run another
-    /// worker has claimed after its lease expired.
+    /// worker has claimed after its lease expired. It cannot block the
+    /// shutdown: waiting for a connection and for a lock is bounded by
+    /// [`RELEASE_TIMEOUT`], the releases run together, and one that fails is
+    /// logged and left to its lease without holding back the others.
     ///
     /// The interrupted attempt stays counted in `attempts`: the claim is told
     /// apart by `lease_id`, but the step rows are still keyed by attempt and
@@ -402,39 +452,48 @@ impl Inner {
     /// A release is never an abandoned run, though: a run `pending` is claimed
     /// whatever its `attempts`, even with `max_attempts(1)`.
     async fn release_held(&self) {
-        let held: Vec<(Uuid, Option<Uuid>, CancellationToken)> = self
-            .held()
-            .iter()
-            .map(|(run, held)| (*run, held.lease_id, held.interrupt.clone()))
-            .collect();
+        let held: Vec<(Uuid, Held)> = self.held().iter().map(|(run, held)| (*run, held.clone())).collect();
         if held.is_empty() {
             return;
         }
-        for (run_id, lease_id, interrupt) in &held {
-            let released = retry(format!("releasing run {run_id}"), || async {
-                let result = sqlx::query(RELEASE_SQL)
-                    .bind(run_id)
-                    .bind(&self.worker_id)
-                    .bind(lease_id)
-                    .execute(self.app.db())
-                    .await?;
-                Ok(result.rows_affected() > 0)
-            })
-            .await;
-            match released {
+        for (_, held) in &held {
+            held.interrupt.cancel();
+        }
+        let grace = tokio::time::Instant::now() + STOP_GRACE;
+        let gone = futures::future::join_all(held.iter().map(|(run_id, held)| async move {
+            if tokio::time::timeout_at(grace, held.finished.cancelled()).await.is_err() {
+                logger::warn(format!(
+                    "[openshop] Run {run_id} is still executing after {}ms and is left to its lease",
+                    STOP_GRACE.as_millis()
+                ));
+                return None;
+            }
+            Some((*run_id, held.lease_id))
+        }))
+        .await;
+
+        let releases = futures::future::join_all(gone.into_iter().flatten().map(|(run_id, lease_id)| async move {
+            match self.release_run(run_id, lease_id).await {
                 Ok(true) => logger::info(format!("[openshop] Released run {run_id} to the queue on shutdown")),
                 Ok(false) => {}
                 Err(error) => logger::warn(format!(
-                    "[openshop] Run {run_id} is left to its lease, which expires without a heartbeat: {error:#}"
+                    "[openshop] Run {run_id} could not be released, it is left to its lease: {error:#}"
                 )),
             }
-            // After the release, so that the execution finds the run not owned.
-            interrupt.cancel();
+        }));
+        // Each release is bounded; this is for the sum to be.
+        if tokio::time::timeout(RELEASE_TIMEOUT * 2, releases).await.is_err() {
+            logger::warn("[openshop] Some runs could not be released in time and are left to their leases");
         }
-        // Give the executions a moment to see the cancellation.
-        let deadline = Instant::now() + RELEASE_GRACE;
-        while self.active.load(Ordering::SeqCst) > 0 && Instant::now() < deadline {
-            tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    /// Gives the run back to the queue, if this worker still holds the claim.
+    async fn release_run(&self, run_id: Uuid, lease_id: Option<Uuid>) -> Result<bool> {
+        let statement = bounded(RELEASE_TIMEOUT, &release_sql(run_id, &self.worker_id, lease_id));
+        let release = sqlx::raw_sql(&statement).execute(self.app.db());
+        match tokio::time::timeout(RELEASE_TIMEOUT, release).await {
+            Ok(result) => Ok(result?.rows_affected() > 0),
+            Err(_) => Err(anyhow::anyhow!("timed out after {}ms", RELEASE_TIMEOUT.as_millis())),
         }
     }
 
@@ -538,24 +597,10 @@ impl Inner {
     /// server enforces it on the statement through `statement_timeout`.
     async fn extend_lease(&self, run_id: Uuid, lease_id: Option<Uuid>) -> Result<bool> {
         let limit = self.heartbeat_timeout();
-        let extend = async {
-            let mut tx = self.app.db().begin().await?;
-            sqlx::query("SELECT set_config('statement_timeout', $1, true)")
-                .bind(limit.as_millis().to_string())
-                .execute(&mut *tx)
-                .await?;
-            let extended = sqlx::query(HEARTBEAT_SQL)
-                .bind(self.lease_ms())
-                .bind(run_id)
-                .bind(&self.worker_id)
-                .bind(lease_id)
-                .execute(&mut *tx)
-                .await?;
-            tx.commit().await?;
-            Ok(extended.rows_affected() > 0)
-        };
+        let statement = bounded(limit, &heartbeat_sql(self.lease_ms(), run_id, &self.worker_id, lease_id));
+        let extend = sqlx::raw_sql(&statement).execute(self.app.db());
         match tokio::time::timeout(limit, extend).await {
-            Ok(result) => result,
+            Ok(result) => Ok(result?.rows_affected() > 0),
             Err(_) => Err(anyhow::anyhow!("timed out after {}ms", limit.as_millis())),
         }
     }
