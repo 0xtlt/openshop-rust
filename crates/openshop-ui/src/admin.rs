@@ -186,11 +186,14 @@ async fn call_admin_function<O: DeserializeOwned>(call: Call<'_>) -> Result<O, A
     if let Some(key) = call.idempotency_key {
         headers.push(("idempotency-key".to_string(), key.to_string()));
     }
+    // A binding of its own: Rust 1.88 does not extend a temporary borrowed
+    // inside `Some(..)` of a struct literal.
+    let body = rpc_body(call.input_json);
     let request = http::Request {
         method: Method::Post,
         url: &url,
         headers: &headers,
-        body: Some(&rpc_body(call.input_json)),
+        body: Some(&body),
         signal: call.signal,
     };
     let response = http::send(request).await.map_err(AdminRpcError::from_message)?;
