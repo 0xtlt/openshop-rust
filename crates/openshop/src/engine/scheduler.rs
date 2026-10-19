@@ -208,6 +208,7 @@ impl Schedule {
     /// itself, or when the wait ran late (a suspended host, a clock set
     /// forward) the latest occurrence since, so that what was missed is one
     /// firing and not one per occurrence. `None` when `now` is before `next`.
+    /// How late an occurrence may still be fired is decided once, by `run_entry`.
     fn due(&self, next: DateTime<Utc>, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
         if now < next {
             return None;
@@ -257,6 +258,33 @@ impl Missed {
 /// the gap between the processes that fire the same occurrence.
 const TICK_RETENTION_HOURS: i64 = 24;
 
+/// An occurrence this late is not fired: another process fired it long ago,
+/// and its claim may be pruned any time now. Must stay well under the retention.
+const MAX_TICK_LATENESS_MINUTES: i64 = 60;
+const _: () = assert!(MAX_TICK_LATENESS_MINUTES < TICK_RETENTION_HOURS * 60);
+
+/// What names a configured cron in `cron_ticks`: its flow and schedule, as in
+/// the override key, plus a digest of what else sets it apart (name, shops,
+/// input), and a rank among crons that are identical. Two crons of one flow and
+/// schedule then claim their own occurrences, and every process of the same
+/// configuration agrees on the name, whatever the order of the crons.
+fn tick_keys(crons: &[Cron]) -> Vec<String> {
+    use sha2::{Digest, Sha256};
+    let mut seen: Vec<String> = Vec::new();
+    crons
+        .iter()
+        .map(|entry| {
+            let identity = serde_json::json!([entry.name, entry.shops_json(), entry.input]).to_string();
+            let digest = Sha256::digest(identity.as_bytes());
+            let digest = format!("{digest:x}");
+            let base = format!("{}#{}", entry.key(), &digest[..16]);
+            let rank = seen.iter().filter(|key| **key == base).count();
+            seen.push(base.clone());
+            if rank == 0 { base } else { format!("{base}#{rank}") }
+        })
+        .collect()
+}
+
 async fn prune_ticks(app: &OpenShop) {
     let result = sqlx::query("DELETE FROM cron_ticks WHERE scheduled_at < $1")
         .bind(Utc::now() - Duration::hours(TICK_RETENTION_HOURS))
@@ -272,8 +300,14 @@ async fn prune_ticks(app: &OpenShop) {
 
 /// Fires an occurrence of a cron. `scheduled_at` is the same instant in every
 /// process, and is what makes the run be queued once.
-async fn run_entry(app: &OpenShop, entry: &Cron, scheduled_at: DateTime<Utc>) {
+async fn run_entry(app: &OpenShop, entry: &Cron, tick_key: &str, scheduled_at: DateTime<Utc>) {
     let flow = &entry.flow;
+    if Utc::now() - scheduled_at > Duration::minutes(MAX_TICK_LATENESS_MINUTES) {
+        logger::warn(format!(
+            "[openshop] Cron \"{flow}\": skipping the occurrence of {scheduled_at}, too late to fire"
+        ));
+        return;
+    }
     let targets = match resolve_targets(app, entry).await {
         Ok(targets) => targets,
         Err(error) => {
@@ -303,7 +337,7 @@ async fn run_entry(app: &OpenShop, entry: &Cron, scheduled_at: DateTime<Utc>) {
     let cron_key = entry.key();
     prune_ticks(app).await;
     let tick = CronTick {
-        cron_key: &cron_key,
+        cron_key: tick_key,
         scheduled_at,
     };
     // The shops that turned the cron off, in one query for all the targets.
@@ -369,12 +403,12 @@ const RESTART_AT_MOST: std::time::Duration = std::time::Duration::from_secs(300)
 
 /// Fires a cron on its schedule, and starts it again when it stops: it never
 /// ends silently, which for a cron means that nothing runs and nobody knows.
-async fn keep_scheduled(app: OpenShop, entry: Cron, schedule: Schedule) {
+async fn keep_scheduled(app: OpenShop, entry: Cron, tick_key: String, schedule: Schedule) {
     let label = entry.name.clone().unwrap_or_else(|| entry.flow.clone());
     let mut wait = RESTART_AFTER;
     loop {
         let started = Instant::now();
-        let ended = AssertUnwindSafe(fire_on_schedule(&app, &entry, &schedule))
+        let ended = AssertUnwindSafe(fire_on_schedule(&app, &entry, &tick_key, &schedule))
             .catch_unwind()
             .await;
         let reason = match ended {
@@ -413,7 +447,7 @@ fn panic_message(panic: &Box<dyn Any + Send>) -> &str {
 
 /// Waits for each occurrence of a schedule and fires it. Returns when the
 /// schedule has none left.
-async fn fire_on_schedule(app: &OpenShop, entry: &Cron, schedule: &Schedule) {
+async fn fire_on_schedule(app: &OpenShop, entry: &Cron, tick_key: &str, schedule: &Schedule) {
     let mut after = Utc::now();
     while let Some(next) = schedule.after(after) {
         tokio::time::sleep((next - Utc::now()).to_std().unwrap_or_default()).await;
@@ -426,8 +460,8 @@ async fn fire_on_schedule(app: &OpenShop, entry: &Cron, schedule: &Schedule) {
         let Some(scheduled_at) = DateTime::from_timestamp(due.timestamp(), 0) else {
             continue;
         };
-        let (app, entry) = (app.clone(), entry.clone());
-        tokio::spawn(async move { run_entry(&app, &entry, scheduled_at).await });
+        let (app, entry, tick_key) = (app.clone(), entry.clone(), tick_key.to_string());
+        tokio::spawn(async move { run_entry(&app, &entry, &tick_key, scheduled_at).await });
     }
 }
 
@@ -440,8 +474,9 @@ impl Scheduler {
     /// Registers every configured cron. Fails on an invalid schedule.
     pub fn start(app: &OpenShop) -> Result<Self> {
         let mut jobs = Vec::new();
+        let keys = tick_keys(&app.config().crons);
 
-        for entry in &app.config().crons {
+        for (entry, tick_key) in app.config().crons.iter().zip(keys) {
             let flow = &entry.flow;
             if !app.config().flows.contains_key(flow) {
                 logger::warn(format!("[openshop] Cron references unknown flow \"{flow}\", skipping"));
@@ -451,7 +486,10 @@ impl Scheduler {
             let schedule = Schedule::of(entry)?;
             let app = app.clone();
             let job_entry = entry.clone();
-            jobs.push(tokio::spawn(async move { keep_scheduled(app, job_entry, schedule).await }));
+            let tick_key = tick_key.clone();
+            jobs.push(tokio::spawn(async move {
+                keep_scheduled(app, job_entry, tick_key, schedule).await
+            }));
 
             let mode = entry.shops_json();
             let mode = mode.as_str().map(str::to_string).unwrap_or_else(|| mode.to_string());
@@ -485,6 +523,11 @@ impl Drop for Scheduler {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::builder::Flow;
+    use crate::runtime::RuntimeEnv;
+    use crate::testing::{MockTransport, TestDb};
+    use crate::{Concurrency, OpenShopConfig};
+    use serde_json::json;
 
     #[test]
     fn accepts_five_and_six_field_schedules_and_nicknames() {
@@ -558,5 +601,52 @@ mod tests {
             parse_timezone(&cron).unwrap_err().to_string(),
             "[openshop] Invalid time zone \"Mars/Olympus\" for the cron of flow \"sync\": expected an IANA name such as \"Europe/Paris\""
         );
+    }
+
+    #[test]
+    fn crons_of_one_flow_and_schedule_get_their_own_tick_keys() {
+        let plain = Cron::new("0 3 * * *", "sync");
+        let full = Cron::new("0 3 * * *", "sync").input(json!({ "mode": "full" }));
+        let keys = tick_keys(&[plain.clone(), full.clone(), plain.clone()]);
+
+        assert_eq!(keys.iter().collect::<std::collections::BTreeSet<_>>().len(), 3);
+        assert!(keys.iter().all(|key| key.starts_with("sync:0 3 * * *#")));
+        // The same configuration, in another order, names its crons alike.
+        let reordered = tick_keys(&[full, plain.clone(), plain]);
+        assert_eq!(reordered[0], keys[1]);
+        assert_eq!([&reordered[1], &reordered[2]], [&keys[0], &keys[2]]);
+    }
+
+    #[tokio::test]
+    async fn an_occurrence_too_late_is_not_fired() {
+        let flow = Flow::new("sync", |_ctx: crate::FlowContext| async move { crate::Result::Ok(()) })
+            .concurrency(Concurrency::Allow);
+        let cron = Cron::new("* * * * * *", "sync");
+        let config = OpenShopConfig::builder().flow(flow).cron(cron.clone()).build().unwrap();
+        let db = TestDb::create().await.unwrap();
+        let env = RuntimeEnv {
+            shopify_api_key: Some("key".into()),
+            shopify_api_secret: Some("secret".into()),
+            cwd: std::env::temp_dir().join("openshop-test-no-toml"),
+            ..Default::default()
+        };
+        let app = OpenShop::with_transport(config, db.pool.clone(), env, MockTransport::new()).unwrap();
+        let count = || async {
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM flow_runs")
+                .fetch_one(&db.pool)
+                .await
+                .unwrap()
+        };
+
+        // A process paused for two days wakes up on occurrences the others fired
+        // long ago, whose claims are gone: it must not queue them again.
+        let old = Utc::now() - Duration::hours(48);
+        run_entry(&app, &cron, "sync", DateTime::from_timestamp(old.timestamp(), 0).unwrap()).await;
+        assert_eq!(count().await, 0);
+
+        let now = DateTime::from_timestamp(Utc::now().timestamp(), 0).unwrap();
+        run_entry(&app, &cron, "sync", now).await;
+        assert_eq!(count().await, 1);
+        db.cleanup().await.unwrap();
     }
 }
