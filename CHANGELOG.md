@@ -25,7 +25,7 @@
   that drops the index `flow_runs_status_available_created_idx` on
   `(status, available_at, created_at)`: the partial queue indexes of the second
   migration serve the claim and the expiry, and nothing else reads it. It loses
-  no data, and the TypeScript runtime does not use it by name. Run
+  no data. Run
   `migrate generate` then `migrate` before starting the new version: `start` and
   `worker` now refuse to start while `migrations/` holds a migration the
   database has not applied, or does not cover the framework schema, with
