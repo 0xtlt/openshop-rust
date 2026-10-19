@@ -5,6 +5,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use super::model::{ColumnDef, ForeignKeyDef, Table, quote};
 
@@ -113,6 +114,18 @@ impl Change {
     }
 }
 
+/// The line of a change to write by hand opens with this, and its identifier.
+/// The author changes `TODO` to `DONE` once the migration does what it says.
+pub const MANUAL_TODO: &str = "-- TODO(";
+pub const MANUAL_DONE: &str = "-- DONE(";
+
+/// What identifies a change to write by hand in the migrations: a few
+/// characters of its explanation, which names the table, the column and both
+/// states.
+fn manual_id(explanation: &str) -> String {
+    hex::encode(&Sha256::digest(explanation.as_bytes())[..4])
+}
+
 /// The statements of a migration, each preceded by its warning.
 pub fn render(changes: &[Change]) -> String {
     let rendered: Vec<String> = changes
@@ -123,7 +136,10 @@ pub fn render(changes: &[Change]) -> String {
                 warning: Some(warning),
             } => format!("-- WARNING: {warning}\n{sql}\n"),
             Change::Statement { sql, warning: None } => format!("{sql}\n"),
-            Change::Manual(explanation) => format!("-- TODO: {explanation}\n"),
+            Change::Manual(explanation) => format!(
+                "{MANUAL_TODO}{}): {explanation}\n-- Write it below, then change TODO to DONE.\n",
+                manual_id(explanation)
+            ),
         })
         .collect();
     rendered.join("\n")
@@ -196,25 +212,82 @@ fn alter_column(table: &str, before: &ColumnDef, after: &ColumnDef, changes: &mu
         });
     }
     if before.primary_key != after.primary_key {
-        changes.push(Change::Manual(format!(
-            "the primary key of {table} changed on {}. Write the constraint change by hand.",
-            after.name
-        )));
+        changes.push(Change::Manual(primary_key_note(table, &after.name)));
     }
     if before.constraints != after.constraints {
-        let show = |constraints: &str| {
-            if constraints.is_empty() {
-                "none".to_string()
-            } else {
-                format!("`{constraints}`")
-            }
-        };
-        changes.push(Change::Manual(format!(
-            "the constraints of {place} changed from {} to {}. Write the statements by hand.",
-            show(&before.constraints),
-            show(&after.constraints)
-        )));
+        changes.push(Change::Manual(constraints_note(&place, before, after)));
     }
+}
+
+fn primary_key_note(table: &str, column: &str) -> String {
+    format!("the primary key of {table} changed on {column}. Write the constraint change by hand.")
+}
+
+fn constraints_note(place: &str, before: &ColumnDef, after: &ColumnDef) -> String {
+    let show = |constraints: &str| {
+        if constraints.is_empty() {
+            "none".to_string()
+        } else {
+            format!("`{constraints}`")
+        }
+    };
+    format!(
+        "the constraints of {place} changed from {} to {}. Write the statements by hand.",
+        show(&before.constraints),
+        show(&after.constraints)
+    )
+}
+
+/// The changes that remain once the changes to write by hand with these
+/// identifiers are left out.
+pub fn without_manual(changes: Vec<Change>, ids: &[String]) -> Vec<Change> {
+    changes
+        .into_iter()
+        .filter(|change| match change {
+            Change::Manual(explanation) => !ids.contains(&manual_id(explanation)),
+            Change::Statement { .. } => true,
+        })
+        .collect()
+}
+
+/// The snapshot to record for `models`: the models, except that a primary key
+/// or constraints that changed keep their previous state until the migration
+/// that writes the change is marked `DONE`. Recording them earlier would make
+/// the models and the database look in line while the database was not.
+pub fn recorded(previous: &SchemaSnapshot, models: &[Table], done: &[String]) -> SchemaSnapshot {
+    let mut snapshot = SchemaSnapshot::of(models);
+    for table in &mut snapshot.tables {
+        let Some(before) = continued(
+            &previous.tables,
+            |before| &before.table,
+            &table.table,
+            table.previous_name(),
+            |name| models.iter().any(|other| other.table == name),
+        ) else {
+            continue;
+        };
+        let (name, names) = (table.table.clone(), table.columns().to_vec());
+        for (column, current) in table.columns_mut().iter_mut().zip(&names) {
+            let Some(was) = continued(
+                before.columns(),
+                |column| &column.name,
+                &current.name,
+                current.renamed_from.as_deref(),
+                |name| names.iter().any(|other| other.name == name),
+            ) else {
+                continue;
+            };
+            let place = format!("{name}.{}", column.name);
+            let held = |note: String| !done.contains(&manual_id(&note));
+            if was.primary_key != column.primary_key && held(primary_key_note(&name, &column.name)) {
+                column.primary_key = was.primary_key;
+            }
+            if was.constraints != column.constraints && held(constraints_note(&place, was, current)) {
+                column.constraints = was.constraints.clone();
+            }
+        }
+    }
+    snapshot
 }
 
 /// The changes of one table, grouped by the place they take in the migration.
@@ -707,7 +780,8 @@ mod tests {
         let changes = diff(&SchemaSnapshot::of(&[previous]), &[current]);
         assert_eq!(
             render(&changes),
-            "-- TODO: the constraints of reviews.product_id changed from none to `REFERENCES products(id)`. Write the statements by hand.\n"
+            "-- TODO(26142195): the constraints of reviews.product_id changed from none to `REFERENCES products(id)`. Write the statements by hand.\n\
+             -- Write it below, then change TODO to DONE.\n"
         );
         assert_eq!(
             summarize(&changes),

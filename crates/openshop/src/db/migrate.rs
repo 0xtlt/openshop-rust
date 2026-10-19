@@ -19,7 +19,7 @@ use chrono::Utc;
 use sha2::{Digest, Sha256};
 use sqlx::{Executor, PgPool};
 
-use super::diff::{self, SNAPSHOT_FILE, SchemaSnapshot};
+use super::diff::{self, MANUAL_DONE, MANUAL_TODO, SNAPSHOT_FILE, SchemaSnapshot};
 use super::model::Table;
 
 pub const MIGRATIONS_DIR: &str = "migrations";
@@ -229,6 +229,18 @@ fn covered_framework_ids(files: &[MigrationFile]) -> Vec<String> {
         .collect()
 }
 
+/// The identifiers of the changes to write by hand that the files list, behind
+/// `marker` (`TODO` or `DONE`).
+fn manual_marks(files: &[MigrationFile], marker: &str) -> Vec<String> {
+    files
+        .iter()
+        .flat_map(|file| file.sql.lines())
+        .filter_map(|line| line.trim().strip_prefix(marker))
+        .filter_map(|rest| rest.split_once(')'))
+        .map(|(id, _)| id.to_string())
+        .collect()
+}
+
 fn missing_framework_migrations(files: &[MigrationFile]) -> Vec<&'static FrameworkMigration> {
     let covered = covered_framework_ids(files);
     FRAMEWORK_MIGRATIONS
@@ -333,13 +345,27 @@ pub fn generate_migrations(
     let files = read_migration_files(&folder)?;
     let missing = missing_framework_migrations(&files);
     let (previous, recorded) = baseline(&folder, &files, models)?;
-    let changes = diff::diff(&previous, models);
+    // A change to write by hand is not recorded until a migration says it is
+    // `DONE`, and is not generated twice: its `TODO` is already in a file.
+    let done = manual_marks(&files, MANUAL_DONE);
+    let listed = manual_marks(&files, MANUAL_TODO);
+    let unwritten = diff::without_manual(diff::diff(&previous, models), &done);
+    let changes = diff::without_manual(unwritten.clone(), &listed);
+    let waiting: Vec<String> = unwritten
+        .iter()
+        .filter(|change| !changes.contains(change))
+        .filter_map(|change| change.warning())
+        .map(|warning| format!("still to write by hand: {warning}"))
+        .collect();
     // A project without models and without snapshot does not get one.
     let new_snapshot = (recorded || !models.is_empty())
-        .then(|| SchemaSnapshot::of(models).to_json())
+        .then(|| diff::recorded(&previous, models, &done).to_json())
         .filter(|json| !recorded || *json != previous.to_json());
 
-    let mut generated = GeneratedMigrations::default();
+    let mut generated = GeneratedMigrations {
+        warnings: waiting,
+        ..Default::default()
+    };
     if missing.is_empty() && changes.is_empty() && name.is_none() && new_snapshot.is_none() {
         return Ok(generated);
     }
@@ -376,10 +402,9 @@ pub fn generate_migrations(
             ),
         )?;
         generated.files.push(path);
-        generated.warnings = changes
-            .iter()
-            .filter_map(|change| change.warning().map(str::to_string))
-            .collect();
+        generated
+            .warnings
+            .extend(changes.iter().filter_map(|change| change.warning().map(str::to_string)));
     } else if let Some(name) = name {
         let path = next_path(&name);
         std::fs::write(&path, format!("-- {name}\n-- Write your schema changes below.\n"))?;
@@ -403,7 +428,7 @@ pub fn check_migrations(cwd: &Path, models: &[Table]) -> Result<()> {
     }
 
     let (previous, recorded) = baseline(&folder, &files, models)?;
-    let pending = diff::diff(&previous, models);
+    let pending = diff::without_manual(diff::diff(&previous, models), &manual_marks(&files, MANUAL_DONE));
     if pending.is_empty() {
         return Ok(());
     }
@@ -423,8 +448,13 @@ pub fn check_migrations(cwd: &Path, models: &[Table]) -> Result<()> {
         .into_iter()
         .map(|change| format!("\n  - {change}"))
         .collect();
+    let by_hand = if pending.iter().any(|change| matches!(change, diff::Change::Manual(_))) {
+        "\nA change to write by hand stays pending until its `-- TODO(…)` line in a migration reads `-- DONE(…)`."
+    } else {
+        ""
+    };
     bail!(
-        "[openshop] The models changed since the last generated migration:{}\n{GENERATE_THEN_MIGRATE}",
+        "[openshop] The models changed since the last generated migration:{}\n{GENERATE_THEN_MIGRATE}{by_hand}",
         changes.concat()
     );
 }
@@ -844,5 +874,60 @@ mod tests {
         assert!(assert_unmodified(&file, &[("0001_a".into(), checksum("SELECT 2;"))]).unwrap());
         let error = assert_unmodified(&file, &[("0001_a".into(), checksum("SELECT 1;"))]).unwrap_err();
         assert!(error.to_string().contains("was modified after it was applied"));
+    }
+
+    #[test]
+    fn a_change_to_write_by_hand_is_not_recorded_until_it_is_marked_done() {
+        use crate::db::Table;
+
+        let dir = temp_dir("manual");
+        let folder = dir.join(MIGRATIONS_DIR);
+        let before = Table::conventional("reviews").column("product_id", "text NOT NULL");
+        let after = Table::conventional("reviews").column("product_id", "text NOT NULL REFERENCES products(id)");
+        generate(&dir, std::slice::from_ref(&before));
+        let recorded = std::fs::read_to_string(folder.join(SNAPSHOT_FILE)).unwrap();
+
+        // The migration tells what to write, and the snapshot still has the old constraints.
+        let second = generate(&dir, std::slice::from_ref(&after));
+        let [path] = &second.files[..] else {
+            panic!("{:?}", second.files)
+        };
+        let sql = std::fs::read_to_string(path).unwrap();
+        let line = sql.lines().find(|line| line.starts_with(MANUAL_TODO)).unwrap_or_default();
+        let id = line
+            .strip_prefix(MANUAL_TODO)
+            .and_then(|rest| rest.split_once(')'))
+            .unwrap_or_else(|| panic!("{sql}"))
+            .0
+            .to_string();
+        let on_disk = std::fs::read_to_string(folder.join(SNAPSHOT_FILE)).unwrap();
+        assert_eq!(on_disk, recorded);
+        let error = check_migrations(&dir, std::slice::from_ref(&after))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("the constraints of reviews.product_id changed"), "{error}");
+        assert!(error.contains("-- DONE(…)"), "{error}");
+
+        // Asked again, it does not write the same TODO twice, and says what is left.
+        let third = generate(&dir, std::slice::from_ref(&after));
+        assert!(third.files.is_empty() && third.snapshot.is_none(), "{third:?}");
+        assert_eq!(third.warnings.len(), 1);
+        assert!(third.warnings[0].starts_with("still to write by hand: the constraints of reviews.product_id"));
+        assert!(check_migrations(&dir, std::slice::from_ref(&after)).is_err());
+
+        // Once written and marked done, the models are in line, and the snapshot follows.
+        std::fs::write(
+            path,
+            sql.replace(&format!("TODO({id})"), &format!("DONE({id})")) + "ALTER TABLE reviews ADD FOREIGN KEY (product_id) REFERENCES products(id);\n",
+        )
+        .unwrap();
+        check_migrations(&dir, std::slice::from_ref(&after)).unwrap();
+        let fourth = generate(&dir, std::slice::from_ref(&after));
+        assert!(fourth.files.is_empty() && fourth.warnings.is_empty(), "{fourth:?}");
+        assert_eq!(fourth.snapshot, Some(folder.join(SNAPSHOT_FILE)));
+        assert_ne!(std::fs::read_to_string(folder.join(SNAPSHOT_FILE)).unwrap(), recorded);
+        check_migrations(&dir, std::slice::from_ref(&after)).unwrap();
+        assert_eq!(generate(&dir, std::slice::from_ref(&after)), GeneratedMigrations::default());
+        std::fs::remove_dir_all(dir).ok();
     }
 }
