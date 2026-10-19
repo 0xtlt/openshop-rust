@@ -317,7 +317,7 @@ body limit. Tool and resource executions time out after 30,000 ms and their
 | `-32601` | Unsupported method. |
 | `-32602` | Unknown capability or invalid arguments. |
 | `-32003` | Permission denied. |
-| `-32000` | Tool/resource error, panic, or timeout. An error from the database, the network or a file is not shown: the message is `Internal error (error id <id>)`, and the cause is in the runtime log under that id. |
+| `-32000` | Tool/resource error, panic, or timeout. Only an error written for the client is shown: a `PublicError`, `InvalidInput`, `InvalidFlowInput`, a flow concurrency conflict, and the errors of the core tools. Any other error a tool or a resource returns is logged under an id, and the message is `Internal error (error id <id>)`. |
 
 Application-level JSON-RPC errors normally use HTTP 200. Authentication and
 payload errors use their explicit HTTP status and a body of the form

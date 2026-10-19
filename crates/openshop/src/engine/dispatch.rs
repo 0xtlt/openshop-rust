@@ -8,7 +8,7 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::backoff::resolve_retry_policy;
-use super::errors::FlowConcurrencyError;
+use super::errors::{FlowConcurrencyError, InvalidFlowInput, UnknownFlowError};
 use crate::app::OpenShopConfig;
 use crate::runtime::time::millis;
 use crate::server::shopify_apps::DEFAULT_SHOPIFY_APP_HANDLE;
@@ -80,11 +80,15 @@ pub struct QueuedRun {
 }
 
 pub(crate) fn unknown_flow(config: &OpenShopConfig, flow_name: &str) -> anyhow::Error {
-    let available: Vec<&str> = config.flows.keys().map(String::as_str).collect();
-    anyhow::anyhow!("Flow \"{flow_name}\" not found. Available: {}", available.join(", "))
+    anyhow::Error::new(UnknownFlowError {
+        flow_name: flow_name.to_string(),
+        available: config.flows.keys().cloned().collect(),
+    })
 }
 
-/// Inserts a `pending` run. Concurrency is decided under an advisory lock scoped
+/// Inserts a `pending` run. Fails with [`UnknownFlowError`] for a flow that is
+/// not registered, and with [`InvalidFlowInput`] when the input fails the input
+/// schema of the flow. Concurrency is decided under an advisory lock scoped
 /// to `(app, shop, flow)` so that simultaneous dispatches cannot both pass.
 pub async fn dispatch_flow(db: &PgPool, config: &OpenShopConfig, options: DispatchOptions) -> Result<QueuedRun> {
     let DispatchOptions {
@@ -102,6 +106,16 @@ pub async fn dispatch_flow(db: &PgPool, config: &OpenShopConfig, options: Dispat
     let Some(flow) = config.flows.get(&flow_name) else {
         return Err(unknown_flow(config, &flow_name));
     };
+
+    // The caller's mistake, before a run is queued that could only fail.
+    if let Some(schema) = &flow.input {
+        // A validator is the code of the application: it may panic.
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| schema.parse(input.clone()))) {
+            Ok(Ok(_)) => {}
+            Ok(Err(summary)) => return Err(InvalidFlowInput { flow_name, summary }.into()),
+            Err(_) => bail!("The input validator of flow \"{flow_name}\" panicked"),
+        }
+    }
 
     let mut tx = db.begin().await?;
     sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1))")

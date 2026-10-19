@@ -42,6 +42,7 @@ pub fn LogsSection(
     levels: RwSignal<Vec<String>>,
     level_counts: RwSignal<LevelCounts>,
     filtered_logs: RwSignal<Vec<LogEntry>>,
+    logs_error: RwSignal<Option<String>>,
     total_logs: RwSignal<u64>,
     new_log_ids: RwSignal<HashSet<String>>,
     show_help: RwSignal<bool>,
@@ -115,6 +116,20 @@ pub fn LogsSection(
                     "?"
                 </s-button>
             </div>
+
+            {move || {
+                logs_error
+                    .get()
+                    .map(|reason| {
+                        view! {
+                            <div style="margin-bottom:12px">
+                                <s-banner tone="critical" heading="The search was refused">
+                                    {reason}
+                                </s-banner>
+                            </div>
+                        }
+                    })
+            }}
 
             <div style="display:flex;gap:6px;margin-bottom:12px">
                 {LOG_LEVELS

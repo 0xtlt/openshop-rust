@@ -57,6 +57,20 @@ async fn dispatch(test: &TestApp) -> Uuid {
         .run_id
 }
 
+/// Queues a run of a flow with an input schema, with an input it accepts: the
+/// tests then run it with the input they mean to try.
+async fn dispatch_valid(test: &TestApp, retry_policy: RetryPolicy) -> Uuid {
+    test.app
+        .dispatch_flow(
+            DispatchOptions::new(FLOW, TEST_SHOP)
+                .input(json!({ "limit": 1 }))
+                .retry_policy(retry_policy),
+        )
+        .await
+        .unwrap()
+        .run_id
+}
+
 /// Queues a run whose first failure is final.
 async fn dispatch_without_retry(test: &TestApp) -> Uuid {
     test.app
@@ -343,7 +357,7 @@ async fn input_validation_rejects_invalid_input() {
     let test = TestApp::new(create_config([limit_flow(seen.clone())])).await;
 
     for input in [json!({ "limit": "not-a-number" }), json!({}), json!({ "limit": -1 })] {
-        let run_id = dispatch_without_retry(&test).await;
+        let run_id = dispatch_valid(&test, RetryPolicy::new().max_attempts(0)).await;
         let result = run_flow(&test.app, options(run_id).input(input.clone())).await.unwrap();
         let RunOutcome::Failed { error, will_retry } = result else {
             panic!("expected a failure for {input}, got {result:?}");
@@ -368,7 +382,7 @@ async fn typed_input_is_validated_and_exposed_to_the_flow() {
     let test = TestApp::new(create_config([limit_flow(seen.clone())])).await;
 
     for input in [json!({ "limit": 5 }), json!({ "limit": 7, "label": "nightly" })] {
-        let run_id = dispatch(&test).await;
+        let run_id = dispatch_valid(&test, RetryPolicy::default()).await;
         let result = run_flow(&test.app, options(run_id).input(input)).await.unwrap();
         assert_eq!(result, RunOutcome::Completed);
     }

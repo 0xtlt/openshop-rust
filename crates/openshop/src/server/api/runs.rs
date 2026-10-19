@@ -14,7 +14,7 @@ use crate::app::OpenShop;
 use crate::db::schema::{FlowRun, StepResult};
 use crate::engine::abort::cancel_run;
 use crate::engine::dispatch::DispatchOptions;
-use crate::engine::errors::FlowConcurrencyError;
+use crate::engine::errors::{FlowConcurrencyError, InvalidFlowInput, UnknownFlowError};
 use crate::runtime::time::parse_date;
 use crate::server::http::{ApiResult, json_error, json_object_body, json_response, parse_query};
 use crate::server::log_query::InvalidLogQuery;
@@ -198,20 +198,6 @@ async fn run_flow(
         Some(input) => input.clone(),
     };
 
-    // The caller's mistakes, before a run is queued: a run that could only fail
-    // would otherwise be accepted.
-    let Some(flow) = app.config().flows.get(&name) else {
-        return Ok(json_error(StatusCode::NOT_FOUND, format!("Flow \"{name}\" not found")));
-    };
-    if let Some(schema) = &flow.input
-        && let Err(summary) = schema.parse(input.clone())
-    {
-        return Ok(json_error(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            format!("Invalid input for flow \"{name}\": {summary}"),
-        ));
-    }
-
     let dispatched = app
         .dispatch_flow(
             DispatchOptions::new(name, session.shop.clone())
@@ -221,13 +207,23 @@ async fn run_flow(
         .await;
     match dispatched {
         Ok(result) => Ok(json_response(StatusCode::ACCEPTED, json!(result))),
-        Err(error) => match error.downcast_ref::<FlowConcurrencyError>() {
-            Some(conflict) => Ok(json_response(
-                StatusCode::CONFLICT,
-                json!({ "error": conflict.to_string(), "existingRunId": conflict.existing_run_id }),
-            )),
-            None => Err(error.into()),
-        },
+        Err(error) => {
+            if let Some(conflict) = error.downcast_ref::<FlowConcurrencyError>() {
+                Ok(json_response(
+                    StatusCode::CONFLICT,
+                    json!({ "error": conflict.to_string(), "existingRunId": conflict.existing_run_id }),
+                ))
+            } else if let Some(unknown) = error.downcast_ref::<UnknownFlowError>() {
+                Ok(json_error(
+                    StatusCode::NOT_FOUND,
+                    format!("Flow \"{}\" not found", unknown.flow_name),
+                ))
+            } else if let Some(invalid) = error.downcast_ref::<InvalidFlowInput>() {
+                Ok(json_error(StatusCode::UNPROCESSABLE_ENTITY, invalid.to_string()))
+            } else {
+                Err(error.into())
+            }
+        }
     }
 }
 

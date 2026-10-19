@@ -1026,19 +1026,29 @@ async fn records_a_panicking_flow_as_failed_and_frees_its_slot() {
 
 #[tokio::test]
 async fn survives_a_panic_outside_of_the_flow_body() {
-    let validated = noop_flow("validated-flow")
-        .input_schema(InputSchema::custom(json!({ "type": "object" }), |_input| {
-            panic!("validator exploded")
+    // The validator explodes on an input that a dispatch lets through: it is
+    // changed in the table before a worker takes the run.
+    let validated =
+        noop_flow("validated-flow").input_schema(InputSchema::custom(json!({ "type": "object" }), |input| {
+            if input.get("explode").is_some() {
+                panic!("validator exploded");
+            }
+            Ok(input)
         }));
     let test = TestApp::new(create_config([validated, noop_flow("quick-flow")])).await;
-    let worker = worker(&test.app, 1);
-    worker.start().await;
-
     let run_id = dispatch_with(
         &test,
         DispatchOptions::new("validated-flow", TEST_SHOP).retry_policy(without_retry()),
     )
     .await;
+    sqlx::query("UPDATE flow_runs SET input = '{\"explode\": true}'::json WHERE id = $1")
+        .bind(run_id)
+        .execute(&test.db)
+        .await
+        .unwrap();
+    let worker = worker(&test.app, 1);
+    worker.start().await;
+
     let run = wait_for_status(&test, run_id, "failed").await;
     assert_eq!(run.error.as_deref(), Some("Worker error: panicked: validator exploded"));
     assert_eq!(run.worker_id, None);
