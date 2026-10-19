@@ -1878,6 +1878,19 @@ impl Drop for Live {
 
 #[tokio::test]
 async fn a_flow_whose_lease_ran_out_is_gone_before_another_worker_starts_the_run() {
+    lease_overlap(false).await;
+}
+
+#[tokio::test]
+async fn a_slow_claim_does_not_stretch_the_lease_of_the_flow() {
+    // The claim answers 1.2 s after it began, with a lease of 2 s dated from its
+    // beginning: the flow starts with less than a second left.
+    lease_overlap(true).await;
+}
+
+/// The first worker lost its heartbeat (see the tests above); the second takes the
+/// run over when the lease expires. Never two flows of the run at once.
+async fn lease_overlap(slow_first_claim: bool) {
     let (live, starts) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
     let release = CancellationToken::new();
     let flow = Flow::new("lease-overlap", {
@@ -1896,6 +1909,18 @@ async fn a_flow_whose_lease_ran_out_is_gone_before_another_worker_starts_the_run
     .concurrency(Concurrency::Allow);
     let config = create_config([flow]);
     let test = TestApp::new(config.clone()).await;
+    if slow_first_claim {
+        sqlx::raw_sql(
+            "CREATE FUNCTION slow_first_claim() RETURNS trigger LANGUAGE plpgsql AS $$ \
+             BEGIN IF OLD.attempts = 0 AND NEW.status = 'running' THEN PERFORM pg_sleep(1.2); END IF; \
+             RETURN NEW; END $$; \
+             CREATE TRIGGER slow_first_claim BEFORE UPDATE ON flow_runs FOR EACH ROW \
+               EXECUTE FUNCTION slow_first_claim()",
+        )
+        .execute(&test.db)
+        .await
+        .unwrap();
+    }
     // The first worker has a pool of one connection, which the test then keeps:
     // its heartbeat waits for a connection that does not come, and no lock keeps
     // the other worker from taking the run over.

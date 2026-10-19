@@ -439,8 +439,9 @@
   connection of a busy pool as well as for the statement, which the server
   enforces with `statement_timeout`. A failure is logged as `Heartbeat of run
   … failed` (the first and every tenth in a row). The worker keeps a deadline for
-  the lease, the moment it sent the last request that extended it plus
-  `lease_duration` less a tenth, and it runs while the worker waits for a tick
+  the lease, the moment it sent the last request that extended it (the claim for the
+  first one, not the moment its answer came back; a run whose claim answered
+  after that deadline is not started) plus `lease_duration` less a tenth, and it runs while the worker waits for a tick
   as well as for a heartbeat stuck on a saturated pool or a lock. When it
   passes, the lease has expired: the flow is dropped
   (not only told to stop through its signal) and nothing is recorded, so a run
