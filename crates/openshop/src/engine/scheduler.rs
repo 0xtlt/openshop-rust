@@ -215,8 +215,9 @@ fn tick_keys(crons: &[Cron]) -> Vec<String> {
 }
 
 async fn prune_ticks(app: &OpenShop) {
-    let result = sqlx::query("DELETE FROM cron_ticks WHERE scheduled_at < $1")
-        .bind(Utc::now() - Duration::hours(TICK_RETENTION_HOURS))
+    // The clock of the database, as the claim that reads these rows.
+    let result = sqlx::query("DELETE FROM cron_ticks WHERE scheduled_at < clock_timestamp() - make_interval(hours => $1)")
+        .bind(TICK_RETENTION_HOURS as i32)
         .execute(app.db())
         .await;
     if let Err(error) = result {
@@ -268,6 +269,7 @@ async fn run_entry(app: &OpenShop, entry: &Cron, tick_key: &str, scheduled_at: D
     let tick = CronTick {
         cron_key: tick_key,
         scheduled_at,
+        max_lateness: Duration::minutes(MAX_TICK_LATENESS_MINUTES),
     };
     let mut missed = Missed::default();
     for CronTarget { shopify_app, shop } in targets {
@@ -430,13 +432,11 @@ mod tests {
         assert_eq!([&reordered[1], &reordered[2]], [&keys[0], &keys[2]]);
     }
 
-    #[tokio::test]
-    async fn an_occurrence_too_late_is_not_fired() {
+    async fn app_with_a_cron(db: &TestDb) -> (OpenShop, Cron) {
         let flow = Flow::new("sync", |_ctx: crate::FlowContext| async move { crate::Result::Ok(()) })
             .concurrency(Concurrency::Allow);
         let cron = Cron::new("* * * * * *", "sync");
         let config = OpenShopConfig::builder().flow(flow).cron(cron.clone()).build().unwrap();
-        let db = TestDb::create().await.unwrap();
         let env = RuntimeEnv {
             shopify_api_key: Some("key".into()),
             shopify_api_secret: Some("secret".into()),
@@ -444,22 +444,66 @@ mod tests {
             ..Default::default()
         };
         let app = OpenShop::with_transport(config, db.pool.clone(), env, MockTransport::new()).unwrap();
-        let count = || async {
-            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM flow_runs")
-                .fetch_one(&db.pool)
-                .await
-                .unwrap()
-        };
+        (app, cron)
+    }
+
+    async fn run_count(db: &TestDb) -> i64 {
+        sqlx::query_scalar("SELECT count(*) FROM flow_runs")
+            .fetch_one(&db.pool)
+            .await
+            .unwrap()
+    }
+
+    fn whole_seconds_ago(age: Duration) -> DateTime<Utc> {
+        DateTime::from_timestamp((Utc::now() - age).timestamp(), 0).unwrap()
+    }
+
+    #[tokio::test]
+    async fn an_occurrence_too_late_is_not_fired() {
+        let db = TestDb::create().await.unwrap();
+        let (app, cron) = app_with_a_cron(&db).await;
 
         // A process paused for two days wakes up on occurrences the others fired
         // long ago, whose claims are gone: it must not queue them again.
-        let old = Utc::now() - Duration::hours(48);
-        run_entry(&app, &cron, "sync", DateTime::from_timestamp(old.timestamp(), 0).unwrap()).await;
-        assert_eq!(count().await, 0);
+        run_entry(&app, &cron, "sync", whole_seconds_ago(Duration::hours(48))).await;
+        assert_eq!(run_count(&db).await, 0);
 
-        let now = DateTime::from_timestamp(Utc::now().timestamp(), 0).unwrap();
-        run_entry(&app, &cron, "sync", now).await;
-        assert_eq!(count().await, 1);
+        run_entry(&app, &cron, "sync", whole_seconds_ago(Duration::zero())).await;
+        assert_eq!(run_count(&db).await, 1);
+        db.cleanup().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn the_claim_itself_refuses_an_occurrence_that_became_too_late() {
+        let db = TestDb::create().await.unwrap();
+        let (app, _) = app_with_a_cron(&db).await;
+        let claim = |scheduled_at| {
+            let app = app.clone();
+            async move {
+                let tick = CronTick {
+                    cron_key: "sync",
+                    scheduled_at,
+                    max_lateness: Duration::minutes(MAX_TICK_LATENESS_MINUTES),
+                };
+                let options = DispatchOptions::new("sync", "__global__");
+                dispatch_cron_tick(app.db(), app.config(), options, &tick).await.unwrap()
+            }
+        };
+
+        // A process that passed the check of `run_entry`, then stalled past the
+        // retention while the claim of the occurrence was pruned: it has no
+        // claim to find, and must not make a new one for a run already queued.
+        let stale = whole_seconds_ago(Duration::hours(TICK_RETENTION_HOURS + 1));
+        assert!(claim(stale).await.is_none());
+        let late = whole_seconds_ago(Duration::minutes(MAX_TICK_LATENESS_MINUTES + 1));
+        assert!(claim(late).await.is_none());
+        assert_eq!(run_count(&db).await, 0);
+
+        // A fresh occurrence is claimed once.
+        let fresh = whole_seconds_ago(Duration::seconds(5));
+        assert!(claim(fresh).await.is_some());
+        assert!(claim(fresh).await.is_none());
+        assert_eq!(run_count(&db).await, 1);
         db.cleanup().await.unwrap();
     }
 }

@@ -97,11 +97,16 @@ pub async fn dispatch_flow(db: &PgPool, config: &OpenShopConfig, options: Dispat
 pub(crate) struct CronTick<'a> {
     pub cron_key: &'a str,
     pub scheduled_at: DateTime<Utc>,
+    /// An occurrence older than this, by the clock of the database, is not claimed.
+    pub max_lateness: Duration,
 }
 
 /// Queues the run of a cron occurrence, unless a process already did. The
 /// claim of the occurrence and the run are written in one transaction, so a
-/// run that is refused leaves the occurrence free. `None` when it was taken.
+/// run that is refused leaves the occurrence free. `None` when it was taken, or
+/// is too late to be claimed: the freshness is decided by the claim itself,
+/// after any wait for the lock, since the claims of older occurrences may have
+/// been removed by now.
 pub(crate) async fn dispatch_cron_tick(
     db: &PgPool,
     config: &OpenShopConfig,
@@ -141,13 +146,16 @@ async fn queue_run(
 
     if let Some(tick) = tick {
         let claimed = sqlx::query(
-            "INSERT INTO cron_ticks (app_handle, shop, cron_key, scheduled_at) VALUES ($1, $2, $3, $4) \
+            "INSERT INTO cron_ticks (app_handle, shop, cron_key, scheduled_at) \
+             SELECT $1, $2, $3, $4::timestamptz \
+             WHERE $4::timestamptz >= clock_timestamp() - make_interval(secs => $5) \
              ON CONFLICT DO NOTHING",
         )
         .bind(&shopify_app)
         .bind(&shop)
         .bind(tick.cron_key)
         .bind(tick.scheduled_at)
+        .bind(tick.max_lateness.num_milliseconds() as f64 / 1000.0)
         .execute(&mut *tx)
         .await?;
         if claimed.rows_affected() == 0 {
