@@ -2648,6 +2648,60 @@ async fn sessions_cannot_reach_runs_and_logs_of_another_shop(ctx: &TestContext) 
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
+/// Crons aimed at `OTHER_SHOP`, at the context's shop and `OTHER_SHOP`, and at every shop.
+fn named_shops_config() -> OpenShopConfig {
+    OpenShopConfig::builder()
+        .flow(noop_flow("test-flow"))
+        .cron(
+            Cron::new("0 * * * *", "test-flow")
+                .shop(OTHER_SHOP)
+                .input(json!({ "customer": "secret-of-other" })),
+        )
+        .cron(Cron::new("1 * * * *", "test-flow").shops(["test.myshopify.com", OTHER_SHOP]))
+        .cron(Cron::new("2 * * * *", "test-flow").all_shops())
+        .build()
+        .unwrap()
+}
+
+#[openshop::test(context(named_shops_config()))]
+async fn crons_and_flows_of_the_admin_only_show_what_applies_to_the_session_shop(ctx: &TestContext) {
+    let (status, crons) = send(ctx.get("/api/crons")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(strings(&crons, "key"), ["test-flow:1 * * * *", "test-flow:2 * * * *"]);
+    assert_eq!(crons[0]["shops"], json!([ctx.shop]));
+    let (_, flows) = send(ctx.get("/api/flows")).await;
+    assert_eq!(strings(&flows[0]["crons"], "schedule"), ["1 * * * *", "2 * * * *"]);
+    assert_eq!(flows[0]["crons"][0]["shops"], json!([ctx.shop]));
+    for body in [crons.to_string(), flows.to_string()] {
+        assert!(
+            !body.contains(OTHER_SHOP) && !body.contains("secret-of-other"),
+            "{body}"
+        );
+    }
+
+    // Only a cron the shop sees can be switched.
+    let (status, body) = send(
+        ctx.post("/api/crons/toggle")
+            .json(&json!({ "key": "test-flow:0 * * * *", "enabled": false })),
+    )
+    .await;
+    assert_eq!((status, body), (StatusCode::NOT_FOUND, error("Cron not found")));
+    let (status, _) = send(
+        ctx.post("/api/crons/toggle")
+            .json(&json!({ "key": "test-flow:1 * * * *", "enabled": false })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let intruder = ctx.session_token_for(OTHER_SHOP, "2");
+    let (_, crons) = send(request_as(ctx, &intruder, Method::GET, "/api/crons")).await;
+    assert_eq!(
+        strings(&crons, "key"),
+        ["test-flow:0 * * * *", "test-flow:1 * * * *", "test-flow:2 * * * *"]
+    );
+    assert_eq!(crons[1]["enabled"], true);
+}
+
 #[openshop::test(api_context())]
 async fn sessions_cannot_reach_providers_and_crons_of_another_shop(ctx: &TestContext) {
     let key = "test-flow:*/5 * * * *";

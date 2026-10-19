@@ -87,7 +87,7 @@ fn core_permission_definitions() -> [(&'static str, &'static str, &'static str, 
         (
             "shopify_admin_graphql",
             "Shopify Admin GraphQL",
-            "Run arbitrary Shopify Admin GraphQL queries and mutations for installed shops.",
+            "Run arbitrary Shopify Admin GraphQL queries and mutations for the shop of the token.",
             "Shopify Admin",
             High,
         ),

@@ -73,6 +73,14 @@ The same rule applies in every handler: `ctx.db` is the same unrestricted pool
 in a webhook, a proxy handler, a server route, a loader or an action of an
 admin page, and an MCP tool.
 
+The core MCP tools follow it: an MCP token belongs to one app and one shop, and
+every core tool acts on that pair. `openshop.admin.graphql` takes its shop
+from the token, not from its arguments: a `shop` naming another shop is
+refused. A
+staff member can grant any permission to the tokens of their own shop, so a
+permission cannot separate shops; reaching several shops through MCP is not
+something a token can be granted.
+
 ## Shared hosting does not mean independent configuration
 
 All Shopify apps in one OpenShop instance share the flow/provider definitions,
