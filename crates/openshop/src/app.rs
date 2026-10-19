@@ -61,6 +61,12 @@ pub struct OpenShopConfig {
     pub admin_ui: Option<UiSource>,
     /// Maximum size of a request body. Defaults to 2 MB.
     pub max_request_body_bytes: Option<usize>,
+    /// How long a request may take to get the head of its response. Defaults
+    /// to 60 seconds.
+    pub request_timeout: Option<std::time::Duration>,
+    /// How many requests are served at once; the ones above are answered with
+    /// `503`. Defaults to 1024.
+    pub max_concurrent_requests: Option<usize>,
     /// The password of the operator dashboard, served under `/ops` when set.
     pub ops_password: Option<String>,
     /// The development store whose token work no Shopify request vouches for
@@ -357,6 +363,21 @@ impl OpenShopBuilder {
 
     pub fn max_request_body_bytes(mut self, bytes: usize) -> Self {
         self.config.max_request_body_bytes = Some(bytes);
+        self
+    }
+
+    /// Answers `503` to a request whose response has not begun after this
+    /// long. The time the handler takes to read the body counts; the time a
+    /// response already begun takes to stream does not. Defaults to 60 seconds.
+    pub fn request_timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.config.request_timeout = Some(timeout);
+        self
+    }
+
+    /// Answers `503` to a request that comes while this many are being
+    /// served. `/health` is always answered. Defaults to 1024.
+    pub fn max_concurrent_requests(mut self, requests: usize) -> Self {
+        self.config.max_concurrent_requests = Some(requests);
         self
     }
 

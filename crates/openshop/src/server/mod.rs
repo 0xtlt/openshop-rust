@@ -15,6 +15,7 @@ pub mod functions;
 pub mod hmac;
 pub mod http;
 pub mod jwt;
+mod limits;
 mod linger;
 pub mod log_query;
 pub mod mcp;
@@ -43,6 +44,7 @@ use axum::routing::{get, post};
 use regex::Regex;
 use serde_json::json;
 use tokio::net::TcpListener;
+use tokio::sync::Semaphore;
 use tokio_util::sync::{CancellationToken, DropGuard};
 use tower::layer::layer_fn;
 use tower_http::cors::{AllowHeaders, AllowOrigin, CorsLayer};
@@ -56,6 +58,7 @@ use crate::runtime::time::to_iso;
 use crate::types::AdminPageMode;
 use openshop_shared::admin_page_from_api_path;
 
+pub use self::limits::{DEFAULT_MAX_CONCURRENT_REQUESTS, DEFAULT_REQUEST_TIMEOUT};
 pub use self::shop::ShopSession;
 pub use self::static_ui::UiSource;
 
@@ -274,6 +277,13 @@ pub(crate) fn create_router(app: &OpenShop, options: ServerOptions, log: bool) -
         .config()
         .max_request_body_bytes
         .unwrap_or(DEFAULT_MAX_REQUEST_BODY_BYTES);
+    let request_timeout = app.config().request_timeout.unwrap_or(DEFAULT_REQUEST_TIMEOUT);
+    let slots = Arc::new(Semaphore::new(
+        app.config()
+            .max_concurrent_requests
+            .unwrap_or(DEFAULT_MAX_CONCURRENT_REQUESTS)
+            .max(1),
+    ));
     // One stack, outermost first: each `Router::layer` call would box every
     // route once more, and a request clones every box it goes through.
     Ok(router
@@ -283,6 +293,8 @@ pub(crate) fn create_router(app: &OpenShop, options: ServerOptions, log: bool) -
                 HeaderValue::from_static(ROBOTS_HEADER),
             ),
             layer_fn(compression::CompressLarge),
+            middleware::from_fn_with_state(slots, limits::shed_excess),
+            middleware::from_fn_with_state(request_timeout, limits::time_out),
             DefaultBodyLimit::max(body_limit),
             #[cfg(feature = "sentry")]
             layer_fn(crate::runtime::report::IsolateRequests),

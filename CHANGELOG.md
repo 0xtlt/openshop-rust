@@ -347,6 +347,22 @@
   Pass `--allow-destructive` to generate it anyway, or declare a rename with
   `renamed_from` when the data is meant to be kept. The `dev` push never
   drops anything and is unchanged.
+- A request that has no response after 60 seconds is answered with `503`
+  (`Request timed out`) and its work is cancelled, and a request that comes
+  while 1024 are being served is answered with `503` and `Retry-After: 1`;
+  `/health` is always answered. The `request_timeout` and
+  `max_concurrent_requests` settings of `app!` change them, and a value of
+  zero is refused. A response already streaming is not counted. Before, a
+  request could hold the server for as long as its handler ran, and nothing
+  bounded how many ran at once.
+- Checking the secret of an MCP token no longer lets whoever knows a token id
+  cost the server a scrypt hash per request: at most as many hashes as CPUs (4
+  at most) run at once, a request that gets no turn in five seconds is
+  answered with `503`, and a secret that was right is remembered for five
+  minutes under a keyed hash that lives in the memory of the process. The
+  stored hash is unchanged (scrypt, shared with the TypeScript runtime), and
+  the state of a token is still read at every request, so a revoked, disabled,
+  expired or rotated token is refused at once.
 - `openshop init` makes a project from one of three templates: `minimal`, one
   provider and one flow, as before; `custom`, a custom app with every building
   block and a page of its own next to the built-in admin; `public`, a public

@@ -123,6 +123,11 @@ fn validate_field(field: &Field, path: &str) -> Result<()> {
 
 pub fn validate_openshop_config(config: &OpenShopConfig) -> Result<()> {
     validate_shopify_config(config.shopify.as_ref())?;
+    assert_positive_duration(config.request_timeout, "request_timeout")?;
+    assert_positive_integer(
+        config.max_concurrent_requests.map(|requests| requests as u64),
+        "max_concurrent_requests",
+    )?;
 
     for (key, provider) in &config.providers {
         if provider.name.trim().is_empty() {

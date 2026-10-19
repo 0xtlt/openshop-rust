@@ -1120,6 +1120,38 @@ async fn mcp_rejects_expired_and_revoked_tokens(ctx: &TestContext) {
     }
 }
 
+// The secret of a token that worked is remembered for a few minutes; whether
+// the token may be used is read again at every request.
+#[openshop::test(context())]
+async fn a_token_that_worked_is_refused_as_soon_as_it_is_revoked_or_rotated(ctx: &TestContext) {
+    let revoked = create_token(ctx, &[]).await;
+    let rotated = create_token(ctx, &[]).await;
+    let disabled = create_token(ctx, &[]).await;
+    for issued in [&revoked, &rotated, &disabled] {
+        for _ in 0..2 {
+            assert_eq!(initialize_status(ctx, &issued.token).await.0, 200);
+        }
+    }
+
+    send(ctx.post(&revoked.path("/revoke"))).await;
+    let (status, body) = initialize_status(ctx, &revoked.token).await;
+    assert_eq!(status, 403);
+    assert_eq!(body, json!({ "error": "Forbidden: MCP token is not active" }));
+
+    let (status, new_secret) = send(ctx.post(&rotated.path("/rotate"))).await;
+    assert_eq!(status, 200);
+    let (status, body) = initialize_status(ctx, &rotated.token).await;
+    assert_eq!(status, 401);
+    assert_eq!(body, json!({ "error": "Unauthorized: invalid MCP token" }));
+    assert_eq!(
+        initialize_status(ctx, new_secret["token"].as_str().unwrap()).await.0,
+        200
+    );
+
+    send(ctx.patch(&disabled.path("")).json(&json!({ "status": "disabled" }))).await;
+    assert_eq!(initialize_status(ctx, &disabled.token).await.0, 403);
+}
+
 #[openshop::test(context())]
 async fn mcp_calls_update_last_used_at(ctx: &TestContext) {
     let issued = create_token(ctx, &[]).await;

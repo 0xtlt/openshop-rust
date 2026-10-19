@@ -1,6 +1,7 @@
 mod common;
 
 use std::borrow::Cow;
+use std::time::Duration;
 
 use common::noop_flow;
 use openshop::builder::Route;
@@ -13,6 +14,13 @@ use tokio::net::TcpStream;
 
 fn echo_size() -> Route {
     Route::public().post(|ctx| async move { Ok(response::json(json!({ "bytes": ctx.request.body.len() }))) })
+}
+
+fn slow(delay: Duration) -> Route {
+    Route::public().get(move |_ctx| async move {
+        tokio::time::sleep(delay).await;
+        Ok(response::json(json!({ "done": true })))
+    })
 }
 
 #[tokio::test]
@@ -204,4 +212,108 @@ async fn serves_a_ui_bundle_compiled_into_the_application() {
     let missing = ctx.http.get(ctx.url_for("/missing.js")).send().await.unwrap();
     assert_eq!(missing.status(), 404);
     ctx.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_request_that_takes_too_long_is_answered_with_503() {
+    let config = OpenShopConfig::builder()
+        .route("/slow", slow(Duration::from_secs(30)))
+        .route("/quick", slow(Duration::ZERO))
+        .request_timeout(Duration::from_millis(300))
+        .build()
+        .unwrap();
+    let ctx = TestContext::new(config).await.unwrap();
+
+    let started = std::time::Instant::now();
+    let timed_out = ctx.http.get(ctx.url_for("/routes/slow")).send().await.unwrap();
+    assert_eq!(timed_out.status(), 503);
+    assert_eq!(
+        timed_out.json::<Value>().await.unwrap(),
+        json!({ "error": "Request timed out" })
+    );
+    assert!(started.elapsed() < Duration::from_secs(10));
+
+    let quick = ctx.http.get(ctx.url_for("/routes/quick")).send().await.unwrap();
+    assert_eq!(quick.status(), 200);
+    ctx.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_body_that_never_finishes_arriving_runs_into_the_timeout() {
+    let config = OpenShopConfig::builder()
+        .route("/echo", echo_size())
+        .request_timeout(Duration::from_millis(300))
+        .build()
+        .unwrap();
+    let ctx = TestContext::new(config).await.unwrap();
+
+    let mut client = TcpStream::connect(("127.0.0.1", ctx.port)).await.unwrap();
+    let head = "POST /routes/echo HTTP/1.1\r\nhost: localhost\r\ncontent-length: 1000\r\n\r\nabc";
+    client.write_all(head.as_bytes()).await.unwrap();
+    let mut status = [0; 12];
+    tokio::time::timeout(Duration::from_secs(10), client.read_exact(&mut status))
+        .await
+        .expect("an answer before the client gives up")
+        .unwrap();
+    assert_eq!(&status, b"HTTP/1.1 503");
+    ctx.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn requests_above_the_concurrency_limit_are_shed_with_503() {
+    let config = OpenShopConfig::builder()
+        .route("/slow", slow(Duration::from_millis(800)))
+        .max_concurrent_requests(2)
+        .build()
+        .unwrap();
+    let ctx = TestContext::new(config).await.unwrap();
+    let slow_url = ctx.url_for("/routes/slow");
+
+    let busy: Vec<_> = (0..2)
+        .map(|_| {
+            let (http, url) = (ctx.http.clone(), slow_url.clone());
+            tokio::spawn(async move { http.get(url).send().await.unwrap().status() })
+        })
+        .collect();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let shed = ctx.http.get(&slow_url).send().await.unwrap();
+    assert_eq!(shed.status(), 503);
+    assert_eq!(shed.headers()["retry-after"], "1");
+    assert_eq!(
+        shed.json::<Value>().await.unwrap(),
+        json!({ "error": "Server is busy, try again" })
+    );
+
+    // The health probe is answered by a server that is full.
+    let health = ctx.http.get(ctx.url_for("/health")).send().await.unwrap();
+    assert_eq!(health.status(), 200);
+
+    for request in busy {
+        assert_eq!(request.await.unwrap(), 200);
+    }
+    // The slots are free again.
+    let after = ctx.http.get(&slow_url).send().await.unwrap();
+    assert_eq!(after.status(), 200);
+    ctx.shutdown().await.unwrap();
+}
+
+#[test]
+fn the_limits_must_be_positive() {
+    let Err(error) = OpenShopConfig::builder().request_timeout(Duration::ZERO).build() else {
+        panic!("a zero timeout is refused");
+    };
+    assert!(
+        error.to_string().contains("request_timeout must be a positive number"),
+        "{error}"
+    );
+    let Err(error) = OpenShopConfig::builder().max_concurrent_requests(0).build() else {
+        panic!("no slot is refused");
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("max_concurrent_requests must be a positive integer"),
+        "{error}"
+    );
 }

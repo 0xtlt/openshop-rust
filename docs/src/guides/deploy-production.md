@@ -157,7 +157,10 @@ scope authorization as needed.
 4. Run a harmless flow and verify it reaches **completed** with the expected steps.
 5. Confirm both service logs show no database, encryption, or configuration errors.
 
-`/health` only proves the HTTP process responds. A completed smoke flow also
+`/health` only proves the HTTP process responds, and it is answered even when
+the server sheds load. A request is cut after 60 seconds and the server serves
+1024 at once; the `request_timeout` and `max_concurrent_requests` settings of
+`app!` change both (see [Configuration](../reference/configuration.md)). A completed smoke flow also
 exercises the queue and worker. If runs stay pending, use
 [Troubleshooting](troubleshooting.md#runs-stay-pending).
 
