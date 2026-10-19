@@ -43,8 +43,9 @@ fn tokens() -> MutexGuard<'static, HashMap<String, Registered>> {
 
 /// Registers an execution of a run. It replaces the token of a previous
 /// execution of the same run, which a cancellation then no longer reaches.
-pub fn register_abort(run_id: &str) -> Abort {
-    let token = CancellationToken::new();
+/// Cancelling `parent` cancels the token of the execution too.
+pub fn register_abort(run_id: &str, parent: Option<&CancellationToken>) -> Abort {
+    let token = parent.map(CancellationToken::child_token).unwrap_or_default();
     let generation = GENERATION.fetch_add(1, Ordering::Relaxed);
     tokens().insert(
         run_id.to_string(),
@@ -77,14 +78,14 @@ mod tests {
 
     #[test]
     fn register_returns_a_live_token() {
-        let abort = register_abort("abort-test-1");
+        let abort = register_abort("abort-test-1", None);
         assert!(!abort.token.is_cancelled());
         abort.cleanup();
     }
 
     #[test]
     fn cancel_run_cancels_the_token_and_forgets_it() {
-        let abort = register_abort("abort-test-2");
+        let abort = register_abort("abort-test-2", None);
         assert!(cancel_run("abort-test-2"));
         assert!(abort.token.is_cancelled());
         assert!(!cancel_run("abort-test-2"));
@@ -96,8 +97,22 @@ mod tests {
     }
 
     #[test]
+    fn cancelling_the_parent_cancels_the_token_but_not_the_other_way() {
+        let parent = CancellationToken::new();
+        let abort = register_abort("abort-test-5", Some(&parent));
+        assert!(cancel_run("abort-test-5"));
+        assert!(abort.token.is_cancelled());
+        assert!(!parent.is_cancelled());
+
+        let abort = register_abort("abort-test-5", Some(&parent));
+        parent.cancel();
+        assert!(abort.token.is_cancelled());
+        abort.cleanup();
+    }
+
+    #[test]
     fn cleanup_removes_the_token_without_cancelling() {
-        let abort = register_abort("abort-test-3");
+        let abort = register_abort("abort-test-3", None);
         abort.cleanup();
         assert!(!abort.token.is_cancelled());
         assert!(!cancel_run("abort-test-3"));
@@ -105,8 +120,8 @@ mod tests {
 
     #[test]
     fn cleanup_of_a_replaced_execution_keeps_the_token_of_the_new_one() {
-        let old = register_abort("abort-test-4");
-        let new = register_abort("abort-test-4");
+        let old = register_abort("abort-test-4", None);
+        let new = register_abort("abort-test-4", None);
         old.cleanup();
         assert!(cancel_run("abort-test-4"));
         assert!(new.token.is_cancelled());

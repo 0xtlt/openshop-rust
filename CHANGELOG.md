@@ -418,6 +418,38 @@
   the run is left to the new execution. Breaking: `StepExecutor::new` takes
   the owner (`engine::RunOwner`, `None` outside a worker) as a last argument,
   and a stale step is no longer recorded as `canceled` or `failed`.
+- A lease, a deadline, a retry and the wake-up of a sleeping run are dated by
+  the clock of the database (`now()` in SQL), no longer by the one of the
+  process that writes them. A replica whose clock was ahead made leases that
+  the others saw already expired and took the runs over, or leases that
+  outlived their worker. Breaking, only in timing: `compute_next_retry_at`
+  takes the date it counts from as a last argument.
+- The heartbeat that extends a lease no longer fails silently. It has a time
+  limit of a quarter of the lease (250 ms to 10 s), for the wait for a
+  connection of a busy pool as well as for the statement, which the server
+  enforces with `statement_timeout`. A failure is logged as `Heartbeat of run
+  … failed` (the first and every tenth in a row). When the lease could not be
+  extended for a whole `lease_duration`, it has expired: the execution stops
+  and records nothing, so a run another worker may have claimed is not run by
+  two at once. `RunFlowOptions` has two new fields, `lease_duration` and
+  `interrupt`.
+- A worker that stops hands back the runs it still executes once its wait of
+  one lease is over: they go back to `pending`, claimable at once, instead of
+  staying `running` until the lease expires, and their executions are
+  cancelled without recording an outcome. The release is fenced by worker and
+  attempt like every write of an execution. The interrupted attempt stays
+  counted in `attempts`, which keys its step rows, so the run has one retry
+  fewer; it is not failed as abandoned for that, and it runs again even with
+  `max_attempts(1)`.
+- Retries wait between half of the backoff and all of it, drawn at random,
+  instead of exactly the backoff, so that runs that failed together, because
+  a provider went down, do not all retry at the same moment. `max_interval`
+  still caps the delay.
+- The documentation of steps no longer says that a step is never executed
+  twice. Steps run at least once: a step whose result is stored is not run
+  again, but a process that dies before the result is stored, or a lease that
+  expires while the step runs, makes the next attempt run it again, side
+  effects included.
 
 ## 0.0.12-beta.0
 

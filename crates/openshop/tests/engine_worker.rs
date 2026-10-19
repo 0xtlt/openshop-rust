@@ -4,7 +4,10 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use common::{TEST_SHOP, TestApp, create_config, heal_write_fault, inject_write_fault, noop_flow, write_fault_hits};
+use common::{
+    TEST_SHOP, TestApp, app_with_a_clock_ahead, create_config, heal_write_fault, inject_write_fault, noop_flow,
+    write_fault_hits,
+};
 use openshop::builder::{Flow, InputSchema};
 use openshop::db::schema::{FlowRun, StepResult};
 use openshop::engine::{Worker, cancel_run};
@@ -1488,5 +1491,234 @@ async fn worker_that_lost_its_lease_cancels_the_flow_on_the_next_heartbeat() {
     );
     // The run itself now belongs to the other worker and is left untouched.
     assert_eq!(find_run(&test, run_id).await, stolen);
+    test.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_lease_is_dated_by_the_clock_of_the_database() {
+    let started = Arc::new(Notify::new());
+    let release = CancellationToken::new();
+    let flow = gated_flow("slow-flow", started.clone(), release.clone());
+    let test = TestApp::new(create_config([flow.clone()])).await;
+    let (ahead, pool) = app_with_a_clock_ahead(&test, create_config([flow])).await;
+    let run_id = dispatch(&test, "slow-flow").await;
+
+    let first = worker(&ahead, 1);
+    first.start().await;
+    tokio::time::timeout(TIMEOUT, started.notified())
+        .await
+        .expect("run claimed");
+
+    // The lease ends 30 seconds after `now()` of the database, whatever the
+    // clock of the worker says.
+    let run = find_run(&test, run_id).await;
+    let lease = run.available_at.expect("a lease");
+    let hour_ahead = chrono::Utc::now() + chrono::Duration::minutes(59);
+    assert!(
+        lease > hour_ahead,
+        "the lease ends at {lease}, by the clock of the worker"
+    );
+
+    // Another replica sees the lease still holds, and does not steal the run.
+    let second = worker(&ahead, 1);
+    second.start().await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let run = find_run(&test, run_id).await;
+    assert_eq!((run.status.as_str(), run.attempts), ("running", 1));
+    assert_eq!(run.worker_id.as_deref(), Some(first.worker_id()));
+
+    release.cancel();
+    wait_for_status(&test, run_id, "completed").await;
+    second.stop().await;
+    first.stop().await;
+    pool.close().await;
+    test.cleanup().await;
+}
+
+#[tokio::test]
+async fn shutdown_hands_back_the_runs_it_still_holds() {
+    let (starts, stopped) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+    let started = Arc::new(Notify::new());
+    let flow = Flow::new("slow-flow", {
+        let (starts, stopped, started) = (starts.clone(), stopped.clone(), started.clone());
+        move |ctx: FlowContext| {
+            let (starts, stopped, started) = (starts.clone(), stopped.clone(), started.clone());
+            async move {
+                started.notify_one();
+                if starts.fetch_add(1, Ordering::SeqCst) == 0 {
+                    // The first execution never ends by itself.
+                    ctx.signal.cancelled().await;
+                    stopped.fetch_add(1, Ordering::SeqCst);
+                    bail!("stopped");
+                }
+                Ok(())
+            }
+        }
+    })
+    .retry_policy(RetryPolicy::new().max_attempts(1));
+    let test = TestApp::new(create_config([flow])).await;
+    let run_id = dispatch(&test, "slow-flow").await;
+
+    let first = worker_with(
+        &test.app,
+        WorkerConfig::new()
+            .concurrency(1)
+            .lease_duration(Duration::from_secs(1)),
+    );
+    first.start().await;
+    tokio::time::timeout(TIMEOUT, started.notified())
+        .await
+        .expect("run claimed");
+
+    // The run does not end within the time a stop waits for it.
+    first.stop().await;
+
+    // It is back in the queue at once, not when its lease would have expired, and
+    // its execution was told to stop without recording anything.
+    let run = find_run(&test, run_id).await;
+    assert_eq!(run.status, "pending");
+    assert_eq!(run.worker_id, None);
+    assert_eq!(run.error, None);
+    assert!(run.completed_at.is_none());
+    assert!(run.available_at.is_some_and(|at| at <= chrono::Utc::now()));
+    assert_eq!(first.active_count(), 0);
+    assert_eq!(stopped.load(Ordering::SeqCst), 1);
+
+    let second = worker(&test.app, 1);
+    let claimed_at = Instant::now();
+    second.start().await;
+    let run = wait_for_status(&test, run_id, "completed").await;
+    assert!(
+        claimed_at.elapsed() < Duration::from_millis(900),
+        "{:?}: it waited for the lease",
+        claimed_at.elapsed()
+    );
+    second.stop().await;
+
+    // The interrupted attempt stays counted, and the run runs again although its
+    // policy has a single attempt: it was handed back, not abandoned.
+    assert_eq!(run.attempts, 2);
+    assert_eq!(run.error, None);
+    assert_eq!(run.worker_id, None);
+    assert_eq!(starts.load(Ordering::SeqCst), 2);
+    test.cleanup().await;
+}
+
+#[tokio::test]
+async fn shutdown_does_not_take_back_a_run_another_worker_owns() {
+    let (started, release) = (Arc::new(Notify::new()), CancellationToken::new());
+    let flow = gated_flow("slow-flow", started.clone(), release.clone());
+    let test = TestApp::new(create_config([flow])).await;
+    let run_id = dispatch(&test, "slow-flow").await;
+
+    let first = worker_with(
+        &test.app,
+        WorkerConfig::new()
+            .concurrency(1)
+            .lease_duration(Duration::from_millis(600)),
+    );
+    first.start().await;
+    tokio::time::timeout(TIMEOUT, started.notified())
+        .await
+        .expect("run claimed");
+    // Another worker took the run over, as after an expired lease.
+    sqlx::query("UPDATE flow_runs SET worker_id = 'other-worker', attempts = 2 WHERE id = $1")
+        .bind(run_id)
+        .execute(&test.db)
+        .await
+        .unwrap();
+
+    first.stop().await;
+    let run = find_run(&test, run_id).await;
+    assert_eq!((run.status.as_str(), run.attempts), ("running", 2));
+    assert_eq!(run.worker_id.as_deref(), Some("other-worker"));
+    release.cancel();
+    test.cleanup().await;
+}
+
+/// Holds the row of a run locked, so that the heartbeat of the run waits.
+async fn lock_run(test: &TestApp, run_id: Uuid) -> sqlx::Transaction<'static, sqlx::Postgres> {
+    let mut tx = test.db.begin().await.unwrap();
+    sqlx::query("SELECT id FROM flow_runs WHERE id = $1 FOR UPDATE")
+        .bind(run_id)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    tx
+}
+
+struct Lines(Mutex<Vec<String>>);
+
+impl openshop::runtime::RuntimeLogger for Lines {
+    fn info(&self, message: &str, _context: Option<&serde_json::Value>) {
+        self.0.lock().unwrap().push(message.to_string());
+    }
+    fn warn(&self, message: &str, _context: Option<&serde_json::Value>) {
+        self.0.lock().unwrap().push(message.to_string());
+    }
+    fn error(&self, message: &str, _context: Option<&serde_json::Value>) {
+        self.0.lock().unwrap().push(message.to_string());
+    }
+}
+
+#[tokio::test]
+async fn a_heartbeat_that_cannot_extend_the_lease_is_logged_and_stops_the_run_before_it_is_taken_over() {
+    let (started, stopped) = (Arc::new(Notify::new()), Arc::new(AtomicUsize::new(0)));
+    let flow = Flow::new("slow-flow", {
+        let (started, stopped) = (started.clone(), stopped.clone());
+        move |ctx: FlowContext| {
+            let (started, stopped) = (started.clone(), stopped.clone());
+            async move {
+                started.notify_one();
+                ctx.signal.cancelled().await;
+                stopped.fetch_add(1, Ordering::SeqCst);
+                bail!("stopped")
+            }
+        }
+    });
+    let test = TestApp::new(create_config([flow])).await;
+    let run_id = dispatch(&test, "slow-flow").await;
+    let lines = Arc::new(Lines(Mutex::new(Vec::new())));
+    let previous = openshop::runtime::set_logger(lines.clone());
+
+    let worker = worker_with(
+        &test.app,
+        WorkerConfig::new()
+            .concurrency(1)
+            .lease_duration(Duration::from_secs(1)),
+    );
+    worker.start().await;
+    tokio::time::timeout(TIMEOUT, started.notified())
+        .await
+        .expect("run claimed");
+
+    // The database holds the row: the heartbeat waits for it, and gives up
+    // instead of waiting for ever.
+    let lock = lock_run(&test, run_id).await;
+    wait_until("the execution to be stopped", || stopped.load(Ordering::SeqCst) == 1).await;
+    lock.rollback().await.unwrap();
+    openshop::runtime::set_logger(previous);
+
+    let lines = lines.0.lock().unwrap().clone();
+    let failure = format!("Heartbeat of run {run_id} failed");
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains(&failure) && line.contains("timed out")),
+        "{lines:#?}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains(&format!("Lease of run {run_id} expired"))),
+        "{lines:#?}"
+    );
+    // The execution stopped, but the run was not canceled nor failed: its lease
+    // runs out and the run is claimed again.
+    let run = find_run(&test, run_id).await;
+    assert_eq!(run.status, "running");
+    assert_eq!(run.error, None);
+    assert!(run.completed_at.is_none());
+    worker.stop().await;
     test.cleanup().await;
 }

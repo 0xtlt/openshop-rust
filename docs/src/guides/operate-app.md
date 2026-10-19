@@ -76,6 +76,7 @@ Operational signals:
 | Old `running` runs | Worker crash or a long step | Check worker logs and step timeout; expired leases allow another worker to reclaim work, as long as the run has attempts left. |
 | `failed` runs with `Run abandoned` | A flow that kills its worker (out of memory, abort) on each attempt | Check the memory and crash logs of the worker; the run is not claimed again once it used all its attempts. |
 | `running` runs that return after the lease, with `attempts` going up | The database was unreachable when the worker recorded their outcome | Look for `Failed recording the outcome of run` in the worker logs; the run resumes from its checkpoints by itself, no action is needed once the database is back. |
+| `Heartbeat of run … failed` in the worker logs | The database was slow or unreachable, or the pool was saturated, when the worker extended a lease | A run whose lease could not be extended for a whole lease duration is stopped and claimed again. Check the database, and give the pool room beyond the concurrency of the worker. |
 | Repeated `sleeping` runs | Explicit `ctx.step.sleep` | Inspect run logs and `availableAt`. |
 | Runs returning to `pending` | Retrying failures | Inspect the run's `error`, `attempts`, and `availableAt`. |
 | Many `failed` runs | Provider, Shopify, validation, or deployment regression | Filter logs by error and compare the first failure time with deployments. |
@@ -195,7 +196,9 @@ fn checksum(chunk: u64) -> u64 {
 6. Dispatch one harmless flow and confirm completion.
 
 The worker stops claiming new runs on shutdown and waits up to its lease duration
-for active runs. If a process dies, its leases eventually expire and another worker
+for active runs. A run that is still executing then goes back to `pending` at once,
+and another worker takes it up without waiting for its lease; the interrupted attempt
+stays counted. If a process dies, its leases eventually expire and another worker
 can reclaim the runs, each claim using an attempt of the run. The same goes for a
 worker that cannot reach the database when a run ends: it retries the write for
 about a second and a half, then leaves the run to its lease instead of marking it

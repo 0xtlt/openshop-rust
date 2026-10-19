@@ -1,12 +1,12 @@
 //! Leases pending runs from PostgreSQL and executes them.
 
+use std::collections::HashMap;
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use chrono::{DateTime, Utc};
 use futures::FutureExt;
 use rand::Rng;
 use serde_json::Value;
@@ -31,6 +31,13 @@ pub const DEFAULT_WORKER_CONFIG: ResolvedWorkerConfig = ResolvedWorkerConfig {
     lease_duration_ms: 30_000,
 };
 
+/// Bounds of the time a heartbeat has to extend a lease.
+const HEARTBEAT_MIN_TIMEOUT: Duration = Duration::from_millis(250);
+const HEARTBEAT_MAX_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// How long a shutdown waits for the executions it handed back to stop.
+const RELEASE_GRACE: Duration = Duration::from_secs(1);
+
 fn merge(mut config: ResolvedWorkerConfig, partial: &WorkerConfig) -> ResolvedWorkerConfig {
     if let Some(value) = partial.concurrency {
         config.concurrency = value;
@@ -52,14 +59,32 @@ fn merge(mut config: ResolvedWorkerConfig, partial: &WorkerConfig) -> ResolvedWo
 
 /// Fails the unfinished runs that outlived their deadline, and returns them.
 /// The `WHERE` clause repeats the predicate of `flow_runs_deadline_idx`.
+///
+/// Every time of a lease or of a deadline is read from the clock of the
+/// database, never from the one of a worker: replicas whose clocks differ must
+/// agree on when a lease ends.
 const EXPIRE_SQL: &str = "\
     UPDATE flow_runs SET \
       status = 'failed', \
       error = 'Flow timed out — exceeded maximum allowed duration', \
-      worker_id = NULL, available_at = NULL, completed_at = $1 \
+      worker_id = NULL, available_at = NULL, completed_at = now() \
     WHERE status IN ('pending', 'sleeping', 'running') \
-      AND deadline_at IS NOT NULL AND deadline_at <= $1 \
+      AND deadline_at IS NOT NULL AND deadline_at <= now() \
     RETURNING id, flow_name, app_handle, shop, error";
+
+/// Extends the lease of a run, if its execution still owns it: `$1` is the
+/// lease in milliseconds, `$2` the run, `$3` the worker, `$4` the attempt.
+const HEARTBEAT_SQL: &str = "\
+    UPDATE flow_runs SET available_at = now() + $1::bigint * interval '1 millisecond' \
+    WHERE id = $2 AND worker_id = $3 AND status = 'running' AND attempts = $4";
+
+/// Hands a run back to the queue, if its execution still owns it: `$1` is the
+/// run, `$2` the worker, `$3` the attempt. The run is claimable right away.
+/// Its `attempts` is left as it is: the interrupted attempt is the key of its
+/// step rows, so the next claim must take a new one.
+const RELEASE_SQL: &str = "\
+    UPDATE flow_runs SET status = 'pending', worker_id = NULL, available_at = now() \
+    WHERE id = $1 AND worker_id = $2 AND status = 'running' AND attempts = $3";
 
 /// A run failed without an attempt.
 #[derive(Debug, Clone, sqlx::FromRow)]
@@ -80,7 +105,8 @@ fn report_failed_run(run: &FailedRun) {
     );
 }
 
-/// Leases up to `$4` runs in one statement and returns them oldest first.
+/// Leases up to `$3` runs in one statement, to the worker `$1` for `$2`
+/// milliseconds, and returns them oldest first.
 ///
 /// `FOR UPDATE SKIP LOCKED` lets several workers claim at the same time. A
 /// `running` row past its `available_at` is an expired lease and can be taken
@@ -104,25 +130,25 @@ const CLAIM_SQL: &str = "\
           CASE WHEN retry_policy->>'maxAttempts' ~ '^[0-9]{1,9}$' \
             THEN (retry_policy->>'maxAttempts')::bigint ELSE 1 END, 1) AS exhausted \
       FROM flow_runs \
-      WHERE status IN ('pending', 'sleeping', 'running') AND available_at <= $1 \
-        AND (deadline_at IS NULL OR deadline_at > $1) \
+      WHERE status IN ('pending', 'sleeping', 'running') AND available_at <= now() \
+        AND (deadline_at IS NULL OR deadline_at > now()) \
       ORDER BY available_at ASC, created_at ASC \
-      LIMIT $4 \
+      LIMIT $3 \
       FOR UPDATE SKIP LOCKED \
     ), failed AS ( \
       UPDATE flow_runs SET \
         status = 'failed', \
         error = 'Run abandoned: its worker stopped after ' || attempts || ' attempts without recording an outcome', \
-        worker_id = NULL, available_at = NULL, completed_at = $1 \
+        worker_id = NULL, available_at = NULL, completed_at = now() \
       WHERE id = ANY(ARRAY(SELECT id FROM candidate WHERE exhausted)) \
       RETURNING id, flow_name, app_handle, shop, input, attempts, error \
     ), claimed AS ( \
       UPDATE flow_runs SET \
         status = 'running', \
         attempts = CASE WHEN status = 'sleeping' THEN GREATEST(attempts, 1) ELSE attempts + 1 END, \
-        worker_id = $2, \
-        available_at = $3, \
-        started_at = COALESCE(started_at, $1) \
+        worker_id = $1, \
+        available_at = now() + $2::bigint * interval '1 millisecond', \
+        started_at = COALESCE(started_at, now()) \
       WHERE id = ANY(ARRAY(SELECT id FROM candidate WHERE NOT exhausted)) \
       RETURNING id, flow_name, app_handle, shop, input, attempts, NULL::text AS error \
     ) \
@@ -145,6 +171,13 @@ struct ClaimedRun {
     exhausted: bool,
 }
 
+/// A run this worker executes: the attempt it claimed it at, and the token
+/// that stops the execution without recording an outcome.
+struct Held {
+    attempt: i32,
+    interrupt: CancellationToken,
+}
+
 struct Inner {
     app: OpenShop,
     config: ResolvedWorkerConfig,
@@ -155,6 +188,9 @@ struct Inner {
     slot_freed: Notify,
     wake: Mutex<CancellationToken>,
     loop_handle: Mutex<Option<JoinHandle<()>>>,
+    /// The runs this worker leased and still executes. Shutdown hands back the
+    /// ones that did not finish.
+    held: std::sync::Mutex<HashMap<Uuid, Held>>,
 }
 
 /// Run several workers against the same database to increase throughput: runs
@@ -177,6 +213,7 @@ impl Worker {
                 slot_freed: Notify::new(),
                 wake: Mutex::new(CancellationToken::new()),
                 loop_handle: Mutex::new(None),
+                held: std::sync::Mutex::new(HashMap::new()),
             }),
         }
     }
@@ -212,6 +249,9 @@ impl Worker {
     }
 
     /// Stops claiming, then waits for active runs up to one lease duration.
+    /// A run that is still executing then is handed back to the queue and its
+    /// execution is stopped, so that another worker takes it up at once
+    /// instead of when its lease expires. See [`Inner::release_held`].
     pub async fn stop(&self) {
         self.inner.running.store(false, Ordering::SeqCst);
         logger::info("[openshop] Worker stopping...");
@@ -224,6 +264,7 @@ impl Worker {
         while self.active_count() > 0 && Instant::now() < deadline {
             tokio::time::sleep(Duration::from_millis(200)).await;
         }
+        self.inner.release_held().await;
         logger::info("[openshop] Worker stopped");
     }
 }
@@ -273,7 +314,6 @@ impl Inner {
     async fn expire_loop(&self, stop: &CancellationToken) {
         while self.running.load(Ordering::SeqCst) {
             let expired = sqlx::query_as::<_, FailedRun>(EXPIRE_SQL)
-                .bind(Utc::now())
                 .fetch_all(self.app.db())
                 .await;
             match expired {
@@ -294,9 +334,8 @@ impl Inner {
     /// to the runs to execute and to how many were failed.
     async fn claim(&self, limit: usize) -> Result<(Vec<ClaimedRun>, usize)> {
         let rows = sqlx::query_as::<_, ClaimedRun>(CLAIM_SQL)
-            .bind(Utc::now())
             .bind(&self.worker_id)
-            .bind(self.lease_until())
+            .bind(self.lease_ms())
             .bind(limit as i64)
             .fetch_all(self.app.db())
             .await?;
@@ -313,17 +352,85 @@ impl Inner {
         Ok((claimed, exhausted.len()))
     }
 
-    fn lease_until(&self) -> DateTime<Utc> {
-        Utc::now() + chrono::Duration::milliseconds(self.config.lease_duration_ms as i64)
+    /// The lease in milliseconds. The database adds it to its own clock.
+    fn lease_ms(&self) -> i64 {
+        self.config.lease_duration_ms.min(i64::MAX as u64) as i64
+    }
+
+    fn held(&self) -> std::sync::MutexGuard<'_, HashMap<Uuid, Held>> {
+        self.held.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     fn process_run(self: Arc<Self>, claimed: ClaimedRun) {
         self.active.fetch_add(1, Ordering::SeqCst);
+        let interrupt = CancellationToken::new();
+        let (run_id, attempt) = (claimed.id, claimed.attempts);
+        self.held().insert(
+            run_id,
+            Held {
+                attempt,
+                interrupt: interrupt.clone(),
+            },
+        );
         tokio::spawn(async move {
-            self.execute(claimed).await;
+            self.execute(claimed, interrupt).await;
+            // Not if a newer claim of the same run, by this worker, replaced it.
+            let mut held = self.held();
+            if held.get(&run_id).is_some_and(|held| held.attempt == attempt) {
+                held.remove(&run_id);
+            }
+            drop(held);
             self.active.fetch_sub(1, Ordering::SeqCst);
             self.slot_freed.notify_one();
         });
+    }
+
+    /// Hands back the runs this worker still executes, once it stopped
+    /// claiming and waited for them. Each goes back to `pending`, claimable
+    /// at once, and its execution is interrupted: the flow is cancelled, but
+    /// no outcome is recorded for it, because the run is not owned any more. The release is fenced like every write of an execution, by
+    /// worker and attempt, so it cannot take a run another worker has claimed
+    /// after its lease expired.
+    ///
+    /// The interrupted attempt stays counted in `attempts`: that number keys
+    /// the step rows of the attempt, which the next claim must not reuse.
+    /// A release is never an abandoned run, though: a run `pending` is claimed
+    /// whatever its `attempts`, even with `max_attempts(1)`.
+    async fn release_held(&self) {
+        let held: Vec<(Uuid, i32, CancellationToken)> = self
+            .held()
+            .iter()
+            .map(|(run, held)| (*run, held.attempt, held.interrupt.clone()))
+            .collect();
+        if held.is_empty() {
+            return;
+        }
+        for (run_id, attempt, interrupt) in &held {
+            let released = retry(format!("releasing run {run_id}"), || async {
+                let result = sqlx::query(RELEASE_SQL)
+                    .bind(run_id)
+                    .bind(&self.worker_id)
+                    .bind(attempt)
+                    .execute(self.app.db())
+                    .await?;
+                Ok(result.rows_affected() > 0)
+            })
+            .await;
+            match released {
+                Ok(true) => logger::info(format!("[openshop] Released run {run_id} to the queue on shutdown")),
+                Ok(false) => {}
+                Err(error) => logger::warn(format!(
+                    "[openshop] Run {run_id} is left to its lease, which expires without a heartbeat: {error:#}"
+                )),
+            }
+            // After the release, so that the execution finds the run not owned.
+            interrupt.cancel();
+        }
+        // Give the executions a moment to see the cancellation.
+        let deadline = Instant::now() + RELEASE_GRACE;
+        while self.active.load(Ordering::SeqCst) > 0 && Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
     }
 
     /// Fails a run this worker still owns, at the attempt it claimed. A
@@ -351,7 +458,7 @@ impl Inner {
         }
     }
 
-    async fn execute(self: &Arc<Self>, claimed: ClaimedRun) {
+    async fn execute(self: &Arc<Self>, claimed: ClaimedRun, interrupt: CancellationToken) {
         if !self.app.config().flows.contains_key(&claimed.flow_name) {
             let run = FailedRun {
                 id: claimed.id,
@@ -375,19 +482,7 @@ impl Inner {
             let (run_id, attempt) = (claimed.id, claimed.attempts);
             Arc::new(move || {
                 let inner = inner.clone();
-                Box::pin(async move {
-                    let extended = sqlx::query(
-                        "UPDATE flow_runs SET available_at = $1 \
-                         WHERE id = $2 AND worker_id = $3 AND status = 'running' AND attempts = $4",
-                    )
-                    .bind(inner.lease_until())
-                    .bind(run_id)
-                    .bind(&inner.worker_id)
-                    .bind(attempt)
-                    .execute(inner.app.db())
-                    .await?;
-                    Ok(extended.rows_affected() > 0)
-                })
+                Box::pin(async move { inner.extend_lease(run_id, attempt).await })
             })
         };
 
@@ -397,6 +492,8 @@ impl Inner {
             .worker_id(self.worker_id.clone())
             .attempt(claimed.attempts);
         options.on_heartbeat = Some(heartbeat);
+        options.lease_duration = Some(Duration::from_millis(self.config.lease_duration_ms));
+        options.interrupt = Some(interrupt);
         // Extend the lease at least twice per lease period.
         options.heartbeat_interval =
             Some(HEARTBEAT_INTERVAL.min(Duration::from_millis((self.config.lease_duration_ms / 2).max(1))));
@@ -422,6 +519,44 @@ impl Inner {
             Err(panic) => format!("panicked: {}", panic_message(panic)),
         };
         self.fail_run(claimed.id, claimed.attempts, format!("Worker error: {failure}")).await;
+    }
+
+    /// Extends the lease of a run, within the time it has to: a heartbeat that
+    /// waits for a connection or for a lock longer than that is no use, as the
+    /// lease it was meant to extend is about to end. Resolves to `false` when
+    /// this execution no longer owns the run.
+    ///
+    /// The heartbeat shares the pool of the application. The time limit covers
+    /// the wait for a connection when the pool is saturated by flows, and the
+    /// server enforces it on the statement through `statement_timeout`.
+    async fn extend_lease(&self, run_id: Uuid, attempt: i32) -> Result<bool> {
+        let limit = self.heartbeat_timeout();
+        let extend = async {
+            let mut tx = self.app.db().begin().await?;
+            sqlx::query("SELECT set_config('statement_timeout', $1, true)")
+                .bind(limit.as_millis().to_string())
+                .execute(&mut *tx)
+                .await?;
+            let extended = sqlx::query(HEARTBEAT_SQL)
+                .bind(self.lease_ms())
+                .bind(run_id)
+                .bind(&self.worker_id)
+                .bind(attempt)
+                .execute(&mut *tx)
+                .await?;
+            tx.commit().await?;
+            Ok(extended.rows_affected() > 0)
+        };
+        match tokio::time::timeout(limit, extend).await {
+            Ok(result) => result,
+            Err(_) => Err(anyhow::anyhow!("timed out after {}ms", limit.as_millis())),
+        }
+    }
+
+    /// A quarter of the lease, so that a heartbeat which times out leaves the
+    /// next ones room to succeed before the lease ends.
+    fn heartbeat_timeout(&self) -> Duration {
+        Duration::from_millis(self.config.lease_duration_ms / 4).clamp(HEARTBEAT_MIN_TIMEOUT, HEARTBEAT_MAX_TIMEOUT)
     }
 
     fn backoff_delay(&self, consecutive: u32) -> u64 {
@@ -450,9 +585,9 @@ mod tests {
     /// The plan PostgreSQL chooses for a statement of the worker, as JSON text.
     async fn plan(db: &TestDb, statement: &str, limit: Option<i64>) -> String {
         let explain = format!("EXPLAIN (FORMAT JSON) {statement}");
-        let mut query = sqlx::query_as(&explain).bind(Utc::now());
+        let mut query = sqlx::query_as(&explain);
         if let Some(limit) = limit {
-            query = query.bind("worker").bind(Utc::now()).bind(limit);
+            query = query.bind("worker").bind(30_000_i64).bind(limit);
         }
         let (plan,): (Value,) = query.fetch_one(&db.pool).await.unwrap();
         plan.to_string()

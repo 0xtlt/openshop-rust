@@ -2,7 +2,8 @@
 
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 use anyhow::{Result, anyhow};
 use chrono::{DateTime, Utc};
@@ -10,6 +11,7 @@ use futures::FutureExt;
 use futures::future::BoxFuture;
 use serde_json::{Value, json};
 use sqlx::PgPool;
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use super::abort::{Abort, register_abort};
@@ -19,6 +21,7 @@ use super::errors::{FlowCanceledError, FlowTimeoutError, LeaseLostError, SleepSi
 use super::step::{RunOwner, StepExecutor, error_message};
 use super::transient::retry;
 use crate::app::OpenShop;
+use crate::runtime::logger;
 use crate::runtime::report::{self, Description, Panicked};
 use crate::runtime::time::to_iso;
 use crate::runtime::FlowLogger;
@@ -47,6 +50,15 @@ pub struct RunFlowOptions {
     pub on_heartbeat: Option<HeartbeatFn>,
     /// Delay between two heartbeats. Defaults to [`HEARTBEAT_INTERVAL`].
     pub heartbeat_interval: Option<Duration>,
+    /// How long a lease lasts. When the heartbeat fails to extend it for that
+    /// long, the lease has expired and another worker may have taken the run:
+    /// the execution stops, and records nothing. Without it, the heartbeat
+    /// keeps trying for as long as the flow runs.
+    pub lease_duration: Option<Duration>,
+    /// Cancelling it stops the execution without recording its outcome, as when
+    /// the run was handed back to the queue: whoever cancels it owns the
+    /// outcome from then on.
+    pub interrupt: Option<CancellationToken>,
     /// Replaces the provider connectors, typically with fakes in tests.
     pub connectors: Option<Connectors>,
 }
@@ -63,6 +75,8 @@ impl RunFlowOptions {
             attempt: None,
             on_heartbeat: None,
             heartbeat_interval: None,
+            lease_duration: None,
+            interrupt: None,
             connectors: None,
         }
     }
@@ -249,21 +263,61 @@ async fn run_attempt(app: &OpenShop, opts: RunFlowOptions) -> Result<RunOutcome>
 
     let run_id = opts.run_id;
     let run_id_text = run_id.to_string();
-    let abort = register_abort(&run_id_text);
+    let abort = register_abort(&run_id_text, opts.interrupt.as_ref());
     let signal = abort.token.clone();
 
     let heartbeat_interval = opts.heartbeat_interval.unwrap_or(HEARTBEAT_INTERVAL);
+    let lease_expired = Arc::new(AtomicBool::new(false));
     let heartbeat = opts.on_heartbeat.clone().map(|on_heartbeat| {
         let signal = signal.clone();
+        let lease_expired = lease_expired.clone();
+        let lease = opts.lease_duration;
         tokio::spawn(async move {
             let mut ticks = tokio::time::interval(heartbeat_interval);
+            ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             ticks.tick().await;
+            // The lease was taken when the run was claimed, a moment ago.
+            let mut extended_at = Instant::now();
+            let mut failures: u32 = 0;
             loop {
                 ticks.tick().await;
-                // A failed extension is retried on the next tick; a lost lease stops the flow.
-                if matches!(on_heartbeat().await, Ok(false)) {
-                    signal.cancel();
-                    return;
+                let started = Instant::now();
+                match on_heartbeat().await {
+                    // Another execution owns the run, or it was canceled: stop the flow.
+                    Ok(false) => {
+                        signal.cancel();
+                        return;
+                    }
+                    Ok(true) => {
+                        if failures > 0 {
+                            logger::info(format!(
+                                "[openshop] Heartbeat of run {run_id} recovered after {failures} failures"
+                            ));
+                        }
+                        failures = 0;
+                        extended_at = started;
+                    }
+                    // A failed extension is tried again on the next tick, until the lease
+                    // has run out: then another worker may own the run, and going on
+                    // could run its steps twice at once. The first failure and every
+                    // tenth after it are logged, so that an outage does not flood the logs.
+                    Err(error) => {
+                        failures += 1;
+                        if failures == 1 || failures.is_multiple_of(10) {
+                            logger::warn(format!(
+                                "[openshop] Heartbeat of run {run_id} failed ({failures} in a row): {error:#}"
+                            ));
+                        }
+                        if lease.is_some_and(|lease| extended_at.elapsed() >= lease) {
+                            logger::warn(format!(
+                                "[openshop] Lease of run {run_id} expired without a heartbeat, \
+                                 stopping its execution"
+                            ));
+                            lease_expired.store(true, Ordering::SeqCst);
+                            signal.cancel();
+                            return;
+                        }
+                    }
                 }
             }
         })
@@ -383,6 +437,11 @@ async fn run_attempt(app: &OpenShop, opts: RunFlowOptions) -> Result<RunOutcome>
                 } else {
                     RunOutcome::LeaseLost
                 }
+            } else if lease_expired.load(Ordering::SeqCst) || opts.interrupt.as_ref().is_some_and(|stop| stop.is_cancelled()) {
+                // The engine stopped the flow, not a cancellation of the run: the lease
+                // ran out, or the worker handed the run back. Whoever owns it now records
+                // what comes next.
+                RunOutcome::LeaseLost
             } else if error.downcast_ref::<FlowCanceledError>().is_some() || signal.is_cancelled() {
                 if finish_run(db, run_id, owner, RunUpdate::status("canceled").completed()).await? {
                     logger.info_with(
@@ -403,6 +462,16 @@ async fn run_attempt(app: &OpenShop, opts: RunFlowOptions) -> Result<RunOutcome>
     Ok(result)
 }
 
+/// What decides whether a failed run is tried again, and when.
+#[derive(sqlx::FromRow)]
+struct RetryState {
+    attempts: i32,
+    deadline_at: Option<DateTime<Utc>>,
+    retry_policy: Option<Value>,
+    /// The time of the database.
+    now: DateTime<Utc>,
+}
+
 async fn record_failure(
     app: &OpenShop,
     run_id: Uuid,
@@ -414,20 +483,20 @@ async fn record_failure(
     let db = app.db();
     let error_message = error_message(&error);
 
-    let run: Option<(i32, Option<DateTime<Utc>>, Option<Value>)> =
-        retry(format!("reading the retry policy of run {run_id}"), || async {
-            Ok(
-                sqlx::query_as("SELECT attempts, deadline_at, retry_policy FROM flow_runs WHERE id = $1 LIMIT 1")
-                    .bind(run_id)
-                    .fetch_optional(db)
-                    .await?,
-            )
-        })
-        .await?;
+    // The retry is dated with the clock of the database, like the claim that reads it.
+    let run: Option<RetryState> = retry(format!("reading the retry policy of run {run_id}"), || async {
+        Ok(sqlx::query_as(
+            "SELECT attempts, deadline_at, retry_policy, now() AS now FROM flow_runs WHERE id = $1 LIMIT 1",
+        )
+        .bind(run_id)
+        .fetch_optional(db)
+        .await?)
+    })
+    .await?;
 
-    let next_at = run.and_then(|(attempts, deadline_at, retry_policy)| {
-        let policy: ResolvedRetryPolicy = serde_json::from_value(retry_policy?).ok()?;
-        compute_next_retry_at(attempts as i64, &policy, deadline_at)
+    let next_at = run.and_then(|run| {
+        let policy: ResolvedRetryPolicy = serde_json::from_value(run.retry_policy?).ok()?;
+        compute_next_retry_at(run.attempts as i64, &policy, run.deadline_at, run.now)
     });
 
     let will_retry = next_at.is_some();

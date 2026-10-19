@@ -1,7 +1,6 @@
 //! Queueing a flow run.
 
 use anyhow::{Result, bail};
-use chrono::{Duration, Utc};
 use serde::Serialize;
 use serde_json::Value;
 use sqlx::PgPool;
@@ -131,27 +130,28 @@ pub async fn dispatch_flow(db: &PgPool, config: &OpenShopConfig, options: Dispat
         }
     }
 
-    let now = Utc::now();
-    let deadline_at = flow
-        .timeout
-        .map(|timeout| now + Duration::milliseconds(timeout.as_millis() as i64));
+    // The deadline and the date from which the run can be claimed are dates of the
+    // clock of the database, which is the one the workers compare them with.
+    let deadline_ms = flow.timeout.map(|timeout| timeout.as_millis().min(i64::MAX as u128) as i64);
     let retry_policy = resolve_retry_policy(&[Some(config.retry_policy), Some(flow.retry_policy), run_retry_policy]);
-    let available_at = now + Duration::milliseconds(delay.map(millis).unwrap_or(0) as i64);
+    let delay_ms = delay.map(millis).unwrap_or(0).min(i64::MAX as u64) as i64;
 
     let (run_id,): (Uuid,) = sqlx::query_as(
         "INSERT INTO flow_runs \
            (app_handle, shop, flow_name, status, input, deadline_at, parent_run_id, retry_policy, available_at) \
-         VALUES ($1, $2, $3, 'pending', $4::json, $5, $6, $7::json, $8) \
+         VALUES ($1, $2, $3, 'pending', $4::json, \
+           clock_timestamp() + $5::bigint * interval '1 millisecond', $6, $7::json, \
+           clock_timestamp() + $8::bigint * interval '1 millisecond') \
          RETURNING id",
     )
     .bind(&shopify_app)
     .bind(&shop)
     .bind(&flow_name)
     .bind(input.to_string())
-    .bind(deadline_at)
+    .bind(deadline_ms)
     .bind(parent_run_id)
     .bind(serde_json::to_string(&retry_policy)?)
-    .bind(available_at)
+    .bind(delay_ms)
     .fetch_one(&mut *tx)
     .await?;
     tx.commit().await?;

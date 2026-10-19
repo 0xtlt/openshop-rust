@@ -183,3 +183,35 @@ pub async fn write_fault_hits(db: &PgPool, table: &str) -> i64 {
         .unwrap();
     hits
 }
+
+/// An application on the database of `test` whose clock, for `now()`, is an
+/// hour ahead of the one of this process: a replica with a clock that drifted.
+pub async fn app_with_a_clock_ahead(test: &TestApp, config: OpenShopConfig) -> (OpenShop, PgPool) {
+    use std::str::FromStr;
+
+    let (schema,): (String,) = sqlx::query_as("SELECT current_schema()")
+        .fetch_one(&test.db)
+        .await
+        .unwrap();
+    sqlx::raw_sql(
+        "CREATE FUNCTION now() RETURNS timestamptz LANGUAGE sql VOLATILE AS \
+         $$ SELECT clock_timestamp() + interval '1 hour' $$",
+    )
+    .execute(&test.db)
+    .await
+    .unwrap();
+    let url = std::env::var("TEST_DATABASE_URL")
+        .or_else(|_| std::env::var("DATABASE_URL"))
+        .expect("a test database");
+    // The schema comes before `pg_catalog`, so its `now()` is the one called.
+    let options = sqlx::postgres::PgConnectOptions::from_str(&url)
+        .unwrap()
+        .options([("search_path", format!("{schema},pg_catalog"))]);
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(4)
+        .connect_with(options)
+        .await
+        .unwrap();
+    let app = OpenShop::with_transport(config, pool.clone(), test_env(), test.transport.clone()).unwrap();
+    (app, pool)
+}

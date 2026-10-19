@@ -1,4 +1,8 @@
-//! Checkpointed steps: a completed step is never executed twice for a run.
+//! Checkpointed steps: a step whose result was stored is not executed again for
+//! the run. Execution is at-least-once, not exactly-once: the result is stored
+//! after the step ran, so a process that dies in between, or a lease that
+//! expires while the step is still running, makes the next attempt run it a
+//! second time, and its side effects with it.
 
 use std::future::Future;
 use std::time::{Duration, Instant};
@@ -343,7 +347,10 @@ impl StepExecutor {
         .await?;
 
         let duration_ms = duration.as_millis().min(i32::MAX as u128) as i32;
-        let resume_at = Utc::now() + chrono::Duration::milliseconds(duration.as_millis() as i64);
+        // The wake-up is dated with the clock of the database, the one the workers
+        // claim the run with.
+        let (now,): (DateTime<Utc>,) = sqlx::query_as("SELECT now()").fetch_one(&self.db).await?;
+        let resume_at = now + chrono::Duration::milliseconds(duration.as_millis().min(i64::MAX as u128) as i64);
 
         if let Some((id, output)) = sleeping {
             let stored_resume_at = output
@@ -352,7 +359,7 @@ impl StepExecutor {
                 .and_then(|text| DateTime::parse_from_rfc3339(text).ok())
                 .map(|date| date.with_timezone(&Utc))
                 .unwrap_or(resume_at);
-            if stored_resume_at <= Utc::now() {
+            if stored_resume_at <= now {
                 self.store(id, "completed", None, None, duration_ms).await?;
                 return Ok(());
             }

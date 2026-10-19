@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use chrono::Utc;
-use common::{TEST_SHOP, TestApp, create_config, noop_flow};
+use common::{TEST_SHOP, TestApp, app_with_a_clock_ahead, create_config, noop_flow};
 use openshop::builder::Flow;
 use openshop::db::schema::{FlowRun, LogRow, StepResult};
 use openshop::engine::{RunFlowOptions, cancel_run, run_flow};
@@ -364,10 +364,15 @@ async fn flow_with_retry_stays_pending_after_failure() {
     assert_eq!(run.status, "pending");
     assert_eq!(run.error.as_deref(), Some("retry me"));
     assert!(run.completed_at.is_none());
-    // The run was never claimed, so the backoff is the one before a first attempt: 500ms.
+    // The run was never claimed, so the backoff is the one before a first attempt:
+    // 500ms, of which the jitter keeps between half and all.
     let available_at = run.available_at.expect("retry time");
     assert!(
-        available_at >= before + chrono::Duration::milliseconds(400),
+        available_at >= before + chrono::Duration::milliseconds(240),
+        "{available_at}"
+    );
+    assert!(
+        available_at <= Utc::now() + chrono::Duration::milliseconds(500),
         "{available_at}"
     );
     test.cleanup().await;
@@ -1212,5 +1217,45 @@ async fn flow_panicking_before_returning_its_future_is_recorded_as_failed() {
         }
     );
     assert_eq!(find_run(&test, run_id).await.status, "failed");
+    test.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_retry_and_a_wake_up_are_dated_by_the_clock_of_the_database() {
+    let flow = Flow::new(FLOW, |ctx: FlowContext| async move {
+        if ctx.input["then"] == "sleep" {
+            ctx.step.sleep("nap", Duration::from_millis(50)).await?;
+        }
+        bail!("boom")
+    })
+    .retry_policy(
+        RetryPolicy::new()
+            .max_attempts(3)
+            .initial_interval(Duration::from_millis(50)),
+    )
+    .concurrency(Concurrency::Allow);
+    let test = TestApp::new(create_config([flow.clone()])).await;
+    let (ahead, pool) = app_with_a_clock_ahead(&test, create_config([flow])).await;
+    let an_hour_ahead = Utc::now() + chrono::Duration::minutes(59);
+
+    for then in ["fail", "sleep"] {
+        let run_id = dispatch(&test).await;
+        claim(&test, run_id).await;
+        let result = run_flow(&ahead, options(run_id).input(json!({ "then": then })))
+            .await
+            .unwrap();
+        let run = find_run(&test, run_id).await;
+        match (then, result) {
+            ("fail", RunOutcome::Failed { will_retry: true, .. }) => assert_eq!(run.status, "pending"),
+            ("sleep", RunOutcome::Sleeping { resume_at }) => {
+                assert_eq!(run.status, "sleeping");
+                assert!(resume_at > an_hour_ahead, "{then}: {resume_at}");
+            }
+            (_, other) => panic!("{then}: {other:?}"),
+        }
+        let at = run.available_at.expect("a date");
+        assert!(at > an_hour_ahead, "{then}: {at}, by the clock of the process");
+    }
+    pool.close().await;
     test.cleanup().await;
 }

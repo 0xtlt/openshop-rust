@@ -218,7 +218,9 @@ A field left unset keeps the value of the level before it.
 
 The merged policy is stored on the run at dispatch. The delay before retry
 `n` is `initial_interval × backoff_coefficient^(n − 1)`, capped at
-`max_interval`.
+`max_interval`. That is the longest delay: the retry is scheduled after a delay
+drawn at random between half of it and all of it, so that runs which failed
+together do not retry together. The date is taken from the clock of the database.
 
 A retry is not scheduled when `max_attempts` is reached or when its next start
 would be at or after the deadline stored at dispatch. Each attempt still uses
