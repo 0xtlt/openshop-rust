@@ -57,8 +57,10 @@
   occurrences; the override key stays `flow:schedule`. The scheduler removes
   the rows older than a day, and skips, with a warning, an occurrence it
   reaches more than an hour late, such as after the process was paused: the
-  others fired it long ago and its claim may be gone. The framework schema has a third migration,
-  `openshop_cron_ticks`: run `migrate generate` then `migrate` before starting
+  others fired it long ago and its claim may be gone. The claim itself
+  refuses an occurrence that old, by the clock of the database, so a process
+  that stalls after the check cannot queue it again. The framework schema has
+  a third migration, `openshop_cron_ticks`: run `migrate generate` then `migrate` before starting
   the new version, or every occurrence of a cron fails with a missing table
   (`migrate check` fails until it is there). The TypeScript runtime does not
   use the table. Until now, N replicas fired every cron N times, and the
