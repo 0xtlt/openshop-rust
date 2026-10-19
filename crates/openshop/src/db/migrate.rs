@@ -369,6 +369,9 @@ pub struct GeneratedMigrations {
 ///
 /// The snapshot is then updated to `models`: pass every model of the
 /// application, since a recorded table without a model is dropped.
+///
+/// A migration that drops a table or a column, or converts a column in a way
+/// that can lose values, is refused unless `--allow-destructive` is given.
 pub fn generate_migrations(
     cwd: &Path,
     args: &[String],
@@ -382,6 +385,7 @@ pub fn generate_migrations(
         );
     }
 
+    let allow_destructive = args.iter().any(|arg| arg == "--allow-destructive");
     let name = args
         .iter()
         .find_map(|arg| arg.strip_prefix("--name="))
@@ -409,6 +413,15 @@ pub fn generate_migrations(
             .map(|warning| format!("still to write by hand: {warning}"))
             .collect()
     };
+    let destructive = diff::destructive(&changes);
+    if !allow_destructive && !destructive.is_empty() {
+        let statements: String = destructive.iter().map(|change| format!("\n  - {change}")).collect();
+        bail!(
+            "[openshop] Refusing to generate a migration that loses data:{statements}\n\
+             If a column or a table was renamed, declare it with `renamed_from`. \
+             Otherwise pass `--allow-destructive` to generate it anyway."
+        );
+    }
     // A project without models and without snapshot does not get one.
     let new_snapshot = (recorded || !models.is_empty())
         .then(|| diff::recorded(&previous, models, accepted).to_json())
@@ -727,6 +740,72 @@ mod tests {
         std::fs::remove_dir_all(dir).ok();
     }
 
+    const ALLOW_DESTRUCTIVE: &str = "--allow-destructive";
+
+    fn folder_listing(dir: &Path) -> Vec<String> {
+        sql_file_names(&dir.join(MIGRATIONS_DIR))
+    }
+
+    #[test]
+    fn refuses_a_migration_that_loses_data_without_the_flag() {
+        use crate::db::{ColumnDef, Table};
+
+        let dir = temp_dir("destructive");
+        let folder = dir.join(MIGRATIONS_DIR);
+        let wide = Table::conventional("reviews")
+            .with_column(ColumnDef::new("rating", "integer"))
+            .with_column(ColumnDef::new("legacy", "text").nullable(true));
+        let votes = Table::conventional("votes");
+        generate(&dir, &[wide.clone(), votes.clone()]);
+        let files = folder_listing(&dir);
+        let snapshot = std::fs::read_to_string(folder.join(SNAPSHOT_FILE)).unwrap();
+
+        // A column and a table that are gone, and a conversion that can truncate.
+        let narrow = Table::conventional("reviews").with_column(ColumnDef::new("rating", "smallint"));
+        let error = generate_migrations(&dir, &[], false, std::slice::from_ref(&narrow))
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            error,
+            "[openshop] Refusing to generate a migration that loses data:\n  \
+             - ALTER TABLE \"reviews\" ALTER COLUMN \"rating\" TYPE smallint USING \"rating\"::smallint: \
+             converts the values of reviews.rating from integer to smallint. Check that the cast is the one you want.\n  \
+             - ALTER TABLE \"reviews\" DROP COLUMN IF EXISTS \"legacy\": drops reviews.legacy and its data.\n  \
+             - DROP TABLE IF EXISTS \"votes\": drops the table votes and its data.\n\
+             If a column or a table was renamed, declare it with `renamed_from`. \
+             Otherwise pass `--allow-destructive` to generate it anyway."
+        );
+        // Nothing was written, nor recorded.
+        assert_eq!(folder_listing(&dir), files);
+        assert_eq!(std::fs::read_to_string(folder.join(SNAPSHOT_FILE)).unwrap(), snapshot);
+
+        let allowed = generate_migrations(&dir, &[ALLOW_DESTRUCTIVE.to_string()], false, &[narrow]).unwrap();
+        assert_eq!(allowed.files.len(), 1);
+        assert_eq!(allowed.warnings.len(), 3);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn generates_what_does_not_lose_data_without_the_flag() {
+        use crate::db::{ColumnDef, Table};
+
+        let dir = temp_dir("not-destructive");
+        let reviews = Table::conventional("reviews")
+            .with_column(ColumnDef::new("rating", "integer"))
+            .with_column(ColumnDef::new("note", "text").nullable(true))
+            .index("reviews_rating_idx", &["rating"]);
+        generate(&dir, std::slice::from_ref(&reviews));
+
+        // Wider type, tighter or looser nullability, another index, a renamed column and a new table.
+        let next = Table::conventional("reviews")
+            .with_column(ColumnDef::new("rating", "bigint"))
+            .with_column(ColumnDef::new("remark", "text").renamed_from("note"))
+            .index("reviews_remark_idx", &["remark"]);
+        let created = generate(&dir, &[next, Table::conventional("votes")]);
+        assert_eq!(created.files.len(), 1);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
     fn generate(dir: &Path, models: &[Table]) -> GeneratedMigrations {
         generate_migrations(dir, &[], false, models).unwrap()
     }
@@ -810,8 +889,10 @@ mod tests {
             GeneratedMigrations::default()
         );
 
-        // A model that is no longer registered has its table dropped.
-        let third = generate(&dir, &[]);
+        // A model that is no longer registered has its table dropped, once that is allowed.
+        let error = generate_migrations(&dir, &[], false, &[]).unwrap_err().to_string();
+        assert!(error.contains("drops the table reviews and its data."), "{error}");
+        let third = generate_migrations(&dir, &[ALLOW_DESTRUCTIVE.to_string()], false, &[]).unwrap();
         assert_eq!(third.warnings, ["drops the table reviews and its data."]);
         assert!(
             std::fs::read_to_string(&third.files[0])

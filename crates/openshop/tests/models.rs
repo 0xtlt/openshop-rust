@@ -449,9 +449,20 @@ async fn generated_migrations_follow_the_models_from_one_release_to_the_next() {
         "{error}"
     );
 
-    let second = generate_migrations(
+    let error = generate_migrations(
         project.path(),
         &["--name=reviews_v2".to_string()],
+        false,
+        &[ReviewV2::table()],
+    )
+    .unwrap_err();
+    assert!(
+        error.to_string().contains("drops reviews.tags and its data."),
+        "{error}"
+    );
+    let second = generate_migrations(
+        project.path(),
+        &["--name=reviews_v2".to_string(), "--allow-destructive".to_string()],
         false,
         &[ReviewV2::table()],
     )
@@ -709,7 +720,14 @@ async fn generated_migrations_carry_the_references() {
         .await
         .unwrap();
 
-    let second = generate_migrations(project.path(), &[], false, &[ReviewVoteV2::table(), Review::table()]).unwrap();
+    let models = [ReviewVoteV2::table(), Review::table()];
+    let error = generate_migrations(project.path(), &[], false, &models).unwrap_err();
+    assert!(
+        error.to_string().contains("drops review_votes.answers and its data."),
+        "{error}"
+    );
+    let allowed = ["--allow-destructive".to_string()];
+    let second = generate_migrations(project.path(), &allowed, false, &models).unwrap();
     assert_eq!(
         std::fs::read_to_string(&second.files[0]).unwrap(),
         "-- models\n\
