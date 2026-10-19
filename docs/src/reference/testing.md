@@ -485,7 +485,7 @@ does not build:
 | `sign_session_token(&claims, secret)` | An HS256 JWT with the claims you choose. |
 | `sign_webhook_body(body, secret)` | The `X-Shopify-Hmac-Sha256` value for a webhook body. |
 | `sign_query(&[(key, value)], secret)` | The query map with the `hmac` parameter Shopify adds to OAuth and app-launch URLs. |
-| `proxy_signature(&query, secret)` | The `signature` parameter of an app proxy query. |
+| `proxy_signature(&query, secret)` | The `signature` parameter of an app proxy query. The query needs a `timestamp` within five minutes of now to be accepted. |
 | `to_query_string(&query)` | A query map serialized for a URL. |
 
 ```rust,ignore

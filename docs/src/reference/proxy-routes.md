@@ -276,7 +276,7 @@ Error bodies are JSON objects of the form `{ "error": "<message>" }`.
 
 | Status | Message | Condition |
 | --- | --- | --- |
-| `401` | `Invalid proxy signature` | No bearer token, and the query signature matched zero or several configured apps. |
+| `401` | `Invalid proxy signature` | No bearer token, and the query signature matched zero or several configured apps, or the query is stale, has no `timestamp` or is ambiguous (see [Authentication](authentication.md#webhook-and-proxy-bodies)). |
 | `401` | `Invalid shop parameter` | Valid signature, but `shop` is not a `*.myshopify.com` domain. |
 | `401` | `Unauthorized: missing token audience` | The bearer token has no readable `aud` claim. |
 | `401` | `Unauthorized: invalid or expired session token` | The audience matches no single app, or the token fails verification. |

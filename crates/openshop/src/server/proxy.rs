@@ -47,8 +47,10 @@ fn signed_customer_id(value: Option<&String>) -> Option<String> {
 fn resolve_proxy_auth(
     app: &OpenShop,
     query: &IndexMap<String, String>,
+    pairs: &[(String, String)],
     headers: &IndexMap<String, String>,
     modes: &[ProxyAuthKind],
+    now: i64,
 ) -> Result<ResolvedProxyAuth, &'static str> {
     let authorization = headers.get("authorization").map(String::as_str).unwrap_or_default();
     if let Some(token) = authorization.strip_prefix("Bearer ") {
@@ -75,7 +77,7 @@ fn resolve_proxy_auth(
             .apps()
             .all()
             .iter()
-            .filter(|shopify_app| verify_proxy_signature(query, &shopify_app.api_secret))
+            .filter(|shopify_app| verify_proxy_signature(pairs, &shopify_app.api_secret, now))
             .collect();
         let [shopify_app] = matches[..] else {
             return Err("Invalid proxy signature");
@@ -149,7 +151,11 @@ async fn handle(
         .filter_map(|(name, value)| Some((name.as_str().to_lowercase(), value.to_str().ok()?.to_string())))
         .collect();
     let query = parse_query(uri.query());
-    let auth = match resolve_proxy_auth(&app, &query, &headers, route.auth_modes) {
+    let pairs: Vec<(String, String)> = url::form_urlencoded::parse(uri.query().unwrap_or_default().as_bytes())
+        .map(|(key, value)| (key.into_owned(), value.into_owned()))
+        .collect();
+    let now = chrono::Utc::now().timestamp();
+    let auth = match resolve_proxy_auth(&app, &query, &pairs, &headers, route.auth_modes, now) {
         Ok(auth) => auth,
         Err(error) => return json_error(StatusCode::UNAUTHORIZED, error),
     };

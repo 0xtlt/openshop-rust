@@ -273,6 +273,24 @@ the signed query parameters. In proxy handlers, trust `ctx.shop`,
 parse yourself. A secret that is empty or only whitespace never verifies a
 signature.
 
+Shopify signs the query parameters only, not the path, the method or the body:
+the same signed query is valid for any proxy route and method for as long as it
+is accepted. OpenShop therefore also checks the query itself:
+
+- `timestamp` must be present and within five minutes of the server clock,
+  before or after it. A signed URL that was kept, or captured, stops working
+  after that.
+- Shopify joins the `key=value` pairs without separator, so the same signature
+  can stand for a query cut in other pairs, with another `shop` for instance.
+  A parameter whose name or value contains `=` (also when encoded as `%3D`) is
+  refused, as is an empty name.
+- A parameter repeated in the query is signed with its values joined by `,`, as
+  Shopify does, and verified that way. `shop`, `timestamp`, `path_prefix`,
+  `logged_in_customer_id` and `signature` are set by Shopify and appear once.
+
+A request refused for one of these reasons gets the `Invalid proxy signature`
+answer like any other bad signature.
+
 ## Browser origins
 
 OpenShop allows known Shopify origins, configured app origins, local development
