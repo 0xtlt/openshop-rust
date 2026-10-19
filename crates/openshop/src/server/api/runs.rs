@@ -16,10 +16,14 @@ use crate::engine::abort::cancel_run;
 use crate::engine::dispatch::{DispatchOptions, lock_flow, reject_when_active};
 use crate::engine::errors::FlowConcurrencyError;
 use crate::runtime::time::parse_date;
-use crate::server::http::{ApiResult, json_error, json_object_body, json_response, parse_query};
+use crate::server::http::{ApiResult, containing, json_error, json_object_body, json_response, parse_query};
 use crate::server::log_query::InvalidLogQuery;
 use crate::server::shop::ShopSession;
 use crate::types::{ACTIVE_RUN_STATUSES, ALL_RUN_STATUSES, Concurrency};
+
+/// The deepest page a list can be asked for. A deeper `OFFSET` makes the
+/// database read and drop every row before it; narrow the filters instead.
+const MAX_OFFSET: i64 = 10_000;
 
 /// `Number(value) || fallback`, floored.
 fn number_param(query: &IndexMap<String, String>, name: &str, fallback: i64) -> i64 {
@@ -39,6 +43,12 @@ async fn list_runs_for(
 ) -> ApiResult {
     let limit = number_param(query, "limit", 50).clamp(1, 200);
     let offset = number_param(query, "offset", 0).max(0);
+    if offset > MAX_OFFSET {
+        return Ok(json_error(
+            StatusCode::BAD_REQUEST,
+            format!("offset must be at most {MAX_OFFSET}"),
+        ));
+    }
     let param = |name: &str| query.get(name).filter(|value| !value.is_empty());
 
     let mut sql: QueryBuilder<'_, Postgres> = QueryBuilder::new("SELECT * FROM flow_runs WHERE app_handle = ");
@@ -48,10 +58,11 @@ async fn list_runs_for(
         sql.push(" AND flow_name = ").push_bind(flow_name);
     }
     if let Some(search) = param("search") {
-        let pattern = format!("%{search}%");
+        let pattern = containing(search);
         sql.push(" AND (flow_name ILIKE ").push_bind(pattern.clone());
-        sql.push(" OR status ILIKE ").push_bind(pattern.clone());
-        sql.push(" OR id::text ILIKE ").push_bind(pattern).push(")");
+        sql.push(" ESCAPE '\\' OR status ILIKE ").push_bind(pattern.clone());
+        sql.push(" ESCAPE '\\' OR id::text ILIKE ").push_bind(pattern);
+        sql.push(" ESCAPE '\\')");
     }
     if let Some(status) = param("status").filter(|status| ALL_RUN_STATUSES.contains(&status.as_str())) {
         sql.push(" AND status = ").push_bind(status);

@@ -459,6 +459,40 @@ async fn get_runs_supports_search(ctx: &TestContext) {
 }
 
 #[openshop::test(api_context())]
+async fn run_search_is_text_not_a_pattern(ctx: &TestContext) {
+    let base = base_time();
+    let percent = seed_run(ctx, "ship-100%-done", "completed", base).await;
+    let underscore = seed_run(ctx, "ship_it", "completed", base).await;
+    let backslash = seed_run(ctx, "ship\\it", "completed", base).await;
+    let plain = seed_run(ctx, "shipXit", "completed", base).await;
+    let _ = plain;
+
+    for (search, expected) in [
+        ("%", percent),
+        ("100%", percent),
+        ("p_i", underscore),
+        ("\\", backslash),
+        ("p\\i", backslash),
+    ] {
+        let (status, data) = send(ctx.get("/api/runs").query(&[("search", search)])).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(strings(&data, "id"), [expected.to_string()], "search={search}");
+    }
+}
+
+#[openshop::test(api_context())]
+async fn run_list_refuses_an_offset_past_the_cap(ctx: &TestContext) {
+    for path in ["/api/runs", "/api/flows/test-flow/runs"] {
+        let (status, data) = send(ctx.get(&format!("{path}?offset=10000"))).await;
+        assert_eq!(status, StatusCode::OK, "{path}");
+        assert_eq!(data, json!([]));
+        let (status, data) = send(ctx.get(&format!("{path}?offset=10001"))).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{path}");
+        assert_eq!(data, error("offset must be at most 10000"));
+    }
+}
+
+#[openshop::test(api_context())]
 async fn get_flow_runs_returns_filtered_runs(ctx: &TestContext) {
     let base = base_time();
     let own = seed_run(ctx, "test-flow", "completed", base).await;

@@ -21,6 +21,7 @@ use super::function_mutations::{
 use super::http::{ApiResult, json_error, json_object_body, json_response, parse_query};
 use super::shop::ShopSession;
 use crate::app::{OpenShop, OpenShopConfig};
+use crate::runtime::logger;
 use crate::shopify::client::ShopifyClient;
 use crate::types::{DiscountMode, Function, FunctionType, JsonMap};
 
@@ -73,6 +74,51 @@ fn find_function<'a>(config: &'a OpenShopConfig, handle: &str) -> Option<(&'a Fu
         .map(|(key, definition)| (definition, function_label(key, definition)))
 }
 
+/// Pages read for one listing, at 50 nodes each: past that, the rest is not
+/// listed (and a warning says so) rather than a request that never ends.
+const MAX_PAGES: usize = 20;
+
+/// Every node of a connection, page after page. `query` takes an optional
+/// `$after: String` that the connection reads, and asks for
+/// `pageInfo { hasNextPage endCursor }`; `variables` are the others it takes.
+async fn connection_pages(
+    shopify: &ShopifyClient,
+    query: &str,
+    variables: JsonMap,
+    connection: &str,
+) -> anyhow::Result<Vec<Value>> {
+    let mut nodes = Vec::new();
+    let mut after: Option<String> = None;
+    for page in 1..=MAX_PAGES {
+        let mut page_variables = variables.clone();
+        if let Some(cursor) = &after {
+            page_variables.insert("after".into(), json!(cursor));
+        }
+        let page_variables = (!page_variables.is_empty()).then_some(Value::Object(page_variables));
+        let data = shopify.graphql(query, page_variables).await?;
+        nodes.extend(connection_nodes(&data, connection).into_iter().cloned());
+
+        let page_info = data.get(connection).and_then(|connection| connection.get("pageInfo"));
+        let has_next = page_info.and_then(|info| info.get("hasNextPage")) == Some(&Value::Bool(true));
+        let cursor = page_info
+            .and_then(|info| info.get("endCursor"))
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        // A cursor that does not move would ask for the same page forever.
+        let Some(cursor) = cursor.filter(|cursor| has_next && after.as_ref() != Some(cursor)) else {
+            return Ok(nodes);
+        };
+        if page == MAX_PAGES {
+            logger::warn_with(
+                "[openshop] A listing of Shopify nodes was cut",
+                json!({ "connection": connection, "pages": MAX_PAGES, "nodes": nodes.len() }),
+            );
+        }
+        after = Some(cursor);
+    }
+    Ok(nodes)
+}
+
 fn connection_nodes<'a>(data: &'a Value, key: &str) -> Vec<&'a Value> {
     data.get(key)
         .and_then(|connection| connection.get("nodes"))
@@ -96,26 +142,36 @@ async fn list_cart_transform_instances(
     handle: &str,
     label: &str,
 ) -> anyhow::Result<Vec<Value>> {
+    let functions_query = "#graphql
+    query ListShopifyFunctions($after: String) {
+      shopifyFunctions(first: 50, after: $after) {
+        nodes { id handle }
+        pageInfo { hasNextPage endCursor }
+      }
+    }";
+    let functions = connection_pages(shopify, functions_query, JsonMap::new(), "shopifyFunctions").await?;
+    let handles: HashMap<&str, &str> = functions
+        .iter()
+        .filter_map(|function| Some((function.get("id")?.as_str()?, function.get("handle")?.as_str()?)))
+        .collect();
+
     let query = format!(
         "#graphql
-    query ListCartTransformInstances($metafieldKey: String!) {{
-      shopifyFunctions(first: 100) {{ nodes {{ id handle }} }}
-      cartTransforms(first: 50) {{
+    query ListCartTransformInstances($metafieldKey: String!, $after: String) {{
+      cartTransforms(first: 50, after: $after) {{
         nodes {{
           id functionId blockOnFailure
           metafield(namespace: \"{METAFIELD_NAMESPACE}\", key: $metafieldKey) {{ value }}
         }}
+        pageInfo {{ hasNextPage endCursor }}
       }}
     }}"
     );
-    let data = shopify.graphql(&query, Some(json!({ "metafieldKey": handle }))).await?;
-    let handles: HashMap<&str, &str> = connection_nodes(&data, "shopifyFunctions")
-        .into_iter()
-        .filter_map(|function| Some((function.get("id")?.as_str()?, function.get("handle")?.as_str()?)))
-        .collect();
+    let variables = JsonMap::from_iter([("metafieldKey".to_string(), json!(handle))]);
+    let transforms = connection_pages(shopify, &query, variables, "cartTransforms").await?;
 
-    Ok(connection_nodes(&data, "cartTransforms")
-        .into_iter()
+    Ok(transforms
+        .iter()
         .filter(|node| {
             node.get("functionId")
                 .and_then(Value::as_str)
@@ -213,8 +269,8 @@ async fn list_instances(
     if definition.function_type == FunctionType::Discount {
         let query = format!(
             "#graphql
-        query ListDiscountInstances($query: String!) {{
-          discountNodes(first: 50, query: $query) {{
+        query ListDiscountInstances($query: String!, $after: String) {{
+          discountNodes(first: 50, after: $after, query: $query) {{
             nodes {{
               id
               discount {{
@@ -230,15 +286,15 @@ async fn list_instances(
               }}
               metafield(namespace: \"{METAFIELD_NAMESPACE}\", key: \"{}\") {{ value }}
             }}
+            pageInfo {{ hasNextPage endCursor }}
           }}
         }}",
             definition.handle
         );
-        let data = shopify
-            .graphql(&query, Some(json!({ "query": format!("function_handle:{handle}") })))
-            .await?;
-        let instances: Vec<Value> = connection_nodes(&data, "discountNodes")
-            .into_iter()
+        let variables = JsonMap::from_iter([("query".to_string(), json!(format!("function_handle:{handle}")))]);
+        let nodes = connection_pages(&shopify, &query, variables, "discountNodes").await?;
+        let instances: Vec<Value> = nodes
+            .iter()
             .map(|node| {
                 let discount = node.get("discount");
                 let field = |name: &str| discount.and_then(|discount| discount.get(name));
@@ -259,20 +315,21 @@ async fn list_instances(
     // Generic list for non-discount types
     let query = format!(
         "#graphql
-      query ListInstances {{
-        {}(first: 50) {{
+      query ListInstances($after: String) {{
+        {}(first: 50, after: $after) {{
           nodes {{
             id
             title enabled
             metafield(namespace: \"{METAFIELD_NAMESPACE}\", key: \"{handle}\") {{ value }}
           }}
+          pageInfo {{ hasNextPage endCursor }}
         }}
       }}",
         mutations.list
     );
-    let data = shopify.graphql(&query, None).await?;
-    let instances: Vec<Value> = connection_nodes(&data, mutations.list)
-        .into_iter()
+    let nodes = connection_pages(&shopify, &query, JsonMap::new(), mutations.list).await?;
+    let instances: Vec<Value> = nodes
+        .iter()
         .map(|node| {
             let mut instance = JsonMap::new();
             instance.insert("id".into(), json!(node.get("id")));

@@ -9,16 +9,21 @@
 //! redirect inside the admin iframe.
 
 use std::borrow::Cow;
+use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
-use std::sync::{Arc, LazyLock};
+use std::sync::{Arc, LazyLock, Mutex, PoisonError};
 
+use axum::body::Bytes;
 use axum::extract::{Request, State};
-use axum::http::header::{CACHE_CONTROL, CONTENT_SECURITY_POLICY, CONTENT_TYPE, REFERER};
-use axum::http::{HeaderValue, Method, StatusCode};
+use axum::http::header::{
+    CACHE_CONTROL, CONTENT_SECURITY_POLICY, CONTENT_TYPE, ETAG, HeaderName, IF_NONE_MATCH, REFERER,
+};
+use axum::http::{HeaderMap, HeaderValue, Method, StatusCode};
 use axum::response::{IntoResponse, Response};
 use chrono::Utc;
 use indexmap::IndexMap;
 use regex::Regex;
+use sha2::{Digest, Sha256};
 
 use super::auth::redirect;
 use super::connectors::is_installed_shop;
@@ -30,7 +35,9 @@ use super::shopify_apps::DEFAULT_SHOPIFY_APP_HANDLE;
 use super::{ROBOTS_HEADER, ServerOptions};
 use crate::app::OpenShop;
 use crate::shopify::client_credentials::Grant;
-use openshop_shared::rpc::encode_uri_component;
+use openshop_shared::rpc::{decode_uri_component, encode_uri_component};
+
+const X_CONTENT_TYPE_OPTIONS: HeaderName = HeaderName::from_static("x-content-type-options");
 
 /// How far, in seconds, the `timestamp` of a signed launch may be from now for
 /// the launch to vouch for its shop and ask Shopify for a token.
@@ -96,8 +103,9 @@ impl UiSource {
         *self != Self::None
     }
 
-    /// The asset at `path` (relative, no leading slash).
-    fn read(&self, path: &str) -> Option<Cow<'static, [u8]>> {
+    /// The asset at `path` (relative, no leading slash). A directory is read
+    /// without holding a thread of the runtime.
+    async fn read(&self, path: &str) -> Option<Cow<'static, [u8]>> {
         if path.is_empty()
             || path
                 .split(['/', '\\'])
@@ -122,10 +130,10 @@ impl UiSource {
                     return None;
                 }
                 let file = directory.join(relative);
-                file.is_file()
-                    .then(|| std::fs::read(file).ok())
-                    .flatten()
-                    .map(Cow::Owned)
+                if !tokio::fs::metadata(&file).await.ok()?.is_file() {
+                    return None;
+                }
+                tokio::fs::read(file).await.ok().map(Cow::Owned)
             }
         }
     }
@@ -187,25 +195,11 @@ pub fn inject_api_key(html: &str, api_key: &str) -> String {
 /// Decodes the `%XX` escapes of a request path. `None` when an escape is malformed,
 /// hides a path separator or a NUL, or when the result is not UTF-8.
 fn decode_asset_path(path: &str) -> Option<String> {
-    let mut decoded = Vec::with_capacity(path.len());
-    let mut rest = path.as_bytes();
-    while let [byte, tail @ ..] = rest {
-        rest = tail;
-        if *byte != b'%' {
-            decoded.push(*byte);
-            continue;
-        }
-        let [high, low, tail @ ..] = rest else {
-            return None;
-        };
-        rest = tail;
-        let value = (char::from(*high).to_digit(16)? * 16 + char::from(*low).to_digit(16)?) as u8;
-        if matches!(value, b'/' | b'\\' | 0) {
-            return None;
-        }
-        decoded.push(value);
-    }
-    String::from_utf8(decoded).ok()
+    let segments: Option<Vec<String>> = path
+        .split('/')
+        .map(|segment| decode_uri_component(segment).filter(|decoded| !decoded.contains(['/', '\\', '\0'])))
+        .collect();
+    Some(segments?.join("/"))
 }
 
 /// Polaris, no form, and nothing else. The page can be framed: a shop whose
@@ -246,7 +240,11 @@ fn unauthorized_ui() -> Response {
 
 fn shell_response(html: String, frame_ancestors: &str) -> Response {
     let mut response = (
-        [(CONTENT_TYPE, "text/html; charset=UTF-8"), (CACHE_CONTROL, "no-store")],
+        [
+            (CONTENT_TYPE, "text/html; charset=UTF-8"),
+            (CACHE_CONTROL, "no-store"),
+            (X_CONTENT_TYPE_OPTIONS, "nosniff"),
+        ],
         html,
     )
         .into_response();
@@ -269,17 +267,60 @@ fn cache_control(path: &str) -> &'static str {
     }
 }
 
-fn asset_response(path: &str, data: Cow<'static, [u8]>) -> Response {
+/// The ETag of the bytes of an asset that is compiled in, by where they are:
+/// such bytes never change nor move, so each is hashed once.
+static COMPILED_ETAGS: LazyLock<Mutex<HashMap<(usize, usize), HeaderValue>>> = LazyLock::new(Mutex::default);
+
+/// A strong ETag: the start of the SHA-256 of the bytes, quoted.
+fn etag_of(data: &[u8]) -> HeaderValue {
+    let hash = Sha256::digest(data);
+    HeaderValue::from_str(&format!("\"{}\"", hex::encode(&hash[..16]))).expect("hex is a header value")
+}
+
+/// The bytes of an asset, shared with the binary when they are compiled in
+/// (nothing is copied per request), and their ETag.
+fn shared(data: Cow<'static, [u8]>) -> (Bytes, HeaderValue) {
+    match data {
+        Cow::Borrowed(data) => {
+            let key = (data.as_ptr() as usize, data.len());
+            let etag = COMPILED_ETAGS
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .entry(key)
+                .or_insert_with(|| etag_of(data))
+                .clone();
+            (Bytes::from_static(data), etag)
+        }
+        Cow::Owned(data) => {
+            let etag = etag_of(&data);
+            (Bytes::from(data), etag)
+        }
+    }
+}
+
+/// Whether an `If-None-Match` names the ETag (weak comparison, as for a `GET`).
+fn is_not_modified(headers: &HeaderMap, etag: &HeaderValue) -> bool {
+    let Some(sent) = header(headers, IF_NONE_MATCH.as_str()) else {
+        return false;
+    };
+    let strong = |tag: &str| tag.trim().trim_start_matches("W/").to_string();
+    let current = strong(etag.to_str().unwrap_or_default());
+    sent.trim() == "*" || sent.split(',').any(|tag| strong(tag) == current)
+}
+
+fn asset_response(path: &str, data: Cow<'static, [u8]>, request_headers: &HeaderMap) -> Response {
     let mime = mime_guess::from_path(path).first_or_octet_stream();
-    let cache = cache_control(path);
-    (
-        [
-            (CONTENT_TYPE, mime.as_ref().to_string()),
-            (CACHE_CONTROL, cache.to_string()),
-        ],
-        data.into_owned(),
-    )
-        .into_response()
+    let (body, etag) = shared(data);
+    let headers = [
+        (CACHE_CONTROL, HeaderValue::from_static(cache_control(path))),
+        (X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff")),
+        (ETAG, etag.clone()),
+    ];
+    if is_not_modified(request_headers, &etag) {
+        return (StatusCode::NOT_MODIFIED, headers).into_response();
+    }
+    let content_type = HeaderValue::from_str(mime.as_ref()).unwrap_or(HeaderValue::from_static("application/octet-stream"));
+    ([(CONTENT_TYPE, content_type)], headers, body).into_response()
 }
 
 pub(crate) async fn serve_ui(
@@ -291,13 +332,15 @@ pub(crate) async fn serve_ui(
     let pathname = request.uri().path().to_string();
 
     if !is_ui_shell_path(&pathname) {
-        let asset =
-            decode_asset_path(pathname.trim_start_matches('/')).and_then(|path| Some((options.ui.read(&path)?, path)));
-        return match asset {
-            Some((data, path)) if matches!(*request.method(), Method::GET | Method::HEAD) => {
-                asset_response(&path, data)
-            }
-            _ => not_found(),
+        if !matches!(*request.method(), Method::GET | Method::HEAD) {
+            return not_found();
+        }
+        let Some(path) = decode_asset_path(pathname.trim_start_matches('/')) else {
+            return not_found();
+        };
+        return match options.ui.read(&path).await {
+            Some(data) => asset_response(&path, data, request.headers()),
+            None => not_found(),
         };
     }
 
@@ -359,7 +402,7 @@ pub(crate) async fn serve_ui(
     if !matches!(*request.method(), Method::GET | Method::HEAD) {
         return not_found();
     }
-    let Some(index) = options.ui.read("index.html") else {
+    let Some(index) = options.ui.read("index.html").await else {
         return not_found();
     };
     let mut shell = inject_api_key(&String::from_utf8_lossy(&index), &api_key);
@@ -418,13 +461,13 @@ mod tests {
         }
     }
 
-    #[test]
-    fn serves_assets_from_a_lookup_function() {
+    #[tokio::test]
+    async fn serves_assets_from_a_lookup_function() {
         let source = UiSource::assets(|path| (path == "index.html").then(|| Cow::Borrowed(b"<html>".as_slice())));
         assert!(source.is_enabled());
-        assert_eq!(source.read("index.html").as_deref(), Some(b"<html>".as_slice()));
-        assert!(source.read("missing.js").is_none());
-        assert!(source.read("../index.html").is_none());
+        assert_eq!(source.read("index.html").await.as_deref(), Some(b"<html>".as_slice()));
+        assert!(source.read("missing.js").await.is_none());
+        assert!(source.read("../index.html").await.is_none());
         assert_eq!(source, source.clone());
     }
 
@@ -486,16 +529,16 @@ mod tests {
         );
     }
 
-    #[test]
-    fn refuses_path_traversal() {
+    #[tokio::test]
+    async fn refuses_path_traversal() {
         let dir = UiSource::Dir(std::env::temp_dir());
-        assert!(dir.read("../etc/passwd").is_none());
-        assert!(dir.read("a//b").is_none());
-        assert!(dir.read("").is_none());
-        assert!(dir.read("/etc/hosts").is_none());
-        assert!(dir.read("..\\secret.txt").is_none());
-        assert!(dir.read("assets\\..\\..\\secret.txt").is_none());
-        assert!(UiSource::None.read("index.html").is_none());
+        assert!(dir.read("../etc/passwd").await.is_none());
+        assert!(dir.read("a//b").await.is_none());
+        assert!(dir.read("").await.is_none());
+        assert!(dir.read("/etc/hosts").await.is_none());
+        assert!(dir.read("..\\secret.txt").await.is_none());
+        assert!(dir.read("assets\\..\\..\\secret.txt").await.is_none());
+        assert!(UiSource::None.read("index.html").await.is_none());
     }
 
     #[test]

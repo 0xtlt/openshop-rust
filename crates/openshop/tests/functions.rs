@@ -182,7 +182,7 @@ fn graphql_data(state: &mut ShopifyState, query: &str) -> Value {
         });
     }
 
-    if query.contains("ListCartTransformInstances") {
+    if query.contains("ListShopifyFunctions") {
         return json!({
             "shopifyFunctions": {
                 "nodes": [
@@ -190,14 +190,17 @@ fn graphql_data(state: &mut ShopifyState, query: &str) -> Value {
                     { "id": "function-other", "handle": "other-cart-transform" },
                 ],
             },
-            "cartTransforms": { "nodes": state.cart_transform_nodes },
         });
+    }
+
+    if query.contains("ListCartTransformInstances") {
+        return json!({ "cartTransforms": { "nodes": state.cart_transform_nodes } });
     }
 
     if query.contains("query ListInstances") {
         let (field, kind) = GENERIC_LISTS
             .into_iter()
-            .find(|(field, _)| query.contains(&format!("{field}(first: 50)")))
+            .find(|(field, _)| query.contains(&format!("{field}(first: 50, after: $after)")))
             .unwrap_or(("unknownList", "Unknown"));
         return json!({
             field: {
@@ -570,7 +573,10 @@ async fn lists_generic_non_discount_instances_from_shopify() {
         assert_eq!(data[0]["id"], format!("gid://shopify/{kind}/1"));
         assert_eq!(data[0]["config"], json!({ "message": "ship it" }));
         let call = last_call(&ctx);
-        assert!(query_of(&call).contains(&format!("{field}(first: 50)")), "{handle}");
+        assert!(
+            query_of(&call).contains(&format!("{field}(first: 50, after: $after)")),
+            "{handle}"
+        );
         assert!(query_of(&call).contains(&format!(r#"key: "{handle}""#)), "{handle}");
     }
     ctx.shutdown().await.unwrap();
@@ -628,6 +634,161 @@ async fn normalizes_and_filters_cart_transform_instances_by_deployed_function_ha
             "config": {},
         }])
     );
+    ctx.shutdown().await.unwrap();
+}
+
+// ─── Paginated listings ──────────────────────────────────────────────
+
+/// Answers every page of a listing: `pages` lists the nodes of each page, and
+/// the cursor of page `n` is `cursor-n`. `connections` names the connections the
+/// query reads; each answers the same pages.
+fn serve_pages(ctx: &TestContext, connections: &'static [&'static str], pages: Vec<Vec<Value>>) {
+    ctx.transport.respond_with(move |request| {
+        let after = request.body["variables"]["after"].as_str();
+        let page = after.map_or(0, |cursor| {
+            cursor.trim_start_matches("cursor-").parse::<usize>().unwrap()
+        });
+        let query = request.body["query"].as_str().unwrap_or_default();
+        let mut data = serde_json::Map::new();
+        for connection in connections {
+            if !query.contains(&format!("{connection}(first:")) {
+                continue;
+            }
+            let more = page + 1 < pages.len();
+            data.insert(
+                connection.to_string(),
+                json!({
+                    "nodes": pages[page],
+                    "pageInfo": { "hasNextPage": more, "endCursor": more.then(|| format!("cursor-{}", page + 1)) },
+                }),
+            );
+        }
+        Ok(MockTransport::json(200, json!({ "data": data })))
+    });
+}
+
+fn discount_node(id: usize) -> Value {
+    json!({
+        "id": format!("gid://shopify/DiscountNode/{id}"),
+        "discount": { "title": format!("Volume {id}"), "status": "ACTIVE" },
+        "metafield": null,
+    })
+}
+
+#[tokio::test]
+async fn lists_every_page_of_discount_instances() {
+    let (ctx, _shopify) = setup().await;
+    serve_pages(
+        &ctx,
+        &["discountNodes"],
+        vec![
+            vec![discount_node(1), discount_node(2)],
+            vec![discount_node(3)],
+            vec![discount_node(4)],
+        ],
+    );
+
+    let (status, data) = send(ctx.get("/api/functions/volume-discount/instances")).await;
+    assert_eq!(status, 200);
+    let ids: Vec<&str> = data
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        ids,
+        [1, 2, 3, 4]
+            .map(|id| format!("gid://shopify/DiscountNode/{id}"))
+            .as_slice()
+    );
+
+    let calls = graphql_calls(&ctx);
+    assert_eq!(calls.len(), 3);
+    assert_eq!(
+        calls[0].body["variables"],
+        json!({ "query": "function_handle:volume-discount" })
+    );
+    assert_eq!(
+        calls[1].body["variables"],
+        json!({ "query": "function_handle:volume-discount", "after": "cursor-1" })
+    );
+    assert_eq!(calls[2].body["variables"]["after"], "cursor-2");
+    ctx.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn lists_every_page_of_generic_and_cart_transform_instances() {
+    let (ctx, _shopify) = setup().await;
+    let generic = |id: usize| json!({ "id": format!("gid://shopify/DeliveryCustomization/{id}"), "title": "Rules", "enabled": true });
+    serve_pages(
+        &ctx,
+        &["deliveryCustomizations"],
+        vec![vec![generic(1)], vec![generic(2)]],
+    );
+    let (status, data) = send(ctx.get("/api/functions/delivery-rules/instances")).await;
+    assert_eq!(status, 200);
+    assert_eq!(data.as_array().unwrap().len(), 2);
+    assert_eq!(graphql_calls(&ctx).len(), 2);
+
+    // The functions of the app, and then its cart transforms.
+    let cart = |id: usize| json!({ "id": format!("gid://shopify/CartTransform/{id}"), "functionId": "function-cart" });
+    serve_pages(
+        &ctx,
+        &["shopifyFunctions", "cartTransforms"],
+        vec![
+            vec![json!({ "id": "function-cart", "handle": "cart-transform" }), cart(1)],
+            vec![cart(2)],
+        ],
+    );
+    let (status, data) = send(ctx.get("/api/functions/cart-transform/instances")).await;
+    assert_eq!(status, 200);
+    let ids: Vec<&str> = data
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, ["gid://shopify/CartTransform/1", "gid://shopify/CartTransform/2"]);
+    ctx.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_listing_stops_at_a_bounded_number_of_pages() {
+    let (ctx, _shopify) = setup().await;
+    // A connection that never ends, and one whose cursor does not advance.
+    ctx.transport.respond_with(|request| {
+        let after = request.body["variables"]["after"]
+            .as_str()
+            .unwrap_or("none")
+            .to_string();
+        Ok(MockTransport::json(
+            200,
+            json!({ "data": { "discountNodes": {
+                "nodes": [discount_node(1)],
+                "pageInfo": { "hasNextPage": true, "endCursor": format!("{after}+") },
+            } } }),
+        ))
+    });
+    let (status, data) = send(ctx.get("/api/functions/volume-discount/instances")).await;
+    assert_eq!(status, 200);
+    assert_eq!(data.as_array().unwrap().len(), graphql_calls(&ctx).len());
+    assert_eq!(graphql_calls(&ctx).len(), 20);
+
+    ctx.transport.respond_with(|_| {
+        Ok(MockTransport::json(
+            200,
+            json!({ "data": { "discountNodes": {
+                "nodes": [discount_node(1)],
+                "pageInfo": { "hasNextPage": true, "endCursor": "stuck" },
+            } } }),
+        ))
+    });
+    let before = graphql_calls(&ctx).len();
+    let (status, data) = send(ctx.get("/api/functions/volume-discount/instances")).await;
+    assert_eq!(status, 200);
+    assert_eq!(data.as_array().unwrap().len(), 2);
+    assert_eq!(graphql_calls(&ctx).len() - before, 2);
     ctx.shutdown().await.unwrap();
 }
 
@@ -1079,8 +1240,9 @@ async fn rejects_a_second_cart_transform_instance() {
     assert_eq!(status, 409);
     assert_eq!(body, json!({ "error": "This Cart Transform already has an instance" }));
     let calls = graphql_calls(&ctx);
-    assert_eq!(calls.len(), 1);
-    assert!(query_of(&calls[0]).contains("ListCartTransformInstances"));
+    assert_eq!(calls.len(), 2);
+    assert!(query_of(&calls[0]).contains("ListShopifyFunctions"));
+    assert!(query_of(&calls[1]).contains("ListCartTransformInstances"));
 
     // Instances of other cart transform functions do not count.
     shopify.lock().unwrap().cart_transform_nodes = vec![json!({
@@ -1120,7 +1282,7 @@ async fn maps_shopify_cart_transform_duplicate_races_to_conflict() {
         json!({ "error": "This Cart Transform already has an instance", "userErrors": user_errors })
     );
     assert!(query_of(&last_call(&ctx)).contains("userErrors { field message code }"));
-    assert_eq!(graphql_calls(&ctx).len(), 2);
+    assert_eq!(graphql_calls(&ctx).len(), 3);
 
     // Any other cart transform error stays a plain validation failure.
     shopify.lock().unwrap().next_user_errors = Some(json!([{

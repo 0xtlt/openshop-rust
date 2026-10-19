@@ -112,8 +112,12 @@ has `id`, `stepName`, `attempt`, `status`, `output`, `error`, `durationMs`,
 Run list query parameters:
 
 - `limit`: `1`–`200`, default `50`.
-- `offset`: non-negative, default `0`.
-- `search`: case-insensitive flow name, status, or run-ID search.
+- `offset`: non-negative, default `0`, at most `10000`: a deeper page makes the
+  database read and drop every row before it, so `400` with
+  `offset must be at most 10000` answers it. Narrow the list with the filters
+  below instead.
+- `search`: case-insensitive flow name, status, or run-ID search. It is text:
+  `%`, `_` and `\` match themselves.
 - `status`: `pending`, `running`, `sleeping`, `completed`, `failed`, or `canceled`. Other values are ignored.
 - `from`, `to`: dates applied to `createdAt`. Accepted forms are RFC 3339 timestamps, `YYYY-MM-DDTHH:MM[:SS]` (read as UTC), and `YYYY-MM-DD`. Unparsable values are ignored.
 
@@ -207,7 +211,7 @@ instances.
 | Method and path | Request | Response |
 | --- | --- | --- |
 | `GET /api/functions` | — | `[{ key, label, type, handle, modes, supportsUpdate, singleton, fields }]`: local function definitions and editable fields. `modes` is present for discount functions only. |
-| `GET /api/functions/:handle/instances` | — | Up to 50 live Shopify instances. |
+| `GET /api/functions/:handle/instances` | — | The live Shopify instances, read page after page (50 at a time, at most 20 pages: 1,000 instances). |
 | `POST /api/functions/:handle/instances` | Function config and owner fields | `201` with `{ ok: true, data }`, where `data` is the mutation payload. |
 | `PUT /api/functions/:handle/instances/:id` | Function config and owner fields | `{ ok: true }`. |
 | `DELETE /api/functions/:handle/instances/:id` | Optional `mode` query | `{ ok: true }`. |

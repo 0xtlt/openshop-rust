@@ -2,6 +2,7 @@
 
 mod common;
 
+use std::borrow::Cow;
 use std::io::ErrorKind;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -311,6 +312,93 @@ async fn get_serves_file_from_the_ui_directory() {
     let wasm = get(&ctx, "/openshop-ui_bg.wasm").await;
     assert_eq!(wasm.status, StatusCode::OK);
     assert_eq!(wasm.content_type(), "application/wasm");
+    ctx.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn assets_carry_a_strong_etag_and_answer_304_to_a_client_that_has_them() {
+    let ui = UiDir::new();
+    let ctx = ui_context(&ui).await;
+
+    let first = get(&ctx, "/asset.txt").await;
+    assert_eq!(first.status, StatusCode::OK);
+    assert_eq!(first.header("x-content-type-options"), Some("nosniff"));
+    let etag = first.header("etag").expect("etag").to_string();
+    assert!(
+        etag.starts_with('"') && etag.ends_with('"') && !etag.starts_with("W/"),
+        "{etag}"
+    );
+    assert_eq!(get(&ctx, "/asset.txt").await.header("etag"), Some(etag.as_str()));
+    assert_ne!(
+        get(&ctx, "/assets/app-4f2a.js").await.header("etag"),
+        Some(etag.as_str())
+    );
+
+    let weak = format!("W/{etag}");
+    for matching in [etag.clone(), weak, "*".to_string(), format!("\"other\", {etag}")] {
+        let reply = fetch(request(&ctx, Method::GET, "/asset.txt").header("if-none-match", &matching)).await;
+        assert_eq!(reply.status, StatusCode::NOT_MODIFIED, "{matching}");
+        assert_eq!(reply.body, "", "{matching}");
+        assert_eq!(reply.header("etag"), Some(etag.as_str()));
+        assert_eq!(reply.header(CACHE_CONTROL), Some("no-cache"));
+        assert_eq!(reply.header("x-content-type-options"), Some("nosniff"));
+    }
+    let other = fetch(request(&ctx, Method::GET, "/asset.txt").header("if-none-match", "\"other\"")).await;
+    assert_eq!(other.status, StatusCode::OK);
+    assert_eq!(other.body, "plain asset");
+
+    // A file that changes on disk gets another ETag.
+    ui.write("asset.txt", "changed asset");
+    let changed = get(&ctx, "/asset.txt").await;
+    assert_eq!(changed.body, "changed asset");
+    assert_ne!(changed.header("etag"), Some(etag.as_str()));
+    let revalidated = fetch(request(&ctx, Method::GET, "/asset.txt").header("if-none-match", &etag)).await;
+    assert_eq!(revalidated.status, StatusCode::OK);
+
+    // The shell and the answers that are not assets are not sniffed either.
+    let shell = get(&ctx, &signed_launch("/", SHOP, SECRET)).await;
+    assert_eq!(shell.status, StatusCode::OK);
+    assert_eq!(shell.header("x-content-type-options"), Some("nosniff"));
+    ctx.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_compressed_asset_has_a_weak_etag() {
+    let ui = UiDir::new();
+    ui.write("big.txt", &"openshop ".repeat(500));
+    let ctx = ui_context(&ui).await;
+
+    let plain = get(&ctx, "/big.txt").await;
+    assert!(plain.header("content-encoding").is_none());
+    let etag = plain.header("etag").expect("etag").to_string();
+
+    let compressed = request(&ctx, Method::GET, "/big.txt")
+        .header("accept-encoding", "gzip")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(compressed.headers()["content-encoding"], "gzip");
+    assert_eq!(compressed.headers()["etag"], format!("W/{etag}").as_str());
+    ctx.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn an_asset_compiled_into_the_application_is_served_with_an_etag() {
+    let ui = UiSource::assets(|path| match path {
+        "index.html" => Some(Cow::Borrowed(SHELL.as_bytes())),
+        "app-1a2b3c4d5e.js" => Some(Cow::Borrowed(b"console.log('compiled')".as_slice())),
+        _ => None,
+    });
+    let ctx = context_with(static_config(), ServerOptions::default().ui(ui)).await;
+
+    let reply = get(&ctx, "/app-1a2b3c4d5e.js").await;
+    assert_eq!(reply.status, StatusCode::OK);
+    assert_eq!(reply.body, "console.log('compiled')");
+    assert_eq!(reply.header(CACHE_CONTROL), Some("public, max-age=31536000, immutable"));
+    assert_eq!(reply.header("x-content-type-options"), Some("nosniff"));
+    let etag = reply.header("etag").expect("etag").to_string();
+    let again = fetch(request(&ctx, Method::GET, "/app-1a2b3c4d5e.js").header("if-none-match", &etag)).await;
+    assert_eq!(again.status, StatusCode::NOT_MODIFIED);
     ctx.shutdown().await.unwrap();
 }
 

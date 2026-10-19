@@ -178,7 +178,8 @@ larger configurations easier to split:
   the `OPENSHOP_UI_DIR` environment variable.
 - Assets whose file name carries a content hash are served with
   `Cache-Control: public, max-age=31536000, immutable`; other files with
-  `no-cache`.
+  `no-cache`. They have an `ETag` and answer `304` to `If-None-Match`, and are
+  sent with `X-Content-Type-Options: nosniff`.
 - Custom admin pages are Rust components registered in your own UI bundle
   instead of `page.tsx` files compiled by Vite.
 - In `dev`, the shell is served by the application itself (there is no separate

@@ -31,6 +31,21 @@ pub fn parse_query(raw: Option<&str>) -> IndexMap<String, String> {
     query
 }
 
+/// `%text%` for `LIKE ... ESCAPE '\'`, with what `LIKE` reads as a pattern
+/// (`%`, `_`, `\`) escaped: the text is matched as it is written.
+pub(crate) fn containing(text: &str) -> String {
+    let mut pattern = String::with_capacity(text.len() + 2);
+    pattern.push('%');
+    for character in text.chars() {
+        if matches!(character, '\\' | '%' | '_') {
+            pattern.push('\\');
+        }
+        pattern.push(character);
+    }
+    pattern.push('%');
+    pattern
+}
+
 pub(crate) fn header<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
     headers.get(name).and_then(|value| value.to_str().ok())
 }

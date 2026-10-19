@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+- The queries of the Admin API are bounded and escaped. Behaviour change:
+  `GET /api/runs` and `GET /api/flows/:name/runs` answer `400` for an `offset`
+  above 10,000 (a deeper page makes the database read every row before it;
+  narrow the list with the filters), and `search` is text, where `%`, `_` and
+  `\` used to be a pattern. The Shopify Functions listings read every
+  page of Shopify's connections (50 at a time, up to 20 pages) instead of the
+  first 50; the cart transform listing makes one request for the functions of
+  the app and one for the cart transforms. On `/ops`, `Older` cuts a page on
+  the time and the id of the last row, so rows created at the same instant are
+  no longer skipped; an old `before` with the time alone still works. The
+  percent-decoder of the custom admin pages and the one of the static assets
+  are one (`openshop_shared::rpc::decode_uri_component`): `%+1` is no longer
+  read as `%01`. Assets of the admin UI have a strong `ETag` and answer `304`
+  to `If-None-Match`, are sent with `X-Content-Type-Options: nosniff` (the
+  shell too), are not copied for each request when they are compiled in, and
+  are read from a directory without blocking the runtime.
 - Retrying, canceling and deleting a run are decided by the write, not by the
   status the request read before: a cancel no longer overwrites a run that
   completed meanwhile, a retry no longer resets a run that started again, and
