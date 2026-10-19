@@ -572,6 +572,14 @@ A statement that can lose data or fail on existing rows is preceded by a
 is yours to edit before it is applied: a backfill, a different cast, a
 statement in another order. Data is never moved for you.
 
+Some of those statements lose data: `DROP TABLE`, `DROP COLUMN`, and a type
+change that is not a widening (`smallint` to `integer` to `bigint`, `real` to
+`double precision`, `varchar(n)` to a longer `varchar` or `text` do not count).
+`migrate generate` refuses to write a migration that has one, and lists them,
+unless `--allow-destructive` is given. Nothing is written or recorded in the
+snapshot when it refuses. Dropping an index or a constraint, and `SET NOT NULL`,
+do not lose data and are not guarded.
+
 `migrate check` fails while a change has no migration:
 
 ```text

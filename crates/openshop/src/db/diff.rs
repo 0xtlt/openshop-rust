@@ -70,8 +70,13 @@ impl SchemaSnapshot {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Change {
     /// A statement, with the reason it deserves a second look before it is
-    /// applied, when there is one.
-    Statement { sql: String, warning: Option<String> },
+    /// applied, when there is one. `destructive` marks a statement that loses
+    /// data the database holds.
+    Statement {
+        sql: String,
+        warning: Option<String>,
+        destructive: bool,
+    },
     /// A change that cannot be written automatically: what to write by hand.
     Manual(String),
 }
@@ -81,6 +86,7 @@ impl Change {
         Self::Statement {
             sql: sql.into(),
             warning: None,
+            destructive: false,
         }
     }
 
@@ -88,7 +94,28 @@ impl Change {
         Self::Statement {
             sql: sql.into(),
             warning: Some(warning.into()),
+            destructive: false,
         }
+    }
+
+    /// A statement that loses data: `migrate generate` refuses it without `--allow-destructive`.
+    fn destructive(sql: impl Into<String>, warning: impl Into<String>) -> Self {
+        Self::Statement {
+            sql: sql.into(),
+            warning: Some(warning.into()),
+            destructive: true,
+        }
+    }
+
+    /// Whether applying the change loses data.
+    pub fn is_destructive(&self) -> bool {
+        matches!(
+            self,
+            Self::Statement {
+                destructive: true,
+                ..
+            }
+        )
     }
 
     /// What to review before the migration is applied.
@@ -121,8 +148,9 @@ pub fn render(changes: &[Change]) -> String {
             Change::Statement {
                 sql,
                 warning: Some(warning),
+                ..
             } => format!("-- WARNING: {warning}\n{sql}\n"),
-            Change::Statement { sql, warning: None } => format!("{sql}\n"),
+            Change::Statement { sql, warning: None, .. } => format!("{sql}\n"),
             Change::Manual(explanation) => format!("-- TODO: {explanation}\n"),
         })
         .collect();
@@ -132,6 +160,58 @@ pub fn render(changes: &[Change]) -> String {
 /// A short description of each change, for messages.
 pub fn summarize(changes: &[Change]) -> Vec<String> {
     changes.iter().map(|change| change.summary().to_string()).collect()
+}
+
+/// What each change that loses data does, for messages.
+pub fn destructive(changes: &[Change]) -> Vec<String> {
+    changes
+        .iter()
+        .filter(|change| change.is_destructive())
+        .map(|change| match change.warning() {
+            Some(warning) => format!("{}: {warning}", change.summary()),
+            None => change.summary().to_string(),
+        })
+        .collect()
+}
+
+/// Whether every value of the type `before` fits the type `after`, so that
+/// converting the column loses nothing.
+fn widens(before: &str, after: &str) -> bool {
+    let rank = |sql_type: &str| match sql_type {
+        "smallint" => Some(1),
+        "integer" => Some(2),
+        "bigint" => Some(3),
+        _ => None,
+    };
+    if let (Some(before), Some(after)) = (rank(before), rank(after)) {
+        return before < after;
+    }
+    if before == "real" {
+        return after == "double precision";
+    }
+    // `character varying(20)` is the base `character varying` with the limit 20.
+    let split = |sql_type: &str| match sql_type.split_once('(') {
+        Some((base, rest)) => (
+            base.trim().to_string(),
+            rest.trim_end_matches(')').trim().parse::<u32>().ok(),
+        ),
+        None => (sql_type.to_string(), None),
+    };
+    let (base, limit) = split(before);
+    if !matches!(base.as_str(), "character varying" | "character" | "char") {
+        return false;
+    }
+    if after == "text" {
+        return true;
+    }
+    let (after_base, after_limit) = split(after);
+    base == "character varying"
+        && after_base == "character varying"
+        && match (limit, after_limit) {
+            (_, None) => true,
+            (Some(limit), Some(after_limit)) => limit <= after_limit,
+            (None, Some(_)) => false,
+        }
 }
 
 /// What `current` continues among `before`: the item of the same name, else
@@ -166,18 +246,22 @@ fn alter_column(table: &str, before: &ColumnDef, after: &ColumnDef, changes: &mu
     let place = format!("{}.{}", table, after.name);
 
     if before.sql_type != after.sql_type {
-        changes.push(Change::risky(
-            format!(
-                "{target} TYPE {} USING {}::{};",
-                after.sql_type,
-                quote(&after.name),
-                after.sql_type
-            ),
-            format!(
-                "converts the values of {place} from {} to {}. Check that the cast is the one you want.",
-                before.sql_type, after.sql_type
-            ),
-        ));
+        let sql = format!(
+            "{target} TYPE {} USING {}::{};",
+            after.sql_type,
+            quote(&after.name),
+            after.sql_type
+        );
+        let warning = format!(
+            "converts the values of {place} from {} to {}. Check that the cast is the one you want.",
+            before.sql_type, after.sql_type
+        );
+        // A conversion that can truncate or round values loses data.
+        changes.push(if widens(&before.sql_type, &after.sql_type) {
+            Change::risky(sql, warning)
+        } else {
+            Change::destructive(sql, warning)
+        });
     }
     if before.default != after.default {
         changes.push(match &after.default {
@@ -273,7 +357,7 @@ fn diff_columns<'a>(before: &'a Table, model: &'a Table, changes: &mut TableChan
 
     for column in before.columns() {
         if !kept.contains(&column.name.as_str()) {
-            changes.dropped_columns.push(Change::risky(
+            changes.dropped_columns.push(Change::destructive(
                 format!("ALTER TABLE {table} DROP COLUMN IF EXISTS {};", quote(&column.name)),
                 format!("drops {}.{} and its data.", model.table, column.name),
             ));
@@ -451,7 +535,7 @@ pub fn diff(previous: &SchemaSnapshot, models: &[Table]) -> Vec<Change> {
         });
         // Tables that reference each other are dropped in the order of the snapshot.
         let table = dropped.remove(free.unwrap_or(0));
-        changes.push(Change::risky(
+        changes.push(Change::destructive(
             format!("DROP TABLE IF EXISTS {};", quote(&table.table)),
             format!("drops the table {} and its data.", table.table),
         ));
@@ -523,6 +607,58 @@ mod tests {
             sql(&[previous], &[reviews()]),
             "-- WARNING: drops reviews.legacy and its data.\nALTER TABLE \"reviews\" DROP COLUMN IF EXISTS \"legacy\";\n"
         );
+    }
+
+    #[test]
+    fn what_loses_data_is_told_apart() {
+        let destructive = |previous: &[Table], current: &[Table]| destructive(&diff(&SchemaSnapshot::of(previous), current));
+
+        let votes = Table::conventional("review_votes").with_column(ColumnDef::new("value", "integer"));
+        assert_eq!(
+            destructive(&[reviews(), votes.clone()], &[reviews()]),
+            ["DROP TABLE IF EXISTS \"review_votes\": drops the table review_votes and its data."]
+        );
+        let legacy = reviews().with_column(ColumnDef::new("legacy", "text").nullable(true));
+        assert_eq!(
+            destructive(&[legacy], &[reviews()]),
+            ["ALTER TABLE \"reviews\" DROP COLUMN IF EXISTS \"legacy\": drops reviews.legacy and its data."]
+        );
+
+        // Created, renamed, indexed, relaxed and widened: nothing is lost.
+        let as_type = |sql_type: &str| Table::conventional("t").with_column(ColumnDef::new("c", sql_type));
+        let loses = |before: &str, after: &str| !destructive(&[as_type(before)], &[as_type(after)]).is_empty();
+        for (before, after) in [
+            ("smallint", "integer"),
+            ("integer", "bigint"),
+            ("smallint", "bigint"),
+            ("real", "double precision"),
+            ("varchar(20)", "varchar(40)"),
+            ("varchar(20)", "varchar"),
+            ("varchar(20)", "text"),
+            ("char(2)", "text"),
+        ] {
+            assert!(!loses(before, after), "{before} to {after}");
+        }
+        for (before, after) in [
+            ("bigint", "integer"),
+            ("integer", "smallint"),
+            ("text", "varchar(20)"),
+            ("varchar(40)", "varchar(20)"),
+            ("varchar", "varchar(20)"),
+            ("double precision", "real"),
+            ("numeric(10, 2)", "integer"),
+            ("text", "integer"),
+            ("timestamp with time zone", "date"),
+        ] {
+            assert!(loses(before, after), "{before} to {after}");
+        }
+
+        let renamed = Table::conventional("product_reviews")
+            .renamed_from("reviews")
+            .with_column(ColumnDef::new("product_id", "text"))
+            .with_column(ColumnDef::new("score", "integer").renamed_from("rating"))
+            .index("reviews_score_idx", &["score"]);
+        assert!(destructive(&[reviews()], &[renamed]).is_empty());
     }
 
     #[test]

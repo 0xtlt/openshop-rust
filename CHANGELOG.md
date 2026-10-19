@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- `migrate generate` refuses to write a migration that loses data: a dropped
+  table or column, or a column converted to a type that can truncate or round
+  its values (a widening such as `integer` to `bigint` is fine). The error
+  lists the statements, and nothing is written or recorded in the snapshot.
+  Pass `--allow-destructive` to generate it anyway, or declare a rename with
+  `renamed_from` when the data is meant to be kept. The `dev` push never
+  drops anything and is unchanged.
 - `openshop init` makes a project from one of three templates: `minimal`, one
   provider and one flow, as before; `custom`, a custom app with every building
   block and a page of its own next to the built-in admin; `public`, a public

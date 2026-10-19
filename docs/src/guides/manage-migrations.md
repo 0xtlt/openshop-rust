@@ -104,13 +104,17 @@ ALTER TABLE "reviews" ADD COLUMN IF NOT EXISTS "author" text NOT NULL;
 ```
 
 A statement that can lose data or fail on existing rows comes with such a
-warning, which `migrate generate` also prints. Three things need your
-attention:
+warning, which `migrate generate` also prints. A migration that drops a table
+or a column, or converts a column to a type that can truncate or round its
+values (`bigint` to `integer`, `text` to `varchar(20)`), is not written at all
+unless you pass `--allow-destructive`; the error lists those statements. Three
+things need your attention:
 
 - **Renames.** A renamed field looks like one column dropped and another
   added, which loses its data. Add `#[model(renamed_from = "old_name")]` to the
   field, or to the struct for its table, before generating. See
-  [Renames](../reference/database.md#renames).
+  [Renames](../reference/database.md#renames). When the drop is what you want,
+  run `cargo run -- migrate generate --allow-destructive`.
 - **Warnings.** Edit the file when the generated statement is not the one you
   want: add a default, backfill before `SET NOT NULL`, change the cast of a
   type change, clean up the rows that a new foreign key would refuse.
