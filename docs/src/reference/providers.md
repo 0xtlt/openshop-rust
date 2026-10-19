@@ -75,7 +75,7 @@ attribute:
 | `placeholder = "https://…"` | |
 | `password` | A secret: never returned by the Admin API, and kept when the form is saved without it. |
 | `select("Europe" = "eu", "United States" = "us")` | A list of choices, each a label and the value saved. |
-| `url` | The value must be an absolute URL. |
+| `url` | The value must be an absolute `http` or `https` URL. |
 | `non_empty` | The value must be a string with at least one character. |
 | `range(min = 1, max = 1000)` | The value must be a number within the bounds. Either bound may be left out. |
 | `length(min = 1, max = 8)` | The value must be a string whose number of characters is within the bounds. Either bound may be left out. |
@@ -182,6 +182,25 @@ make a field optional. `.validate(…)` accepts a validator; the value it return
 becomes the saved value. Called again, it adds a validator that runs after the
 ones already set, on the value they return.
 
+### What is checked when a configuration is saved
+
+Before a validator runs, every submitted value is checked against the type of
+its field. A value of another type is refused with `400` and
+`{ "error": "Field \"retries\": must be a number (was \"abc\")" }`:
+
+| Field | Accepts |
+| --- | --- |
+| `text`, `password` | A string. |
+| `number` | A number, or a string that is one (`"3"`, `" 2.5 "`), saved as a number. |
+| `checkbox` | `true`, `false`, `"true"` or `"false"`, saved as a boolean. Anything else, `"yes"` or `1` included, is refused. |
+| `select` | A string equal to the `value` of one of the options. |
+
+A null or an empty string is no value: a required field then fails with
+`Field "…" is required`, and an optional one is not saved. A blank password
+keeps the one already saved. Keys that are not fields of the provider are
+ignored and not saved. A transformer runs on the checked values, before the
+validators.
+
 ### Validators
 
 A validator is any `Fn(&Value) -> Result<Value, String>`: it returns the value
@@ -192,13 +211,27 @@ provides the common ones:
 | --- | --- | --- |
 | `validators::string()` | Any string | `must be a string (was …)` |
 | `validators::non_empty()` | A string with at least one character | `must be non-empty`, or `must be a string (was …)` |
-| `validators::url()` | An absolute URL | `must be a URL string (was …)` |
+| `validators::url()` | An absolute `http` or `https` URL with a host | `must be a URL string (was …)`, or `must be an http or https URL (was …)` |
+| `validators::public_url()` | Like `url()`, and the host is not on the server's own network | `must be a public http or https URL (was …)`, plus those of `url()` |
 | `validators::number()` | Any finite number | `must be a number (was …)` |
 | `validators::number_range(min, max)` | A number within `min..=max` | `must be at least <min> (was …)`, `must be at most <max> (was …)`, or `must be a number (was …)` |
 | `validators::range(min, max)` | A number within the bounds that are given, each an `Option<f64>` | `must be at least <min> (was …)`, `must be at most <max> (was …)`, or `must be a number (was …)` |
 | `validators::length(min, max)` | A string whose number of characters is within the bounds that are given, each an `Option<usize>` | `must be at least <min> characters (was …)`, `must be at most <max> characters (was …)`, or `must be a string (was …)` |
 | `validators::integer_min(min)` | A whole number greater than or equal to `min` | `must be an integer (was …)`, `must be at least <min> (was …)`, or `must be a number (was …)` |
 | `validators::one_of([..])` | One of the listed strings | `must be one of "a", "b" (was …)` |
+
+`url()` refuses `file:`, `gopher:`, `ftp:` and every other scheme, since the
+server fetches the URLs a merchant saves. It accepts any host, `localhost` and
+private addresses included, which a provider that talks to a service on the
+same network needs. When the URL must point at the internet, as with an
+endpoint a merchant types in, use
+`validate = validators::public_url()`: it also refuses `localhost`,
+`*.localhost`, `metadata.google.internal` and hosts written as an IP address in
+a loopback, private (`10/8`, `172.16/12`, `192.168/16`, `fc00::/7`),
+link-local (`169.254/16`, `fe80::/10`), shared (`100.64/10`), multicast or
+unspecified range. It only reads the text of the URL: a public name that
+resolves to a private address (DNS rebinding) passes. If that matters, also
+check the address the connection is made to when the request is sent.
 
 The ready-made validators return the value unchanged. On a
 [provider struct](#the-configuration), the `url`, `non_empty`, `range(…)` and

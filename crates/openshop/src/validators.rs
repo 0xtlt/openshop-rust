@@ -7,7 +7,7 @@ use serde_json::Value;
 
 type Validator = Box<dyn Fn(&Value) -> Result<Value, String> + Send + Sync>;
 
-fn describe(value: &Value) -> String {
+pub(crate) fn describe(value: &Value) -> String {
     match value {
         Value::String(text) => format!("\"{text}\""),
         other => other.to_string(),
@@ -39,16 +39,93 @@ pub fn non_empty() -> Validator {
     })
 }
 
-/// An absolute URL.
+/// An absolute `http` or `https` URL with a host.
+///
+/// Other schemes (`file:`, `gopher:`, `ftp:`…) are refused because the server
+/// fetches these URLs. The host is not restricted: use [`public_url`] when the
+/// merchant must not be able to point the server at its own network.
 pub fn url() -> Validator {
-    Box::new(|value| match value {
-        Value::String(text) if url::Url::parse(text).is_ok() => Ok(value.clone()),
-        other => Err(format!("must be a URL string (was {})", describe(other))),
+    Box::new(|value| {
+        let Some(parsed) = value.as_str().and_then(|text| url::Url::parse(text).ok()) else {
+            return Err(format!("must be a URL string (was {})", describe(value)));
+        };
+        if is_http_with_host(&parsed) {
+            Ok(value.clone())
+        } else {
+            Err(format!("must be an http or https URL (was {})", describe(value)))
+        }
     })
 }
 
+/// Like [`url`], and the host must not be on the server's own network.
+///
+/// Refused: `localhost`, `*.localhost`, `metadata.google.internal`, and hosts
+/// written as an IP address in a loopback, private (`10/8`, `172.16/12`,
+/// `192.168/16`, `fc00::/7`), link-local (`169.254/16`, `fe80::/10`, which holds
+/// the cloud metadata endpoint), shared (`100.64/10`), multicast, broadcast or
+/// unspecified range. Odd spellings such as `http://2130706433/` or
+/// `http://0x7f.1/` are read as the IP address they mean.
+///
+/// This only looks at the text of the URL. A public name that resolves to a
+/// private address (DNS rebinding) passes: also check the address the
+/// connection is made to when the request is sent.
+pub fn public_url() -> Validator {
+    Box::new(|value| {
+        let Some(parsed) = value.as_str().and_then(|text| url::Url::parse(text).ok()) else {
+            return Err(format!("must be a URL string (was {})", describe(value)));
+        };
+        if !is_http_with_host(&parsed) {
+            return Err(format!("must be an http or https URL (was {})", describe(value)));
+        }
+        let internal = match parsed.host() {
+            Some(url::Host::Domain(domain)) => is_internal_domain(domain),
+            Some(url::Host::Ipv4(address)) => is_internal_ipv4(address),
+            Some(url::Host::Ipv6(address)) => is_internal_ipv6(address),
+            None => true,
+        };
+        if internal {
+            Err(format!("must be a public http or https URL (was {})", describe(value)))
+        } else {
+            Ok(value.clone())
+        }
+    })
+}
+
+fn is_http_with_host(parsed: &url::Url) -> bool {
+    matches!(parsed.scheme(), "http" | "https") && parsed.host_str().is_some_and(|host| !host.is_empty())
+}
+
+fn is_internal_domain(domain: &str) -> bool {
+    let domain = domain.trim_end_matches('.').to_ascii_lowercase();
+    domain.is_empty() || domain == "localhost" || domain.ends_with(".localhost") || domain == "metadata.google.internal"
+}
+
+fn is_internal_ipv4(address: std::net::Ipv4Addr) -> bool {
+    let [first, second, ..] = address.octets();
+    address.is_loopback()
+        || address.is_private()
+        || address.is_link_local()
+        || address.is_unspecified()
+        || address.is_broadcast()
+        || address.is_multicast()
+        || first == 0
+        || (first == 100 && (64..128).contains(&second))
+}
+
+fn is_internal_ipv6(address: std::net::Ipv6Addr) -> bool {
+    if let Some(mapped) = address.to_ipv4_mapped() {
+        return is_internal_ipv4(mapped);
+    }
+    let first = address.segments()[0];
+    address.is_loopback()
+        || address.is_unspecified()
+        || address.is_multicast()
+        || first & 0xffc0 == 0xfe80
+        || first & 0xfe00 == 0xfc00
+}
+
 /// Any finite number.
-pub fn number() -> Validator {
+pub fn number()-> Validator {
     Box::new(|value| match value.as_f64() {
         Some(number) if number.is_finite() => Ok(value.clone()),
         _ => Err(format!("must be a number (was {})", describe(value))),
@@ -154,6 +231,84 @@ mod tests {
         assert!(url()(&json!("https://warehouse.example.com/api")).is_ok());
         assert_eq!(
             url()(&json!("nope")).unwrap_err(),
+            "must be a URL string (was \"nope\")"
+        );
+    }
+
+    #[test]
+    fn url_accepts_only_http_and_https_with_a_host() {
+        for ok in [
+            "http://warehouse.test",
+            "https://warehouse.test/api?x=1",
+            "HTTPS://Warehouse.test:8443/",
+            "http://localhost:3000",
+            "http://10.0.0.1/",
+        ] {
+            assert!(url()(&json!(ok)).is_ok(), "{ok}");
+        }
+        for bad in [
+            "file:///etc/passwd",
+            "gopher://warehouse.test:70/_x",
+            "ftp://warehouse.test/",
+            "javascript:alert(1)",
+            "data:text/plain,hi",
+            "mailto:a@b.test",
+            "http://",
+        ] {
+            assert!(url()(&json!(bad)).is_err(), "{bad}");
+        }
+        assert_eq!(
+            url()(&json!("file:///etc/passwd")).unwrap_err(),
+            "must be an http or https URL (was \"file:///etc/passwd\")"
+        );
+        assert!(url()(&json!(12)).is_err());
+    }
+
+    #[test]
+    fn public_url_refuses_hosts_on_the_server_network() {
+        for ok in [
+            "https://warehouse.test/api",
+            "http://93.184.216.34/",
+            "https://[2606:4700:4700::1111]/",
+            "http://172.32.0.1/",
+            "http://100.63.0.1/",
+        ] {
+            assert!(public_url()(&json!(ok)).is_ok(), "{ok}");
+        }
+        for bad in [
+            "http://169.254.169.254/latest/meta-data/",
+            "http://127.0.0.1:8080/",
+            "http://127.1/",
+            "http://2130706433/",
+            "http://0x7f.0.0.1/",
+            "http://[::1]/",
+            "http://[::]/",
+            "http://[::ffff:127.0.0.1]/",
+            "http://[::ffff:169.254.169.254]/",
+            "http://[fe80::1]/",
+            "http://[fd00::1]/",
+            "http://10.0.0.1/",
+            "http://172.16.0.1/",
+            "http://172.31.255.255/",
+            "http://192.168.1.1/",
+            "http://100.64.0.1/",
+            "http://0.0.0.0/",
+            "http://localhost/",
+            "http://LOCALHOST:3000/",
+            "http://localhost./",
+            "http://admin.localhost/",
+            "http://metadata.google.internal/computeMetadata/v1/",
+            "file:///etc/passwd",
+            "gopher://warehouse.test/",
+        ] {
+            assert!(public_url()(&json!(bad)).is_err(), "{bad}");
+        }
+        assert_eq!(
+            public_url()(&json!("http://169.254.169.254/")).unwrap_err(),
+            "must be a public http or https URL (was \"http://169.254.169.254/\")"
+        );
+        assert_eq!(
+            public_url()(&json!("nope")).unwrap_err(),
             "must be a URL string (was \"nope\")"
         );
     }

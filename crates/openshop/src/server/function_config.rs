@@ -2,17 +2,8 @@
 
 use serde_json::Value;
 
-use super::provider_config::{js_number, js_truthy};
-use crate::types::{Field, FieldType, Fields, JsonMap, is_missing};
-
-fn coerce_field_value(field: &Field, value: Option<Value>) -> Option<Value> {
-    match (field.field_type, value) {
-        (FieldType::Number, Some(Value::String(text))) if !text.trim().is_empty() => Some(js_number(&text)),
-        (FieldType::Checkbox, Some(Value::String(text))) => Some(Value::Bool(text == "true")),
-        (FieldType::Checkbox, Some(other)) => Some(Value::Bool(js_truthy(&other))),
-        (_, value) => value,
-    }
-}
+use super::provider_config::coerce_field_value;
+use crate::types::{Fields, JsonMap, is_missing};
 
 pub fn validate_function_config(fields: &Fields, raw_config: Option<&Value>) -> Result<JsonMap, String> {
     let empty = JsonMap::new();
@@ -20,7 +11,7 @@ pub fn validate_function_config(fields: &Fields, raw_config: Option<&Value>) -> 
     let mut config = JsonMap::new();
 
     for (name, field) in fields {
-        let value = coerce_field_value(field, input.get(name).cloned());
+        let value = coerce_field_value(name, field, input.get(name).cloned())?;
         if field.is_required() && is_missing(value.as_ref()) {
             return Err(format!("Field \"{name}\" is required"));
         }
@@ -42,6 +33,7 @@ pub fn validate_function_config(fields: &Fields, raw_config: Option<&Value>) -> 
 mod tests {
     use super::*;
     use crate::validators;
+    use crate::types::Field;
     use indexmap::IndexMap;
     use serde_json::json;
 
@@ -99,9 +91,21 @@ mod tests {
     }
 
     #[test]
-    fn unparseable_numbers_count_as_missing() {
+    fn refuses_values_of_the_wrong_type() {
         let error =
             validate_function_config(&fields(), Some(&json!({ "minQuantity": "abc", "percentage": 10 }))).unwrap_err();
-        assert_eq!(error, "Field \"minQuantity\" is required");
+        assert_eq!(error, "Field \"minQuantity\": must be a number (was \"abc\")");
+        let error = validate_function_config(
+            &fields(),
+            Some(&json!({ "minQuantity": 1, "percentage": 10, "stackable": "yes" })),
+        )
+        .unwrap_err();
+        assert_eq!(error, "Field \"stackable\": must be a boolean (was \"yes\")");
+        let error = validate_function_config(
+            &fields(),
+            Some(&json!({ "minQuantity": 1, "percentage": 10, "excludedTags": 3 })),
+        )
+        .unwrap_err();
+        assert_eq!(error, "Field \"excludedTags\": must be a string (was 3)");
     }
 }

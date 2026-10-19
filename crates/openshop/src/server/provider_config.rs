@@ -3,6 +3,7 @@
 use serde_json::Value;
 
 use crate::types::{Field, FieldType, JsonMap, Provider, is_missing};
+use crate::validators::describe;
 
 /// JavaScript's `Number(string)` for the inputs a form can send.
 pub(crate) fn js_number(text: &str) -> Value {
@@ -18,25 +19,51 @@ pub(crate) fn js_number(text: &str) -> Value {
     }
 }
 
-/// JavaScript truthiness, used for checkbox values.
-pub(crate) fn js_truthy(value: &Value) -> bool {
-    match value {
-        Value::Null => false,
-        Value::Bool(flag) => *flag,
-        Value::Number(number) => number.as_f64().is_some_and(|float| float != 0.0 && !float.is_nan()),
-        Value::String(text) => !text.is_empty(),
-        Value::Array(_) | Value::Object(_) => true,
-    }
-}
-
-/// Form inputs arrive as strings: numbers and checkboxes are coerced to their types.
-pub(crate) fn coerce_field_value(field: &Field, value: Option<Value>) -> Option<Value> {
-    let value = value?;
+/// Form inputs arrive as strings: numbers and checkboxes are coerced to their
+/// types (`"3"` is 3, `"true"` is true). A value that is not of the type of its
+/// field, even after that, is refused with an error naming the field. A null or
+/// an empty string counts as no value.
+pub(crate) fn coerce_field_value(name: &str, field: &Field, value: Option<Value>) -> Result<Option<Value>, String> {
+    let refuse = |expected: &str, value: &Value| Err(format!("Field \"{name}\": must be {expected} (was {})", describe(value)));
+    let Some(value) = value.filter(|value| !is_missing(Some(value))) else {
+        return Ok(None);
+    };
     match (field.field_type, &value) {
-        (FieldType::Number, Value::String(text)) if !text.trim().is_empty() => Some(js_number(text)),
-        (FieldType::Checkbox, Value::String(text)) => Some(Value::Bool(text == "true")),
-        (FieldType::Checkbox, other) => Some(Value::Bool(js_truthy(other))),
-        _ => Some(value),
+        (FieldType::Text | FieldType::Password, Value::String(_)) => Ok(Some(value)),
+        (FieldType::Text | FieldType::Password, other) => refuse("a string", other),
+        (FieldType::Number, Value::Number(_)) => Ok(Some(value)),
+        (FieldType::Number, Value::String(text)) if !text.trim().is_empty() => match js_number(text) {
+            Value::Null => refuse("a number", &value),
+            number => Ok(Some(number)),
+        },
+        // A blank number (spaces only) is no value.
+        (FieldType::Number, Value::String(_)) => Ok(None),
+        (FieldType::Number, other) => refuse("a number", other),
+        (FieldType::Checkbox, Value::Bool(_)) => Ok(Some(value)),
+        (FieldType::Checkbox, Value::String(text)) if text == "true" || text == "false" => {
+            Ok(Some(Value::Bool(text == "true")))
+        }
+        (FieldType::Checkbox, other) => refuse("a boolean", other),
+        (FieldType::Select, Value::String(text))
+            if field
+                .options
+                .iter()
+                .flatten()
+                .any(|option| option.value == *text) =>
+        {
+            Ok(Some(value))
+        }
+        (FieldType::Select, other) => Err(format!(
+            "Field \"{name}\": must be one of {} (was {})",
+            field
+                .options
+                .iter()
+                .flatten()
+                .map(|option| format!("\"{}\"", option.value))
+                .collect::<Vec<_>>()
+                .join(", "),
+            describe(other)
+        )),
     }
 }
 
@@ -93,7 +120,7 @@ pub fn parse_provider_config(
             value = Some(existing.clone());
         }
 
-        let value = coerce_field_value(field, value);
+        let value = coerce_field_value(name, field, value)?;
         if field.is_required() && is_missing(value.as_ref()) {
             return Err(format!("Field \"{name}\" is required"));
         }
@@ -128,6 +155,7 @@ pub fn parse_provider_config(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::FieldOption;
     use crate::validators;
     use serde_json::json;
 
@@ -266,6 +294,106 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.starts_with("Field \"retries\": "), "{error}");
+    }
+
+    fn typed() -> Provider {
+        Provider::new("typed")
+            .field(
+                "mode",
+                Field::select(
+                    "Mode",
+                    [FieldOption::new("Live", "live"), FieldOption::new("Test", "test")],
+                ),
+            )
+            .field("retries", Field::number("Retries").optional())
+            .field("sandbox", Field::checkbox("Sandbox").optional())
+            .field("label", Field::text("Label").optional())
+            .field("token", Field::password("Token").optional())
+    }
+
+    fn typed_error(config: Value) -> String {
+        parse_provider_config(&typed(), Some(&config), &JsonMap::new()).unwrap_err()
+    }
+
+    #[test]
+    fn refuses_a_select_value_that_is_not_an_option() {
+        assert_eq!(
+            typed_error(json!({ "mode": "prod" })),
+            "Field \"mode\": must be one of \"live\", \"test\" (was \"prod\")"
+        );
+        assert_eq!(
+            typed_error(json!({ "mode": 1 })),
+            "Field \"mode\": must be one of \"live\", \"test\" (was 1)"
+        );
+        let parsed = parse_provider_config(&typed(), Some(&json!({ "mode": "test" })), &JsonMap::new()).unwrap();
+        assert_eq!(parsed["mode"], "test");
+    }
+
+    #[test]
+    fn refuses_a_number_that_is_not_one() {
+        assert_eq!(
+            typed_error(json!({ "mode": "live", "retries": "abc" })),
+            "Field \"retries\": must be a number (was \"abc\")"
+        );
+        assert_eq!(
+            typed_error(json!({ "mode": "live", "retries": "Infinity" })),
+            "Field \"retries\": must be a number (was \"Infinity\")"
+        );
+        assert_eq!(
+            typed_error(json!({ "mode": "live", "retries": true })),
+            "Field \"retries\": must be a number (was true)"
+        );
+        let parsed = parse_provider_config(
+            &typed(),
+            Some(&json!({ "mode": "live", "retries": " 2.5 " })),
+            &JsonMap::new(),
+        )
+        .unwrap();
+        assert_eq!(parsed["retries"], 2.5);
+        let parsed = parse_provider_config(
+            &typed(),
+            Some(&json!({ "mode": "live", "retries": "" })),
+            &JsonMap::new(),
+        )
+        .unwrap();
+        assert!(!parsed.contains_key("retries"));
+    }
+
+    #[test]
+    fn refuses_a_checkbox_that_is_not_a_boolean() {
+        for bad in [json!("yes"), json!("on"), json!(1), json!([])] {
+            let error = typed_error(json!({ "mode": "live", "sandbox": bad }));
+            assert!(error.starts_with("Field \"sandbox\": must be a boolean (was "), "{error}");
+        }
+        for (sent, saved) in [(json!(true), true), (json!("true"), true), (json!("false"), false)] {
+            let parsed =
+                parse_provider_config(&typed(), Some(&json!({ "mode": "live", "sandbox": sent })), &JsonMap::new())
+                    .unwrap();
+            assert_eq!(parsed["sandbox"], saved);
+        }
+    }
+
+    #[test]
+    fn refuses_text_and_password_that_are_not_strings() {
+        assert_eq!(
+            typed_error(json!({ "mode": "live", "label": 5 })),
+            "Field \"label\": must be a string (was 5)"
+        );
+        assert_eq!(
+            typed_error(json!({ "mode": "live", "token": { "a": 1 } })),
+            "Field \"token\": must be a string (was {\"a\":1})"
+        );
+    }
+
+    #[test]
+    fn ignores_fields_that_are_not_declared() {
+        let parsed = parse_provider_config(
+            &typed(),
+            Some(&json!({ "mode": "live", "extra": "x", "__proto__": { "a": 1 } })),
+            &JsonMap::new(),
+        )
+        .unwrap();
+        assert_eq!(parsed, object(json!({ "mode": "live" })));
     }
 
     #[test]

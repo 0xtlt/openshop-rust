@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use chrono::{DateTime, SubsecRound, Utc};
 use common::{create_config, noop_flow};
-use openshop::builder::{Field, Flow, Function, FunctionType, Provider};
+use openshop::builder::{Field, FieldOption, Flow, Function, FunctionType, Provider};
 use openshop::db::schema::FlowRun;
 use openshop::engine::{RunFlowOptions, run_flow};
 use openshop::runtime::time::to_iso;
@@ -1835,6 +1835,100 @@ async fn put_providers_validates_coerces_and_transforms_fields() {
     let (_, list) = send(ctx.get("/api/providers")).await;
     assert_eq!(list[0]["config"], stored);
     assert_eq!(list[0]["configured"], true);
+    ctx.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn put_providers_checks_each_value_against_its_field_type() {
+    let erp = Provider::new("erp")
+        .field("endpoint", Field::text("Endpoint").validate(validators::url()))
+        .field(
+            "callback",
+            Field::text("Callback").optional().validate(validators::public_url()),
+        )
+        .field(
+            "mode",
+            Field::select(
+                "Mode",
+                [FieldOption::new("Live", "live"), FieldOption::new("Test", "test")],
+            ),
+        )
+        .field("retries", Field::number("Retries").optional())
+        .field("sandbox", Field::checkbox("Sandbox").optional());
+    let config = OpenShopConfig::builder()
+        .flow(noop_flow("test-flow"))
+        .provider(erp)
+        .build()
+        .unwrap();
+    let ctx = context(config).await;
+    let valid = json!({ "endpoint": "https://erp.test", "mode": "live" });
+    let save = |changes: Value| {
+        let mut config = valid.clone();
+        config
+            .as_object_mut()
+            .unwrap()
+            .extend(changes.as_object().unwrap().clone());
+        send(ctx.put("/api/providers/erp").json(&json!({ "config": config })))
+    };
+
+    for (changes, message) in [
+        (
+            json!({ "mode": "prod" }),
+            "Field \"mode\": must be one of \"live\", \"test\" (was \"prod\")",
+        ),
+        (
+            json!({ "retries": "abc" }),
+            "Field \"retries\": must be a number (was \"abc\")",
+        ),
+        (
+            json!({ "sandbox": "yes" }),
+            "Field \"sandbox\": must be a boolean (was \"yes\")",
+        ),
+        (
+            json!({ "endpoint": "file:///etc/passwd" }),
+            "Field \"endpoint\": must be an http or https URL (was \"file:///etc/passwd\")",
+        ),
+        (
+            json!({ "endpoint": "gopher://erp.test:70/_x" }),
+            "Field \"endpoint\": must be an http or https URL (was \"gopher://erp.test:70/_x\")",
+        ),
+        (
+            json!({ "callback": "http://169.254.169.254/latest/meta-data/" }),
+            "Field \"callback\": must be a public http or https URL (was \"http://169.254.169.254/latest/meta-data/\")",
+        ),
+    ] {
+        let (status, body) = save(changes.clone()).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{changes}");
+        assert_eq!(body, error(message));
+    }
+    let (rows,): (i64,) = sqlx::query_as("SELECT count(*) FROM provider_configs")
+        .fetch_one(&ctx.db)
+        .await
+        .unwrap();
+    assert_eq!(rows, 0);
+
+    let (status, _) = save(json!({
+        "retries": "2",
+        "sandbox": "false",
+        "callback": "https://hooks.example.com/erp",
+        "unknown": "ignored",
+    }))
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (stored,): (Value,) = sqlx::query_as("SELECT config FROM provider_configs WHERE provider_name = 'erp'")
+        .fetch_one(&ctx.db)
+        .await
+        .unwrap();
+    assert_eq!(
+        stored,
+        json!({
+            "endpoint": "https://erp.test",
+            "callback": "https://hooks.example.com/erp",
+            "mode": "live",
+            "retries": 2,
+            "sandbox": false,
+        })
+    );
     ctx.shutdown().await.unwrap();
 }
 
