@@ -91,10 +91,6 @@ fn scrub_context(context: &mut Context) {
                 scrub_value(data);
             }
         }
-        Context::Trace(trace) => {
-            trace.description.iter_mut().for_each(scrub);
-            scrub_map(&mut trace.data);
-        }
         // Every other kind of context, those of the SDK that are yet to come
         // included, through its JSON form: all its strings, at any depth. One
         // that does not come back as a context is not sent.

@@ -274,7 +274,9 @@ fn tick_keys(crons: &[Cron]) -> Vec<String> {
     crons
         .iter()
         .map(|entry| {
-            let identity = serde_json::json!([entry.name, entry.shops_json(), entry.input]).to_string();
+            // The effective time zone: "UTC" and no time zone are the same cron.
+            let zone = parse_timezone(entry).map_or_else(|_| entry.timezone.clone().unwrap_or_default(), |zone| zone.name().to_string());
+            let identity = serde_json::json!([entry.name, entry.shops_json(), entry.input, zone]).to_string();
             let digest = Sha256::digest(identity.as_bytes());
             let digest = format!("{digest:x}");
             let base = format!("{}#{}", entry.key(), &digest[..16]);
@@ -615,6 +617,22 @@ mod tests {
         let reordered = tick_keys(&[full, plain.clone(), plain]);
         assert_eq!(reordered[0], keys[1]);
         assert_eq!([&reordered[1], &reordered[2]], [&keys[0], &keys[2]]);
+    }
+
+    #[test]
+    fn crons_that_differ_by_time_zone_get_their_own_tick_keys() {
+        let utc = Cron::new("0 9 * * *", "sync");
+        let paris = Cron::new("0 9 * * *", "sync").timezone("Europe/Paris");
+        let explicit = Cron::new("0 9 * * *", "sync").timezone("UTC");
+
+        let keys = tick_keys(&[utc.clone(), paris.clone()]);
+        assert_ne!(keys[0], keys[1]);
+        // Whatever the order, each keeps its key: no rank is shared between zones.
+        let reordered = tick_keys(&[paris, utc.clone()]);
+        assert_eq!([&reordered[1], &reordered[0]], [&keys[0], &keys[1]]);
+        assert!(!reordered.iter().any(|key| key.ends_with("#1")));
+        // Saying UTC is the default.
+        assert_eq!(tick_keys(&[explicit])[0], tick_keys(&[utc])[0]);
     }
 
     #[tokio::test]

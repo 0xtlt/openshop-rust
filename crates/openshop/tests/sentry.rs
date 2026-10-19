@@ -821,3 +821,26 @@ fn what_a_url_carries_of_secrets_is_not_sent_in_an_opentelemetry_context() {
     };
     assert_eq!(otel.attributes["url.full"], "https://api.example.com/a?[redacted]");
 }
+
+#[test]
+fn what_a_url_carries_of_secrets_is_not_sent_in_a_trace_context() {
+    use openshop::sentry::protocol::{Context, TraceContext};
+
+    let events = captured(async {
+        openshop::sentry::configure_scope(|scope| {
+            scope.set_context(
+                "trace",
+                Context::Trace(Box::new(TraceContext {
+                    op: Some("GET https://a.test/x?token=SECRET".into()),
+                    origin: Some("https://u:hunter2@o.test/y".into()),
+                    description: Some("https://d.test/z?k=SECRET".into()),
+                    ..Default::default()
+                })),
+            );
+        });
+        openshop::sentry::capture_message("failed", Level::Error);
+    });
+
+    let sent = format!("{:?}", the_only(events));
+    assert!(!sent.contains("SECRET") && !sent.contains("hunter2"), "{sent}");
+}
