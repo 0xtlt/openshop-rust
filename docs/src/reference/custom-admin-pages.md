@@ -467,7 +467,8 @@ into `<meta name="shopify-api-key">` and the App Bridge `<script>` tag.
 Assets whose file name carries a content hash are served with
 `Cache-Control: public, max-age=31536000, immutable`, other files with
 `no-cache`, and the shell with `no-store`. Every asset has a strong `ETag`, a
-hash of its bytes (weak when the response is compressed), and a request whose
+hash of its bytes (weak, and with `Vary: accept-encoding`, when the response may
+be compressed; a `304` carries the same), and a request whose
 `If-None-Match` names it is answered `304`. Assets and shell carry
 `X-Content-Type-Options: nosniff`. An asset compiled into the binary is sent
 from the binary without being copied, and hashed once.

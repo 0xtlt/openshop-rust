@@ -379,6 +379,27 @@ async fn a_compressed_asset_has_a_weak_etag() {
         .unwrap();
     assert_eq!(compressed.headers()["content-encoding"], "gzip");
     assert_eq!(compressed.headers()["etag"], format!("W/{etag}").as_str());
+    assert_eq!(compressed.headers()["vary"], "accept-encoding");
+    // The answer to a revalidation describes the same representation as the
+    // answer it replaces, whichever ETag the client holds.
+    assert_eq!(plain.header("vary"), Some("accept-encoding"));
+    for held in [format!("W/{etag}"), etag.clone()] {
+        let revalidated = request(&ctx, Method::GET, "/big.txt")
+            .header("accept-encoding", "gzip")
+            .header("if-none-match", &held)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(revalidated.status(), StatusCode::NOT_MODIFIED, "{held}");
+        assert_eq!(revalidated.headers()["etag"], format!("W/{etag}").as_str(), "{held}");
+        assert_eq!(revalidated.headers()["vary"], "accept-encoding", "{held}");
+    }
+    let plain_again = fetch(request(&ctx, Method::GET, "/big.txt").header("if-none-match", &etag)).await;
+    assert_eq!(plain_again.status, StatusCode::NOT_MODIFIED);
+    assert_eq!(plain_again.header("etag"), Some(etag.as_str()));
+    assert_eq!(plain_again.header("vary"), Some("accept-encoding"));
+    // A small asset is never compressed: nothing varies.
+    assert!(get(&ctx, "/asset.txt").await.header("vary").is_none());
     ctx.shutdown().await.unwrap();
 }
 

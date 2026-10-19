@@ -16,7 +16,7 @@ use std::sync::{Arc, LazyLock, Mutex, PoisonError};
 use axum::body::Bytes;
 use axum::extract::{Request, State};
 use axum::http::header::{
-    CACHE_CONTROL, CONTENT_SECURITY_POLICY, CONTENT_TYPE, ETAG, HeaderName, IF_NONE_MATCH, REFERER,
+    CACHE_CONTROL, CONTENT_SECURITY_POLICY, CONTENT_TYPE, ETAG, HeaderName, IF_NONE_MATCH, REFERER, VARY,
 };
 use axum::http::{HeaderMap, HeaderValue, Method, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -26,6 +26,7 @@ use regex::Regex;
 use sha2::{Digest, Sha256};
 
 use super::auth::redirect;
+use super::compression;
 use super::connectors::is_installed_shop;
 use super::http::{header, not_found, parse_query};
 use super::polaris;
@@ -310,12 +311,21 @@ fn is_not_modified(headers: &HeaderMap, etag: &HeaderValue) -> bool {
 
 fn asset_response(path: &str, data: Cow<'static, [u8]>, request_headers: &HeaderMap) -> Response {
     let mime = mime_guess::from_path(path).first_or_octet_stream();
-    let (body, etag) = shared(data);
-    let headers = [
-        (CACHE_CONTROL, HeaderValue::from_static(cache_control(path))),
-        (X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff")),
-        (ETAG, etag.clone()),
-    ];
+    let (body, mut etag) = shared(data);
+    // What the compression layer will do to a `200`, decided here so that a
+    // `304` describes the same representation: a body it compresses has a weak
+    // ETag, and every body it may compress varies with `Accept-Encoding`.
+    let compressible = compression::is_compressible(body.len());
+    if compressible && compression::accepts_compression(request_headers) {
+        etag = compression::weak_etag(&etag);
+    }
+    let mut headers = HeaderMap::new();
+    headers.insert(CACHE_CONTROL, HeaderValue::from_static(cache_control(path)));
+    headers.insert(X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff"));
+    headers.insert(ETAG, etag.clone());
+    if compressible {
+        headers.insert(VARY, HeaderValue::from_static("accept-encoding"));
+    }
     if is_not_modified(request_headers, &etag) {
         return (StatusCode::NOT_MODIFIED, headers).into_response();
     }
