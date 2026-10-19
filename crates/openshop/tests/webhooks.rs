@@ -583,3 +583,99 @@ async fn post_webhooks_runs_a_delivery_that_shopify_sends_again_once() {
     assert_eq!(recorder.count(), 6);
     ctx.shutdown().await.unwrap();
 }
+
+/// A handler that does what `behave` says for the number of its call, counting the calls.
+fn scripted<F, Fut>(behave: F) -> (Webhook, Arc<std::sync::atomic::AtomicUsize>)
+where
+    F: Fn(usize) -> Fut + Send + Sync + 'static,
+    Fut: std::future::Future<Output = openshop::Result<()>> + Send + 'static,
+{
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counted = calls.clone();
+    let webhook =
+        Webhook::new(move |_ctx: WebhookContext| behave(counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1));
+    (webhook, calls)
+}
+
+fn calls_of(calls: &Arc<std::sync::atomic::AtomicUsize>) -> usize {
+    calls.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+fn delivery(ctx: &TestContext, client: &reqwest::Client, id: &str) -> reqwest::RequestBuilder {
+    let body = r#"{"id":7}"#;
+    client
+        .post(format!("{}/webhooks", ctx.url))
+        .header("x-shopify-hmac-sha256", sign_webhook_body(body, SECRET))
+        .header("x-shopify-topic", "orders/create")
+        .header("x-shopify-shop-domain", "test.myshopify.com")
+        .header("x-shopify-webhook-id", id)
+        .body(body)
+}
+
+#[tokio::test]
+async fn post_webhooks_runs_again_a_delivery_whose_handler_failed() {
+    let (webhook, calls) = scripted(|call| async move {
+        if call == 1 {
+            bail!("first attempt failed");
+        }
+        Ok(())
+    });
+    let config = builder().webhook("ORDERS_CREATE", webhook).build().unwrap();
+    let ctx = TestContext::new(config).await.unwrap();
+
+    // The failure is still answered 200, but the delivery was not handled.
+    assert_ok(delivery(&ctx, &ctx.http, "delivery-1").send().await.unwrap()).await;
+    assert_eq!(calls_of(&calls), 1);
+    // The repeat runs, completes, and is the last to run.
+    assert_ok(delivery(&ctx, &ctx.http, "delivery-1").send().await.unwrap()).await;
+    assert_eq!(calls_of(&calls), 2);
+    assert_ok(delivery(&ctx, &ctx.http, "delivery-1").send().await.unwrap()).await;
+    assert_eq!(calls_of(&calls), 2);
+    ctx.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn post_webhooks_runs_again_a_delivery_whose_request_was_cancelled() {
+    let (webhook, calls) = scripted(|call| async move {
+        if call == 1 {
+            // Never ends: Shopify gives up first.
+            std::future::pending::<()>().await;
+        }
+        Ok(())
+    });
+    let config = builder().webhook("ORDERS_CREATE", webhook).build().unwrap();
+    let ctx = TestContext::new(config).await.unwrap();
+
+    let impatient = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_millis(1500))
+        .build()
+        .unwrap();
+    let first = tokio::spawn(delivery(&ctx, &impatient, "delivery-1").send());
+    while calls_of(&calls) == 0 {
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+
+    // While the handler runs, a repeat is not taken for handled: Shopify is asked to come back.
+    let meanwhile = delivery(&ctx, &ctx.http, "delivery-1").send().await.unwrap();
+    assert_eq!(meanwhile.status(), 503);
+    assert_eq!(meanwhile.headers()["retry-after"], "5");
+    assert_eq!(calls_of(&calls), 1);
+
+    // Shopify hangs up: the handler is cancelled.
+    assert!(first.await.unwrap().is_err());
+    let mut retry = delivery(&ctx, &ctx.http, "delivery-1").send().await.unwrap();
+    for _ in 0..100 {
+        if retry.status() != 503 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        retry = delivery(&ctx, &ctx.http, "delivery-1").send().await.unwrap();
+    }
+    assert_ok(retry).await;
+    assert_eq!(calls_of(&calls), 2, "the retry ran the handler");
+
+    // Completed: the next repeat is acknowledged and not run.
+    assert_ok(delivery(&ctx, &ctx.http, "delivery-1").send().await.unwrap()).await;
+    assert_eq!(calls_of(&calls), 2);
+    ctx.shutdown().await.unwrap();
+}

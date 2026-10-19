@@ -10,10 +10,13 @@
     take `&[u8]`; `sign_webhook_body` takes anything that is bytes.
   - A webhook delivery that Shopify sends again (same `X-Shopify-Webhook-Id`,
     or `X-Shopify-Event-Id` without it) is acknowledged and its handler is
-    not run again, within an hour. The memory is the process's, bounded to
-    100,000 deliveries, and keyed by app, topic, id and signature; a handler
-    must still be idempotent across replicas and restarts. A delivery without
-    either header is run as before.
+    not run again, within an hour, once its handler has completed. A handler
+    that fails or panics, or a request Shopify cancels by hanging up, leaves
+    nothing remembered and the repeat runs; a repeat that arrives while the
+    handler is still running is answered `503` with `Retry-After: 5`. The
+    memory is the process's, bounded to 100,000 deliveries, and keyed by app,
+    topic, id and signature; a handler must still be idempotent across
+    replicas and restarts. A delivery without either header is run as before.
   - A refused session token on `/api` is answered `Unauthorized: invalid
     session token`, where the answer named the claim that failed or the apps
     configured. The reason is logged as a warning. **Behaviour change** for a

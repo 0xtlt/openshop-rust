@@ -12,7 +12,8 @@ use std::time::Duration;
 use axum::Router;
 use axum::body::Bytes;
 use axum::extract::State;
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::header::RETRY_AFTER;
+use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::Response;
 use axum::routing::post;
 use futures::FutureExt;
@@ -37,40 +38,111 @@ pub(crate) const REMEMBER: Duration = Duration::from_secs(60 * 60);
 /// oldest are forgotten first.
 const MAX_REMEMBERED: usize = 100_000;
 
-/// The deliveries this process has run. It is in memory: another replica, or
-/// a restart, does not know them, and a handler must still be safe to run
-/// twice for a delivery (see the [webhooks reference](../../../docs/src/reference/webhooks.md)).
+/// What the process knows of a delivery.
+#[derive(Clone, Copy)]
+enum Known {
+    /// A handler is running for it.
+    Running(Instant),
+    /// A handler completed.
+    Done(Instant),
+}
+
+impl Known {
+    fn at(self) -> Instant {
+        match self {
+            Self::Running(at) | Self::Done(at) => at,
+        }
+    }
+}
+
+/// The deliveries this process has run, or is running. It is in memory:
+/// another replica, or a restart, does not know them, and a handler must still
+/// be safe to run twice for a delivery (see the
+/// [webhooks reference](../../../docs/src/reference/webhooks.md)).
 #[derive(Default)]
 pub(crate) struct WebhookDeliveries {
-    seen: Mutex<HashMap<String, Instant>>,
+    seen: Mutex<HashMap<String, Known>>,
+}
+
+/// What [`WebhookDeliveries::claim`] found.
+pub(crate) enum Claim<'a> {
+    /// Nobody has run this delivery: the caller does, and says how it went.
+    First(Delivery<'a>),
+    /// A handler is running for it right now.
+    Running,
+    /// A handler completed for it.
+    Done,
+}
+
+/// The claim on a delivery whose handler runs. Unless [`Delivery::complete`]
+/// is called, the claim is given up when this is dropped: the handler failed,
+/// or its request was cancelled (Shopify hung up), and the delivery that
+/// Shopify sends again must run.
+pub(crate) struct Delivery<'a> {
+    deliveries: &'a WebhookDeliveries,
+    key: String,
+    started: Instant,
+    completed: bool,
+}
+
+impl Delivery<'_> {
+    /// The handler completed: the repeats of this delivery are not run.
+    pub(crate) fn complete(mut self) {
+        self.completed = true;
+        self.deliveries.lock().insert(self.key.clone(), Known::Done(self.started));
+    }
+}
+
+impl Drop for Delivery<'_> {
+    fn drop(&mut self) {
+        if self.completed {
+            return;
+        }
+        // Only the claim that is still the running one is given up: one that
+        // took too long was replaced by another.
+        let mut seen = self.deliveries.lock();
+        if matches!(seen.get(&self.key), Some(Known::Running(at)) if *at == self.started) {
+            seen.remove(&self.key);
+        }
+    }
 }
 
 impl WebhookDeliveries {
-    /// Takes note of a delivery. `false` when it was already there: the
-    /// delivery was run, or is being run.
+    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<String, Known>> {
+        self.seen.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Takes the delivery to run it, unless it was run or is being run.
     ///
     /// The key names the app and the topic as well as the id, and carries the
     /// signature: the headers are not signed, so a delivery with an id that was
     /// not sent by Shopify with that body is another delivery.
-    pub(crate) fn first_time(&self, shopify_app: &str, topic: &str, id: &str, signature: &str) -> bool {
-        self.first_time_at(Instant::now(), shopify_app, topic, id, signature)
+    pub(crate) fn claim(&self, shopify_app: &str, topic: &str, id: &str, signature: &str) -> Claim<'_> {
+        self.claim_at(Instant::now(), shopify_app, topic, id, signature)
     }
 
-    fn first_time_at(&self, now: Instant, shopify_app: &str, topic: &str, id: &str, signature: &str) -> bool {
+    fn claim_at(&self, now: Instant, shopify_app: &str, topic: &str, id: &str, signature: &str) -> Claim<'_> {
         let key = format!("{shopify_app}\n{topic}\n{id}\n{signature}");
-        let mut seen = self.seen.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        if seen.get(&key).is_some_and(|at| now.duration_since(*at) < REMEMBER) {
-            return false;
+        let mut seen = self.lock();
+        match seen.get(&key) {
+            Some(Known::Done(at)) if now.duration_since(*at) < REMEMBER => return Claim::Done,
+            Some(Known::Running(at)) if now.duration_since(*at) < REMEMBER => return Claim::Running,
+            _ => {}
         }
         if seen.len() >= MAX_REMEMBERED {
-            seen.retain(|_, at| now.duration_since(*at) < REMEMBER);
+            seen.retain(|_, known| now.duration_since(known.at()) < REMEMBER);
             if seen.len() >= MAX_REMEMBERED {
-                let oldest = seen.values().min().copied();
-                seen.retain(|_, at| Some(*at) != oldest);
+                let oldest = seen.values().map(|known| known.at()).min();
+                seen.retain(|_, known| Some(known.at()) != oldest);
             }
         }
-        seen.insert(key, now);
-        true
+        seen.insert(key.clone(), Known::Running(now));
+        Claim::First(Delivery {
+            deliveries: self,
+            key,
+            started: now,
+            completed: false,
+        })
     }
 }
 
@@ -124,14 +196,23 @@ async fn handle(State(app): State<OpenShop>, headers: HeaderMap, body: Bytes) ->
     let delivery_id = header(&headers, "x-shopify-webhook-id")
         .or_else(|| header(&headers, "x-shopify-event-id"))
         .filter(|id| !id.is_empty());
-    if let Some(id) = delivery_id
-        && !app.webhook_deliveries().first_time(&shopify_app.handle, &topic, id, &hmac)
-    {
-        logger::info(format!(
-            "[openshop] Webhook \"{topic}\" delivery {id} was already received: not run again"
-        ));
-        return ok();
-    }
+    let claim = match delivery_id.map(|id| (id, app.webhook_deliveries().claim(&shopify_app.handle, &topic, id, &hmac))) {
+        Some((id, Claim::Done)) => {
+            logger::info(format!(
+                "[openshop] Webhook \"{topic}\" delivery {id} was already handled: not run again"
+            ));
+            return ok();
+        }
+        // Not acknowledged: the handler may yet fail or be cancelled, and then
+        // the delivery has not been handled. Shopify sends it again.
+        Some((_, Claim::Running)) => {
+            let mut response = json_error(StatusCode::SERVICE_UNAVAILABLE, "Delivery in progress");
+            response.headers_mut().insert(RETRY_AFTER, HeaderValue::from_static("5"));
+            return response;
+        }
+        Some((_, Claim::First(delivery))) => Some(delivery),
+        None => None,
+    };
 
     let context = WebhookContext {
         topic: topic.clone(),
@@ -152,12 +233,22 @@ async fn handle(State(app): State<OpenShop>, headers: HeaderMap, body: Bytes) ->
         Ok(outcome) => outcome.err(),
         Err(_) => Some(Panicked::error("handler panicked")),
     };
-    if let Some(error) = failure {
-        report::error(&error);
-        logger::error_with(
-            format!("[openshop] Webhook handler error for \"{topic}\""),
-            json!({ "error": error_message(&error) }),
-        );
+    match failure {
+        Some(error) => {
+            report::error(&error);
+            logger::error_with(
+                format!("[openshop] Webhook handler error for \"{topic}\""),
+                json!({ "error": error_message(&error) }),
+            );
+            // A delivery whose handler failed is not handled: dropping the
+            // claim lets a repeat of it run.
+            drop(claim);
+        }
+        None => {
+            if let Some(delivery) = claim {
+                delivery.complete();
+            }
+        }
     }
 
     ok()
@@ -173,21 +264,59 @@ pub fn create_webhook_routes() -> Router<OpenShop> {
 mod tests {
     use super::*;
 
+    fn first<'a>(claim: Claim<'a>) -> Delivery<'a> {
+        match claim {
+            Claim::First(delivery) => delivery,
+            Claim::Running => panic!("running"),
+            Claim::Done => panic!("done"),
+        }
+    }
+
     #[test]
     fn a_delivery_is_run_once_within_the_time_it_is_remembered() {
         let deliveries = WebhookDeliveries::default();
         let start = Instant::now();
-        assert!(deliveries.first_time_at(start, "app", "ORDERS_CREATE", "id-1", "sig"));
-        assert!(!deliveries.first_time_at(start + Duration::from_secs(5), "app", "ORDERS_CREATE", "id-1", "sig"));
+        first(deliveries.claim_at(start, "app", "ORDERS_CREATE", "id-1", "sig")).complete();
+        assert!(matches!(
+            deliveries.claim_at(start + Duration::from_secs(5), "app", "ORDERS_CREATE", "id-1", "sig"),
+            Claim::Done
+        ));
         // Another id, topic, app or body is another delivery.
-        assert!(deliveries.first_time_at(start, "app", "ORDERS_CREATE", "id-2", "sig"));
-        assert!(deliveries.first_time_at(start, "app", "ORDERS_PAID", "id-1", "sig"));
-        assert!(deliveries.first_time_at(start, "other", "ORDERS_CREATE", "id-1", "sig"));
-        assert!(deliveries.first_time_at(start, "app", "ORDERS_CREATE", "id-1", "another-sig"));
+        for (app, topic, id, signature) in [
+            ("app", "ORDERS_CREATE", "id-2", "sig"),
+            ("app", "ORDERS_PAID", "id-1", "sig"),
+            ("other", "ORDERS_CREATE", "id-1", "sig"),
+            ("app", "ORDERS_CREATE", "id-1", "another-sig"),
+        ] {
+            first(deliveries.claim_at(start, app, topic, id, signature)).complete();
+        }
         // Forgotten after the hour, and it is a first time again.
         let later = start + REMEMBER;
-        assert!(deliveries.first_time_at(later, "app", "ORDERS_CREATE", "id-1", "sig"));
-        assert!(!deliveries.first_time_at(later, "app", "ORDERS_CREATE", "id-1", "sig"));
+        first(deliveries.claim_at(later, "app", "ORDERS_CREATE", "id-1", "sig")).complete();
+        assert!(matches!(
+            deliveries.claim_at(later, "app", "ORDERS_CREATE", "id-1", "sig"),
+            Claim::Done
+        ));
+    }
+
+    #[test]
+    fn a_delivery_that_is_not_completed_can_be_run_again() {
+        let deliveries = WebhookDeliveries::default();
+        let start = Instant::now();
+        let delivery = first(deliveries.claim_at(start, "app", "T", "id", "sig"));
+        // While the handler runs, a repeat is neither run nor taken for handled.
+        assert!(matches!(deliveries.claim_at(start, "app", "T", "id", "sig"), Claim::Running));
+        // The handler failed, or its request was cancelled: the claim is dropped.
+        drop(delivery);
+        let delivery = first(deliveries.claim_at(start, "app", "T", "id", "sig"));
+        delivery.complete();
+        assert!(matches!(deliveries.claim_at(start, "app", "T", "id", "sig"), Claim::Done));
+
+        // A handler that never ends does not hold the delivery for ever.
+        let stuck = first(deliveries.claim_at(start, "app", "T", "stuck", "sig"));
+        assert!(matches!(deliveries.claim_at(start, "app", "T", "stuck", "sig"), Claim::Running));
+        first(deliveries.claim_at(start + REMEMBER, "app", "T", "stuck", "sig")).complete();
+        drop(stuck);
     }
 
     #[test]
@@ -196,14 +325,17 @@ mod tests {
         let start = Instant::now();
         for index in 0..MAX_REMEMBERED + 10 {
             let now = start + Duration::from_millis(index as u64);
-            assert!(deliveries.first_time_at(now, "app", "T", &index.to_string(), "sig"));
+            first(deliveries.claim_at(now, "app", "T", &index.to_string(), "sig")).complete();
         }
-        let size = deliveries.seen.lock().unwrap().len();
+        let size = deliveries.lock().len();
         assert!(size <= MAX_REMEMBERED, "{size}");
         // The oldest were forgotten, the latest are not.
         let now = start + Duration::from_millis(MAX_REMEMBERED as u64 + 20);
-        assert!(!deliveries.first_time_at(now, "app", "T", &(MAX_REMEMBERED + 9).to_string(), "sig"));
-        assert!(deliveries.first_time_at(now, "app", "T", "0", "sig"));
+        assert!(matches!(
+            deliveries.claim_at(now, "app", "T", &(MAX_REMEMBERED + 9).to_string(), "sig"),
+            Claim::Done
+        ));
+        first(deliveries.claim_at(now, "app", "T", "0", "sig")).complete();
     }
 
     #[test]

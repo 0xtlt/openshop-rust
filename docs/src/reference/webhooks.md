@@ -159,8 +159,14 @@ OpenShop does not provide automatic retries for webhook handlers.
 
 Shopify can deliver the same event more than once, with the same
 `X-Shopify-Webhook-Id` (or `X-Shopify-Event-Id`, when the former is missing).
-After the signature is verified, OpenShop remembers the delivery for an hour
-and answers `200` to a repeat without running the handler again. The memory is
+After the signature is verified, OpenShop remembers a delivery whose handler
+completed for an hour and answers `200` to a repeat without running the handler
+again. A delivery is only remembered once its handler has completed: if the
+handler returns an error or panics, or Shopify hangs up before it ends (the
+request is cancelled), nothing is remembered and the delivery that Shopify
+sends again runs. While a handler is still running, a repeat of the same
+delivery is answered `503` with `Retry-After: 5`, not `200`, so that Shopify
+comes back and finds either the handler completed or the delivery free to run. The memory is
 that of the process: another replica, or a restart, does not know a delivery,
 and a handler can still run twice for one event. The key is the app, the topic,
 the id and the signature of the body, so a request that repeats an id with
