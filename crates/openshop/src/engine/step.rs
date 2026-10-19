@@ -166,13 +166,14 @@ impl StepExecutor {
 
     /// Whether the row `id` is there. It was written by an earlier try of an
     /// insert whose answer was lost: `id` is generated for the insert and
-    /// belongs to nobody else.
-    async fn is_stored(&self, id: Uuid) -> bool {
-        sqlx::query_scalar::<_, i32>("SELECT 1 FROM step_results WHERE id = $1")
+    /// belongs to nobody else. An error is not an absent row: it is returned,
+    /// and the insert is tried again with its recognition.
+    async fn is_stored(&self, id: Uuid) -> Result<bool> {
+        let row = sqlx::query_scalar::<_, i32>("SELECT 1 FROM step_results WHERE id = $1")
             .bind(id)
             .fetch_optional(&self.db)
-            .await
-            .is_ok_and(|row| row.is_some())
+            .await?;
+        Ok(row.is_some())
     }
 
     /// Fails when a write was refused because the run is not owned any more.
@@ -248,7 +249,10 @@ impl StepExecutor {
                 .fetch_optional(&self.db)
                 .await;
             match result {
-                Err(error) if is_unique_violation(&error) && self.is_stored(new_id).await => Ok(Some((new_id,))),
+                Err(error) if is_unique_violation(&error) => match self.is_stored(new_id).await? {
+                    true => Ok(Some((new_id,))),
+                    false => Err(error.into()),
+                },
                 other => Ok(other?),
             }
         })
@@ -412,7 +416,10 @@ impl StepExecutor {
                 .execute(&self.db)
                 .await;
             match result {
-                Err(error) if is_unique_violation(&error) && self.is_stored(new_id).await => Ok(true),
+                Err(error) if is_unique_violation(&error) => match self.is_stored(new_id).await? {
+                    true => Ok(true),
+                    false => Err(error.into()),
+                },
                 other => Ok(other?.rows_affected() > 0),
             }
         })

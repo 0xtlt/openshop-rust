@@ -190,7 +190,7 @@ pub async fn write_fault_hits(db: &PgPool, table: &str) -> i64 {
 /// connection for a statement that went through.
 pub struct DropProxy {
     port: u16,
-    armed: Arc<std::sync::Mutex<Option<String>>>,
+    armed: Arc<std::sync::Mutex<Vec<String>>>,
     cuts: Arc<std::sync::atomic::AtomicUsize>,
 }
 
@@ -200,7 +200,7 @@ impl DropProxy {
         let upstream = (options.get_host().to_string(), options.get_port());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("proxy port");
         let port = listener.local_addr().unwrap().port();
-        let armed = Arc::new(std::sync::Mutex::new(None));
+        let armed = Arc::new(std::sync::Mutex::new(Vec::new()));
         let cuts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         tokio::spawn({
             let (armed, cuts) = (armed.clone(), cuts.clone());
@@ -217,9 +217,10 @@ impl DropProxy {
     }
 
     /// Cuts the connection that sends a statement containing `statement`, after
-    /// the server committed it.
+    /// the server committed it. Armed more than once, it cuts as many
+    /// connections, one per statement.
     pub fn drop_answer_of(&self, statement: &str) {
-        *self.armed.lock().unwrap() = Some(statement.to_string());
+        self.armed.lock().unwrap().push(statement.to_string());
     }
 
     /// How many connections were cut.
@@ -252,7 +253,7 @@ const EXECUTING: u8 = 3;
 async fn pipe(
     client: tokio::net::TcpStream,
     server: tokio::net::TcpStream,
-    armed: Arc<std::sync::Mutex<Option<String>>>,
+    armed: Arc<std::sync::Mutex<Vec<String>>>,
     cuts: Arc<std::sync::atomic::AtomicUsize>,
 ) {
     use std::sync::atomic::{AtomicU8, Ordering};
@@ -274,8 +275,8 @@ async fn pipe(
                     let mut armed = armed.lock().unwrap();
                     if phase.load(Ordering::SeqCst) == PREPARED {
                         phase.store(EXECUTING, Ordering::SeqCst);
-                    } else if armed.as_deref().is_some_and(|statement| text.contains(statement)) {
-                        *armed = None;
+                    } else if let Some(at) = armed.iter().position(|statement| text.contains(statement.as_str())) {
+                        armed.remove(at);
                         phase.store(PREPARING, Ordering::SeqCst);
                     }
                 }
