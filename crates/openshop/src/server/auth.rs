@@ -236,3 +236,19 @@ pub fn create_auth_routes() -> Router<OpenShop> {
         .route("/auth/callback", get(callback))
         .route("/auth/webhooks/app-uninstalled", post(app_uninstalled))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn spent_states_are_forgotten_once_they_would_have_expired() {
+        let now = Utc::now().timestamp();
+        assert!(spend("spent-test-old".into(), now - 1));
+        assert!(spend("spent-test-live".into(), now + 60));
+        assert!(!spend("spent-test-live".into(), now + 60));
+        let spent = SPENT.lock().unwrap();
+        assert!(!spent.contains_key("spent-test-old"));
+        assert!(spent.contains_key("spent-test-live"));
+    }
+}
