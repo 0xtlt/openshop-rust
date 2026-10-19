@@ -395,12 +395,17 @@
   sleep is retried as far as the policy says. Breaking: `attempts` of a run
   that slept is lower than before, and the steps run after a sleep belong to
   the attempt that slept. No schema change.
-- Only the last claim of a run can record its outcome. The write that ends an
-  attempt, the heartbeat and the failure of a run carry the worker and the
-  attempt that claimed it, so a slow execution whose lease expired and whose
-  run was claimed again, by another worker or by the same one, can no longer
-  finish, sleep, fail or cancel it, and stops at its next heartbeat. It no
-  longer takes the cancellation token of the new execution with it either.
+- Only the last claim of a run can record its outcome. Each claim sets a new
+  `lease_id` on the run, and the write that ends an attempt, the heartbeat and
+  the failure of a run only apply while the worker holds it. A slow execution
+  whose lease expired, or whose run was canceled and retried, and which was
+  claimed again by another worker or by the same one, can no longer finish,
+  sleep, fail or cancel it, and stops at its next heartbeat. It no longer takes
+  the cancellation token of the new execution with it either. The framework
+  schema has a migration for it, `openshop_run_lease`, one nullable column on
+  `flow_runs` that the TypeScript runtime ignores: run `migrate generate` then
+  `migrate` before starting the new worker (`migrate check` fails until it is
+  there; `dev` adds the column on start).
 
 ## 0.0.12-beta.0
 

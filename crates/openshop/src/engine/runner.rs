@@ -43,6 +43,8 @@ pub struct RunFlowOptions {
     /// When set, the outcome is only recorded if this worker still owns the run.
     pub worker_id: Option<String>,
     pub attempt: Option<i32>,
+    /// The claim the worker holds on the run: the outcome is only recorded while it does.
+    pub lease_id: Option<Uuid>,
     pub on_heartbeat: Option<HeartbeatFn>,
     /// Delay between two heartbeats. Defaults to [`HEARTBEAT_INTERVAL`].
     pub heartbeat_interval: Option<Duration>,
@@ -60,6 +62,7 @@ impl RunFlowOptions {
             shopify_app: None,
             worker_id: None,
             attempt: None,
+            lease_id: None,
             on_heartbeat: None,
             heartbeat_interval: None,
             connectors: None,
@@ -83,6 +86,11 @@ impl RunFlowOptions {
 
     pub fn attempt(mut self, attempt: i32) -> Self {
         self.attempt = Some(attempt);
+        self
+    }
+
+    pub fn lease_id(mut self, lease_id: Option<Uuid>) -> Self {
+        self.lease_id = lease_id;
         self
     }
 
@@ -178,14 +186,14 @@ impl<'a> RunUpdate<'a> {
     }
 }
 
-/// Who an execution is, when a worker leased the run for it. A claim of the
-/// run bumps its `attempts`, except when it wakes up from a sleep. So the
-/// worker and the attempt tell this execution from every other one, including
-/// an earlier one of the same worker whose lease expired.
+/// Who an execution is, when a worker leased the run for it. Every claim of
+/// the run sets a new `lease_id`, which tells this execution from every other
+/// one, including an earlier one of the same worker whose lease expired or
+/// whose run was canceled and retried, which resets `attempts`.
 #[derive(Clone, Copy)]
 struct Owner<'a> {
     worker_id: &'a str,
-    attempt: Option<i32>,
+    lease_id: Option<Uuid>,
 }
 
 /// Applies an update only while the run is owned, and reports whether it was.
@@ -196,9 +204,10 @@ async fn finish_run(db: &PgPool, run_id: Uuid, owner: Option<Owner<'_>>, update:
            error = CASE WHEN $2 = 'completed' THEN NULL ELSE COALESCE($3, error) END, \
            available_at = COALESCE($4, available_at), \
            completed_at = CASE WHEN $5 THEN now() ELSE completed_at END, \
-           worker_id = NULL \
+           worker_id = NULL, \
+           lease_id = NULL \
          WHERE id = $1 AND ($6::text IS NULL \
-           OR (worker_id = $6 AND status = 'running' AND attempts = COALESCE($7, attempts)))",
+           OR (worker_id = $6 AND status = 'running' AND ($7::uuid IS NULL OR lease_id = $7)))",
     )
     .bind(run_id)
     .bind(update.status)
@@ -206,7 +215,7 @@ async fn finish_run(db: &PgPool, run_id: Uuid, owner: Option<Owner<'_>>, update:
     .bind(update.available_at)
     .bind(update.completed)
     .bind(owner.map(|owner| owner.worker_id))
-    .bind(owner.and_then(|owner| owner.attempt))
+    .bind(owner.and_then(|owner| owner.lease_id))
     .execute(db)
     .await?;
     Ok(result.rows_affected() > 0)
@@ -284,7 +293,7 @@ async fn run_attempt(app: &OpenShop, opts: RunFlowOptions) -> Result<RunOutcome>
     });
     let owner = opts.worker_id.as_deref().map(|worker_id| Owner {
         worker_id,
-        attempt: opts.attempt,
+        lease_id: opts.lease_id,
     });
     let step = StepExecutor::new(
         db.clone(),
