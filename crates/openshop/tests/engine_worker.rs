@@ -1866,3 +1866,74 @@ async fn a_release_that_waits_does_not_hold_back_the_shutdown_nor_the_other_rele
     assert_eq!(stuck.worker_id.as_deref(), Some(worker.worker_id()));
     test.cleanup().await;
 }
+
+/// Counts the flows alive at once.
+struct Live(Arc<AtomicUsize>);
+
+impl Drop for Live {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+#[tokio::test]
+async fn a_flow_whose_lease_ran_out_is_gone_before_another_worker_starts_the_run() {
+    let (live, starts) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+    let release = CancellationToken::new();
+    let flow = Flow::new("lease-overlap", {
+        let (live, starts, release) = (live.clone(), starts.clone(), release.clone());
+        move |_ctx: FlowContext| {
+            let (live, starts, release) = (live.clone(), starts.clone(), release.clone());
+            async move {
+                live.fetch_add(1, Ordering::SeqCst);
+                starts.fetch_add(1, Ordering::SeqCst);
+                let _alive = Live(live);
+                release.cancelled().await;
+                Ok(())
+            }
+        }
+    })
+    .concurrency(Concurrency::Allow);
+    let config = create_config([flow]);
+    let test = TestApp::new(config.clone()).await;
+    // The first worker has a pool of one connection, which the test then keeps:
+    // its heartbeat waits for a connection that does not come, and no lock keeps
+    // the other worker from taking the run over.
+    let first_pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect_with((*test.db.connect_options()).clone())
+        .await
+        .unwrap();
+    let first_app =
+        OpenShop::with_transport(config, first_pool.clone(), common::test_env(), test.transport.clone()).unwrap();
+    let settings = WorkerConfig::new()
+        .concurrency(1)
+        .lease_duration(Duration::from_secs(2))
+        .poll_interval(Duration::from_millis(20))
+        .poll_max_interval(Duration::from_millis(20));
+    dispatch(&test, "lease-overlap").await;
+    let first = Worker::new(first_app, settings);
+    first.start().await;
+    wait_until("the first worker to start the run", || {
+        starts.load(Ordering::SeqCst) == 1
+    })
+    .await;
+    let held_connection = first_pool.acquire().await.unwrap();
+
+    let second = Worker::new(test.app.clone(), settings);
+    second.start().await;
+    wait_until("the second worker to take the run over", || {
+        starts.load(Ordering::SeqCst) == 2
+    })
+    .await;
+    // The flow of the first worker was dropped before the other one began.
+    let alive_with_the_new_owner = live.load(Ordering::SeqCst);
+
+    drop(held_connection);
+    release.cancel();
+    first.stop().await;
+    second.stop().await;
+    first_pool.close().await;
+    test.cleanup().await;
+    assert_eq!(alive_with_the_new_owner, 1, "two flows of one run were alive at once");
+}

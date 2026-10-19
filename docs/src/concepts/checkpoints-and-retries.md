@@ -107,9 +107,11 @@ from the one of a worker, so replicas whose clocks differ agree on when a lease
 ends. The extension has a time limit of a quarter of the lease (at least 250 ms,
 at most 10 s), which covers the wait for a free connection of the pool and the
 statement itself. A failed extension is logged (`Heartbeat of run … failed`: the
-first time and every tenth in a row) and tried again at the next heartbeat. When
-none succeeded for a whole lease, the lease has expired and another worker may
-own the run: the flow is dropped, with whatever it was doing at its current
+first time and every tenth in a row) and tried again at the next heartbeat. The
+worker counts the lease from the moment it sent the last request that extended
+it, less a tenth of the lease. When that time has passed, the lease has
+expired and another worker may own the run, whether or not a heartbeat is still
+waiting for an answer: the flow is dropped, with whatever it was doing at its current
 `.await`, no outcome is recorded, and the run is claimed again. Code that never
 yields, or a task started with `tokio::spawn`, is not reached by a drop. An application that runs many flows at once should leave room in the pool
 for the heartbeats: a pool kept busy by the flows delays them (see
