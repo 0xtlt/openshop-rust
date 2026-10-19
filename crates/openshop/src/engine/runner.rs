@@ -2,7 +2,7 @@
 
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use anyhow::{Result, anyhow};
 use chrono::{DateTime, Utc};
@@ -52,6 +52,11 @@ pub struct RunFlowOptions {
     pub on_heartbeat: Option<HeartbeatFn>,
     /// Delay between two heartbeats. Defaults to [`HEARTBEAT_INTERVAL`].
     pub heartbeat_interval: Option<Duration>,
+    /// The instant just before the statement that leased the run was sent. The
+    /// lease ends no sooner than this plus `lease_duration`: the database dates
+    /// it from the claim, which may have waited for a connection or a lock before
+    /// it answered. Without it, the lease is counted from the start of the run.
+    pub claimed_at: Option<tokio::time::Instant>,
     /// How long a lease lasts. When the heartbeat fails to extend it for that
     /// long, the lease has expired and another worker may have taken the run:
     /// the execution stops, and records nothing. Without it, the heartbeat
@@ -78,6 +83,7 @@ impl RunFlowOptions {
             lease_id: None,
             on_heartbeat: None,
             heartbeat_interval: None,
+            claimed_at: None,
             lease_duration: None,
             interrupt: None,
             connectors: None,
@@ -155,6 +161,14 @@ impl Drop for RunGuard {
         }
         self.abort.cleanup();
     }
+}
+
+/// Takes the flow away from an execution whose lease ran out.
+fn expire(run_id: Uuid, halt: &CancellationToken) {
+    logger::warn(format!(
+        "[openshop] Lease of run {run_id} expired without a heartbeat, stopping its execution"
+    ));
+    halt.cancel();
 }
 
 pub(crate) fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
@@ -281,23 +295,62 @@ async fn run_attempt(app: &OpenShop, opts: RunFlowOptions) -> Result<RunOutcome>
     let signal = abort.token.clone();
 
     let heartbeat_interval = opts.heartbeat_interval.unwrap_or(HEARTBEAT_INTERVAL);
+    let lease = opts.lease_duration;
+    // The lease ends, for every other worker, `lease` after the database got the
+    // last request that extended it (or the claim). This task cannot know when
+    // that was exactly, only when it sent the request: the lease ends no sooner
+    // than that, and a margin covers the time to hear the answer.
+    let margin = lease.map_or(Duration::ZERO, |lease| lease / 10);
+    let deadline_after = move |sent: tokio::time::Instant| lease.map(|lease| sent + lease.saturating_sub(margin));
+    let first_deadline = deadline_after(opts.claimed_at.unwrap_or_else(tokio::time::Instant::now));
+    if first_deadline.is_some_and(|deadline| deadline <= tokio::time::Instant::now()) {
+        // The claim took so long to answer that the lease is about to end, or has: another
+        // worker may take the run before this flow could do anything. It is not started.
+        logger::warn(format!(
+            "[openshop] Lease of run {run_id} was about to expire when it was claimed, not starting it"
+        ));
+        abort.cleanup();
+        return Ok(RunOutcome::LeaseLost);
+    }
     let heartbeat = opts.on_heartbeat.clone().map(|on_heartbeat| {
         let halt = halt.clone();
-        let lease = opts.lease_duration;
         tokio::spawn(async move {
             let mut ticks = tokio::time::interval(heartbeat_interval);
             ticks.tick().await;
-            // The lease was taken when the run was claimed, a moment ago.
-            let mut extended_at = Instant::now();
+            // The deadline is raced against everything this task waits for, a tick as well
+            // as a heartbeat that hangs on a saturated pool or a lock: once it has passed,
+            // another worker may own the run, and the flow must be gone before it starts.
+            let mut deadline = first_deadline;
+            let expiry = |deadline: Option<tokio::time::Instant>| async move {
+                match deadline {
+                    Some(deadline) => tokio::time::sleep_until(deadline).await,
+                    None => std::future::pending().await,
+                }
+            };
             let mut failures: u32 = 0;
             loop {
                 tokio::select! {
                     _ = ticks.tick() => {}
                     // Nothing to extend once the execution is taken away.
                     _ = halt.cancelled() => return,
+                    _ = expiry(deadline) => {
+                        expire(run_id, &halt);
+                        return;
+                    }
                 }
-                let started = Instant::now();
-                match on_heartbeat().await {
+                let sent = tokio::time::Instant::now();
+                let result = tokio::select! {
+                    result = on_heartbeat() => result,
+                    _ = halt.cancelled() => return,
+                    _ = expiry(deadline) => {
+                        logger::warn(format!(
+                            "[openshop] Heartbeat of run {run_id} did not answer before the lease ran out"
+                        ));
+                        expire(run_id, &halt);
+                        return;
+                    }
+                };
+                match result {
                     // Another execution owns the run, or it was canceled: stop the flow.
                     Ok(false) => {
                         halt.cancel();
@@ -310,26 +363,17 @@ async fn run_attempt(app: &OpenShop, opts: RunFlowOptions) -> Result<RunOutcome>
                             ));
                         }
                         failures = 0;
-                        extended_at = started;
+                        deadline = deadline_after(sent);
                     }
-                    // A failed extension is tried again on the next tick, until the lease
-                    // has run out: then another worker may own the run, and going on
-                    // could run its steps twice at once. The first failure and every
-                    // tenth after it are logged, so that an outage does not flood the logs.
+                    // A failed extension is tried again on the next tick, until the deadline
+                    // above. The first failure and every tenth after it are logged, so that
+                    // an outage does not flood the logs.
                     Err(error) => {
                         failures += 1;
                         if failures == 1 || failures.is_multiple_of(10) {
                             logger::warn(format!(
                                 "[openshop] Heartbeat of run {run_id} failed ({failures} in a row): {error:#}"
                             ));
-                        }
-                        if lease.is_some_and(|lease| extended_at.elapsed() >= lease) {
-                            logger::warn(format!(
-                                "[openshop] Lease of run {run_id} expired without a heartbeat, \
-                                 stopping its execution"
-                            ));
-                            halt.cancel();
-                            return;
                         }
                     }
                 }

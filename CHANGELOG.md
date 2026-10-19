@@ -872,8 +872,12 @@
   limit of a quarter of the lease (250 ms to 10 s), for the wait for a
   connection of a busy pool as well as for the statement, which the server
   enforces with `statement_timeout`. A failure is logged as `Heartbeat of run
-  … failed` (the first and every tenth in a row). When the lease could not be
-  extended for a whole `lease_duration`, it has expired: the flow is dropped
+  … failed` (the first and every tenth in a row). The worker keeps a deadline for
+  the lease, the moment it sent the last request that extended it (the claim for the
+  first one, not the moment its answer came back; a run whose claim answered
+  after that deadline is not started) plus `lease_duration` less a tenth, and it runs while the worker waits for a tick
+  as well as for a heartbeat stuck on a saturated pool or a lock. When it
+  passes, the lease has expired: the flow is dropped
   (not only told to stop through its signal) and nothing is recorded, so a run
   another worker may have claimed is not run by two at once; the same when the
   run turns out to be owned by another execution. The step that was running is

@@ -208,6 +208,10 @@ struct ClaimedRun {
     /// Names this claim: the claim sets it, and every write of the execution checks it.
     lease_id: Option<Uuid>,
     exhausted: bool,
+    /// Just before the claim was sent. The database dates the lease from the
+    /// claim, so the lease ends no sooner than this instant plus its duration.
+    #[sqlx(skip)]
+    claimed_at: Option<tokio::time::Instant>,
 }
 
 /// A run this worker executes: the claim it holds, the token that stops the
@@ -399,12 +403,16 @@ impl Inner {
     /// Leases runs, and fails the ones that used all their attempts. Resolves
     /// to the runs to execute and to how many were failed.
     async fn claim(&self, limit: usize) -> Result<(Vec<ClaimedRun>, usize)> {
-        let rows = sqlx::query_as::<_, ClaimedRun>(CLAIM_SQL)
+        let sent = tokio::time::Instant::now();
+        let mut rows = sqlx::query_as::<_, ClaimedRun>(CLAIM_SQL)
             .bind(&self.worker_id)
             .bind(self.lease_ms())
             .bind(limit as i64)
             .fetch_all(self.app.db())
             .await?;
+        for row in &mut rows {
+            row.claimed_at = Some(sent);
+        }
         let (exhausted, claimed): (Vec<_>, Vec<_>) = rows.into_iter().partition(|run| run.exhausted);
         for run in &exhausted {
             report_failed_run(&FailedRun {
@@ -583,6 +591,7 @@ impl Inner {
             .worker_id(self.worker_id.clone())
             .attempt(claimed.attempts)
             .lease_id(claimed.lease_id);
+        options.claimed_at = claimed.claimed_at;
         options.on_heartbeat = Some(heartbeat);
         options.lease_duration = Some(Duration::from_millis(self.config.lease_duration_ms));
         options.interrupt = Some(interrupt);
