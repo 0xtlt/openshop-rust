@@ -13,7 +13,7 @@ An OpenShop app has two command lines:
 | `openshop init [<dir>]` | — | Scaffold a new project from a template. |
 | `openshop init-ui` | — | Scaffold a custom admin page with its view. |
 | `openshop dev [cargo args]` | `cargo run [cargo args] -- dev`, restarted on changes | Start the development server. The admin UI reloads by itself. |
-| `openshop codegen [--api-version=YYYY-MM] [--out=<file>]` | — | Download the Shopify Admin GraphQL schema of another API version for [`graphql!`](graphql.md#schema-and-api-version). |
+| `openshop codegen [--api-version=YYYY-MM] [--out=<file>]` | — | Download the Shopify Admin GraphQL schema of another API version for [`graphql!`](graphql.md#schema-and-api-version). Gives up when the endpoint does not connect in 15 seconds or the download takes more than 120. |
 | `openshop build [args]` | `openshop build-ui`, then `cargo build --release [args]` | Build the app for production. |
 | `openshop build-ui` | `trunk build --release` on the crate of the bundle | Build the admin UI bundle of an app whose admin pages have a view, into `dist/`. |
 | `openshop start [args]` | `cargo run --release -- start [args]` | Start the production web process. |
@@ -21,13 +21,15 @@ An OpenShop app has two command lines:
 | `openshop migrate [args]` | `cargo run -- migrate [args]` | Apply, generate, check, or inspect migrations. |
 | `openshop test [args]` | `cargo test [args]` | Run the app's tests. |
 
-Any other command prints the usage text. When `cargo` fails, `openshop` prints
-the error and exits with status `1`.
+An unknown command fails with status `2` and the usage text (see the end of
+this page). When `cargo` fails, `openshop` prints the error and exits with
+status `1`.
 
-Install the CLI from the repository:
+Install the CLI from the repository. `--locked` builds it with the versions of
+the dependencies the repository tested:
 
 ```bash
-cargo install --git https://github.com/0xtlt/openshop-rust openshop-cli
+cargo install --locked --git https://github.com/0xtlt/openshop-rust openshop-cli
 ```
 
 The CLI is a convenience. Every command except `init`, `init-ui`, `codegen`,
@@ -84,6 +86,12 @@ A non-empty target fails with
 the template. The `custom` and `public` templates have admin pages with a
 view, compiled to WebAssembly: install the toolchain once with
 `rustup target add wasm32-unknown-unknown` and `cargo install trunk`.
+
+If `init` fails after it started writing, it removes the files it wrote and the
+directories it made, nothing else: a directory it shares with another `init`
+stays if that one wrote in it. A
+directory that already had something in it is refused before anything is
+written.
 
 ### Scaffold a custom admin page
 
@@ -144,10 +152,11 @@ the current directory.
 | `migrate check` | `migrations/` directory | Fails when the committed migrations do not cover the framework schema, or when the models changed since the last generated migration. Does not connect to the database. |
 | `migrate status` | Database and `migrations/` directory | Prints the migrations folder and the applied and pending migrations. |
 
-Any other first argument, or none, prints the usage text and exits with status
-`0`. An unknown `migrate` subcommand fails with
-`[openshop] Unknown migrate command: <name>`. A failing command prints its
-error and exits with a non-zero status.
+No command, `help`, `--help` and `-h` print the usage text and exit with status
+`0`. Any other first argument fails with `[openshop] Unknown command: <name>`
+and the usage text on stderr, with status `2`. An unknown `migrate` subcommand
+fails with `[openshop] Unknown migrate command: <name>`. A failing command
+prints its error and exits with a non-zero status.
 
 Details:
 

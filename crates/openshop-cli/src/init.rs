@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use dialoguer::theme::ColorfulTheme;
 use dialoguer::{Input, Select};
+use toml_edit::{DocumentMut, InlineTable, Item, RawString, Table, Value, value};
 
 const OPENSHOP_VERSION: &str = env!("CARGO_PKG_VERSION");
 const OPENSHOP_REPOSITORY: &str = "https://github.com/0xtlt/openshop-rust";
@@ -61,26 +62,30 @@ impl Template {
             .unwrap_or_default()
     }
 
+    /// Its manifest. The templates are checked by the tests, so one that does
+    /// not parse reads as empty here, and fails where a project is made from it.
+    fn manifest_document(&self) -> DocumentMut {
+        self.manifest().parse().unwrap_or_default()
+    }
+
     /// The dependencies its manifest declares, development ones included.
-    fn dependencies(&self) -> Vec<&'static str> {
-        sections(self.manifest())
+    fn dependencies(&self) -> Vec<String> {
+        let manifest = self.manifest_document();
+        ["dependencies", "dev-dependencies"]
             .into_iter()
-            .filter(|(header, _)| matches!(*header, "[dependencies]" | "[dev-dependencies]"))
-            .flat_map(|(_, lines)| lines)
-            .filter(|line| !line.trim_start().starts_with(['#', '[']))
-            .filter_map(|line| line.split_once('='))
-            .map(|(name, _)| name.trim().trim_end_matches(".workspace"))
+            .filter_map(|table| manifest.get(table)?.as_table_like())
+            .flat_map(|table| table.iter().map(|(name, _)| name.to_string()).collect::<Vec<_>>())
             .collect()
     }
 
     /// Whether its admin pages have views, compiled to WebAssembly: its
     /// `openshop` has the `ui` feature.
     pub fn views(&self) -> bool {
-        sections(self.manifest())
-            .into_iter()
-            .filter(|(header, _)| *header == "[dependencies]")
-            .flat_map(|(_, lines)| lines)
-            .any(|line| line.trim_start().starts_with("openshop ") && line.contains("\"ui\""))
+        let manifest = self.manifest_document();
+        manifest
+            .get("dependencies")
+            .and_then(|dependencies| dependencies.get("openshop")?.get("features")?.as_array())
+            .is_some_and(|features| features.iter().any(|feature| feature.as_str() == Some("ui")))
     }
 
     /// How the sources of the template name its crate, `openshop-template-<name>`.
@@ -234,122 +239,173 @@ impl Source {
     }
 }
 
-/// The sections of a manifest as `(header, lines)`, the lines of a section
-/// starting with the comments right above its header. What comes before the
-/// first header has an empty one.
-fn sections(manifest: &str) -> Vec<(&str, Vec<&str>)> {
-    let mut sections = vec![("", Vec::new())];
-    for line in manifest.lines() {
-        let Some((_, previous)) = sections.last_mut() else {
-            continue;
-        };
-        let header = line.trim();
-        if !header.starts_with('[') {
-            previous.push(line);
-            continue;
-        }
-        let comments = previous
-            .iter()
-            .rev()
-            .take_while(|line| line.trim_start().starts_with('#'))
-            .count();
-        let mut lines = previous.split_off(previous.len() - comments);
-        lines.push(line);
-        sections.push((header, lines));
-    }
-    sections
+/// A manifest, read to be rewritten with its comments and layout kept.
+fn parse_manifest(manifest: &str, what: &str) -> Result<DocumentMut> {
+    manifest
+        .parse()
+        .with_context(|| format!("[openshop] {what} is not valid TOML"))
 }
 
 /// The value of `key` in the `[workspace.<table>]` of the workspace manifest.
-fn workspace_value(table: &str, key: &str) -> Result<&'static str> {
-    let header = format!("[workspace.{table}]");
-    sections(WORKSPACE_MANIFEST)
-        .into_iter()
-        .filter(|(name, _)| *name == header)
-        .flat_map(|(_, lines)| lines)
-        .find_map(|line| {
-            let (name, value) = line.split_once('=')?;
-            (name.trim() == key).then(|| value.trim())
-        })
-        .with_context(|| format!("[openshop] The workspace has no `{key}` in {header}"))
+fn workspace_value(table: &str, key: &str) -> Result<Value> {
+    let workspace = parse_manifest(WORKSPACE_MANIFEST, "The manifest of the workspace")?;
+    let mut value = workspace
+        .get("workspace")
+        .and_then(|workspace| workspace.get(table)?.get(key))
+        .and_then(|item| item.clone().into_value().ok())
+        .with_context(|| format!("[openshop] The workspace has no `{key}` in [workspace.{table}]"))?;
+    format_value(&mut value, None);
+    Ok(value)
 }
 
-/// A line of the dependencies of a template, as a project declares it:
-/// `workspace = true` replaced by the source of the dependency, and `None`
-/// for a path dependency, which only exists in the repository.
-fn project_dependency(line: &str, openshop: &str) -> Result<Option<String>> {
-    if line.trim_start().starts_with('#') {
-        return Ok(Some(line.to_string()));
+/// `value` with the default layout, a `suffix` (a comment) after it if given.
+fn format_value(value: &mut Value, suffix: Option<RawString>) {
+    match value {
+        Value::InlineTable(table) => table.fmt(),
+        Value::Array(array) => array.fmt(),
+        _ => {}
     }
-    let Some((name, value)) = line.split_once('=') else {
-        return Ok(Some(line.to_string()));
+    let decor = value.decor_mut();
+    decor.clear();
+    if let Some(suffix) = suffix {
+        decor.set_suffix(suffix);
+    }
+}
+
+/// The `openshop` dependency of a project, from `git = "…", rev = "…"` or
+/// `path = "…"`: what goes between the braces.
+fn openshop_dependency(source: &str) -> Result<InlineTable> {
+    let source = parse_manifest(&format!("openshop = {{ {source} }}"), "The source of `openshop`")?;
+    source
+        .get("openshop")
+        .and_then(|source| source.as_inline_table())
+        .cloned()
+        .context("[openshop] The source of `openshop` is not a table")
+}
+
+/// What becomes of a dependency a template declares.
+enum Dependency {
+    Keep,
+    /// A path dependency, which only exists in the repository.
+    Drop,
+}
+
+/// Gives a dependency of a template the source a project declares:
+/// `workspace = true` is replaced by the workspace's declaration of it,
+/// whatever its form (`serde.workspace = true`, `{ workspace = true,
+/// features = […] }`), and the comment after it stays.
+fn project_dependency(name: &str, item: &mut Item, openshop: &InlineTable) -> Result<Dependency> {
+    let Some(table) = item.as_table_like() else {
+        return Ok(Dependency::Keep);
     };
-    let (name, value) = (name.trim(), value.trim());
-    if value.contains("path =") {
-        return Ok(None);
+    if table.contains_key("path") {
+        return Ok(Dependency::Drop);
     }
-    // `serde.workspace = true`
-    if let Some(name) = name.strip_suffix(".workspace") {
-        let source = match name {
-            "openshop" => format!("{{ {openshop} }}"),
-            _ => workspace_value("dependencies", name)?.to_string(),
+    let Some(inherited) = table.get("workspace") else {
+        return Ok(Dependency::Keep);
+    };
+    if inherited.as_bool() != Some(true) {
+        return Ok(Dependency::Keep);
+    }
+    // The comment after the dependency sits after the value of its last key.
+    let suffix = match &*item {
+        Item::Value(value) => value.decor().suffix().cloned(),
+        _ => inherited.as_value().and_then(|value| value.decor().suffix().cloned()),
+    };
+
+    // What the template adds to the workspace's declaration, `features` say.
+    let added: Vec<(String, Value)> = table
+        .iter()
+        .filter(|(key, _)| *key != "workspace")
+        .filter_map(|(key, added)| Some((key.to_string(), added.as_value()?.clone())))
+        .collect();
+    let mut declared = match name {
+        "openshop" => Value::InlineTable(openshop.clone()),
+        _ => workspace_value("dependencies", name)?,
+    };
+    if !added.is_empty() {
+        declared = match declared {
+            Value::InlineTable(table) if name == "openshop" => Value::InlineTable(table),
+            // A version is all it takes to add to: a table is declared in full.
+            Value::String(version) => {
+                let mut table = InlineTable::new();
+                table.insert("version", Value::String(version));
+                Value::InlineTable(table)
+            }
+            _ => bail!("[openshop] A template adds to `{name}` of the workspace, a table: declare it in full"),
         };
-        return Ok(Some(format!("{name} = {source}")));
+        if let Value::InlineTable(table) = &mut declared {
+            for (key, value) in added {
+                table.insert(&key, value);
+            }
+        }
     }
-    // `openshop = { workspace = true, features = ["ui"] }`
-    if let Some(rest) = value.strip_prefix("{ workspace = true") {
-        let source = match name {
-            "openshop" => openshop.to_string(),
-            _ => match workspace_value("dependencies", name)? {
-                version if version.starts_with('"') => format!("version = {version}"),
-                _ => bail!("[openshop] A template adds to `{name}` of the workspace, a table: declare it in full"),
-            },
-        };
-        return Ok(Some(format!("{name} = {{ {source}{rest}")));
+    format_value(&mut declared, suffix);
+    *item = Item::Value(declared);
+    Ok(Dependency::Keep)
+}
+
+/// Sets the position of the tables of `item` to none, so that they follow the
+/// tables of the document they are added to.
+fn follow_the_tables(item: &mut Item) {
+    if let Some(table) = item.as_table_mut() {
+        table.set_position(None);
+        for (_, item) in table.iter_mut() {
+            follow_the_tables(item);
+        }
     }
-    Ok(Some(line.to_string()))
 }
 
 /// The manifest of a project made from a template: a package of its own, the
 /// dependencies of the template with their source, and the profiles of the
 /// workspace, which a member of it cannot declare.
 fn project_manifest(template: &str, package_name: &str, openshop: &str) -> Result<String> {
-    let mut manifest: Vec<String> = Vec::new();
-    for (header, lines) in sections(template) {
-        match header {
-            "[package]" => manifest.extend([
-                "[package]".to_string(),
-                format!("name = {}", toml_string(package_name)),
-                "version = \"0.1.0\"".to_string(),
-                format!("edition = {}", workspace_value("package", "edition")?),
-                "publish = false".to_string(),
-                String::new(),
-            ]),
-            "[dependencies]" | "[dev-dependencies]" => {
-                for line in lines {
-                    match project_dependency(line, openshop)? {
-                        Some(line) => manifest.push(line),
-                        // The comments of a dependency go with it.
-                        None => {
-                            while manifest.last().is_some_and(|line| line.trim_start().starts_with('#')) {
-                                manifest.pop();
-                            }
-                        }
-                    }
+    let mut manifest = parse_manifest(template, "The manifest of the template")?;
+    let openshop = openshop_dependency(openshop)?;
+
+    if manifest.contains_key("package") {
+        let mut package = Table::new();
+        package.insert("name", value(package_name));
+        package.insert("version", value("0.1.0"));
+        package.insert("edition", Item::Value(workspace_value("package", "edition")?));
+        package.insert("publish", value(false));
+        manifest.insert("package", Item::Table(package));
+    }
+    for section in ["dependencies", "dev-dependencies"] {
+        let Some(dependencies) = manifest.get_mut(section).and_then(Item::as_table_like_mut) else {
+            continue;
+        };
+        let mut dropped = Vec::new();
+        for (mut name, item) in dependencies.iter_mut() {
+            // A `[dependencies.<name>]` table of its own becomes a line: what
+            // comes before its header goes before the line.
+            let header = item
+                .as_table()
+                .filter(|table| !table.is_dotted())
+                .map(|table| table.decor().prefix().cloned());
+            match project_dependency(&name, item, &openshop)? {
+                Dependency::Drop => dropped.push(name.to_string()),
+                Dependency::Keep if item.is_value() && header.is_some() => {
+                    let decor = name.leaf_decor_mut();
+                    decor.set_prefix(header.flatten().unwrap_or_default());
+                    decor.set_suffix(" ");
                 }
+                Dependency::Keep => {}
             }
-            _ => manifest.extend(lines.into_iter().map(str::to_string)),
+        }
+        // The comment of a dependency goes with it.
+        for name in dropped {
+            dependencies.remove(&name);
         }
     }
-    for (header, lines) in sections(WORKSPACE_MANIFEST) {
-        if header.starts_with("[profile.") {
-            if manifest.last().is_some_and(|line| !line.trim().is_empty()) {
-                manifest.push(String::new());
-            }
-            manifest.extend(lines.into_iter().map(str::to_string));
-        }
+
+    let workspace = parse_manifest(WORKSPACE_MANIFEST, "The manifest of the workspace")?;
+    if let Some(profiles) = workspace.get("profile") {
+        let mut profiles = profiles.clone();
+        follow_the_tables(&mut profiles);
+        manifest.insert("profile", profiles);
     }
-    Ok(manifest.join("\n").trim_end().to_string() + "\n")
+    Ok(manifest.to_string().trim_end().to_string() + "\n")
 }
 
 /// What a project names itself, where a template names itself.
@@ -643,8 +699,71 @@ fn init(cwd: &Path, target: &str, template: &Template, source: Option<Source>) -
         Some(source) => source,
         None => Source::default(),
     };
-    let created = !target_dir.exists();
-    std::fs::create_dir_all(&target_dir)?;
+    let mut created = Created::default();
+    match write_project(&mut created, &target_dir, target, template, source) {
+        Ok(result) => Ok(result),
+        Err(error) => {
+            created.take_back();
+            Err(error)
+        }
+    }
+}
+
+/// What one `init` created: the files it wrote and the directories it made, in
+/// order. When it fails it takes back those and nothing else, as another
+/// `init` may be writing next to it, in a directory both created.
+#[derive(Default)]
+struct Created {
+    /// `(path, is a directory)`.
+    paths: Vec<(PathBuf, bool)>,
+}
+
+impl Created {
+    /// Makes `directory` and the ones above it that do not exist.
+    fn directory(&mut self, directory: &Path) -> std::io::Result<()> {
+        let missing: Vec<&Path> = directory.ancestors().take_while(|path| !path.exists()).collect();
+        for path in missing.into_iter().rev() {
+            match std::fs::create_dir(path) {
+                Ok(()) => self.paths.push((path.to_path_buf(), true)),
+                // Made by another `init` since: it is theirs.
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(())
+    }
+
+    fn file(&mut self, file: &Path, content: &str) -> std::io::Result<()> {
+        if let Some(parent) = file.parent() {
+            self.directory(parent)?;
+        }
+        self.paths.push((file.to_path_buf(), false));
+        std::fs::write(file, content)
+    }
+
+    /// Removes the files, then the directories, last made first. A directory
+    /// that holds something this `init` did not make stays.
+    fn take_back(&self) {
+        for (path, is_directory) in self.paths.iter().rev() {
+            if *is_directory {
+                std::fs::remove_dir(path).ok();
+            } else {
+                std::fs::remove_file(path).ok();
+            }
+        }
+    }
+}
+
+/// Writes the project into `target_dir`, creating it if need be. It leaves
+/// the files it wrote when it fails: see [`Created`].
+fn write_project(
+    created: &mut Created,
+    target_dir: &Path,
+    target: &str,
+    template: &Template,
+    source: Source,
+) -> Result<InitResult> {
+    created.directory(target_dir)?;
     let target_dir = target_dir.canonicalize()?;
 
     let app_name = target_dir
@@ -659,9 +778,6 @@ fn init(cwd: &Path, target: &str, template: &Template, source: Option<Source>) -
         .into_iter()
         .find(|dependency| dependency.replace('-', "_") == ident)
     {
-        if created {
-            std::fs::remove_dir(&target_dir).ok();
-        }
         bail!(
             "[openshop] A project cannot be named `{package_name}`: it depends on `{dependency}`. Choose another directory name."
         );
@@ -674,11 +790,10 @@ fn init(cwd: &Path, target: &str, template: &Template, source: Option<Source>) -
     };
 
     for &(path, content) in template.files.iter().chain(files::SHARED) {
-        let file = target_dir.join(path);
-        if let Some(parent) = file.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        std::fs::write(&file, project_file(path, content, template, &project)?)?;
+        created.file(
+            &target_dir.join(path),
+            &project_file(path, content, template, &project)?,
+        )?;
     }
 
     println!(
@@ -1064,6 +1179,68 @@ mod tests {
         std::fs::remove_dir_all(cwd).ok();
     }
 
+    /// A template that fails once it has written a file, `a` being a file and
+    /// then a directory.
+    const BROKEN: Template = Template {
+        name: "broken",
+        summary: "",
+        files: &[("first.txt", "1"), ("src/lib.rs", "2"), ("a", "3"), ("a/b", "4")],
+    };
+
+    #[test]
+    fn leaves_nothing_behind_when_it_fails_halfway() {
+        let cwd = temp_dir("failed");
+
+        // A directory it creates, and the ones above it.
+        let error = init(&cwd, "new/deep/app", &BROKEN, None).unwrap_err();
+        assert!(!error.to_string().is_empty());
+        assert!(!cwd.join("new").exists(), "the directories it created are still there");
+
+        // A parent that was there stays.
+        std::fs::create_dir_all(cwd.join("parent")).unwrap();
+        init(&cwd, "parent/app", &BROKEN, None).unwrap_err();
+        assert!(cwd.join("parent").is_dir());
+        assert!(!cwd.join("parent/app").exists());
+
+        // An empty directory of the user stays, empty.
+        std::fs::create_dir_all(cwd.join("empty")).unwrap();
+        init(&cwd, "empty", &BROKEN, None).unwrap_err();
+        assert!(cwd.join("empty").is_dir());
+        assert_eq!(std::fs::read_dir(cwd.join("empty")).unwrap().count(), 0);
+
+        // A directory that is not empty is refused before anything is written.
+        std::fs::create_dir_all(cwd.join("taken")).unwrap();
+        std::fs::write(cwd.join("taken/mine.txt"), "mine").unwrap();
+        init(&cwd, "taken", &BROKEN, None).unwrap_err();
+        assert_eq!(std::fs::read_to_string(cwd.join("taken/mine.txt")).unwrap(), "mine");
+        assert_eq!(std::fs::read_dir(cwd.join("taken")).unwrap().count(), 1);
+
+        // A project that works is still made in a directory that failed before.
+        init(&cwd, "empty", minimal(), None).unwrap();
+        assert!(cwd.join("empty/Cargo.toml").is_file());
+        std::fs::remove_dir_all(cwd).ok();
+    }
+
+    #[test]
+    fn taking_back_leaves_what_another_init_wrote_in_a_directory_they_share() {
+        let cwd = temp_dir("shared");
+        let mut first = Created::default();
+        first.file(&cwd.join("apps/a/Cargo.toml"), "a").unwrap();
+        // Another `init`, meanwhile, in the `apps` the first one made.
+        let mut second = Created::default();
+        second.file(&cwd.join("apps/b/Cargo.toml"), "b").unwrap();
+
+        first.take_back();
+        assert!(!cwd.join("apps/a").exists());
+        assert_eq!(std::fs::read_to_string(cwd.join("apps/b/Cargo.toml")).unwrap(), "b");
+
+        // The shared directory was the first one's to remove, and it was not empty.
+        assert!(cwd.join("apps").is_dir());
+        second.take_back();
+        assert!(!cwd.join("apps/b").exists());
+        std::fs::remove_dir_all(cwd).ok();
+    }
+
     #[test]
     fn needs_a_target_and_a_template_outside_a_terminal() {
         let cwd = temp_dir("batch");
@@ -1081,6 +1258,82 @@ mod tests {
         assert!(!cwd.join("app").exists());
         assert!(init_from_args(&cwd, &args(&["app", "--template=minimal"]), false).is_ok());
         std::fs::remove_dir_all(cwd).ok();
+    }
+
+    #[test]
+    fn a_template_manifest_is_rewritten_whatever_its_layout() {
+        let template = r#"[package]
+name = "openshop-template-x"
+
+[dependencies]
+# Spread on several lines.
+regex = {
+    workspace = true,
+    features = ["unicode"],
+}
+tracing.workspace = true # the logs
+serde = { workspace = true } # kept as is
+leptos = { version = "0.8", features = [
+    "csr",
+] }
+
+# Declared as a table of its own.
+[dependencies.url]
+workspace = true
+
+[dev-dependencies]
+openshop = { features = ["testing"], workspace = true }
+# Only in the repository.
+preview = {
+    path = "../preview",
+}
+other = "1"
+"#;
+        let manifest = project_manifest(template, "shop", "git = \"https://example.com/o\", rev = \"abc\"").unwrap();
+        let (manifest, _) = manifest.split_once("\n\n# MCP token hashing").unwrap();
+        assert_eq!(
+            manifest,
+            r#"[package]
+name = "shop"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+# Spread on several lines.
+regex = { version = "1", features = ["unicode"] }
+tracing = "0.1" # the logs
+serde = { version = "1", features = ["derive"] } # kept as is
+leptos = { version = "0.8", features = [
+    "csr",
+] }
+
+# Declared as a table of its own.
+url = "2"
+
+[dev-dependencies]
+openshop = { git = "https://example.com/o", rev = "abc", features = ["testing"] }
+other = "1""#
+        );
+        // Nothing is left of the workspace.
+        assert!(
+            !manifest.contains("workspace") && !manifest.contains("path"),
+            "{manifest}"
+        );
+    }
+
+    #[test]
+    fn a_template_manifest_that_is_not_toml_is_refused() {
+        let error = project_manifest("[dependencies\nserde = 1\n", "shop", "").unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "[openshop] The manifest of the template is not valid TOML"
+        );
+        let error = project_manifest("", "shop", "git = ").unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "[openshop] The source of `openshop` is not valid TOML"
+        );
     }
 
     #[test]

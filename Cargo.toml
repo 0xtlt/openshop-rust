@@ -64,6 +64,8 @@ subtle = "2"
 syn = { version = "2", features = ["full"] }
 tokio = { version = "1", features = ["fs", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-util = "0.7"
+# Reads and rewrites the manifest of a template, comments and layout kept.
+toml_edit = { version = "0.25", default-features = false, features = ["parse", "display"] }
 tower = { version = "0.5", default-features = false, features = ["util"] }
 tower-http = { version = "0.6", features = ["compression-br", "compression-gzip", "cors", "set-header"] }
 tracing = "0.1"

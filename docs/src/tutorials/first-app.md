@@ -24,7 +24,7 @@ dedicated database there, and substitute its connection URL in step 3.
 Install the `openshop` command once:
 
 ```bash
-cargo install --git https://github.com/0xtlt/openshop-rust openshop-cli
+cargo install --locked --git https://github.com/0xtlt/openshop-rust openshop-cli
 ```
 
 Then create the project:

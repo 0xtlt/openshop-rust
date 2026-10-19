@@ -7,7 +7,7 @@ use crate::{
     components::config_field_renderer::ConfigFieldRenderer,
     components::page::Page,
     events::{event_checked, event_value},
-    fetch::{api_fetch, api_request},
+    fetch::{api_json_or_report, api_request},
     http::Method,
     json::js_string_or_empty,
     query::QueryParams,
@@ -81,9 +81,7 @@ fn FunctionForm(handle: String, #[prop(optional)] instance_id: Option<String>) -
 
     let wanted_handle = handle.get_value();
     spawn_local(async move {
-        if let Ok(Ok(definitions)) = api_fetch("/api/functions")
-            .await
-            .map(|response| response.json::<Vec<FunctionDef>>())
+        if let Some(definitions) = api_json_or_report::<Vec<FunctionDef>>("/api/functions", "the functions").await
             && let Some(found) = definitions
                 .into_iter()
                 .find(|definition| definition.handle == wanted_handle)
@@ -97,10 +95,7 @@ fn FunctionForm(handle: String, #[prop(optional)] instance_id: Option<String>) -
     if let Some(instance_id) = instance_id.get_value() {
         let url = instance_endpoint(&handle.get_value(), None);
         spawn_local(async move {
-            let Ok(Ok(instances)) = api_fetch(&url)
-                .await
-                .map(|response| response.json::<Vec<FunctionInstance>>())
-            else {
+            let Some(instances) = api_json_or_report::<Vec<FunctionInstance>>(&url, "the instance").await else {
                 return;
             };
             let wanted = decode_uri_component(&instance_id);

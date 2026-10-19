@@ -83,12 +83,27 @@ async fn run(args: &[String]) -> Result<()> {
         Some("test") => cargo(&["test"], rest).await,
         Some("migrate") => cargo(&["run", "--", "migrate"], rest).await,
         Some(command @ ("start" | "worker")) => cargo(&["run", "--release", "--", command], rest).await,
-        _ => {
+        None | Some("help" | "--help" | "-h") => {
             println!("{USAGE}");
             Ok(())
         }
+        Some(unknown) => Err(UnknownCommand(unknown.to_string()).into()),
     }
 }
+
+/// A command that does not exist: the usage goes to stderr and the exit code is
+/// 2, as for a command line that cannot be parsed, so that a script that
+/// mistypes a command stops.
+#[derive(Debug)]
+struct UnknownCommand(String);
+
+impl std::fmt::Display for UnknownCommand {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "[openshop] Unknown command: {}\n{USAGE}", self.0)
+    }
+}
+
+impl std::error::Error for UnknownCommand {}
 
 #[tokio::main]
 async fn main() -> ExitCode {
@@ -97,7 +112,10 @@ async fn main() -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("{error:#}");
-            ExitCode::FAILURE
+            match error.downcast_ref::<UnknownCommand>() {
+                Some(_) => ExitCode::from(2),
+                None => ExitCode::FAILURE,
+            }
         }
     }
 }

@@ -57,14 +57,20 @@ pub fn Crons() -> impl IntoView {
         toggling.set(Some(key.clone()));
         spawn_local(async move {
             let body = json!({ "key": key, "enabled": !enabled });
-            if let Ok(response) = api_request(Method::Post, "/api/crons/toggle", Some(&body)).await
-                && response.ok
-            {
-                crons.update(|crons| {
-                    for cron in crons.iter_mut().filter(|cron| cron.key == key) {
-                        cron.enabled = !cron.enabled;
-                    }
-                });
+            // A request that gets no answer is reported by `api_request`.
+            if let Ok(response) = api_request(Method::Post, "/api/crons/toggle", Some(&body)).await {
+                if response.ok {
+                    error.set(None);
+                    crons.update(|crons| {
+                        for cron in crons.iter_mut().filter(|cron| cron.key == key) {
+                            cron.enabled = !cron.enabled;
+                        }
+                    });
+                } else {
+                    error.set(Some(response.error().unwrap_or_else(|| {
+                        format!("Could not change the cron: the server answered {}", response.status)
+                    })));
+                }
             }
             toggling.set(None);
         });

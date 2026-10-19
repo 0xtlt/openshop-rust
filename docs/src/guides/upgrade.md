@@ -81,7 +81,7 @@ when you upgrade so that `openshop init` and `openshop dev` come from the same
 release:
 
 ```bash
-cargo install --git https://github.com/0xtlt/openshop-rust openshop-cli
+cargo install --locked --git https://github.com/0xtlt/openshop-rust openshop-cli
 ```
 
 For migration steps, see [Manage migrations](manage-migrations.md). For the

@@ -3,7 +3,11 @@ use super::{
     types::{FunctionDef, FunctionInstance, type_label},
 };
 use crate::{
-    components::page::Page, components::table_header::TableHeader, fetch::api_fetch, json::js_string, router::route,
+    components::page::Page,
+    components::table_header::TableHeader,
+    fetch::{api_fetch, api_json_or_report},
+    json::js_string,
+    router::route,
 };
 use futures_util::future::join;
 use leptos::{prelude::*, task::spawn_local};
@@ -32,13 +36,11 @@ pub fn FunctionInstances(handle: String) -> impl IntoView {
     spawn_local(async move {
         let handle = wanted_handle;
         let (definitions, listed) = join(
-            api_fetch("/api/functions"),
+            api_json_or_report::<Vec<FunctionDef>>("/api/functions", "the functions"),
             api_fetch(&format!("/api/functions/{handle}/instances")),
         )
         .await;
-        if let (Ok(definitions), Ok(listed)) = (definitions, listed)
-            && let Ok(definitions) = definitions.json::<Vec<FunctionDef>>()
-        {
+        if let (Some(definitions), Ok(listed)) = (definitions, listed) {
             definition.set(definitions.into_iter().find(|definition| definition.handle == handle));
             if !listed.ok {
                 error.set(listed.error());

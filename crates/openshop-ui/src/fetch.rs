@@ -4,6 +4,7 @@
 use crate::{
     http::{self, Method},
     json::js_string,
+    report::{log_error, report_error},
     shopify,
 };
 use serde::de::DeserializeOwned;
@@ -63,6 +64,7 @@ pub fn api_error_message(body: Option<&Value>, status: u16) -> String {
 pub struct ApiResponse {
     pub status: u16,
     pub ok: bool,
+    path: String,
     body: String,
 }
 
@@ -72,8 +74,17 @@ impl ApiResponse {
         serde_json::from_str(&self.body).ok()
     }
 
+    /// The body as `T`. A body that is not one is logged to the console, with the path it
+    /// came from.
     pub fn json<T: DeserializeOwned>(&self) -> Result<T, ApiError> {
-        serde_json::from_str(&self.body).map_err(|error| ApiError(error.to_string()))
+        serde_json::from_str(&self.body).map_err(|error| {
+            let error = ApiError(error.to_string());
+            log_error(
+                &format!("The answer of {} is not what the UI expects", self.path),
+                &error,
+            );
+            error
+        })
     }
 
     /// `data.error` of the JSON body.
@@ -87,8 +98,14 @@ async fn send(method: Method, path: &str, body: Option<&Value>) -> Result<http::
         Some(_) => &[("Content-Type", "application/json")],
         None => &[],
     };
-    let authorization = authorization_header(shopify::id_token().await);
+    let token = shopify::id_token().await;
+    if let Err(error) = &token {
+        // The request goes without a session, and the server refuses it.
+        log_error("Could not get a session token from App Bridge", error);
+    }
+    let authorization = authorization_header(token);
     let body = body.map(Value::to_string);
+    let writes = method != Method::Get;
     let request = http::Request {
         method,
         url: path,
@@ -96,16 +113,35 @@ async fn send(method: Method, path: &str, body: Option<&Value>) -> Result<http::
         body: body.as_deref(),
         signal: None,
     };
-    http::send(request).await.map_err(ApiError)
+    http::send(request).await.map_err(|message| {
+        let error = ApiError(message);
+        let context = format!("Request to {path} failed");
+        if writes {
+            // A page shows the answer to what it asked for, and there is none.
+            report_error(&context, &error, &format!("Could not reach the server: {error}"));
+        } else {
+            log_error(&context, &error);
+        }
+        error
+    })
 }
 
 /// Sends a request and reads the whole response body.
+///
+/// A request that gets no answer is logged to the console, and a write (anything but `GET`)
+/// also shows an error toast: callers only have a response to show.
 pub async fn api_request(method: Method, path: &str, body: Option<&Value>) -> Result<ApiResponse, ApiError> {
     let response = send(method, path, body).await?;
+    let text = response.text().await.map_err(|message| {
+        let error = ApiError(message);
+        log_error(&format!("Reading the answer of {path} failed"), &error);
+        error
+    })?;
     Ok(ApiResponse {
         status: response.status(),
         ok: response.ok(),
-        body: response.text().await.map_err(ApiError)?,
+        path: path.to_string(),
+        body: text,
     })
 }
 
@@ -116,6 +152,15 @@ pub async fn api_fetch(path: &str) -> Result<ApiResponse, ApiError> {
 /// `GET`s a download; returns the bytes and their content type.
 pub async fn api_download(path: &str) -> Result<(Vec<u8>, String), ApiError> {
     let response = send(Method::Get, path, None).await?;
+    if !response.ok() {
+        // The error body is not a file to save.
+        let body = response
+            .text()
+            .await
+            .ok()
+            .and_then(|text| serde_json::from_str(&text).ok());
+        return Err(ApiError(api_error_message(body.as_ref(), response.status())));
+    }
     let content_type = response.header("content-type").unwrap_or_default();
     Ok((response.bytes().await.map_err(ApiError)?, content_type))
 }
@@ -127,6 +172,27 @@ pub async fn api_json<T: DeserializeOwned>(path: &str) -> Result<T, ApiError> {
         return Err(ApiError(api_error_message(response.value().as_ref(), response.status)));
     }
     response.json()
+}
+
+/// [`api_json`] for what a page needs to open: a failure is logged and shown in a toast
+/// (`what` is what could not be loaded, "the flows"), and gives `None`.
+pub async fn api_json_or_report<T: DeserializeOwned>(path: &str, what: &str) -> Option<T> {
+    match api_json(path).await {
+        Ok(data) => Some(data),
+        Err(error) => {
+            report_error(
+                &format!("Could not load {what}"),
+                &error,
+                &load_failure_message(what, &error),
+            );
+            None
+        }
+    }
+}
+
+/// The toast for something that could not be loaded.
+pub fn load_failure_message(what: &str, error: &ApiError) -> String {
+    format!("Could not load {what}: {error}")
 }
 
 #[cfg(test)]
@@ -197,6 +263,14 @@ mod tests {
         );
         assert_eq!(api_error_message(Some(&json!("error")), 502), "Request failed with 502");
         assert_eq!(api_error_message(None, 401), "Request failed with 401");
+    }
+
+    #[test]
+    fn tells_what_could_not_be_loaded_and_why() {
+        assert_eq!(
+            load_failure_message("the flows", &ApiError("Request failed with 500".to_string())),
+            "Could not load the flows: Request failed with 500"
+        );
     }
 
     #[test]
