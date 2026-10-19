@@ -201,7 +201,8 @@ mod tests {
 
     #[tokio::test]
     async fn an_answer_that_stops_halfway_fails_the_download() {
-        let url = stalled_server("HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 100\r\n\r\n{").await;
+        let url =
+            stalled_server("HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 100\r\n\r\n{").await;
         let wait = Duration::from_millis(300);
         let error = fetch_schema(&url, "2026-04", wait, wait).await.unwrap_err();
         assert_eq!(

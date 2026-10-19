@@ -29,7 +29,10 @@ fn no_command_or_a_request_for_help_prints_the_usage_and_succeeds() {
     for args in [&[][..], &["help"], &["--help"], &["-h"]] {
         let output = openshop(args);
         assert_eq!(output.status.code(), Some(0), "{args:?}");
-        assert!(String::from_utf8_lossy(&output.stdout).contains("Commands:"), "{args:?}");
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains("Commands:"),
+            "{args:?}"
+        );
         assert!(output.stderr.is_empty(), "{args:?}");
     }
 }
