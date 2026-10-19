@@ -12,7 +12,10 @@ pub mod worker;
 pub use abort::cancel_run;
 pub use backoff::{DEFAULT_RETRY_POLICY, compute_backoff_ms, compute_next_retry_at, resolve_retry_policy};
 pub use dispatch::{DispatchOptions, QueuedRun, dispatch_flow};
-pub use errors::{FlowCanceledError, FlowConcurrencyError, FlowTimeoutError, SleepSignal, StepTimeoutError};
+pub use errors::{
+    FlowCanceledError, FlowConcurrencyError, FlowTimeoutError, InvalidFlowInput, SleepSignal, StepTimeoutError,
+    UnknownFlowError,
+};
 pub use runner::{RunFlowOptions, RunOutcome, run_flow};
 pub use scheduler::Scheduler;
 pub use step::StepExecutor;

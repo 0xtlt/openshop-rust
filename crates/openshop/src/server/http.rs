@@ -48,15 +48,63 @@ pub(crate) fn error_id() -> String {
     uuid::Uuid::new_v4().simple().to_string()[..12].to_string()
 }
 
-/// Whether the error comes from the server's own machinery (database,
-/// network, files, URLs) rather than from what the caller asked for. Its text
-/// can hold a query, an address or a key, so it never goes to a client.
-pub(crate) fn is_internal_error(error: &anyhow::Error) -> bool {
-    error.chain().any(|cause| {
-        cause.is::<sqlx::Error>()
-            || cause.is::<reqwest::Error>()
-            || cause.is::<std::io::Error>()
-            || cause.is::<url::ParseError>()
+/// An error whose message is meant for the client: a refused input, a missing
+/// resource. The Admin API and the MCP endpoint show the message of this error
+/// as it is; any other error that reaches them is logged under an id, and the
+/// client reads the id: the text of an error that nobody wrote for a client
+/// can hold a query, an address, a key or a value of the caller.
+///
+/// `bail!(PublicError::new("shop is not installed"))`
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PublicError(pub String);
+
+impl PublicError {
+    pub fn new(message: impl Into<String>) -> Self {
+        Self(message.into())
+    }
+}
+
+impl std::fmt::Display for PublicError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for PublicError {}
+
+/// A [`PublicError`] as an `anyhow::Error`, for the errors the framework raises
+/// for a client.
+pub(crate) fn public_error(message: impl Into<String>) -> anyhow::Error {
+    PublicError::new(message).into()
+}
+
+/// The message of the first error of the chain that is written for a client.
+fn public_message(error: &anyhow::Error) -> Option<String> {
+    use crate::admin::AdminPublicError;
+    use crate::declare::InvalidInput;
+    use crate::engine::errors::{FlowConcurrencyError, InvalidFlowInput, UnknownFlowError};
+    use crate::server::log_query::InvalidLogQuery;
+
+    error.chain().find_map(|cause| {
+        if let Some(public) = cause.downcast_ref::<PublicError>() {
+            return Some(public.to_string());
+        }
+        macro_rules! shown {
+            ($($kind:ty),*) => {
+                $(if let Some(known) = cause.downcast_ref::<$kind>() {
+                    return Some(known.to_string());
+                })*
+            };
+        }
+        shown!(
+            AdminPublicError,
+            InvalidInput,
+            FlowConcurrencyError,
+            InvalidFlowInput,
+            UnknownFlowError,
+            InvalidLogQuery
+        );
+        None
     })
 }
 
@@ -67,13 +115,13 @@ pub(crate) struct ClientError {
     pub error_id: Option<String>,
 }
 
-/// The message of an error the caller can act on, as it is. An internal error
-/// is logged and reported with a new id, and the client gets a generic message
-/// and that id.
+/// The message of an error written for the client, as it is. Any other error is
+/// logged and reported with a new id, and the client gets a generic message and
+/// that id.
 pub(crate) fn client_error(what: &str, error: &anyhow::Error) -> ClientError {
-    if !is_internal_error(error) {
+    if let Some(message) = public_message(error) {
         return ClientError {
-            message: error_message(error),
+            message,
             error_id: None,
         };
     }

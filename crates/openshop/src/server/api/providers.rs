@@ -12,7 +12,7 @@ use serde_json::{Value, json};
 use crate::app::OpenShop;
 use crate::db::schema::ProviderConfigRow;
 use crate::runtime::time::to_iso;
-use crate::server::http::{ApiResult, client_error, json_error, json_object_body, json_response};
+use crate::server::http::{ApiResult, client_error, public_error, json_error, json_object_body, json_response};
 use crate::server::provider_config::{
     parse_provider_config, provider_config_is_complete, provider_fields_for_response, public_provider_config,
 };
@@ -113,7 +113,7 @@ async fn check_provider(
         let ok = tokio::time::timeout(CHECK_TIMEOUT, AssertUnwindSafe(checker(config)).catch_unwind())
             .await
             .map_err(|_| CheckTimedOut)?
-            .unwrap_or_else(|_| Err(anyhow::anyhow!("checker panicked")))?;
+            .unwrap_or_else(|_| Err(public_error("checker panicked")))?;
 
         if let Some(stored) = &stored {
             sqlx::query("UPDATE provider_configs SET last_checked_at = now(), last_check_ok = $1 WHERE id = $2")

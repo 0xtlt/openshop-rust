@@ -28,7 +28,21 @@
   MCP tool or in a provider check is logged under an id, and the client reads
   `Internal error (error id <id>)` and that id, not the text, which can hold a
   query or a URL with a key. Errors a tool raises itself are shown as before.
-  A provider check that takes more than 10 seconds answers `504`.
+  A provider check that takes more than 10 seconds answers `504`. Only an
+  error written for the client is shown by the MCP endpoint and by a provider
+  check: `openshop::PublicError`, `InvalidInput`, `InvalidFlowInput`,
+  `FlowConcurrencyError` and the errors of the core tools. Any other error,
+  including a decoding error that quotes a stored credential, gets the id.
+  Behaviour change for an application: an MCP tool or a provider checker that
+  returned a plain `anyhow!("…")` and wants it read by the client returns
+  `PublicError::new("…")` instead. `app.dispatch_flow` (so `#[flow]`'s
+  `dispatch`) now refuses input that fails the input schema of the flow with
+  `InvalidFlowInput`, and a flow that is not registered with
+  `UnknownFlowError`, before it queues a run; from a webhook handler this is a
+  logged handler error, and Shopify still gets its `200`. A `last:` that
+  reaches back further than the calendar answers `400` instead of panicking.
+  The run page of the admin shows the reason when the server refuses a log
+  search, instead of keeping the previous lines.
 - `openshop init` makes a project from one of three templates: `minimal`, one
   provider and one flow, as before; `custom`, a custom app with every building
   block and a page of its own next to the built-in admin; `public`, a public

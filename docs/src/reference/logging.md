@@ -86,7 +86,9 @@ Regular expressions are limited to 120 characters and must not contain
 backreferences, nested quantifiers such as `(a+)+`, or repeated `.*`. A pattern
 that is rejected, invalid, or compiles to more than 1 MiB fails the whole
 query: the Admin API answers `400` with the reason, and the MCP tool answers
-an error. A query is at most 2,000 characters and holds at most 20 filters.
+an error. A query is at most 2,000 characters and holds at most 20 filters. A
+`last:` that reaches back further than the calendar fails the query the same
+way.
 
 Dates are RFC 3339 timestamps, `YYYY-MM-DDTHH:MM[:SS]` (read as UTC), or
 `YYYY-MM-DD`. Lines are listed newest first, and context lines are taken from

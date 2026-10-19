@@ -11,7 +11,7 @@ pub use crate::types::{McpAuditStatus, McpCapabilityType};
 use std::panic::AssertUnwindSafe;
 use std::time::{Duration, Instant};
 
-use anyhow::{Result, anyhow};
+use anyhow::Result;
 use axum::body::Body;
 use axum::extract::{Request, State};
 use axum::http::header::AUTHORIZATION;
@@ -27,7 +27,7 @@ use self::schema::validate_mcp_tool_arguments;
 use crate::app::OpenShop;
 use crate::engine::step::error_message;
 use crate::server::connectors::Connectors;
-use crate::server::http::client_error;
+use crate::server::http::{client_error, public_error};
 use crate::server::shop_domain::normalize_shop_domain;
 use crate::shopify::client::ShopifyClient;
 use crate::types::{JsonMap, McpContext};
@@ -173,8 +173,11 @@ where
     let guarded = AssertUnwindSafe(async { run(signal).await }).catch_unwind();
     match tokio::time::timeout(MAX_MCP_EXECUTION, guarded).await {
         Ok(Ok(result)) => result,
-        Ok(Err(_)) => Err(anyhow!("{label} panicked")),
-        Err(_) => Err(anyhow!("{label} timed out after {}ms", MAX_MCP_EXECUTION.as_millis())),
+        Ok(Err(_)) => Err(public_error(format!("{label} panicked"))),
+        Err(_) => Err(public_error(format!(
+            "{label} timed out after {}ms",
+            MAX_MCP_EXECUTION.as_millis()
+        ))),
     }
 }
 

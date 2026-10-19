@@ -63,6 +63,42 @@ impl std::fmt::Display for FlowConcurrencyError {
 
 impl std::error::Error for FlowConcurrencyError {}
 
+/// A run was asked for a flow that is not registered.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnknownFlowError {
+    pub flow_name: String,
+    pub available: Vec<String>,
+}
+
+impl std::fmt::Display for UnknownFlowError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Flow \"{}\" not found. Available: {}",
+            self.flow_name,
+            self.available.join(", ")
+        )
+    }
+}
+
+impl std::error::Error for UnknownFlowError {}
+
+/// The input of a run fails the input schema of its flow. A dispatch refuses
+/// it before a run is queued; a run that holds it anyway fails with it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InvalidFlowInput {
+    pub flow_name: String,
+    pub summary: String,
+}
+
+impl std::fmt::Display for InvalidFlowInput {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Invalid input for flow \"{}\": {}", self.flow_name, self.summary)
+    }
+}
+
+impl std::error::Error for InvalidFlowInput {}
+
 /// Raised by `step.sleep()` to suspend the run until `resume_at`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SleepSignal {

@@ -14,7 +14,8 @@ use openshop::server::mcp::core::latest_stable_shopify_admin_api_version;
 use openshop::testing::{MockTransport, TestContext, TestOptions, session_token};
 use openshop::{
     AdminPageId, AdminPageMode, CancellationToken, Cron, DispatchOptions, FlowContext, IndexMap, McpConfig, McpContext,
-    McpPermission, McpResourceContent, OpenShopConfig, ShopifyAppConfig, ShopifyConfig, Value, anyhow, json,
+    McpPermission, McpResourceContent, OpenShopConfig, PublicError, ShopifyAppConfig, ShopifyConfig, Value, anyhow,
+    json,
 };
 use reqwest::{Method, RequestBuilder};
 use uuid::Uuid;
@@ -1708,7 +1709,22 @@ fn showcase_mcp() -> McpConfig {
         )
         .tool(
             "demo.fail",
-            McpTool::new("Always fails", |_ctx, _input| async { Err(anyhow!("boom")) }),
+            McpTool::new("Always fails", |_ctx, _input| async {
+                Err(PublicError::new("boom").into())
+            }),
+        )
+        .tool(
+            "demo.plain",
+            McpTool::new("Fails with a plain error", |_ctx, _input| async {
+                Err(anyhow!("plain detail"))
+            }),
+        )
+        .tool(
+            "demo.decode",
+            McpTool::new("Fails to decode a value", |_ctx, _input| async {
+                let _: u64 = serde_json::from_value(json!("secret-checker-credential"))?;
+                Ok(Value::Null)
+            }),
         )
         .tool(
             "demo.leak",
@@ -1745,7 +1761,7 @@ fn showcase_mcp() -> McpConfig {
         )
         .resource(
             "demo://broken",
-            McpResource::new("Broken", |_ctx| async { Err(anyhow!("unreadable")) }),
+            McpResource::new("Broken", |_ctx| async { Err(PublicError::new("unreadable").into()) }),
         )
 }
 
@@ -1883,7 +1899,16 @@ async fn a_tool_failing_inside_the_server_shows_an_id_and_not_the_cause(ctx: &Te
     let recorded = audits(ctx, &issued.token_id).await;
     assert_eq!(recorded[0].error.as_deref(), Some(message));
 
-    // What the caller can act on is still told as it is.
+    // An error nobody wrote for a client is hidden whatever its type: a decoding
+    // error quotes the value it refused.
+    for tool in ["demo.plain", "demo.decode"] {
+        let body = call_tool(ctx, &issued.token, tool, json!({})).await;
+        let message = body["error"]["message"].as_str().unwrap();
+        assert!(message.starts_with("Internal error (error id "), "{tool}: {message}");
+        assert!(!message.contains("secret-checker-credential") && !message.contains("plain detail"));
+    }
+
+    // An error written for the client is told as it is.
     let body = call_tool(ctx, &issued.token, "demo.fail", json!({})).await;
     assert_eq!(body["error"]["message"], "boom");
 }
@@ -2364,7 +2389,10 @@ async fn openshop_admin_graphql_reports_shopify_failures_without_hiding_them(ctx
 
     ctx.transport.respond_with(|_| Err(anyhow!("network down")));
     let body = call_tool(ctx, &issued.token, "openshop.admin.graphql", arguments).await;
-    assert_eq!(body["error"], json!({ "code": -32000, "message": "network down" }));
+    // The error of a transport is the server's: the client reads an id.
+    let message = body["error"]["message"].as_str().unwrap();
+    assert!(message.starts_with("Internal error (error id "), "{message}");
+    assert!(!message.contains("network down"));
 
     let statuses: Vec<String> = audits(ctx, &issued.token_id)
         .await
