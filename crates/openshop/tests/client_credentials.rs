@@ -1037,7 +1037,9 @@ async fn a_session_token_replaces_an_expiring_grant_token_by_the_exchange(ctx: &
         Some("cc-token-1")
     );
 
+    // A refused exchange is not tried again for thirty seconds.
     *shopify.exchange_refused.lock().unwrap() = false;
+    wait(Duration::from_secs(31)).await;
     api_request(ctx).await;
     assert_eq!(
         token_requests(ctx),

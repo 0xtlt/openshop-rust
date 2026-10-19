@@ -3,6 +3,8 @@
 
 mod common;
 
+use std::time::Duration;
+
 use chrono::Utc;
 use common::noop_flow;
 use openshop::db::schema::InstallationRow;
@@ -1077,30 +1079,125 @@ async fn session_token_request_skips_the_token_exchange_for_installed_shops() {
     ctx.shutdown().await.unwrap();
 }
 
+/// Lets `duration` pass for the process, as a timer sees it.
+async fn wait(duration: Duration) {
+    tokio::time::pause();
+    tokio::time::advance(duration).await;
+    tokio::time::resume();
+}
+
+fn exchange_requests(ctx: &TestContext) -> usize {
+    ctx.transport
+        .requests()
+        .iter()
+        .filter(|request| request.body["grant_type"] == TOKEN_EXCHANGE)
+        .count()
+}
+
+const TOKEN_EXCHANGE: &str = "urn:ietf:params:oauth:grant-type:token-exchange";
+const HELD_BACK: Duration = Duration::from_secs(31);
+
 #[openshop::test(single_app())]
 async fn session_token_request_survives_a_failed_token_exchange(ctx: &TestContext) {
     // The default mock answers 404.
     assert_eq!(ctx.get("/api/flows").send().await.unwrap().status(), 200);
+    wait(HELD_BACK).await;
     ctx.transport.respond_with(|_| Err(anyhow!("connection reset")));
     assert_eq!(ctx.get("/api/flows").send().await.unwrap().status(), 200);
+    wait(HELD_BACK).await;
     ctx.transport.respond_json(json!({ "scope": "read_products" }));
     assert_eq!(ctx.get("/api/flows").send().await.unwrap().status(), 200);
+    wait(HELD_BACK).await;
     ctx.transport
         .respond_with(|_| Ok(MockTransport::json(200, json!("not an object"))));
     assert_eq!(ctx.get("/api/flows").send().await.unwrap().status(), 200);
 
-    // After the first failed exchange, the client credentials grant fails
-    // too, and holds back for thirty seconds: four exchanges, one grant.
+    // Every failure is served: four exchanges, each followed by the grant.
     let requests = ctx.transport.requests();
-    assert_eq!(requests.len(), 5);
-    assert_eq!(requests[1].body["grant_type"], "client_credentials");
-    for index in [0, 2, 3, 4] {
-        assert_eq!(
-            requests[index].body["grant_type"],
-            "urn:ietf:params:oauth:grant-type:token-exchange"
-        );
+    assert_eq!(requests.len(), 8);
+    for pair in requests.chunks(2) {
+        assert_eq!(pair[0].body["grant_type"], TOKEN_EXCHANGE);
+        assert_eq!(pair[1].body["grant_type"], "client_credentials");
     }
     assert_eq!(installation_count(ctx).await, 0);
+}
+
+#[openshop::test(single_app())]
+async fn concurrent_requests_of_a_shop_without_a_token_share_one_token_exchange(ctx: &TestContext) {
+    grant_access_token(ctx, "shared-token");
+    // Slow enough for every request to arrive while the exchange is out.
+    ctx.transport.delay_responses(Duration::from_millis(400));
+    let token = ctx.session_token();
+
+    let statuses = futures::future::join_all((0..8).map(|_| api_get(ctx, "/api/flows", &token))).await;
+    assert!(statuses.iter().all(|response| response.status() == 200));
+
+    assert_eq!(exchange_requests(ctx), 1);
+    let row = installation(ctx, "default", SHOP).await;
+    assert_eq!(decrypted_token(ctx, &row).as_deref(), Some("shared-token"));
+}
+
+#[openshop::test(single_app())]
+async fn a_shop_does_not_wait_for_the_token_exchange_of_another(ctx: &TestContext) {
+    grant_access_token(ctx, "token");
+    ctx.transport.delay_responses(Duration::from_millis(400));
+    let token = ctx.session_token();
+    let other = ctx.session_token_for("other.myshopify.com", "1");
+
+    let started = std::time::Instant::now();
+    let (first, second) = futures::join!(api_get(ctx, "/api/flows", &token), api_get(ctx, "/api/flows", &other));
+    assert_eq!((first.status().as_u16(), second.status().as_u16()), (200, 200));
+    // Two exchanges, side by side: the second did not wait for the first.
+    assert_eq!(exchange_requests(ctx), 2);
+    assert!(
+        started.elapsed() < Duration::from_millis(780),
+        "{:?}",
+        started.elapsed()
+    );
+}
+
+#[openshop::test(single_app())]
+async fn a_refused_token_exchange_is_not_tried_again_for_thirty_seconds(ctx: &TestContext) {
+    ctx.transport
+        .respond_with(|_| Ok(MockTransport::json(400, json!({ "error": "invalid_subject_token" }))));
+    let token = ctx.session_token();
+
+    for _ in 0..4 {
+        assert_eq!(api_get(ctx, "/api/flows", &token).await.status(), 200);
+    }
+    assert_eq!(exchange_requests(ctx), 1);
+
+    // Shopify is back: the next request after the window gets the token.
+    grant_access_token(ctx, "late-token");
+    wait(HELD_BACK).await;
+    assert_eq!(api_get(ctx, "/api/flows", &token).await.status(), 200);
+    assert_eq!(exchange_requests(ctx), 2);
+    let row = installation(ctx, "default", SHOP).await;
+    assert_eq!(decrypted_token(ctx, &row).as_deref(), Some("late-token"));
+}
+
+#[openshop::test(single_app())]
+async fn a_token_exchange_slower_than_five_seconds_fails_fast(ctx: &TestContext) {
+    grant_access_token(ctx, "too-late");
+    ctx.transport.delay_responses(Duration::from_secs(3600));
+    let token = ctx.session_token();
+
+    let started = std::time::Instant::now();
+    let response = tokio::time::timeout(Duration::from_secs(9), api_get(ctx, "/api/flows", &token))
+        .await
+        .expect("the request waited for Shopify");
+    // The request is served, without a token.
+    assert_eq!(response.status(), 200);
+    assert!(started.elapsed() < Duration::from_secs(9), "{:?}", started.elapsed());
+    assert!(
+        find_installation(ctx, "default", SHOP)
+            .await
+            .is_none_or(|row| row.access_token.is_none())
+    );
+
+    // The failure is remembered like a refusal.
+    assert_eq!(api_get(ctx, "/api/flows", &token).await.status(), 200);
+    assert_eq!(exchange_requests(ctx), 1);
 }
 
 #[openshop::test(single_app())]
