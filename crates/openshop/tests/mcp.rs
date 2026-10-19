@@ -923,10 +923,7 @@ async fn permissions_that_no_tool_checks_are_not_offered_and_old_grants_of_them_
     let (status, _) = initialize_status(ctx, &issued.token).await;
     assert_eq!(status, 200);
     let tools = call(ctx, &issued.token, "tools/list", json!({})).await;
-    assert_eq!(
-        strings(&tools["result"]["tools"], "name"),
-        ["openshop.shops.list", "openshop.logs.search"]
-    );
+    assert_eq!(strings(&tools["result"]["tools"], "name"), ["openshop.logs.search"]);
 }
 
 #[openshop::test(context())]

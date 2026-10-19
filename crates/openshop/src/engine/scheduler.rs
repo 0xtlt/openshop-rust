@@ -645,6 +645,7 @@ mod tests {
         let env = RuntimeEnv {
             shopify_api_key: Some("key".into()),
             shopify_api_secret: Some("secret".into()),
+            development: true,
             cwd: std::env::temp_dir().join("openshop-test-no-toml"),
             ..Default::default()
         };
