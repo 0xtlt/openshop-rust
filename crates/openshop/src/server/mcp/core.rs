@@ -2,7 +2,7 @@
 
 use std::future::Future;
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Result, anyhow};
 use chrono::{DateTime, Datelike, TimeZone, Utc};
 use indexmap::IndexMap;
 use serde_json::{Value, json};
@@ -11,6 +11,7 @@ use super::registry::core_mcp_permissions;
 use crate::engine::dispatch::DispatchOptions;
 use crate::runtime::time::to_iso;
 use crate::server::api::run_logs::{RunLogOptions, get_filtered_run_logs};
+use crate::server::http::public_error;
 use crate::server::shop_domain::normalize_shop_domain;
 use crate::shopify::is_api_version;
 use crate::types::{JsonMap, McpContext, McpResource, McpResourceContent, McpRiskLevel, McpTool};
@@ -68,7 +69,7 @@ async fn assert_run_visible(ctx: &McpContext, run_id: &str) -> Result<()> {
         Err(_) => false,
     };
     if !visible {
-        bail!("Run not found");
+        return Err(public_error("Run not found"));
     }
     Ok(())
 }
@@ -104,7 +105,7 @@ fn api_version_input(input: &JsonMap) -> Result<String> {
         Some(requested) => requested.to_string(),
     };
     if !is_api_version(&value) {
-        bail!("apiVersion must use YYYY-MM format or \"latest\"");
+        return Err(public_error("apiVersion must use YYYY-MM format or \"latest\""));
     }
     Ok(value)
 }
@@ -128,15 +129,18 @@ async fn list_installed_shops(ctx: &McpContext) -> Result<Value> {
 
 async fn run_admin_graphql(ctx: McpContext, input: JsonMap) -> Result<Value> {
     let Some(shop) = string_input(&input, "shop").and_then(normalize_shop_domain) else {
-        bail!("shop must be a myshopify.com domain");
+        return Err(public_error("shop must be a myshopify.com domain"));
     };
     let Some(query) = string_input(&input, "query") else {
-        bail!("query is required");
+        return Err(public_error("query is required"));
     };
     let variables = object_input(&input, "variables");
     let api_version = api_version_input(&input)?;
 
-    let not_installed = || anyhow!("Shop \"{shop}\" is not installed for app \"{}\"", ctx.shopify_app);
+    let not_installed = || public_error(format!(
+            "Shop \"{shop}\" is not installed for app \"{}\"",
+            ctx.shopify_app
+        ));
     let uninstalled: bool = sqlx::query_scalar(
         "SELECT EXISTS (SELECT 1 FROM installations \
          WHERE app_handle = $1 AND shop = $2 AND uninstalled_at IS NOT NULL)",
@@ -178,7 +182,7 @@ async fn run_admin_graphql(ctx: McpContext, input: JsonMap) -> Result<Value> {
 
 async fn search_logs(ctx: McpContext, input: JsonMap) -> Result<Value> {
     let Some(run_id) = string_input(&input, "runId") else {
-        bail!("runId is required");
+        return Err(public_error("runId is required"));
     };
     assert_run_visible(&ctx, run_id).await?;
 
@@ -225,22 +229,16 @@ fn list_flows(ctx: &McpContext) -> Value {
 
 async fn run_flow_tool(ctx: McpContext, input: JsonMap) -> Result<Value> {
     let Some(flow) = string_input(&input, "flow") else {
-        bail!("flow is required");
+        return Err(public_error("flow is required"));
     };
-    let Some(definition) = ctx.app.config().flows.get(flow) else {
-        bail!("Unknown flow \"{flow}\"");
-    };
-    let flow_input = object_input(&input, "input");
-    if let Some(schema) = &definition.input
-        && let Err(summary) = schema.parse(flow_input.clone())
-    {
-        bail!("Invalid input for flow \"{flow}\": {summary}");
+    if !ctx.app.config().flows.contains_key(flow) {
+        return Err(public_error(format!("Unknown flow \"{flow}\"")));
     }
     let result = ctx
         .app
         .dispatch_flow(
             DispatchOptions::new(flow, ctx.shop.clone())
-                .input(flow_input)
+                .input(object_input(&input, "input"))
                 .shopify_app(ctx.shopify_app.clone()),
         )
         .await?;
@@ -312,10 +310,10 @@ pub(crate) async fn set_cron_enabled(
 
 async fn set_cron_enabled_tool(ctx: McpContext, input: JsonMap) -> Result<Value> {
     let Some(key) = string_input(&input, "key") else {
-        bail!("key is required");
+        return Err(public_error("key is required"));
     };
     let Some(enabled) = boolean_input(&input, "enabled") else {
-        bail!("enabled is required");
+        return Err(public_error("enabled is required"));
     };
     set_cron_enabled(&ctx.app, &ctx.shopify_app, &ctx.shop, key, enabled).await?;
     Ok(structured_result(json!({ "ok": true, "key": key, "enabled": enabled })))

@@ -293,7 +293,7 @@ pub async fn warehouse(ctx: RouteContext<Caller>) -> Result<Response> {
 
 `sync_orders::dispatch` is added by `#[flow]`. It queues a run for the shop
 and the Shopify app of the context it is given, and returns a `QueuedRun`.
-The input is validated by the worker when the run starts, not at dispatch; see
+The input is validated at dispatch, which fails for input the flow refuses, and again by the worker; see
 [Input](flows.md#input).
 
 For a flow that is only known by its name, or to set a delay or a retry

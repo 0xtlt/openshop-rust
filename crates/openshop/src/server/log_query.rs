@@ -142,8 +142,10 @@ fn number(captures: &Captures<'_>, group: usize) -> usize {
         .map_or(MAX_CONTEXT_LINES, |value| value.min(MAX_CONTEXT_LINES))
 }
 
-pub fn parse_log_query(query: &str) -> ParsedLogQuery {
+/// Fails when a term is out of range, such as a `last:` older than the calendar.
+pub fn parse_log_query(query: &str) -> Result<ParsedLogQuery, InvalidLogQuery> {
     let mut parsed = ParsedLogQuery::default();
+    let mut refused = None;
     let mut rest = query.to_string();
 
     rest = CONTEXT_BOTH
@@ -198,10 +200,20 @@ pub fn parse_log_query(query: &str) -> ParsedLogQuery {
         .into_owned();
     rest = LAST
         .replace_all(&rest, |captures: &Captures<'_>| {
-            let amount: i64 = captures[1].parse().unwrap_or(0);
+            // Only digits: a number too big for an i64 saturates, then is refused below.
+            let amount: i64 = captures[1].parse().unwrap_or(i64::MAX);
             let ms = amount.saturating_mul(duration_unit_ms(&captures[2]));
             if ms > 0 {
-                parsed.time.from = Some(Utc::now() - chrono::Duration::milliseconds(ms));
+                let from = chrono::Duration::try_milliseconds(ms).and_then(|span| Utc::now().checked_sub_signed(span));
+                match from {
+                    Some(from) => parsed.time.from = Some(from),
+                    None => {
+                        refused = Some(InvalidLogQuery(format!(
+                            "last:{}{} reaches back further than the calendar",
+                            &captures[1], &captures[2]
+                        )))
+                    }
+                }
             }
             ""
         })
@@ -230,7 +242,10 @@ pub fn parse_log_query(query: &str) -> ParsedLogQuery {
             value: rest.to_lowercase(),
         });
     }
-    parsed
+    match refused {
+        Some(invalid) => Err(invalid),
+        None => Ok(parsed),
+    }
 }
 
 /// Stringifies like JavaScript's `String(value)`.
@@ -320,7 +335,7 @@ pub fn prepare_log_query(query: &str) -> Result<(ParsedLogQuery, LogMatcher), In
             "Log query is longer than {MAX_QUERY_CHARS} characters"
         )));
     }
-    let parsed = parse_log_query(query);
+    let parsed = parse_log_query(query)?;
     let matcher = LogMatcher::new(&parsed.filters)?;
     Ok((parsed, matcher))
 }
@@ -361,7 +376,7 @@ mod tests {
     #[test]
     fn free_text_becomes_contains_filter() {
         assert_eq!(
-            parse_log_query("Hello").filters,
+            parse_log_query("Hello").unwrap().filters,
             vec![filter(LogFilterOp::Contains, "hello")]
         );
     }
@@ -369,22 +384,22 @@ mod tests {
     #[test]
     fn operators_create_their_filters() {
         assert_eq!(
-            parse_log_query(r#"|= "Order""#).filters,
+            parse_log_query(r#"|= "Order""#).unwrap().filters,
             vec![filter(LogFilterOp::Contains, "order")]
         );
         assert_eq!(
-            parse_log_query(r#"!= "retry""#).filters,
+            parse_log_query(r#"!= "retry""#).unwrap().filters,
             vec![filter(LogFilterOp::Excludes, "retry")]
         );
         assert_eq!(
-            parse_log_query(r#"|~ "order-\d+""#).filters,
+            parse_log_query(r#"|~ "order-\d+""#).unwrap().filters,
             vec![filter(LogFilterOp::Regex, r"order-\d+")]
         );
     }
 
     #[test]
     fn multiple_filters_combined() {
-        let filters = parse_log_query(r#"|= "order" != "retry" |~ "id-\d+""#).filters;
+        let filters = parse_log_query(r#"|= "order" != "retry" |~ "id-\d+""#).unwrap().filters;
         assert_eq!(
             filters.iter().map(|filter| filter.op).collect::<Vec<_>>(),
             vec![LogFilterOp::Contains, LogFilterOp::Excludes, LogFilterOp::Regex]
@@ -393,11 +408,11 @@ mod tests {
 
     #[test]
     fn context_flags_are_parsed() {
-        let parsed = parse_log_query("hello C:3");
+        let parsed = parse_log_query("hello C:3").unwrap();
         assert_eq!(parsed.context, LogContext { before: 3, after: 3 });
         assert_eq!(parsed.filters, vec![filter(LogFilterOp::Contains, "hello")]);
 
-        let parsed = parse_log_query("B:2 A:5");
+        let parsed = parse_log_query("B:2 A:5").unwrap();
         assert_eq!(parsed.context, LogContext { before: 2, after: 5 });
         assert!(parsed.filters.is_empty());
     }
@@ -405,28 +420,28 @@ mod tests {
     #[test]
     fn last_sets_from_date() {
         let before = Utc::now();
-        let from = parse_log_query("last:5m").time.from.unwrap();
+        let from = parse_log_query("last:5m").unwrap().time.from.unwrap();
         let diff = (before - from).num_milliseconds();
         assert!((5 * 60_000 - 100..5 * 60_000 + 100).contains(&diff));
     }
 
     #[test]
     fn from_and_to_set_date_range() {
-        let time = parse_log_query("from:2026-03-01 to:2026-03-02").time;
+        let time = parse_log_query("from:2026-03-01 to:2026-03-02").unwrap().time;
         assert_eq!(time.from.unwrap().date_naive().to_string(), "2026-03-01");
         assert_eq!(time.to.unwrap().date_naive().to_string(), "2026-03-02");
     }
 
     #[test]
     fn between_sets_both_from_and_to() {
-        let time = parse_log_query("between:2026-01-01,2026-02-01").time;
+        let time = parse_log_query("between:2026-01-01,2026-02-01").unwrap().time;
         assert!(time.from.is_some());
         assert!(time.to.is_some());
     }
 
     #[test]
     fn empty_string_returns_no_filters() {
-        assert_eq!(parse_log_query(""), ParsedLogQuery::default());
+        assert_eq!(parse_log_query("").unwrap(), ParsedLogQuery::default());
     }
 
     #[test]
@@ -497,8 +512,25 @@ mod tests {
     }
 
     #[test]
+    fn a_last_beyond_the_calendar_is_refused_not_a_panic() {
+        for query in [
+            "last:9223372036854775807s",
+            "last:9223372036854775807d",
+            "last:99999999999999999999999999d",
+            "last:300000000000h",
+        ] {
+            let result = std::panic::catch_unwind(|| prepare_log_query(query));
+            let error = result.expect("no panic").err().expect("refused");
+            assert!(error.0.contains("further than the calendar"), "{query}: {error}");
+        }
+        assert!(prepare_log_query("last:1000d").is_ok());
+        // Not a time, so not an error either.
+        assert!(prepare_log_query("last:0s").is_ok());
+    }
+
+    #[test]
     fn context_counts_are_capped() {
-        let parsed = parse_log_query("hello C:5000 A:99999999999999999999999999 B:3");
+        let parsed = parse_log_query("hello C:5000 A:99999999999999999999999999 B:3").unwrap();
         assert_eq!(
             parsed.context,
             LogContext {
@@ -506,7 +538,7 @@ mod tests {
                 after: MAX_CONTEXT_LINES
             }
         );
-        assert_eq!(parse_log_query("C:100").context.after, 100);
+        assert_eq!(parse_log_query("C:100").unwrap().context.after, 100);
     }
 
     #[test]

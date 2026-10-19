@@ -14,7 +14,7 @@ use crate::app::OpenShop;
 use crate::db::schema::{FlowRun, StepResult};
 use crate::engine::abort::cancel_run;
 use crate::engine::dispatch::{DispatchOptions, lock_flow, reject_when_active};
-use crate::engine::errors::FlowConcurrencyError;
+use crate::engine::errors::{FlowConcurrencyError, InvalidFlowInput, UnknownFlowError};
 use crate::runtime::time::parse_date;
 use crate::server::http::{ApiResult, containing, json_error, json_object_body, json_response, parse_query};
 use crate::server::log_query::InvalidLogQuery;
@@ -209,20 +209,6 @@ async fn run_flow(
         Some(input) => input.clone(),
     };
 
-    // The caller's mistakes, before a run is queued: a run that could only fail
-    // would otherwise be accepted.
-    let Some(flow) = app.config().flows.get(&name) else {
-        return Ok(json_error(StatusCode::NOT_FOUND, format!("Flow \"{name}\" not found")));
-    };
-    if let Some(schema) = &flow.input
-        && let Err(summary) = schema.parse(input.clone())
-    {
-        return Ok(json_error(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            format!("Invalid input for flow \"{name}\": {summary}"),
-        ));
-    }
-
     let dispatched = app
         .dispatch_flow(
             DispatchOptions::new(name, session.shop.clone())
@@ -232,13 +218,23 @@ async fn run_flow(
         .await;
     match dispatched {
         Ok(result) => Ok(json_response(StatusCode::ACCEPTED, json!(result))),
-        Err(error) => match error.downcast_ref::<FlowConcurrencyError>() {
-            Some(conflict) => Ok(json_response(
-                StatusCode::CONFLICT,
-                json!({ "error": conflict.to_string(), "existingRunId": conflict.existing_run_id }),
-            )),
-            None => Err(error.into()),
-        },
+        Err(error) => {
+            if let Some(conflict) = error.downcast_ref::<FlowConcurrencyError>() {
+                Ok(json_response(
+                    StatusCode::CONFLICT,
+                    json!({ "error": conflict.to_string(), "existingRunId": conflict.existing_run_id }),
+                ))
+            } else if let Some(unknown) = error.downcast_ref::<UnknownFlowError>() {
+                Ok(json_error(
+                    StatusCode::NOT_FOUND,
+                    format!("Flow \"{}\" not found", unknown.flow_name),
+                ))
+            } else if let Some(invalid) = error.downcast_ref::<InvalidFlowInput>() {
+                Ok(json_error(StatusCode::UNPROCESSABLE_ENTITY, invalid.to_string()))
+            } else {
+                Err(error.into())
+            }
+        }
     }
 }
 
@@ -366,6 +362,7 @@ async fn cancel(
     };
     // The status is checked by the update itself: a run that finished since it
     // was read is not overwritten.
+    let mut tx = app.db().begin().await?;
     let canceled = sqlx::query(
         "UPDATE flow_runs SET status = 'canceled', completed_at = now() \
          WHERE id = $1 AND app_handle = $2 AND shop = $3 AND status = ANY($4)",
@@ -374,18 +371,22 @@ async fn cancel(
     .bind(&session.shopify_app)
     .bind(&session.shop)
     .bind(ACTIVE_RUN_STATUSES.as_slice())
-    .execute(app.db())
+    .execute(&mut *tx)
     .await?;
     if canceled.rows_affected() == 0 {
+        tx.rollback().await?;
         return refused_transition(&app, &session, &id, &ACTIVE_RUN_STATUSES, |run| {
             format!("Cannot cancel a run with status \"{}\"", run.status)
         })
         .await;
     }
 
-    // The worker that executes the run, when it is this process, is told once
-    // the run is canceled: its later writes are refused.
+    // The worker that executes the run, when it is this process, is told while
+    // the row is still locked: a retry waits for the commit, so no new execution
+    // of the run can register itself before this signal and receive it. The
+    // writes of the worker are refused once the run is canceled.
     cancel_run(&run_id.to_string());
+    tx.commit().await?;
     Ok(json_response(StatusCode::OK, json!({ "ok": true })))
 }
 

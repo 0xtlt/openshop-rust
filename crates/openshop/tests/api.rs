@@ -238,22 +238,28 @@ async fn race_winner(ctx: &TestContext, run_id: Uuid, statement: &str) -> RaceWi
     RaceWinner { tx, pid }
 }
 
+/// Waits until a statement is stuck behind the backend `pid`.
+async fn wait_until_blocked_by(db: &PgPool, pid: i32) {
+    for _ in 0..500 {
+        let (waiting,): (i64,) =
+            sqlx::query_as("SELECT count(*) FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid))")
+                .bind(pid)
+                .fetch_one(db)
+                .await
+                .unwrap();
+        if waiting > 0 {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("nothing waits for backend {pid}");
+}
+
 impl RaceWinner {
     /// Waits until a request is stuck behind this transaction, then commits it.
     async fn win(self, db: &PgPool) {
-        for _ in 0..500 {
-            let (waiting,): (i64,) =
-                sqlx::query_as("SELECT count(*) FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid))")
-                    .bind(self.pid)
-                    .fetch_one(db)
-                    .await
-                    .unwrap();
-            if waiting > 0 {
-                return self.tx.commit().await.unwrap();
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        panic!("no request waits for the run");
+        wait_until_blocked_by(db, self.pid).await;
+        self.tx.commit().await.unwrap();
     }
 }
 
@@ -1026,6 +1032,58 @@ async fn post_run_cancel_does_not_overwrite_a_run_that_completed_meanwhile(ctx: 
     cleanup_abort(&run_id.to_string());
 }
 
+/// A cancel tells the worker while it still holds the row of the run, before
+/// the cancellation is visible: nobody can retry the run, and see a worker claim
+/// it again, in between, so the signal cannot reach a new execution.
+/// The commit of the cancellation is held back by a deferred trigger that waits
+/// for an advisory lock of the test.
+#[openshop::test(api_context())]
+async fn post_run_cancel_signals_the_worker_before_the_cancellation_is_visible(ctx: &TestContext) {
+    let run_id = seed_run(ctx, "test-flow", "running", base_time()).await;
+    let token = register_abort(&run_id.to_string());
+    let key = i64::from(Uuid::new_v4().as_u128() as u32);
+    sqlx::raw_sql(&format!(
+        "CREATE FUNCTION hold_cancellation() RETURNS trigger LANGUAGE plpgsql AS $$ \
+         BEGIN PERFORM pg_advisory_lock({key}); PERFORM pg_advisory_unlock({key}); RETURN NULL; END $$; \
+         CREATE CONSTRAINT TRIGGER hold_cancellation AFTER UPDATE ON flow_runs \
+           DEFERRABLE INITIALLY DEFERRED FOR EACH ROW WHEN (NEW.status = 'canceled') \
+           EXECUTE FUNCTION hold_cancellation();"
+    ))
+    .execute(&ctx.db)
+    .await
+    .unwrap();
+    let mut holder = ctx.db.acquire().await.unwrap();
+    let (pid,): (i32,) = sqlx::query_as("SELECT pg_backend_pid()")
+        .fetch_one(&mut *holder)
+        .await
+        .unwrap();
+    sqlx::query("SELECT pg_advisory_lock($1)")
+        .bind(key)
+        .execute(&mut *holder)
+        .await
+        .unwrap();
+
+    let canceling = tokio::spawn(send(ctx.post(&format!("/api/runs/{run_id}/cancel"))));
+    wait_until_blocked_by(&ctx.db, pid).await;
+    assert!(token.is_cancelled(), "the worker is told before the commit");
+    assert_eq!(run_status(&ctx.db, run_id).await, "running", "not visible yet");
+
+    // A retry cannot slip in before the cancellation: the run is still running.
+    let (code, body) = send(ctx.post(&format!("/api/runs/{run_id}/retry"))).await;
+    assert_eq!(code, StatusCode::CONFLICT);
+    assert_eq!(body, error("Cannot retry a run with status \"running\""));
+
+    sqlx::query("SELECT pg_advisory_unlock($1)")
+        .bind(key)
+        .execute(&mut *holder)
+        .await
+        .unwrap();
+    drop(holder);
+    let (code, body) = canceling.await.unwrap();
+    assert_eq!((code, body), (StatusCode::OK, json!({ "ok": true })));
+    assert_eq!(run_status(&ctx.db, run_id).await, "canceled");
+}
+
 #[openshop::test(api_context())]
 async fn post_run_retry_of_a_run_deleted_meanwhile_is_not_found(ctx: &TestContext) {
     let run_id = seed_run(ctx, "test-flow", "completed", base_time()).await;
@@ -1630,6 +1688,22 @@ async fn get_run_logs_refuses_a_query_it_cannot_run(ctx: &TestContext) {
 }
 
 #[openshop::test(api_context())]
+async fn get_run_logs_refuses_a_last_beyond_the_calendar(ctx: &TestContext) {
+    let (run_id, _) = seed_order_logs(ctx).await;
+    for query in ["last:9223372036854775807s", "last:99999999999999999999999999d"] {
+        let (status, body) = send(ctx.get(&format!("/api/runs/{run_id}/logs")).query(&[("q", query)])).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{query}");
+        assert!(
+            body["error"].as_str().unwrap().contains("further than the calendar"),
+            "{body}"
+        );
+    }
+    // The server is still up.
+    let (status, _) = send(ctx.get(&format!("/api/runs/{run_id}/logs"))).await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+#[openshop::test(api_context())]
 async fn get_run_logs_caps_the_context_around_matches(ctx: &TestContext) {
     let base = base_time();
     let run_id = seed_run(ctx, "test-flow", "completed", base).await;
@@ -2223,6 +2297,7 @@ async fn post_providers_check_reports_checker_failures() {
         .checker(|config| async move {
             match config.get("token").and_then(Value::as_str) {
                 Some("panic") => panic!("checker exploded"),
+                Some("public") => Err(openshop::PublicError::new("connection refused").into()),
                 _ => Err(anyhow!("connection refused")),
             }
         });
@@ -2239,6 +2314,19 @@ async fn post_providers_check_reports_checker_failures() {
     .await;
     assert_eq!(status, StatusCode::OK);
 
+    let (status, body) = send(ctx.post("/api/providers/flaky/check")).await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    // A plain error is the checker's own business: the client reads an id.
+    assert_eq!(body["ok"], false);
+    assert!(body["errorId"].is_string(), "{body}");
+    assert!(!body.to_string().contains("connection refused"), "{body}");
+
+    let (status, _) = send(
+        ctx.put("/api/providers/flaky")
+            .json(&json!({ "config": { "token": "public" } })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
     let (status, body) = send(ctx.post("/api/providers/flaky/check")).await;
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
     assert_eq!(body, json!({ "ok": false, "error": "Error: connection refused" }));
@@ -2333,6 +2421,45 @@ async fn a_checker_failing_inside_the_server_is_logged_and_never_shown() {
         let line = logged.lines().find(|line| line.contains(id.as_str())).expect("a line");
         assert!(line.contains("hunter2"), "{line}");
     }
+    ctx.shutdown().await.unwrap();
+}
+
+#[derive(serde::Deserialize)]
+struct NumericCredentials {
+    #[serde(rename = "apiKey")]
+    _api_key: u64,
+}
+
+#[tokio::test]
+async fn a_typed_checker_does_not_echo_a_saved_credential_it_cannot_decode() {
+    let config = OpenShopConfig::builder()
+        .provider(
+            Provider::new("warehouse")
+                .field("apiKey", Field::password("API key"))
+                .typed_checker(|_: NumericCredentials| async { Ok(true) }),
+        )
+        .build()
+        .unwrap();
+    let ctx = TestContext::with_options(
+        config,
+        TestOptions {
+            encryption_key: Some(ENCRYPTION_KEY.to_string()),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let (status, _) = send(
+        ctx.put("/api/providers/warehouse")
+            .json(&json!({ "config": { "apiKey": "secret-checker-credential" } })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, body) = send(ctx.post("/api/providers/warehouse/check")).await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert!(!body.to_string().contains("secret-checker-credential"), "{body}");
+    assert!(body["errorId"].is_string(), "{body}");
     ctx.shutdown().await.unwrap();
 }
 

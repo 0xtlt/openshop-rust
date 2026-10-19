@@ -180,7 +180,10 @@ input is dispatched with the context alone: `nightly::dispatch(&ctx).await?`.
 
 Do not rely on returning an error from the handler: OpenShop acknowledges the
 delivery. A dispatch rejected because the flow already has an active run for
-the shop is such an error; see [Concurrency](flows.md#concurrency).
+the shop is such an error; see [Concurrency](flows.md#concurrency). So is a
+dispatch refused because the input fails the input schema of the flow
+(`InvalidFlowInput`): the error is logged, no run is queued, and Shopify still
+gets its `200`, so it does not redeliver a payload that can never be accepted.
 
 ## Without the attribute
 

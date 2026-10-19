@@ -35,6 +35,13 @@ async fn load_run(id: &str, run: RwSignal<Option<RunDetail>>) {
     }
 }
 
+/// The server's reason, or a plain one when it gave none.
+fn logs_error_message(reason: Option<String>) -> String {
+    reason
+        .filter(|reason| !reason.is_empty())
+        .unwrap_or_else(|| "The logs could not be loaded.".to_string())
+}
+
 fn is_finished(status: &str) -> bool {
     matches!(status, "failed" | "completed" | "canceled")
 }
@@ -57,6 +64,8 @@ pub fn FlowRun() -> impl IntoView {
     let initial_load = StoredValue::new(true);
     let debounce = StoredValue::new_local(None::<Timeout>);
     let retrying = RwSignal::new(false);
+    // Why the logs cannot be shown, such as an invalid regular expression.
+    let logs_error = RwSignal::new(None::<String>);
 
     // App Bridge mirrors `replaceState` to the admin address bar.
     let sync_url = |query: &str, levels: &[String]| {
@@ -79,10 +88,20 @@ pub fn FlowRun() -> impl IntoView {
         let Some(id) = id.get_untracked() else { return };
         let filtered_url = logs_url(&id, &query.get_untracked(), &levels.get_untracked());
         spawn_local(async move {
-            if let Ok(response) = api_fetch(&filtered_url).await
+            let response = api_fetch(&filtered_url).await;
+            // A query the server refuses must not leave the lines of the
+            // previous one on screen as if they were its result.
+            if let Ok(refused) = &response
+                && !refused.ok
+            {
+                logs_error.set(Some(logs_error_message(refused.error())));
+                set_if_changed(filtered_logs, Vec::new());
+            }
+            if let Ok(response) = response
                 && response.ok
                 && let Ok(data) = response.json::<LogsResponse>()
             {
+                logs_error.set(None);
                 let initial = initial_load.try_get_value().unwrap_or(false);
                 let fresh = known_log_ids
                     .try_update_value(|known| note_logs(known, &data.logs, initial))
@@ -279,6 +298,7 @@ pub fn FlowRun() -> impl IntoView {
                     levels
                     level_counts
                     filtered_logs
+                    logs_error
                     total_logs
                     new_log_ids
                     show_help
@@ -302,5 +322,20 @@ pub fn FlowRun() -> impl IntoView {
             }
             .into_any()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_refused_search_shows_the_reason_of_the_server() {
+        assert_eq!(
+            logs_error_message(Some("Invalid regex \"(\": unclosed group".to_string())),
+            "Invalid regex \"(\": unclosed group"
+        );
+        assert_eq!(logs_error_message(None), "The logs could not be loaded.");
+        assert_eq!(logs_error_message(Some(String::new())), "The logs could not be loaded.");
     }
 }

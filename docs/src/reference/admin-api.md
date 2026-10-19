@@ -96,7 +96,7 @@ error contract.
 | `GET /api/runs` | Query filters below | Run rows for the authenticated app and shop, newest first. |
 | `GET /api/flows/:name/runs` | Same filters | Run rows restricted to one flow. |
 | `GET /api/runs/:id` | — | Run row plus `steps`, in creation order. |
-| `POST /api/flows/:name/run` | `{ "input": { ... } }` | `202` with `{ runId, status: "pending" }`. `404` for an unknown flow, `422` when the input fails the input schema of the flow; no run is queued. |
+| `POST /api/flows/:name/run` | `{ "input": { ... } }` | `202` with `{ runId, status: "pending" }`. `404` for an unknown flow, `422` when the input fails the input schema of the flow; no run is queued. A dispatch from code refuses the same input. |
 | `POST /api/runs/:id/retry?mode=resume` | — | Requeues a finished run: `{ ok: true, runId, mode }`. |
 | `POST /api/runs/:id/retry?mode=reset` | — | Deletes every step result, then requeues. |
 | `POST /api/runs/:id/cancel` | — | Cancels a pending, running, or sleeping run: `{ ok: true }`. |

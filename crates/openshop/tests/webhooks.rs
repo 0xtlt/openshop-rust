@@ -389,6 +389,50 @@ async fn post_webhooks_handler_can_dispatch_a_flow_through_the_app() {
 }
 
 #[tokio::test]
+async fn post_webhooks_acknowledges_a_delivery_whose_dispatch_input_is_refused() {
+    // A handler that queues a run with input the flow refuses fails like any
+    // handler error: logged, no run, and Shopify gets its 200, so it does not
+    // redeliver the same payload for ever.
+    let strict = noop_flow("wh-flow").input_schema(openshop::builder::InputSchema::custom(
+        json!({ "type": "object" }),
+        |value| match value.get("orderId") {
+            Some(Value::Number(_)) => Ok(value),
+            _ => Err("orderId must be a number".to_string()),
+        },
+    ));
+    let config = OpenShopConfig::builder()
+        .flow(strict)
+        .webhook(
+            "ORDERS_CREATE",
+            Webhook::new(|ctx: WebhookContext| async move {
+                ctx.app
+                    .dispatch_flow(
+                        DispatchOptions::new("wh-flow", ctx.shop.clone())
+                            .input(json!({ "orderId": ctx.payload["name"] })),
+                    )
+                    .await?;
+                Ok(())
+            }),
+        )
+        .build()
+        .unwrap();
+    let ctx = TestContext::new(config).await.unwrap();
+
+    assert_ok(
+        deliver(
+            &ctx,
+            "orders/create",
+            "shop-hooks.myshopify.com",
+            r#"{"name":"order one"}"#,
+        )
+        .await,
+    )
+    .await;
+    assert!(flow_runs(&ctx).await.is_empty());
+    ctx.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn post_webhooks_resolves_the_matching_shopify_app_from_hmac() {
     let recorder = Recorder::default();
     let ctx = TestContext::new(multi_app_config(&recorder)).await.unwrap();
