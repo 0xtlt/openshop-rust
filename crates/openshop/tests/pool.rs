@@ -11,9 +11,7 @@ use sqlx::{Connection, PgConnection};
 const POOLED: usize = 3;
 
 fn connect_options() -> PgConnectOptions {
-    let url = std::env::var("TEST_DATABASE_URL")
-        .or_else(|_| std::env::var("DATABASE_URL"))
-        .unwrap_or_else(|_| openshop::runtime::env::DEFAULT_DATABASE_URL.to_string());
+    let url = openshop::testing::test_database_url().unwrap();
     PgConnectOptions::from_str(&url).unwrap()
 }
 

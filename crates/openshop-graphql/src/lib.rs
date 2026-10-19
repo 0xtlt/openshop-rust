@@ -5,6 +5,7 @@
 //! description into Rust types. The `graphql!` macro of the `openshop` crate
 //! is a thin layer over both, and the `openshop codegen` command uses
 //! [`Schema::from_introspection`] to store the schema of another API version.
+#![forbid(unsafe_code)]
 
 pub mod analyze;
 pub mod codegen;

@@ -100,8 +100,10 @@ A context can also be started by hand:
 3. inserts an installation for `shop` when `access_token` is set;
 4. serves the application on a random port of `127.0.0.1`.
 
-The test database is `TEST_DATABASE_URL`, then `DATABASE_URL`, then the local
-development database. Contexts are independent, so tests can run in parallel
+The test database is `TEST_DATABASE_URL`, then `DATABASE_URL` when it points at
+this machine, then the local development database. A `DATABASE_URL` of another
+host is refused: set `TEST_DATABASE_URL` to the database the tests may use.
+Contexts are independent, so tests can run in parallel
 against one database.
 
 `shutdown()` destroys factory-created resources, closes the server, and drops

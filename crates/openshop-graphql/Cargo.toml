@@ -19,5 +19,5 @@ quote.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 
-[lints.rust]
-unsafe_code = "forbid"
+[lints]
+workspace = true

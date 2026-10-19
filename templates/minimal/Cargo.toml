@@ -13,3 +13,6 @@ serde.workspace = true
 
 [dev-dependencies]
 openshop = { workspace = true, features = ["testing"] }
+
+[lints]
+workspace = true

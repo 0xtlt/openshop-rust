@@ -21,7 +21,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use hmac::{Hmac, Mac};
-use rand::RngCore;
+use rand::Rng;
 use sha2::Sha256;
 use tokio::sync::Semaphore;
 

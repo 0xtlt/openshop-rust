@@ -90,7 +90,6 @@ pub async fn connect_to(url: &str) -> Result<PgPool> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runtime::env::DEFAULT_DATABASE_URL;
 
     fn options(vars: &[(&str, &str)]) -> PgPoolOptions {
         pool_options_from(|name| {
@@ -153,9 +152,11 @@ mod tests {
 
     #[tokio::test]
     async fn a_pool_without_timeouts_connects_and_keeps_its_connection() {
-        let url = std::env::var("TEST_DATABASE_URL")
-            .or_else(|_| std::env::var("DATABASE_URL"))
-            .unwrap_or_else(|_| DEFAULT_DATABASE_URL.to_string());
+        let url = crate::testing::test_database_url().unwrap();
+        // A pool without timeouts retries a refused connection forever: check
+        // that PostgreSQL answers, and fail with what to do if it does not.
+        let connect_options = url.parse().unwrap();
+        crate::testing::connect(&connect_options).await.unwrap().close().await.unwrap();
         let pool = options(&ZEROS).connect(&url).await.unwrap();
 
         sqlx::query("SELECT 1").execute(&pool).await.unwrap();

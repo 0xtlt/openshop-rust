@@ -380,6 +380,29 @@
   `src/lib.rs`, so that the crate is built again with the schema; `cargo` did
   not know a file that did not exist at the first build.
 
+- The tests refuse a `DATABASE_URL` that is not on the machine: the harness
+  (`TestDb`, `#[openshop::test]`) uses `TEST_DATABASE_URL`, then `DATABASE_URL`
+  when its host is `localhost`, a loopback address or a socket, then the local
+  development database. A shell with the `DATABASE_URL` of a real database in
+  it no longer creates and drops schemas there; set `TEST_DATABASE_URL` to
+  choose such a database on purpose. `openshop::testing::test_database_url()`
+  gives the URL the harness uses. Without PostgreSQL, a test fails within ten
+  seconds saying so (`mise run db:up`, or `TEST_DATABASE_URL`) instead of
+  hanging.
+- `FakeMethod::call` takes its place in the record when the call starts: two
+  calls running at once each get their own index for `on_call_returns` and
+  `on_call_rejects`, and `calls()` lists them in the order they started in
+  (it listed them in the order they finished, the second one taking the rule
+  of the first). A call is recorded as soon as it starts, with its result
+  filled in when it ends; a `reset()` in the meantime forgets it.
+- `docker-compose.yml` publishes PostgreSQL on `127.0.0.1:5432` only, not on
+  every interface of the machine.
+- The workspace declares its lints (`[workspace.lints]`: `unsafe_code` and
+  unused `#[must_use]` results denied, no `dbg!`, `todo!` or `unimplemented!`
+  left in) and its members inherit them with `[lints] workspace = true`. A
+  project made by `openshop init` does not get the section. `rand` is 0.10, the
+  version `sentry` already uses: the lockfile loses `rand` 0.9, its
+  `rand_chacha` and `rand_core`, and one `getrandom`.
 - `openshop init` makes a project from one of three templates: `minimal`, one
   provider and one flow, as before; `custom`, a custom app with every building
   block and a page of its own next to the built-in admin; `public`, a public

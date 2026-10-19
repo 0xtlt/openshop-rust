@@ -15,7 +15,9 @@ pub use admin::{AdminTestOptions, admin_context};
 pub use context::{
     IntoTestContext, ProxyClient, ProxyRequestBuilder, ProxyResponse, StartedTestContext, TestContext, TestOptions,
 };
-pub use db::TestDb;
+pub use db::{TestDb, test_database_url};
+#[cfg(test)]
+pub(crate) use db::connect;
 pub use factory::{Factory, FactoryScope};
 pub use fake::{FakeCall, FakeMethod, FakeProviders, TypedCall, TypedFake};
 pub use transport::MockTransport;

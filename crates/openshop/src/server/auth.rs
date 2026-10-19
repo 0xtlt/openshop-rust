@@ -11,7 +11,7 @@ use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use chrono::Utc;
-use rand::RngCore;
+use rand::Rng;
 use serde_json::{Value, json};
 
 use super::hmac::{constant_time_eq, hmac_sha256};

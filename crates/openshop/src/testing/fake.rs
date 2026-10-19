@@ -31,6 +31,8 @@ struct FakeState {
     implementation: Option<Implementation>,
     per_call: Vec<(usize, Result<Value, String>)>,
     calls: Vec<FakeCall>,
+    /// Counts the resets, so that a call still running after one does not write into the calls after it.
+    generation: u64,
 }
 
 /// A spy standing in for one provider method. Returns `null` unless told otherwise.
@@ -92,14 +94,28 @@ impl FakeMethod {
 
     /// Forgets recorded calls and every configured behavior.
     pub fn reset(&self) {
-        *self.state() = FakeState::default();
+        let mut state = self.state();
+        *state = FakeState {
+            generation: state.generation + 1,
+            ..FakeState::default()
+        };
     }
 
     pub async fn call(&self, args: Value) -> Result<Value> {
-        let (override_result, implementation, default_error, default_return) = {
-            let state = self.state();
+        // The call takes its place in the record, and so its index, in the same
+        // lock as the rules are read: calls that overlap each get their own.
+        let (index, generation, override_result, implementation, default_error, default_return) = {
+            let mut state = self.state();
             let index = state.calls.len();
+            state.calls.push(FakeCall {
+                args: args.clone(),
+                returned_value: None,
+                thrown_error: None,
+                timestamp: Utc::now(),
+            });
             (
+                index,
+                state.generation,
                 state
                     .per_call
                     .iter()
@@ -114,21 +130,23 @@ impl FakeMethod {
 
         let outcome = match (override_result, implementation, default_error) {
             (Some(result), _, _) => result,
-            (None, Some(implementation), _) => implementation(args.clone()).await.map_err(|error| format!("{error:#}")),
+            (None, Some(implementation), _) => implementation(args).await.map_err(|error| format!("{error:#}")),
             (None, None, Some(error)) => Err(error),
             (None, None, None) => Ok(default_return),
         };
 
-        let (returned_value, thrown_error) = match &outcome {
-            Ok(value) => (Some(value.clone()), None),
-            Err(error) => (None, Some(error.clone())),
-        };
-        self.state().calls.push(FakeCall {
-            args,
-            returned_value,
-            thrown_error,
-            timestamp: Utc::now(),
-        });
+        {
+            let mut state = self.state();
+            // A reset in the meantime forgot this call.
+            if state.generation == generation
+                && let Some(call) = state.calls.get_mut(index)
+            {
+                match &outcome {
+                    Ok(value) => call.returned_value = Some(value.clone()),
+                    Err(error) => call.thrown_error = Some(error.clone()),
+                }
+            }
+        }
         outcome.map_err(|error| anyhow!(error))
     }
 }
@@ -337,6 +355,49 @@ mod tests {
         fake.rejects("always");
         assert_eq!(fake.call(Value::Null).await.unwrap_err().to_string(), "always");
         assert_eq!(fake.call_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn concurrent_calls_each_take_their_own_index() {
+        let fake = FakeMethod::default();
+        fake.on_call_returns(1, "second");
+        fake.implementation(|args| async move {
+            // The first call is still running when the second one starts.
+            tokio::time::sleep(std::time::Duration::from_millis(if args == json!("a") { 50 } else { 0 })).await;
+            Ok(json!("implementation"))
+        });
+
+        let (first, second) = tokio::join!(fake.call(json!("a")), fake.call(json!("b")));
+        assert_eq!(first.unwrap(), json!("implementation"));
+        assert_eq!(second.unwrap(), json!("second"));
+
+        // The calls are in the order they started in, each with its own result.
+        let calls = fake.calls();
+        assert_eq!(calls.len(), 2);
+        assert_eq!((&calls[0].args, &calls[0].returned_value), (&json!("a"), &Some(json!("implementation"))));
+        assert_eq!((&calls[1].args, &calls[1].returned_value), (&json!("b"), &Some(json!("second"))));
+    }
+
+    #[tokio::test]
+    async fn a_reset_during_a_call_does_not_touch_the_calls_after_it() {
+        let fake = FakeMethod::default();
+        fake.implementation(|_| async {
+            tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+            Ok(json!("late"))
+        });
+        let running = fake.call(json!("old"));
+        let reset = async {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            fake.reset();
+            fake.returns("new");
+            fake.call(json!("fresh")).await.unwrap();
+        };
+        let (late, ()) = tokio::join!(running, reset);
+        assert_eq!(late.unwrap(), json!("late"));
+
+        let calls = fake.calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!((&calls[0].args, &calls[0].returned_value), (&json!("fresh"), &Some(json!("new"))));
     }
 
     #[tokio::test]

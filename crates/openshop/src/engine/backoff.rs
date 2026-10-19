@@ -1,6 +1,6 @@
 //! Retry policies and exponential backoff.
 
-use rand::Rng;
+use rand::RngExt;
 use chrono::{DateTime, Duration, Utc};
 
 use crate::runtime::time::millis;

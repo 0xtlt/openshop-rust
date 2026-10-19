@@ -22,9 +22,11 @@ is dropped when the test ends. Your
 development tables in the `public` schema are not touched, and there is no
 migration step: the harness does not read `./migrations`.
 
-The harness connects to `TEST_DATABASE_URL`, then `DATABASE_URL`, then the local
-development database (`postgresql://openshop:openshop@localhost:5432/openshop`).
-Set `TEST_DATABASE_URL` to use another server or a dedicated database:
+The harness connects to `TEST_DATABASE_URL`, then `DATABASE_URL` when it points
+at this machine, then the local development database
+(`postgresql://openshop:openshop@localhost:5432/openshop`). A `DATABASE_URL` of
+another host is refused, because tests create and drop schemas: set
+`TEST_DATABASE_URL` to use another server or a dedicated database:
 
 ```bash
 export TEST_DATABASE_URL=postgresql://openshop:openshop@localhost:5432/openshop

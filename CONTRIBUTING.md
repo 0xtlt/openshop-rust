@@ -12,6 +12,11 @@ export DATABASE_URL=postgresql://openshop:openshop@localhost:5432/openshop
 cargo test --workspace
 ```
 
+The tests use `TEST_DATABASE_URL`, or `DATABASE_URL` when it points at this
+machine; they refuse a `DATABASE_URL` of another host, so a shell with a real
+database in it never runs them. They fail within seconds, saying so, when
+PostgreSQL does not answer.
+
 Integration tests create one PostgreSQL schema per test and drop it afterwards,
 so they run in parallel against a single database. They never touch the
 `public` schema.

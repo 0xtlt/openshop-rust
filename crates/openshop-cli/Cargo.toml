@@ -33,5 +33,5 @@ tokio.workspace = true
 dialoguer.workspace = true
 toml_edit.workspace = true
 
-[lints.rust]
-unsafe_code = "forbid"
+[lints]
+workspace = true

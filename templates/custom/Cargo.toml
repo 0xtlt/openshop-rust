@@ -17,3 +17,6 @@ leptos = "0.8"
 openshop = { workspace = true, features = ["testing"] }
 # What `examples/preview-custom.rs` runs.
 openshop-preview = { path = "../../apps/preview" }
+
+[lints]
+workspace = true
