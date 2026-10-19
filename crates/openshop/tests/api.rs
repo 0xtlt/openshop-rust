@@ -1589,6 +1589,85 @@ async fn get_run_logs_counts_the_lines_of_each_level(ctx: &TestContext) {
     assert_eq!(data["total"], 6);
 }
 
+/// A page is bounded by its limit, whatever the matches and the context asked
+/// for, and the pages put end to end are the list of one unbounded request.
+#[openshop::test(api_context())]
+async fn get_run_logs_pages_are_bounded_with_consecutive_matches_and_wide_context(ctx: &TestContext) {
+    let base = base_time();
+    let run_id = seed_run(ctx, "test-flow", "completed", base).await;
+    // Newest first, the lines are `line 60` down to `line 1`; every 7th is marked.
+    for index in 1..=60 {
+        let message = if index % 7 == 0 {
+            format!("line {index} mark")
+        } else {
+            format!("line {index}")
+        };
+        let at = base + chrono::Duration::seconds(index);
+        seed_log(&ctx.db, run_id, "info", &message, json!({}), at).await;
+    }
+
+    // What the query shows, from the definition: a match, and `before` lines
+    // newer / `after` lines older around it (the list runs newest first).
+    let expected = |marked_only: bool, before: usize, after: usize| -> Vec<String> {
+        let lines: Vec<(String, bool)> = (1..=60)
+            .rev()
+            .map(|index| (format!("line {index}"), !marked_only || index % 7 == 0))
+            .collect();
+        let mut visible = vec![false; lines.len()];
+        for (position, (_, matched)) in lines.iter().enumerate() {
+            if *matched {
+                let start = position.saturating_sub(before);
+                let end = (position + after).min(lines.len() - 1);
+                visible[start..=end].iter_mut().for_each(|flag| *flag = true);
+            }
+        }
+        lines
+            .into_iter()
+            .zip(visible)
+            .filter(|(_, visible)| *visible)
+            .map(|(line, _)| line.0)
+            .collect()
+    };
+    let names = |pages: &[Value]| -> Vec<String> {
+        pages
+            .iter()
+            .flat_map(|page| strings(&page["logs"], "message"))
+            .map(|message| message.trim_end_matches(" mark").to_string())
+            .collect()
+    };
+
+    let cases = [
+        // (query, marked only, before, after)
+        (r#"|= "line" A:1"#, false, 0, 1),
+        (r#"|= "line" C:3"#, false, 3, 3),
+        (r#"|= "line" A:100000"#, false, 0, 100_000),
+        (r#"|= "line" B:100000 A:100000"#, false, 1_000, 100_000),
+        (r#"|= "mark" A:1"#, true, 0, 1),
+        (r#"|= "mark" B:2 A:4"#, true, 2, 4),
+        (r#"|= "mark" C:100000"#, true, 1_000, 100_000),
+        (r#"|= "mark""#, true, 0, 0),
+    ];
+    for (query, marked_only, before, after) in cases {
+        let want = expected(marked_only, before, after);
+        for limit in [1_usize, 2, 3, 7, 25] {
+            let pages = read_log_pages(ctx, run_id, &[("q", query), ("limit", &limit.to_string())]).await;
+            // A match is never split from the lines before it, which can be more than the limit.
+            let most = limit.max(before + 1);
+            for page in &pages {
+                let size = page["logs"].as_array().unwrap().len();
+                assert!(size <= most, "q={query} limit={limit}: {size} lines");
+            }
+            assert_eq!(names(&pages), want, "q={query} limit={limit}");
+        }
+        let (_, all) = send(
+            ctx.get(&format!("/api/runs/{run_id}/logs"))
+                .query(&[("q", query), ("limit", "5000")]),
+        )
+        .await;
+        assert_eq!(names(&[all]), want, "q={query} unbounded");
+    }
+}
+
 #[openshop::test(api_context())]
 async fn get_run_logs_pages_through_a_query_and_its_context(ctx: &TestContext) {
     let (run_id, _) = seed_order_logs(ctx).await;

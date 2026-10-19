@@ -151,9 +151,12 @@ A page holds `limit` lines: 1,000 when it is absent or not a number, 5,000 at
 most. `next` is a cursor, `null` on the last page; pass it as `cursor` with the
 same `q` and `levels` to get the following lines. Lines are ordered by
 `(createdAt, id)`, newest first, so pages neither repeat nor skip a line. A
-cursor that is not one answers `400` with `Invalid cursor`. With a text filter
-a page stops after a whole match and its context, so it can hold more than
-`limit` lines by the context lines of its last match. Levels and time bounds
+cursor that is not one answers `400` with `Invalid cursor`. A page never holds
+more than `limit` lines, however many lines match and whatever the context
+(`A:`, `B:`, `C:`) asked for; the cursor carries the context still to come, so
+the pages put end to end are the list one unbounded request would give. The one
+exception is a match whose context before it is longer than `limit`: it is not
+split, so a page that starts with it holds it, up to 1,001 lines. Levels and time bounds
 are applied by the database; the text of the filters is checked on the lines as
 they are read, so a rare match in a long run still reads the run, a chunk at a
 time. `before` context is limited to 1,000 lines.

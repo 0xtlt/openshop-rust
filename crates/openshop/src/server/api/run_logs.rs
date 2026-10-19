@@ -58,14 +58,27 @@ pub struct FilteredRunLogs {
 pub struct LogCursor {
     created_at: DateTime<Utc>,
     id: Uuid,
+    /// Lines of context still to show after this one, when a page stopped
+    /// inside the context of a match.
+    after_left: usize,
 }
 
 impl LogCursor {
     pub fn parse(value: &str) -> Option<Self> {
-        let (micros, id) = value.split_once('.')?;
+        let mut parts = value.split('.');
+        let micros = parts.next()?;
+        let id = parts.next()?;
+        let after_left = match parts.next() {
+            Some(left) => left.parse().ok()?,
+            None => 0,
+        };
+        if parts.next().is_some() {
+            return None;
+        }
         Some(Self {
             created_at: DateTime::from_timestamp_micros(micros.parse().ok()?)?,
             id: Uuid::parse_str(id).ok()?,
+            after_left,
         })
     }
 
@@ -73,11 +86,16 @@ impl LogCursor {
         Self {
             created_at: log.created_at,
             id: log.id,
+            after_left: 0,
         }
     }
 
     pub fn encode(&self) -> String {
-        format!("{}.{}", self.created_at.timestamp_micros(), self.id)
+        let (micros, id) = (self.created_at.timestamp_micros(), self.id);
+        match self.after_left {
+            0 => format!("{micros}.{id}"),
+            left => format!("{micros}.{id}.{left}"),
+        }
     }
 }
 
@@ -87,7 +105,8 @@ pub struct RunLogOptions<'a> {
     /// Comma-separated levels, e.g. `info,warn,error`.
     pub levels: &'a str,
     pub include_context: bool,
-    /// The most lines of the page. Context lines of the last match come on top.
+    /// The most lines of the page. A page that has no line yet takes a match
+    /// with the context before it (1,000 lines at most) even if it is longer.
     pub limit: usize,
     /// The `next` of the previous page.
     pub cursor: Option<LogCursor>,
@@ -173,9 +192,9 @@ fn plain(log: LogRow) -> LogResponseRow {
 ///
 /// Without a text filter the database returns the page. With one, the scan
 /// reads the run chunk by chunk, keeping the matches, and the context lines
-/// around them when asked for, until the page is full. A page stops after a
-/// whole match with its context, so the pages put end to end hold what one
-/// unpaged request would.
+/// around them when asked for, until the page is full. The cursor of a page
+/// carries what the next needs of the context, so the pages put end to end
+/// hold what one unpaged request would, and none holds more than its limit.
 pub async fn get_filtered_run_logs(
     db: &PgPool,
     flow_run_id: &str,
@@ -215,7 +234,7 @@ pub async fn get_filtered_run_logs(
         after,
         limit,
         pending: VecDeque::new(),
-        after_left: 0,
+        after_left: options.cursor.map_or(0, |cursor| cursor.after_left),
         logs: Vec::new(),
         last: None,
     };
@@ -262,13 +281,23 @@ impl Page<'_> {
     }
 
     /// Takes the next line of the scan. Returns where the next page starts
-    /// when the page is full and the line is a match that belongs to the next.
+    /// when the line would make this one longer than its limit.
+    ///
+    /// A match is shown with the lines before it, never without: when they do
+    /// not fit in what is left of the page, the page stops before them and the
+    /// next one starts with them. The one exception is a page with nothing yet,
+    /// which takes them whatever the limit so that pages always advance; they
+    /// are at most `MAX_CONTEXT_BEFORE`. The lines after a match come one at a
+    /// time, and a page that stops among them hands the number still to come to
+    /// the next in its cursor. A page ends at its last shown line, so a line is
+    /// only read again if it was not shown.
     fn push(&mut self, log: LogRow) -> Option<LogCursor> {
         let matched = matches_log_filters(log.message.as_deref(), log.payload.as_ref(), self.filters);
         let full = self.logs.len() >= self.limit;
         if matched {
-            if full && self.after_left == 0 {
-                return self.last;
+            let needed = if self.after_left > 0 { 1 } else { self.pending.len() + 1 };
+            if !self.logs.is_empty() && self.logs.len() + needed > self.limit {
+                return self.stop();
             }
             while let Some(context) = self.pending.pop_front() {
                 self.emit(context, false);
@@ -276,6 +305,9 @@ impl Page<'_> {
             self.emit(log, true);
             self.after_left = self.after;
         } else if self.after_left > 0 {
+            if full {
+                return self.stop();
+            }
             self.after_left -= 1;
             self.emit(log, false);
         } else if !full && self.before > 0 {
@@ -285,6 +317,14 @@ impl Page<'_> {
             self.pending.push_back(log);
         }
         None
+    }
+
+    /// Where the next page starts: after the last line of this one.
+    fn stop(&self) -> Option<LogCursor> {
+        self.last.map(|last| LogCursor {
+            after_left: self.after_left,
+            ..last
+        })
     }
 }
 
@@ -486,7 +526,20 @@ mod tests {
     fn a_cursor_survives_its_encoding() {
         let cursor = LogCursor::of(&row(None, None).log);
         assert_eq!(LogCursor::parse(&cursor.encode()), Some(cursor));
-        for bad in ["", "nope", "1.2", "x.00000000-0000-0000-0000-000000000000"] {
+        let inside_context = LogCursor {
+            after_left: 7,
+            ..cursor
+        };
+        assert!(inside_context.encode().ends_with(".7"));
+        assert_eq!(LogCursor::parse(&inside_context.encode()), Some(inside_context));
+        for bad in [
+            "",
+            "nope",
+            "1.2",
+            "x.00000000-0000-0000-0000-000000000000",
+            "1.00000000-0000-0000-0000-000000000000.x",
+            "1.00000000-0000-0000-0000-000000000000.1.2",
+        ] {
             assert_eq!(LogCursor::parse(bad), None, "{bad}");
         }
     }
