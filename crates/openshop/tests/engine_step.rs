@@ -641,3 +641,106 @@ async fn writes_a_line_without_waiting_for_the_end_of_the_run() {
     assert_ne!(writes[0].2, writes[1].2, "the second line has its own statement");
     test.cleanup().await;
 }
+
+// A NUL byte cannot be stored in a PostgreSQL text: one in a line used to fail
+// the whole statement, and with it every line logged at the same time.
+#[tokio::test]
+async fn a_nul_byte_in_a_line_does_not_lose_the_lines_around_it() {
+    let test = new_test().await;
+    let run_id = create_run(&test).await;
+    let logger = FlowLogger::new(test.db.clone(), run_id.to_string());
+
+    logger.info("before");
+    logger.warn_with(
+        "bad\0byte",
+        json!({ "na\0me": "va\0lue", "list": ["x\0", 1], "nested": { "k": "\0" } }),
+    );
+    logger.info("after");
+    logger.flush().await;
+
+    let lines: Vec<(String, String)> =
+        sqlx::query_as("SELECT message, payload::text FROM logs WHERE flow_run_id = $1 ORDER BY created_at, ctid")
+            .bind(run_id.to_string())
+            .fetch_all(&test.db)
+            .await
+            .unwrap();
+    let messages: Vec<&str> = lines.iter().map(|(message, _)| message.as_str()).collect();
+    assert_eq!(messages, ["before", "badbyte", "after"]);
+    assert_eq!(
+        lines[1].1,
+        r#"{"name":"value","list":["x",1],"nested":{"k":""}}"#,
+        "no NUL, and not its escape either"
+    );
+    test.cleanup().await;
+}
+
+struct Warnings(std::sync::Mutex<Vec<String>>);
+
+impl openshop::runtime::RuntimeLogger for Warnings {
+    fn info(&self, _message: &str, _context: Option<&openshop::Value>) {}
+    fn warn(&self, message: &str, _context: Option<&openshop::Value>) {
+        self.0.lock().unwrap().push(message.to_string());
+    }
+    fn error(&self, _message: &str, _context: Option<&openshop::Value>) {}
+}
+
+#[tokio::test]
+async fn a_log_write_that_fails_is_told_to_the_process_logger() {
+    let test = new_test().await;
+    let run_id = create_run(&test).await;
+    // The pool of the logger is closed: its writes fail, the flow does not.
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect_with((*test.db.connect_options()).clone())
+        .await
+        .unwrap();
+    let logger = FlowLogger::new(pool.clone(), run_id.to_string());
+    pool.close().await;
+
+    let warnings = Arc::new(Warnings(Default::default()));
+    let previous = openshop::runtime::logger::set_logger(warnings.clone());
+    logger.info("never stored");
+    logger.flush().await;
+    openshop::runtime::logger::set_logger(previous);
+
+    let told = warnings.0.lock().unwrap().clone();
+    let told = told.iter().find(|line| line.contains(&run_id.to_string()));
+    assert!(
+        told.is_some_and(|line| line.contains("1 log line")),
+        "nothing said that the line was lost: {told:?}"
+    );
+    test.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_flow_that_logs_faster_than_the_database_writes_drops_lines_and_says_so() {
+    let test = new_test().await;
+    let run_id = create_run(&test).await;
+    let logger = FlowLogger::new(test.db.clone(), run_id.to_string());
+
+    // A current-thread runtime: the task that writes does not run until the
+    // flow awaits, so the queue fills up. Memory must not grow with it.
+    const LOGGED: usize = 50_000;
+    for position in 0..LOGGED {
+        logger.info_with("tick", json!({ "position": position }));
+    }
+    logger.flush().await;
+
+    let stored: (i64,) = sqlx::query_as("SELECT count(*) FROM logs WHERE flow_run_id = $1 AND message = 'tick'")
+        .bind(run_id.to_string())
+        .fetch_one(&test.db)
+        .await
+        .unwrap();
+    let stored = stored.0 as usize;
+    assert!(stored > 0 && stored < LOGGED, "{stored} lines were stored");
+
+    let notice: (String, String) =
+        sqlx::query_as("SELECT level, message FROM logs WHERE flow_run_id = $1 AND message LIKE '%dropped%'")
+            .bind(run_id.to_string())
+            .fetch_one(&test.db)
+            .await
+            .unwrap();
+    assert_eq!(notice.0, "warn");
+    assert_eq!(notice.1, format!("{} log lines were dropped", LOGGED - stored));
+    test.cleanup().await;
+}

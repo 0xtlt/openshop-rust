@@ -1,6 +1,9 @@
 //! Per-run logger: every line goes to the process logger and to the `logs` table,
 //! and is left on the trail of what the run reports.
 
+use std::borrow::Cow;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
@@ -8,11 +11,15 @@ use serde_json::Value;
 use sqlx::PgPool;
 use tokio::sync::{mpsc, oneshot};
 
-use super::logger::logger;
+use super::logger::{self, logger};
 use super::report::Trail;
 
 /// How long a line may wait for the next ones before it is written.
 const WRITE_DELAY: Duration = Duration::from_millis(50);
+
+/// How many lines wait to be written. A flow that logs faster than the
+/// database takes them loses the newest ones, and the run says how many.
+const QUEUE_CAPACITY: usize = 10_000;
 
 struct Line {
     level: &'static str,
@@ -27,16 +34,21 @@ enum Message {
 }
 
 /// Writes are queued and persisted in emission order by a background task, so
-/// logging never blocks or fails a flow.
+/// logging never blocks or fails a flow. The queue is bounded: when it is full
+/// a line is dropped instead of waiting, and a line saying how many were
+/// dropped is written next to the others.
 #[derive(Clone)]
 pub struct FlowLogger {
-    sender: mpsc::UnboundedSender<Message>,
+    sender: mpsc::Sender<Message>,
+    dropped: Arc<AtomicUsize>,
     trail: Trail,
 }
 
 impl FlowLogger {
     pub fn new(db: PgPool, flow_run_id: String) -> Self {
-        let (sender, mut receiver) = mpsc::unbounded_channel();
+        let (sender, mut receiver) = mpsc::channel(QUEUE_CAPACITY);
+        let dropped = Arc::new(AtomicUsize::new(0));
+        let lost = dropped.clone();
 
         tokio::spawn(async move {
             let mut lines = Vec::new();
@@ -66,6 +78,17 @@ impl FlowLogger {
                         }
                     }
                 }
+                let lost = lost.swap(0, Ordering::Relaxed);
+                if lost > 0 {
+                    let notice = format!("{lost} log lines were dropped");
+                    logger::warn(format!("[openshop] Run {flow_run_id}: {notice}"));
+                    lines.push(Line {
+                        level: "warn",
+                        message: notice,
+                        payload: Value::Object(Default::default()),
+                        at: Utc::now(),
+                    });
+                }
                 write(&db, &flow_run_id, &lines).await;
                 lines.clear();
                 for done in flushes.drain(..) {
@@ -76,11 +99,12 @@ impl FlowLogger {
 
         Self {
             sender,
+            dropped,
             trail: Trail::current(),
         }
     }
 
-    fn log(&self, level: &'static str, payload: Value, message: &str) {
+    fn log(&self, level: &'static str, mut payload: Value, message: &str) {
         let line = format!("[{}] {message}", level.to_uppercase());
         let logger = logger();
         match level {
@@ -90,12 +114,18 @@ impl FlowLogger {
         }
         self.trail.leave(level, message);
 
-        let _ = self.sender.send(Message::Line(Line {
+        // PostgreSQL stores no NUL in a text, and one fails the whole statement.
+        strip_nul(&mut payload);
+        let line = Line {
             level,
-            message: message.to_string(),
+            message: without_nul(message).into_owned(),
             payload,
             at: Utc::now(),
-        }));
+        };
+        // A full queue loses the line; a closed one belongs to a stopped runtime.
+        if let Err(mpsc::error::TrySendError::Full(_)) = self.sender.try_send(Message::Line(line)) {
+            self.dropped.fetch_add(1, Ordering::Relaxed);
+        }
     }
 
     /// Logs a line of the run.
@@ -127,9 +157,39 @@ impl FlowLogger {
     /// Resolves once every line logged so far has been written.
     pub async fn flush(&self) {
         let (done, wait) = oneshot::channel();
-        if self.sender.send(Message::Flush(done)).is_ok() {
+        if self.sender.send(Message::Flush(done)).await.is_ok() {
             let _ = wait.await;
         }
+    }
+}
+
+fn without_nul(text: &str) -> Cow<'_, str> {
+    if text.contains('\0') {
+        Cow::Owned(text.replace('\0', ""))
+    } else {
+        Cow::Borrowed(text)
+    }
+}
+
+/// Removes the NUL bytes from the strings and the keys of a payload.
+fn strip_nul(value: &mut Value) {
+    match value {
+        Value::String(text) => {
+            if let Cow::Owned(clean) = without_nul(text) {
+                *text = clean;
+            }
+        }
+        Value::Array(items) => items.iter_mut().for_each(strip_nul),
+        Value::Object(map) => {
+            if map.keys().any(|key| key.contains('\0')) {
+                *map = std::mem::take(map)
+                    .into_iter()
+                    .map(|(key, value)| (without_nul(&key).into_owned(), value))
+                    .collect();
+            }
+            map.values_mut().for_each(strip_nul);
+        }
+        _ => {}
     }
 }
 
@@ -145,8 +205,8 @@ async fn write(db: &PgPool, flow_run_id: &str, lines: &[Line]) {
     let payloads: Vec<String> = lines.iter().map(|line| line.payload.to_string()).collect();
     let dates: Vec<DateTime<Utc>> = lines.iter().map(|line| line.at).collect();
 
-    // A failed log write must not crash the flow.
-    let _ = sqlx::query(
+    // A failed log write must not crash the flow: it is told to the process logger.
+    let written = sqlx::query(
         "INSERT INTO logs (flow_run_id, level, message, payload, created_at) \
          SELECT $1, line.level, line.message, line.payload::json, line.created_at \
          FROM UNNEST($2::text[], $3::text[], $4::text[], $5::timestamptz[]) AS line (level, message, payload, created_at)",
@@ -158,4 +218,11 @@ async fn write(db: &PgPool, flow_run_id: &str, lines: &[Line]) {
     .bind(dates)
     .execute(db)
     .await;
+    if let Err(error) = written {
+        let count = lines.len();
+        logger::warn(format!(
+            "[openshop] {count} log line{} of run {flow_run_id} could not be written: {error}",
+            if count == 1 { "" } else { "s" }
+        ));
+    }
 }
