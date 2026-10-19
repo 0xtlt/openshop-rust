@@ -11,8 +11,9 @@
   flow like a dispatch, under the same lock; when the flow rejects concurrent
   runs (the default) and another run of it is active for the shop, it answers
   `409` with `existingRunId` and the run stays as it was, where it used to run
-  beside the other one. A cancel tells the worker only once the run is
-  canceled.
+  beside the other one. A cancel tells the worker of the run while it
+  still holds the row, so a retry and a new claim of the run cannot take place
+  before the signal and receive it.
 - The Admin API answers what the caller got wrong with a `4xx`, and no longer
   shows what the server got wrong. Behaviour change:
   `POST /api/flows/:name/run` answers `404` for an unknown flow, and `422`

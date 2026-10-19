@@ -238,22 +238,28 @@ async fn race_winner(ctx: &TestContext, run_id: Uuid, statement: &str) -> RaceWi
     RaceWinner { tx, pid }
 }
 
+/// Waits until a statement is stuck behind the backend `pid`.
+async fn wait_until_blocked_by(db: &PgPool, pid: i32) {
+    for _ in 0..500 {
+        let (waiting,): (i64,) =
+            sqlx::query_as("SELECT count(*) FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid))")
+                .bind(pid)
+                .fetch_one(db)
+                .await
+                .unwrap();
+        if waiting > 0 {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("nothing waits for backend {pid}");
+}
+
 impl RaceWinner {
     /// Waits until a request is stuck behind this transaction, then commits it.
     async fn win(self, db: &PgPool) {
-        for _ in 0..500 {
-            let (waiting,): (i64,) =
-                sqlx::query_as("SELECT count(*) FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid))")
-                    .bind(self.pid)
-                    .fetch_one(db)
-                    .await
-                    .unwrap();
-            if waiting > 0 {
-                return self.tx.commit().await.unwrap();
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        panic!("no request waits for the run");
+        wait_until_blocked_by(db, self.pid).await;
+        self.tx.commit().await.unwrap();
     }
 }
 
@@ -990,6 +996,58 @@ async fn post_run_cancel_does_not_overwrite_a_run_that_completed_meanwhile(ctx: 
         "the worker of a run that completed is left alone"
     );
     cleanup_abort(&run_id.to_string());
+}
+
+/// A cancel tells the worker while it still holds the row of the run, before
+/// the cancellation is visible: nobody can retry the run, and see a worker claim
+/// it again, in between, so the signal cannot reach a new execution.
+/// The commit of the cancellation is held back by a deferred trigger that waits
+/// for an advisory lock of the test.
+#[openshop::test(api_context())]
+async fn post_run_cancel_signals_the_worker_before_the_cancellation_is_visible(ctx: &TestContext) {
+    let run_id = seed_run(ctx, "test-flow", "running", base_time()).await;
+    let token = register_abort(&run_id.to_string());
+    let key = i64::from(Uuid::new_v4().as_u128() as u32);
+    sqlx::raw_sql(&format!(
+        "CREATE FUNCTION hold_cancellation() RETURNS trigger LANGUAGE plpgsql AS $$ \
+         BEGIN PERFORM pg_advisory_lock({key}); PERFORM pg_advisory_unlock({key}); RETURN NULL; END $$; \
+         CREATE CONSTRAINT TRIGGER hold_cancellation AFTER UPDATE ON flow_runs \
+           DEFERRABLE INITIALLY DEFERRED FOR EACH ROW WHEN (NEW.status = 'canceled') \
+           EXECUTE FUNCTION hold_cancellation();"
+    ))
+    .execute(&ctx.db)
+    .await
+    .unwrap();
+    let mut holder = ctx.db.acquire().await.unwrap();
+    let (pid,): (i32,) = sqlx::query_as("SELECT pg_backend_pid()")
+        .fetch_one(&mut *holder)
+        .await
+        .unwrap();
+    sqlx::query("SELECT pg_advisory_lock($1)")
+        .bind(key)
+        .execute(&mut *holder)
+        .await
+        .unwrap();
+
+    let canceling = tokio::spawn(send(ctx.post(&format!("/api/runs/{run_id}/cancel"))));
+    wait_until_blocked_by(&ctx.db, pid).await;
+    assert!(token.is_cancelled(), "the worker is told before the commit");
+    assert_eq!(run_status(&ctx.db, run_id).await, "running", "not visible yet");
+
+    // A retry cannot slip in before the cancellation: the run is still running.
+    let (code, body) = send(ctx.post(&format!("/api/runs/{run_id}/retry"))).await;
+    assert_eq!(code, StatusCode::CONFLICT);
+    assert_eq!(body, error("Cannot retry a run with status \"running\""));
+
+    sqlx::query("SELECT pg_advisory_unlock($1)")
+        .bind(key)
+        .execute(&mut *holder)
+        .await
+        .unwrap();
+    drop(holder);
+    let (code, body) = canceling.await.unwrap();
+    assert_eq!((code, body), (StatusCode::OK, json!({ "ok": true })));
+    assert_eq!(run_status(&ctx.db, run_id).await, "canceled");
 }
 
 #[openshop::test(api_context())]

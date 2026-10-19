@@ -355,6 +355,7 @@ async fn cancel(
     };
     // The status is checked by the update itself: a run that finished since it
     // was read is not overwritten.
+    let mut tx = app.db().begin().await?;
     let canceled = sqlx::query(
         "UPDATE flow_runs SET status = 'canceled', completed_at = now() \
          WHERE id = $1 AND app_handle = $2 AND shop = $3 AND status = ANY($4)",
@@ -363,18 +364,22 @@ async fn cancel(
     .bind(&session.shopify_app)
     .bind(&session.shop)
     .bind(ACTIVE_RUN_STATUSES.as_slice())
-    .execute(app.db())
+    .execute(&mut *tx)
     .await?;
     if canceled.rows_affected() == 0 {
+        tx.rollback().await?;
         return refused_transition(&app, &session, &id, &ACTIVE_RUN_STATUSES, |run| {
             format!("Cannot cancel a run with status \"{}\"", run.status)
         })
         .await;
     }
 
-    // The worker that executes the run, when it is this process, is told once
-    // the run is canceled: its later writes are refused.
+    // The worker that executes the run, when it is this process, is told while
+    // the row is still locked: a retry waits for the commit, so no new execution
+    // of the run can register itself before this signal and receive it. The
+    // writes of the worker are refused once the run is canceled.
     cancel_run(&run_id.to_string());
+    tx.commit().await?;
     Ok(json_response(StatusCode::OK, json!({ "ok": true })))
 }
 
