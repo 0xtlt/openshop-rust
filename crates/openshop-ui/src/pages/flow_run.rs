@@ -35,6 +35,12 @@ async fn load_run(id: &str, run: RwSignal<Option<RunDetail>>) {
     }
 }
 
+/// Whether an answer is for the request sent last. Requests overlap: a slow
+/// answer to a replaced query arrives after the answer to its successor.
+fn is_current(latest: &str, answered: &str) -> bool {
+    latest == answered
+}
+
 /// The server's reason, or a plain one when it gave none.
 fn logs_error_message(reason: Option<String>) -> String {
     reason
@@ -62,6 +68,8 @@ pub fn FlowRun() -> impl IntoView {
     let new_log_ids = RwSignal::new(HashSet::<String>::new());
     let known_log_ids = StoredValue::new(HashSet::<String>::new());
     let initial_load = StoredValue::new(true);
+    // The address of the last log request sent: an answer to another one is stale.
+    let latest_logs_url = StoredValue::new(String::new());
     let debounce = StoredValue::new_local(None::<Timeout>);
     let retrying = RwSignal::new(false);
     // Why the logs cannot be shown, such as an invalid regular expression.
@@ -87,17 +95,25 @@ pub fn FlowRun() -> impl IntoView {
     let fetch_logs = move || {
         let Some(id) = id.get_untracked() else { return };
         let filtered_url = logs_url(&id, &query.get_untracked(), &levels.get_untracked());
+        latest_logs_url.set_value(filtered_url.clone());
         spawn_local(async move {
             let response = api_fetch(&filtered_url).await;
+            // A slow answer to a query that was replaced since must change
+            // nothing: neither the lines, nor the error of the newer one.
+            let current = latest_logs_url
+                .try_get_value()
+                .is_some_and(|latest| is_current(&latest, &filtered_url));
             // A query the server refuses must not leave the lines of the
             // previous one on screen as if they were its result.
-            if let Ok(refused) = &response
+            if current
+                && let Ok(refused) = &response
                 && !refused.ok
             {
                 logs_error.set(Some(logs_error_message(refused.error())));
                 set_if_changed(filtered_logs, Vec::new());
             }
-            if let Ok(response) = response
+            if current
+                && let Ok(response) = response
                 && response.ok
                 && let Ok(data) = response.json::<LogsResponse>()
             {
@@ -328,6 +344,12 @@ pub fn FlowRun() -> impl IntoView {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_the_answer_to_the_last_request_is_current() {
+        assert!(is_current("/api/runs/1/logs?q=a", "/api/runs/1/logs?q=a"));
+        assert!(!is_current("/api/runs/1/logs?q=%7C~%22(%22", "/api/runs/1/logs?q=a"));
+    }
 
     #[test]
     fn a_refused_search_shows_the_reason_of_the_server() {
