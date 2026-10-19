@@ -505,3 +505,77 @@ async fn registers_one_job_per_cron_including_nicknames() {
     assert_eq!(queued, 0);
     test.cleanup().await;
 }
+
+#[tokio::test]
+async fn invalid_time_zones_are_rejected_before_the_scheduler_starts() {
+    let error = OpenShopConfig::builder()
+        .flow(noop_flow("quick-flow"))
+        .cron(Cron::new("0 9 * * *", "quick-flow").timezone("Mars/Olympus"))
+        .build()
+        .err()
+        .expect("rejected by the builder")
+        .to_string();
+    assert_eq!(
+        error,
+        "[openshop] Invalid config: crons[0].timezone is invalid: Invalid time zone \"Mars/Olympus\" \
+         for the cron of flow \"quick-flow\": expected an IANA name such as \"Europe/Paris\""
+    );
+
+    OpenShopConfig::builder()
+        .flow(noop_flow("quick-flow"))
+        .cron(Cron::new("0 9 * * *", "quick-flow").timezone("Europe/Paris"))
+        .build()
+        .expect("a known time zone");
+}
+
+/// Keeps what the process logger is told as errors.
+struct Errors(std::sync::Mutex<Vec<String>>);
+
+impl openshop::runtime::RuntimeLogger for Errors {
+    fn info(&self, _message: &str, _context: Option<&openshop::Value>) {}
+    fn warn(&self, _message: &str, _context: Option<&openshop::Value>) {}
+    fn error(&self, message: &str, _context: Option<&openshop::Value>) {
+        self.0.lock().unwrap().push(message.to_string());
+    }
+}
+
+#[tokio::test]
+async fn a_cron_that_stops_is_told_and_started_again() {
+    // 30 February: the expression is valid and never comes.
+    let never = "0 0 0 30 2 *";
+    let test = TestApp::new(config(
+        [concurrent_flow("never-flow")],
+        [Cron::new(never, "never-flow").name("Never")],
+    ))
+    .await;
+
+    let errors = std::sync::Arc::new(Errors(Default::default()));
+    let previous = openshop::runtime::logger::set_logger(errors.clone());
+    let mut scheduler = Scheduler::start(&test.app).unwrap();
+    // Told once at the start, and again after the wait it announces.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let told = loop {
+        let told: Vec<String> = errors
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|line| line.contains("Cron \"Never\" stopped"))
+            .cloned()
+            .collect();
+        if told.len() >= 2 || Instant::now() > deadline {
+            break told;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    scheduler.stop();
+    openshop::runtime::logger::set_logger(previous);
+
+    assert_eq!(told.len(), 2, "{told:?}");
+    assert_eq!(
+        told[0],
+        "[openshop] Cron \"Never\" stopped, its schedule has no more occurrence. Starting it again in 1s."
+    );
+    assert!(told[1].ends_with("Starting it again in 2s."), "{told:?}");
+    test.cleanup().await;
+}

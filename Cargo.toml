@@ -34,6 +34,7 @@ anyhow = "1"
 axum = { version = "0.8", default-features = false, features = ["http1", "json", "query", "tokio"] }
 base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde", "std"] }
+chrono-tz = { version = "0.10", default-features = false }
 croner = "3"
 # Without its editor and password prompts.
 dialoguer = { version = "0.12", default-features = false }

@@ -7,7 +7,7 @@ use serde_json::{Value, json};
 
 use crate::app::OpenShop;
 use crate::server::http::{ApiResult, json_error, json_object_body, json_response};
-use crate::server::mcp::core::{cron_items, set_cron_enabled};
+use crate::server::mcp::core::{cron_items, is_cron_key, set_cron_enabled};
 use crate::server::shop::ShopSession;
 
 async fn list_crons(State(app): State<OpenShop>, Extension(session): Extension<ShopSession>) -> ApiResult {
@@ -28,6 +28,9 @@ async fn toggle_cron(
         return Ok(json_error(StatusCode::BAD_REQUEST, "key and enabled are required"));
     };
 
+    if !is_cron_key(&app, key) {
+        return Ok(json_error(StatusCode::NOT_FOUND, "Cron not found"));
+    }
     set_cron_enabled(&app, &session.shopify_app, &session.shop, key, enabled).await?;
     Ok(json_response(
         StatusCode::OK,

@@ -729,6 +729,8 @@ pub struct Cron {
     pub flow: String,
     pub input: Option<Value>,
     pub shops: Option<CronShops>,
+    /// The IANA time zone the schedule is read in. UTC when unset.
+    pub timezone: Option<String>,
 }
 
 impl Cron {
@@ -739,6 +741,7 @@ impl Cron {
             flow: flow.into(),
             input: None,
             shops: None,
+            timezone: None,
         }
     }
 
@@ -749,6 +752,13 @@ impl Cron {
 
     pub fn input(mut self, input: Value) -> Self {
         self.input = Some(input);
+        self
+    }
+
+    /// Reads the schedule in an IANA time zone such as `Europe/Paris`, daylight
+    /// saving time included. Without it, the schedule is read in UTC.
+    pub fn timezone(mut self, timezone: impl Into<String>) -> Self {
+        self.timezone = Some(timezone.into());
         self
     }
 
