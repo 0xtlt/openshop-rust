@@ -644,6 +644,15 @@ impl<'a> Analyzer<'a> {
     /// Checks a literal or a variable given where `expected` is wanted.
     fn check_value(&mut self, value: &Value<'a>, expected: &InputValue, place: &str, position: Pos) -> Result<()> {
         let inner = expected.ty.nullable();
+        // A custom scalar, `JSON` among them, defines its own literals: an object
+        // or a list is a value of it, not an input object or a list of the schema.
+        if let TypeRef::Named(name) = inner
+            && !matches!(value, ast::Value::Variable(_) | ast::Value::Null)
+            && !matches!(name.as_str(), "Int" | "Float" | "String" | "Boolean" | "ID")
+            && matches!(self.schema.get(name), Some(TypeDef::Scalar))
+        {
+            return self.mark_variables(value, position);
+        }
         match value {
             ast::Value::Variable(name) => {
                 let variable = self.variable(name, position)?;

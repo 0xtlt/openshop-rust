@@ -363,6 +363,37 @@ fn default_values_fit_the_type_of_their_variable() {
 }
 
 #[test]
+fn json_and_custom_scalars_accept_any_literal() {
+    // `JSON` takes an object, a list or a scalar, in a default value and in an argument.
+    let operation = check(
+        "mutation($payload: JSON = {Amount: \"30\", customer_id: 12345, tags: [\"a\", {nested: true}]}) {
+           flowTriggerReceive(handle: \"h\", payload: $payload) { userErrors { message } }
+         }",
+    );
+    assert_eq!(operation.variables.len(), 1);
+    check(
+        "mutation($items: JSON = [1, \"two\", null]) { flowTriggerReceive(handle: \"h\", payload: $items) { userErrors { message } } }",
+    );
+    check(
+        "mutation { flowTriggerReceive(handle: \"h\", payload: {Amount: \"30\", list: [1, 2], none: null}) { userErrors { message } } }",
+    );
+    check(
+        "mutation($id: String) { flowTriggerReceive(handle: \"h\", payload: {customer: $id}) { userErrors { message } } }",
+    );
+    check("mutation { flowTriggerReceive(handle: \"h\", payload: [1, 2]) { userErrors { message } } }");
+    // A variable inside the literal is declared like any other.
+    assert_eq!(
+        refusal("mutation { flowTriggerReceive(handle: \"h\", payload: {customer: $id}) { userErrors { message } } }"),
+        "Variable `$id` is not declared (line 1, column 12)"
+    );
+    // An object stays refused for a built-in scalar.
+    assert_eq!(
+        refusal("mutation { flowTriggerReceive(handle: {a: 1}, payload: {}) { userErrors { message } } }"),
+        "An object is given for argument `handle` of `Mutation.flowTriggerReceive`, of type `String` (line 1, column 12)"
+    );
+}
+
+#[test]
 fn checks_input_object_literals() {
     assert_eq!(
         refusal(
