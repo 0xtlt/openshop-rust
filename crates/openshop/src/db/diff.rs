@@ -174,44 +174,86 @@ pub fn destructive(changes: &[Change]) -> Vec<String> {
         .collect()
 }
 
+/// A type split into its name, its numeric modifiers and the array marks that follow.
+struct ParsedType<'a> {
+    base: &'a str,
+    /// `None` without parentheses.
+    modifiers: Option<Vec<u32>>,
+    dimensions: &'a str,
+}
+
+/// Splits `base(1, 2)[]`. `None` for anything else, such as `timestamp(3) with
+/// time zone`, so that what is not understood is never taken for a widening.
+fn parse_type(sql_type: &str) -> Option<ParsedType<'_>> {
+    let (head, dimensions) = match sql_type.find('[') {
+        Some(index) => sql_type.split_at(index),
+        None => (sql_type, ""),
+    };
+    let marks_ok = dimensions
+        .split_inclusive(']')
+        .all(|mark| mark.starts_with('[') && mark.ends_with(']'));
+    if !dimensions.is_empty() && !marks_ok {
+        return None;
+    }
+    let (base, modifiers) = match head.split_once('(') {
+        Some((base, rest)) => {
+            let inside = rest.strip_suffix(')')?;
+            let modifiers = inside
+                .split(',')
+                .map(|modifier| modifier.trim().parse::<u32>().ok())
+                .collect::<Option<Vec<u32>>>()?;
+            (base.trim(), Some(modifiers))
+        }
+        None => (head.trim(), None),
+    };
+    Some(ParsedType {
+        base,
+        modifiers,
+        dimensions,
+    })
+}
+
 /// Whether every value of the type `before` fits the type `after`, so that
-/// converting the column loses nothing.
+/// converting the column loses nothing. Only what is proven to fit counts: a
+/// type that is not understood loses data until shown otherwise.
 fn widens(before: &str, after: &str) -> bool {
-    let rank = |sql_type: &str| match sql_type {
+    let (Some(before), Some(after)) = (parse_type(before), parse_type(after)) else {
+        return false;
+    };
+    // The same array dimensions, and the element widens. `text[]` does not become `text`.
+    if before.dimensions != after.dimensions {
+        return false;
+    }
+    let rank = |base: &str| match base {
         "smallint" => Some(1),
         "integer" => Some(2),
         "bigint" => Some(3),
         _ => None,
     };
-    if let (Some(before), Some(after)) = (rank(before), rank(after)) {
-        return before < after;
-    }
-    if before == "real" {
-        return after == "double precision";
-    }
-    // `character varying(20)` is the base `character varying` with the limit 20.
-    let split = |sql_type: &str| match sql_type.split_once('(') {
-        Some((base, rest)) => (
-            base.trim().to_string(),
-            rest.trim_end_matches(')').trim().parse::<u32>().ok(),
-        ),
-        None => (sql_type.to_string(), None),
-    };
-    let (base, limit) = split(before);
-    if !matches!(base.as_str(), "character varying" | "character" | "char") {
-        return false;
-    }
-    if after == "text" {
-        return true;
-    }
-    let (after_base, after_limit) = split(after);
-    base == "character varying"
-        && after_base == "character varying"
-        && match (limit, after_limit) {
-            (_, None) => true,
-            (Some(limit), Some(after_limit)) => limit <= after_limit,
-            (None, Some(_)) => false,
+    match (before.base, after.base) {
+        (a, b) if rank(a).is_some() && rank(b).is_some() => {
+            before.modifiers.is_none() && after.modifiers.is_none() && rank(a) < rank(b)
         }
+        ("real", "double precision") => before.modifiers.is_none() && after.modifiers.is_none(),
+        ("character varying" | "character" | "char", "text") => after.modifiers.is_none(),
+        ("character varying", "character varying") => match (&before.modifiers, &after.modifiers) {
+            (_, None) => true,
+            (Some(before), Some(after)) => before.len() == 1 && after.len() == 1 && before[0] <= after[0],
+            (None, Some(_)) => false,
+        },
+        ("numeric", "numeric") => match (&before.modifiers, &after.modifiers) {
+            (_, None) => true,
+            // Same scale, room for at least as many digits before the point.
+            (Some(before), Some(after)) => {
+                let scale = |modifiers: &[u32]| modifiers.get(1).copied().unwrap_or(0);
+                matches!((before.len(), after.len()), (1..=2, 1..=2))
+                    && scale(before) == scale(after)
+                    && before[0] <= after[0]
+            }
+            (None, Some(_)) => false,
+        },
+        _ => false,
+    }
 }
 
 /// What `current` continues among `before`: the item of the same name, else
@@ -636,6 +678,10 @@ mod tests {
             ("varchar(20)", "varchar"),
             ("varchar(20)", "text"),
             ("char(2)", "text"),
+            ("varchar(20)[]", "varchar(40)[]"),
+            ("integer[]", "bigint[]"),
+            ("numeric(10, 2)", "numeric(12, 2)"),
+            ("numeric(10, 2)", "numeric"),
         ] {
             assert!(!loses(before, after), "{before} to {after}");
         }
@@ -649,6 +695,21 @@ mod tests {
             ("numeric(10, 2)", "integer"),
             ("text", "integer"),
             ("timestamp with time zone", "date"),
+            ("varchar(20)[]", "varchar(3)[]"),
+            ("varchar(20)[]", "varchar(3)[][]"),
+            ("varchar(20)[]", "text"),
+            ("text[]", "varchar(20)[]"),
+            ("integer[]", "integer"),
+            ("integer", "integer[]"),
+            ("numeric(10, 2)", "numeric(12, 3)"),
+            ("numeric(10, 2)", "numeric(8, 2)"),
+            ("numeric", "numeric(10, 2)"),
+            ("timestamp(3) with time zone", "timestamp(6) with time zone"),
+            ("timestamp(6)", "timestamp(3)"),
+            ("varchar(x)", "varchar(40)"),
+            ("bit(8)", "bit(4)"),
+            ("char(8)", "char(4)"),
+            ("char(4)", "char(8)"),
         ] {
             assert!(loses(before, after), "{before} to {after}");
         }
