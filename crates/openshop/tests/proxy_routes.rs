@@ -625,20 +625,30 @@ async fn extension_mode_rejects_expired_bearer_token(ctx: &TestContext) {
 }
 
 #[openshop::test(TestContext::new(ping_config()))]
-async fn numeric_admin_sub_is_not_treated_as_a_customer_id(ctx: &TestContext) {
-    let token = ctx.session_token_for("jwt-shop.myshopify.com", "123");
+async fn the_session_token_of_a_staff_user_is_refused_on_proxy_and_ext_routes(ctx: &TestContext) {
+    let not_staff = "Unauthorized: session token was issued to a staff user";
+    let query = signed_query(&[("shop", "test.myshopify.com")], &ctx.secret);
+    // The subject of a staff user is a numeric id, never a customer GID.
+    for sub in ["123", "gid://shopify/StaffMember/9", "gid://shopify/Customer/abc"] {
+        let token = ctx.session_token_for("jwt-shop.myshopify.com", sub);
+        for path in [
+            "/ext/ping?logged_in_customer_id=123".to_string(),
+            format!("/proxy/ping?{query}"),
+        ] {
+            let response = get(ctx, &path).bearer_auth(&token).send().await.unwrap();
+            assert_error(response, 401, not_staff).await;
+        }
+    }
 
-    let response = get(ctx, "/ext/ping?logged_in_customer_id=123")
-        .bearer_auth(token)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(response.status(), 200);
-    let body = json_body(response).await;
-    assert_eq!(body["shop"], "jwt-shop.myshopify.com");
-    assert_eq!(body["customerId"], Value::Null);
-    assert_eq!(body["queryShop"], "jwt-shop.myshopify.com");
-    assert_eq!(body["queryCustomerId"], Value::Null);
+    // The tokens of customer account and checkout extensions are accepted, a buyer without an account included.
+    for (sub, customer_id) in [(CUSTOMER_GID, json!("123")), ("", Value::Null)] {
+        let token = ctx.session_token_for("jwt-shop.myshopify.com", sub);
+        let response = get(ctx, "/ext/ping").bearer_auth(token).send().await.unwrap();
+        assert_eq!(response.status(), 200, "{sub}");
+        let body = json_body(response).await;
+        assert_eq!(body["shop"], "jwt-shop.myshopify.com");
+        assert_eq!(body["customerId"], customer_id);
+    }
 }
 
 #[openshop::test(TestContext::new(ping_config()))]

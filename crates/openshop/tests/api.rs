@@ -1035,23 +1035,23 @@ async fn request_with_forged_or_expired_token_returns_401(ctx: &TestContext) {
     let cases = [
         (
             session_token(&ctx.shop, "wrong-secret", &ctx.api_key, "1"),
-            "Unauthorized: Invalid JWT signature",
+            "Unauthorized: invalid session token",
         ),
         (
             session_token(&ctx.shop, &ctx.secret, "another-app", "1"),
-            "Unauthorized: [openshop] No Shopify app matches the session token audience",
+            "Unauthorized: invalid session token",
         ),
         (
             sign_session_token(&claims(&ctx.shop, now - 5), &ctx.secret),
-            "Unauthorized: JWT expired",
+            "Unauthorized: invalid session token",
         ),
         (
             sign_session_token(&claims("evil.example.com", now + 60), &ctx.secret),
-            "Unauthorized: JWT missing or invalid dest claim",
+            "Unauthorized: invalid session token",
         ),
         (
             sign_session_token(&mismatched, &ctx.secret),
-            "Unauthorized: JWT dest/iss mismatch",
+            "Unauthorized: invalid session token",
         ),
     ];
     for (token, message) in cases {
@@ -2118,7 +2118,7 @@ async fn sessions_cannot_reach_data_of_another_shopify_app() {
     let forged = session_token(&ctx.shop, "client-b-secret", "client-a-key", "1");
     let (status, body) = send(request_as(&ctx, &forged, Method::GET, "/api/flows")).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
-    assert_eq!(body, error("Unauthorized: Invalid JWT signature"));
+    assert_eq!(body, error("Unauthorized: invalid session token"));
 
     let (status, triggered) = send(as_a(Method::POST, "/api/flows/test-flow/run")).await;
     assert_eq!(status, StatusCode::ACCEPTED);

@@ -203,13 +203,12 @@ async fn callback(State(app): State<OpenShop>, headers: HeaderMap, RawQuery(raw)
 }
 
 async fn app_uninstalled(State(app): State<OpenShop>, headers: HeaderMap, body: Bytes) -> ApiResult {
-    let body = String::from_utf8_lossy(&body);
     let hmac = header(&headers, "x-shopify-hmac-sha256").unwrap_or_default();
     let Ok(shopify_app) = app.apps().by_webhook_hmac(&body, hmac) else {
         return Ok(json_error(StatusCode::UNAUTHORIZED, "Invalid webhook HMAC"));
     };
 
-    let data: Value = serde_json::from_str(&body)?;
+    let data: Value = serde_json::from_slice(&body)?;
     // The body is covered by the HMAC; the header is not, so it is only a fallback.
     let shop_domain = data
         .get("myshopify_domain")

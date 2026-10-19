@@ -1043,7 +1043,7 @@ async fn ambiguous_app_resolution_fails_closed() {
     assert_error(
         api_get(&ctx, "/api/flows", &token).await,
         401,
-        "Unauthorized: [openshop] Multiple Shopify apps use apiKey \"shared-key\"",
+        "Unauthorized: invalid session token",
     )
     .await;
 
@@ -1422,7 +1422,7 @@ async fn rejected_session_tokens_never_trigger_a_token_exchange(ctx: &TestContex
 
     let forged = session_token(SHOP, "wrong-secret", "test-app", "1");
     let response = api_get(ctx, "/api/flows", &forged).await;
-    assert_error(response, 401, "Unauthorized: Invalid JWT signature").await;
+    assert_error(response, 401, "Unauthorized: invalid session token").await;
 
     assert!(ctx.transport.requests().is_empty());
     assert_eq!(installation_count(ctx).await, 0);
@@ -1495,7 +1495,7 @@ async fn nothing_authenticates_without_a_configured_secret() {
 
         // Each credential is signed with the blank secret itself.
         let response = api_get(&ctx, "/api/flows", &ctx.session_token()).await;
-        assert_error(response, 401, "Unauthorized: SHOPIFY_API_SECRET is not configured").await;
+        assert_error(response, 401, "Unauthorized: invalid session token").await;
 
         let response = get(&ctx, &callback_path(SHOP, "c", "nonce-1", secret)).await;
         assert_error(response, 401, "Invalid HMAC").await;
@@ -1599,27 +1599,17 @@ async fn multi_app_session_tokens_cannot_be_used_across_apps(ctx: &TestContext) 
     // Audience of app A, signed with the secret of app B.
     let crossed = session_token(shop, "client-b-secret", "client-a-key", "1");
     let response = api_get(ctx, "/api/flows", &crossed).await;
-    assert_error(response, 401, "Unauthorized: Invalid JWT signature").await;
+    assert_error(response, 401, "Unauthorized: invalid session token").await;
 
     // The environment credentials of single-app mode are not an app here.
     let env_token = ctx.session_token_for(shop, "1");
     let response = api_get(ctx, "/api/flows", &env_token).await;
-    assert_error(
-        response,
-        401,
-        "Unauthorized: [openshop] No Shopify app matches the session token audience",
-    )
-    .await;
+    assert_error(response, 401, "Unauthorized: invalid session token").await;
 
     // Neither is an app handle an audience.
     let by_handle = session_token(shop, "client-a-secret", "clientA", "1");
     let response = api_get(ctx, "/api/flows", &by_handle).await;
-    assert_error(
-        response,
-        401,
-        "Unauthorized: [openshop] No Shopify app matches the session token audience",
-    )
-    .await;
+    assert_error(response, 401, "Unauthorized: invalid session token").await;
 
     assert!(ctx.transport.requests().is_empty());
     assert_eq!(installation_count(ctx).await, 0);

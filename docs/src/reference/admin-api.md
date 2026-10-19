@@ -151,7 +151,9 @@ text filters, time bounds, and context expansion. When `q` contains a text
 filter, each returned log carries `_matched`: `true` for a match, `false` for a
 context line. Export uses only matching rows and omits context
 expansion. `format=csv` selects CSV with the columns
-`id,level,message,payload,createdAt`; every other value returns JSON. The
+`id,level,message,payload,createdAt`; a cell that starts with `=`, `+`, `-`, `@`,
+a tab or a carriage return starts with `'` so that a spreadsheet does not read
+it as a formula; every other value returns JSON. The
 response is sent as an attachment named `run-<id>-logs.<format>`; a `format`
 that contains anything but letters and digits is replaced with `json` in the
 file name.

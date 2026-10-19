@@ -344,7 +344,7 @@ async fn rejects_rpc_requests_without_a_session_token(ctx: &TestContext) {
     assert_eq!(response.status(), 401);
     assert_eq!(
         json_body(response).await,
-        json!({ "error": "Unauthorized: Invalid JWT signature" })
+        json!({ "error": "Unauthorized: invalid session token" })
     );
 }
 

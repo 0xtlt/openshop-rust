@@ -6,7 +6,8 @@ use std::path::PathBuf;
 /// Database used when `DATABASE_URL` is not set.
 pub const DEFAULT_DATABASE_URL: &str = "postgresql://openshop:openshop@localhost:5432/openshop";
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+/// `Debug` does not show `shopify_api_secret` or `encryption_key`.
+#[derive(Clone, Default, PartialEq, Eq)]
 pub struct RuntimeEnv {
     /// `SHOPIFY_API_KEY` (single-app mode).
     pub shopify_api_key: Option<String>,
@@ -22,6 +23,21 @@ pub struct RuntimeEnv {
     pub production: bool,
     /// Project root used to resolve Shopify TOML files and migrations.
     pub cwd: PathBuf,
+}
+
+impl std::fmt::Debug for RuntimeEnv {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        use super::redact::redacted_option;
+        f.debug_struct("RuntimeEnv")
+            .field("shopify_api_key", &self.shopify_api_key)
+            .field("shopify_api_secret", &redacted_option(&self.shopify_api_secret))
+            .field("host", &self.host)
+            .field("shopify_app_url", &self.shopify_app_url)
+            .field("encryption_key", &redacted_option(&self.encryption_key))
+            .field("production", &self.production)
+            .field("cwd", &self.cwd)
+            .finish()
+    }
 }
 
 fn non_empty(name: &str) -> Option<String> {

@@ -74,8 +74,8 @@ pub fn session_token(shop: &str, secret: &str, api_key: &str, sub: &str) -> Stri
 }
 
 /// The `X-Shopify-Hmac-Sha256` header value for a webhook body.
-pub fn sign_webhook_body(body: &str, secret: &str) -> String {
-    STANDARD.encode(hmac_sha256(secret, body.as_bytes()))
+pub fn sign_webhook_body(body: impl AsRef<[u8]>, secret: &str) -> String {
+    STANDARD.encode(hmac_sha256(secret, body.as_ref()))
 }
 
 /// Adds the `hmac` parameter Shopify appends to OAuth and app-launch URLs.

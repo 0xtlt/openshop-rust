@@ -22,6 +22,7 @@ use crate::server::mcp::registry::{McpRegistry, build_mcp_registry};
 use crate::server::shopify_apps::ShopifyApps;
 use crate::server::static_ui::UiSource;
 use crate::shopify::client::ShopifyClient;
+use crate::server::webhooks::WebhookDeliveries;
 use crate::shopify::client_credentials::ClientCredentials;
 use crate::types::{
     AdminMenuItem, AdminPageId, AdminPageMode, AdminPagesConfig, Cron, ErrorContext, Flow, Function, McpConfig,
@@ -425,6 +426,7 @@ struct Inner {
     client_credentials: ClientCredentials,
     custom_pages: Vec<CustomAdminPage>,
     mcp_registry: McpRegistry,
+    webhook_deliveries: WebhookDeliveries,
 }
 
 /// A running application: configuration plus the database pool and environment.
@@ -464,6 +466,7 @@ impl OpenShop {
                 client_credentials,
                 custom_pages,
                 mcp_registry,
+                webhook_deliveries: WebhookDeliveries::default(),
             }),
         })
     }
@@ -501,6 +504,11 @@ impl OpenShop {
     /// `client_credentials_shop` setting background work may use it for.
     pub(crate) fn client_credentials(&self) -> &ClientCredentials {
         &self.inner.client_credentials
+    }
+
+    /// The webhook deliveries this process ran, to run none of them twice.
+    pub(crate) fn webhook_deliveries(&self) -> &WebhookDeliveries {
+        &self.inner.webhook_deliveries
     }
 
     pub(crate) fn custom_pages(&self) -> &[CustomAdminPage] {

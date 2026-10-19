@@ -84,8 +84,8 @@ to read them.
 | --- | --- |
 | Any path under `/ops` without a session | `303` to `/ops/login`. |
 | `POST /ops/login` with the password, as the form field `password` | `303` to `/ops`, with the session cookie. |
-| `POST /ops/login` with another password | `401` and the form, after a delay. |
-| `POST /ops/login` while another attempt is being checked | `429` and the form. The password was not looked at. |
+| `POST /ops/login` with another password | `401` and the form. |
+| `POST /ops/login` from a client that attempted a moment ago | `429`, the form, and `Retry-After`. The password was not looked at. |
 | `POST /ops/login` or `POST /ops/logout` sent by a page of another site (`Sec-Fetch-Site`) | `403`. |
 | `POST /ops/logout` | `303` to `/ops/login`; the browser forgets the cookie. |
 
@@ -97,14 +97,24 @@ The signing key is derived from the password, and from `ENCRYPTION_KEY` when
 it is set, so that changing either closes every session. Signing out removes
 the cookie from one browser; the session itself stays valid until it expires.
 
-Passwords are compared in constant time. One attempt is checked at a time, and
-a wrong one is answered after a delay that doubles with each failure, from
-250 ms to 8 seconds, until a successful sign-in. Guessing stays slow whatever
-the number of connections. While someone keeps guessing, signing in is refused
-for everyone; a session that is already open keeps working.
+Passwords are compared in constant time. Each client may attempt once, then
+again after a delay that doubles with each failure, from 250 ms to 8 seconds,
+until a successful sign-in; an attempt made sooner is answered `429` at once and
+not looked at, even with the right password. Guessing stays slow whatever the
+number of connections, and the delays of the clients are independent: one that
+keeps guessing is the only one that cannot sign in, and nobody waits for it.
+A session that is already open keeps working.
+
+A client is the address of the peer of the connection (a `/64` for IPv6). Behind
+a reverse proxy that is the proxy, unless it is on a private network, a loopback
+or a link-local address and sends `X-Forwarded-For`: the last address of that
+header, the one the proxy added, is the client then. A peer on a public address
+is never believed about that header. If your proxy does not set it, every
+visitor counts as one client and one of them guessing keeps the others out for
+a few seconds at a time.
 
 Each sign-in and each wrong password writes a line to the
-[runtime logger](logging.md), without the password.
+[runtime logger](logging.md), with the client address and without the password.
 
 ## Response headers
 

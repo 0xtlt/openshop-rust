@@ -7,7 +7,8 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 use std::time::Duration;
 
-use axum::serve::Listener;
+use axum::extract::connect_info::Connected;
+use axum::serve::{IncomingStream, Listener};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::{TcpListener, TcpStream};
 
@@ -32,6 +33,16 @@ impl Listener for LingeringListener {
 
     fn local_addr(&self) -> io::Result<Self::Addr> {
         self.0.local_addr()
+    }
+}
+
+/// The address of the peer of a request, read as `ConnectInfo<Peer>`.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Peer(pub(crate) SocketAddr);
+
+impl Connected<IncomingStream<'_, LingeringListener>> for Peer {
+    fn connect_info(stream: IncomingStream<'_, LingeringListener>) -> Self {
+        Self(*stream.remote_addr())
     }
 }
 

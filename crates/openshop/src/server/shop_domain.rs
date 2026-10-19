@@ -9,11 +9,15 @@ static SHOP_DOMAIN_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^[a-z0-9][a-z0-9-]{0,62}\.myshopify\.com$").expect("valid regex"));
 
 /// Accepts a bare domain or a URL and returns the lowercase shop hostname.
+///
+/// Only ASCII is read: Unicode case mapping would turn `K` (Kelvin sign) into
+/// `k` and `İ` into `i̇`, and name a shop other than the one written.
 pub fn normalize_shop_domain(value: &str) -> Option<String> {
-    let input = value.trim().to_lowercase();
-    if input.is_empty() {
+    let input = value.trim();
+    if input.is_empty() || !input.is_ascii() {
         return None;
     }
+    let input = input.to_ascii_lowercase();
 
     let candidate = if input.contains("://") {
         input
@@ -21,7 +25,7 @@ pub fn normalize_shop_domain(value: &str) -> Option<String> {
         format!("https://{input}")
     };
     let url = url::Url::parse(&candidate).ok()?;
-    let hostname = url.host_str()?.to_lowercase();
+    let hostname = url.host_str()?.to_ascii_lowercase();
 
     SHOP_DOMAIN_RE.is_match(&hostname).then_some(hostname)
 }
@@ -75,6 +79,12 @@ mod tests {
             "test.myshopify.io",
             "https://",
             "test.myshopify.com@evil.com",
+            // Unicode case mapping would name another shop than the one written.
+            "d\u{212A}.myshopify.com",
+            "https://D\u{212A}.myshopify.com/admin",
+            "\u{130}-shop.myshopify.com",
+            "dev-st\u{FF4F}re.myshopify.com",
+            "test.myshopify.com\u{FF0F}evil",
         ] {
             assert_eq!(normalize_shop_domain(value), None, "{value}");
         }

@@ -511,3 +511,75 @@ async fn post_webhooks_without_shopify_api_secret_returns_500() {
     }
     assert_eq!(recorder.count(), 0);
 }
+
+#[tokio::test]
+async fn post_webhooks_verifies_the_bytes_that_were_sent_not_a_lossy_text() {
+    let recorder = Recorder::default();
+    let ctx = TestContext::new(orders_create_config(&recorder)).await.unwrap();
+    // Latin-1 `é`: not UTF-8, so not JSON either.
+    let body: Vec<u8> = b"{\"note\":\"caf\xe9\"}".to_vec();
+    let mangled = String::from_utf8_lossy(&body).into_owned();
+    let send = async |hmac: String| {
+        ctx.http
+            .post(format!("{}/webhooks", ctx.url))
+            .header("x-shopify-hmac-sha256", hmac)
+            .header("x-shopify-topic", "products/update")
+            .header("x-shopify-shop-domain", "test.myshopify.com")
+            .body(body.clone())
+            .send()
+            .await
+            .unwrap()
+    };
+
+    // The signature of the bytes is the one that counts...
+    assert_ok(send(sign_webhook_body(&body, SECRET)).await).await;
+    // ...and the signature of what a lossy conversion made of them is not one.
+    let response = send(sign_webhook_body(&mangled, SECRET)).await;
+    assert_error(response, 401, "Invalid webhook HMAC").await;
+    assert_eq!(recorder.count(), 0);
+    ctx.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn post_webhooks_runs_a_delivery_that_shopify_sends_again_once() {
+    let recorder = Recorder::default();
+    let ctx = TestContext::new(orders_create_config(&recorder)).await.unwrap();
+    let body = r#"{"id":7}"#;
+    let hmac = sign_webhook_body(body, SECRET);
+    let send = async |header: &str, id: &str, hmac: &str| {
+        ctx.http
+            .post(format!("{}/webhooks", ctx.url))
+            .header("x-shopify-hmac-sha256", hmac)
+            .header("x-shopify-topic", "orders/create")
+            .header("x-shopify-shop-domain", "test.myshopify.com")
+            .header(header, id)
+            .body(body)
+            .send()
+            .await
+            .unwrap()
+    };
+
+    // The same delivery again, and again: acknowledged, and run once.
+    for _ in 0..3 {
+        assert_ok(send("x-shopify-webhook-id", "delivery-1", &hmac).await).await;
+    }
+    assert_eq!(recorder.count(), 1);
+
+    // Another delivery of the same event is another delivery; the event id stands in for a missing webhook id.
+    assert_ok(send("x-shopify-webhook-id", "delivery-2", &hmac).await).await;
+    assert_ok(send("x-shopify-event-id", "event-1", &hmac).await).await;
+    assert_ok(send("x-shopify-event-id", "event-1", &hmac).await).await;
+    assert_eq!(recorder.count(), 3);
+
+    // A forged request does not use up the id of a real one.
+    let response = send("x-shopify-webhook-id", "delivery-3", "forged").await;
+    assert_error(response, 401, "Invalid webhook HMAC").await;
+    assert_ok(send("x-shopify-webhook-id", "delivery-3", &hmac).await).await;
+    assert_eq!(recorder.count(), 4);
+
+    // Without an id, nothing says it is a repeat.
+    assert_ok(deliver(&ctx, "orders/create", "test.myshopify.com", body).await).await;
+    assert_ok(deliver(&ctx, "orders/create", "test.myshopify.com", body).await).await;
+    assert_eq!(recorder.count(), 6);
+    ctx.shutdown().await.unwrap();
+}

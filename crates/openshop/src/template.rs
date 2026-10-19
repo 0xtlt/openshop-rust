@@ -46,7 +46,13 @@ impl Liquid {
     /// A string, a number, a boolean and `None` are the same value in Liquid.
     /// Liquid has no literal for a list or an object: those are assigned as
     /// their JSON text, to print in a `<script type="application/json">` for
-    /// the scripts of the page.
+    /// the scripts of the page. In that text `<`, `>`, `&` and the line
+    /// separators U+2028 and U+2029 are written as `\uXXXX` escapes, which
+    /// are the same JSON: a value holding `</script>` or `<!--` cannot end the
+    /// script element or hide the rest of the page in it.
+    ///
+    /// A string is assigned as it is, and printed as it is: `{{ name }}` is
+    /// not escaped by Liquid. In HTML, write `{{ name | escape }}`.
     pub fn assign(mut self, name: impl Into<String>, value: impl Serialize) -> Self {
         let value = serde_json::to_value(value).map_err(|error| error.to_string());
         self.assigns.push((name.into(), value));
@@ -87,8 +93,24 @@ fn literal(value: &Value) -> String {
         Value::Bool(boolean) => boolean.to_string(),
         Value::Number(number) => number.to_string(),
         Value::String(text) => string_literal(text),
-        structured => string_literal(&structured.to_string()),
+        structured => string_literal(&json_for_script(structured)),
     }
+}
+
+/// The JSON text of a value, safe to print in HTML, in a `<script>` too.
+fn json_for_script(value: &Value) -> String {
+    let mut text = String::new();
+    for character in value.to_string().chars() {
+        match character {
+            '<' => text.push_str("\\u003c"),
+            '>' => text.push_str("\\u003e"),
+            '&' => text.push_str("\\u0026"),
+            '\u{2028}' => text.push_str("\\u2028"),
+            '\u{2029}' => text.push_str("\\u2029"),
+            other => text.push(other),
+        }
+    }
+    text
 }
 
 /// A Liquid expression whose value is `text`.
@@ -216,6 +238,26 @@ mod tests {
         assert_eq!(read, hostile);
         assert_eq!(string_literal(""), "\"\"");
         assert_eq!(string_literal("it's 100%"), "\"it's 100\" | append: '%'");
+    }
+
+    #[test]
+    fn json_assigned_for_a_script_cannot_end_the_script() {
+        let hostile = json!({ "name": "</script><script>alert(1)</script><!--", "a&b": ["x\u{2028}y\u{2029}z", ">"] });
+        let text = json_for_script(&hostile);
+        for forbidden in ['<', '>', '&', '\u{2028}', '\u{2029}'] {
+            assert!(!text.contains(forbidden), "{forbidden:?} in {text}");
+        }
+        assert!(text.contains("\\u003c/script\\u003e"), "{text}");
+        // The escapes are JSON: the text reads back as the value.
+        assert_eq!(serde_json::from_str::<Value>(&text).unwrap(), hostile);
+
+        // And so is what the template is given.
+        let rendered = Liquid::new("").assign("data", &hostile).render().unwrap();
+        assert!(!rendered.contains("</script"), "{rendered}");
+        assert!(!rendered.contains("<!--"), "{rendered}");
+        // A string is left as it is: Liquid prints it, and `escape` is the template's.
+        let rendered = Liquid::new("").assign("name", "<b>").render().unwrap();
+        assert!(rendered.contains("<b>"), "{rendered}");
     }
 
     #[test]

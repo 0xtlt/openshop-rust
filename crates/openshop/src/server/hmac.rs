@@ -44,12 +44,13 @@ pub fn verify_query_hmac(query: &IndexMap<String, String>, secret: &str) -> bool
 }
 
 /// Verify Shopify webhook HMAC.
-/// Shopify sends the HMAC in the `X-Shopify-Hmac-Sha256` header.
-pub fn verify_webhook_hmac(body: &str, hmac: &str, secret: &str) -> bool {
+/// Shopify sends the HMAC in the `X-Shopify-Hmac-Sha256` header. The signature
+/// covers the bytes of the body as they were sent, which need not be UTF-8.
+pub fn verify_webhook_hmac(body: &[u8], hmac: &str, secret: &str) -> bool {
     if secret.trim().is_empty() {
         return false;
     }
-    let computed = STANDARD.encode(hmac_sha256(secret, body.as_bytes()));
+    let computed = STANDARD.encode(hmac_sha256(secret, body));
     constant_time_eq(computed.as_bytes(), hmac.as_bytes())
 }
 
@@ -128,26 +129,40 @@ pub(crate) mod tests {
     #[test]
     fn valid_body_hmac_returns_true() {
         let body = r#"{"id":123,"name":"order"}"#;
-        assert!(verify_webhook_hmac(body, &sign_body(body, SECRET), SECRET));
+        assert!(verify_webhook_hmac(body.as_bytes(), &sign_body(body, SECRET), SECRET));
     }
 
     #[test]
     fn wrong_body_hmac_returns_false() {
-        assert!(!verify_webhook_hmac(r#"{"id":123}"#, "wrong-hmac", SECRET));
+        assert!(!verify_webhook_hmac(br#"{"id":123}"#, "wrong-hmac", SECRET));
     }
 
     #[test]
     fn different_body_returns_false() {
         let hmac = sign_body(r#"{"id":456}"#, SECRET);
-        assert!(!verify_webhook_hmac(r#"{"id":123}"#, &hmac, SECRET));
+        assert!(!verify_webhook_hmac(br#"{"id":123}"#, &hmac, SECRET));
+    }
+
+    #[test]
+    fn the_signature_covers_the_bytes_that_were_sent() {
+        // Not UTF-8: a lossy conversion would replace the bytes with U+FFFD.
+        let body: &[u8] = b"{\"note\":\"caf\xe9\"}";
+        let hmac = STANDARD.encode(hmac_sha256(SECRET, body));
+        assert!(verify_webhook_hmac(body, &hmac, SECRET));
+        // What a lossy conversion of that body would have been signed as.
+        let mangled = String::from_utf8_lossy(body).into_owned();
+        assert_ne!(mangled.as_bytes(), body);
+        assert!(!verify_webhook_hmac(mangled.as_bytes(), &hmac, SECRET));
+        let hmac_of_mangled = sign_body(&mangled, SECRET);
+        assert!(!verify_webhook_hmac(body, &hmac_of_mangled, SECRET));
     }
 
     #[test]
     fn empty_secret_returns_false_even_when_body_is_signed_with_an_empty_secret() {
         let body = r#"{"id":123}"#;
         let hmac = sign_body(body, "");
-        assert!(!verify_webhook_hmac(body, &hmac, ""));
-        assert!(!verify_webhook_hmac(body, &hmac, "   "));
+        assert!(!verify_webhook_hmac(body.as_bytes(), &hmac, ""));
+        assert!(!verify_webhook_hmac(body.as_bytes(), &hmac, "   "));
     }
 
     #[test]

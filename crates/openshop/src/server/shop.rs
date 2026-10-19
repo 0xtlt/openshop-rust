@@ -8,7 +8,7 @@ use axum::response::Response;
 use serde_json::{Value, json};
 
 use super::http::{header, json_error};
-use super::jwt::{customer_id_from_jwt_sub, read_jwt_audience, verify_session_token};
+use super::jwt::{is_staff_subject, read_jwt_audience, verify_session_token};
 use super::shopify_apps::ResolvedShopifyApp;
 use crate::admin::AdminActor;
 use crate::app::OpenShop;
@@ -54,13 +54,20 @@ pub(crate) async fn shop_middleware(State(app): State<OpenShop>, mut request: Re
     });
     let (shopify_app, verified) = match verified {
         Ok(verified) => verified,
-        Err(error) => return json_error(StatusCode::UNAUTHORIZED, format!("Unauthorized: {error}")),
+        Err(error) => {
+            // Why a token fails (which claim, which app) is for the logs, not for
+            // whoever sent it.
+            logger::warn_with(
+                "[openshop] Session token refused",
+                json!({ "reason": error.to_string(), "path": request.uri().path() }),
+            );
+            return json_error(StatusCode::UNAUTHORIZED, "Unauthorized: invalid session token");
+        }
     };
 
     // Checkout and customer account extensions get tokens signed with the same secret,
     // for a customer or an anonymous buyer. The Admin API is for staff sessions only.
-    let subject = &verified.payload.sub;
-    if subject.is_empty() || customer_id_from_jwt_sub(subject).is_some() {
+    if !is_staff_subject(&verified.payload.sub) {
         return json_error(
             StatusCode::UNAUTHORIZED,
             "Unauthorized: session token was not issued to a staff user",

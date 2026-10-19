@@ -10,8 +10,8 @@ forward one surface's credential to another.
 | OAuth start `/auth` | Shop domain and optional configured app handle | Shop normalization and configured app lookup | requested shop and app |
 | OAuth callback `/auth/callback` | Signed Shopify query plus OAuth `state` and the cookie `/auth` set | Shopify HMAC, and a signed, unexpired, unspent `state` of the browser that started it | verified shop and app |
 | `/webhooks` | `X-Shopify-Hmac-Sha256` | HMAC over the raw request body | shop and app selected by the matching secret |
-| `/proxy/*` | Shopify App Proxy query signature, or Customer Account JWT | Query HMAC or JWT | shop, app, optional customer |
-| `/ext/*` | Customer Account session JWT | JWT signature and audience | shop, app, customer |
+| `/proxy/*` | Shopify App Proxy query signature, or Customer Account JWT | Query HMAC or JWT (never the session token of a staff user) | shop, app, optional customer |
+| `/ext/*` | Customer Account session JWT | JWT signature and audience (never the session token of a staff user) | shop, app, customer |
 | `/routes/*` | Route-defined | Authentication function named by `auth = …` in `#[route]`, or intentionally public without it | Route-defined; optional `for_shop()` context |
 | `/mcp` | OpenShop token in `Authorization: Bearer …` | Stored token hash, status, expiry, shop, and permissions | token, shop, app, grants |
 | `/ops/*` | Session cookie obtained with the password of the application | Signature and expiry of the cookie | The operator; no shop |
@@ -47,9 +47,12 @@ A session token is accepted when:
 | --- | --- |
 | `Unauthorized: missing session token` | No `Authorization: Bearer …` header. |
 | `Unauthorized: missing token audience` | The token has no readable `aud` claim. |
-| `Unauthorized: [openshop] No Shopify app matches the session token audience` | `aud` matches no configured API key. |
-| `Unauthorized: Invalid JWT signature`, `JWT expired`, `JWT not yet valid`, `JWT dest/iss mismatch`, … | The token fails verification. |
+| `Unauthorized: invalid session token` | `aud` matches no configured API key, or the token fails verification (signature, expiry, `dest`, `iss`, …). |
 | `Unauthorized: session token was not issued to a staff user` | Empty or customer `sub`. |
+
+The reason a token is refused is not sent to the client, which would learn from
+it which claim to forge or which apps are configured. It is logged as a warning
+(`[openshop] Session token refused`, with the reason and the path).
 
 When the shop has no stored access token yet, the first authenticated request
 gets one and stores it encrypted, by exchanging the session token for an
@@ -301,13 +304,16 @@ signature.
 
 ## Browser origins
 
-OpenShop allows known Shopify origins, configured app origins, local development
-origins, and `https://extensions.shopifycdn.com`. Arbitrary origins are not
-reflected in CORS responses.
+OpenShop allows known Shopify origins, configured app origins,
+`https://extensions.shopifycdn.com`, and in development (`OPENSHOP_ENV` other
+than `production`) local origins. Arbitrary origins are not reflected in CORS
+responses. In production a page on `localhost` is never allowed: it runs on the
+visitor's own machine, not on an origin of the application, unless `HOST` or
+`SHOPIFY_APP_URL` is itself that address.
 
 | Allowed origin | Example |
 | --- | --- |
-| Local development hosts, any port | `http://localhost:3000`, `https://app.localhost`, `http://127.0.0.1:8080`, `http://[::1]:3000` |
+| Local development hosts, any port, outside production | `http://localhost:3000`, `https://app.localhost`, `http://127.0.0.1:8080`, `http://[::1]:3000` |
 | Shopify admin and Shopify | `https://admin.shopify.com`, `https://shopify.com` |
 | Shop domains | `https://example.myshopify.com` |
 | Shopify's extension CDN | `https://extensions.shopifycdn.com` |

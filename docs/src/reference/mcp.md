@@ -81,6 +81,12 @@ authentication updates `lastUsedAt`.
 | `403` | `Forbidden: MCP token has expired` |
 | `403` | `MCP is disabled` (valid token, endpoint disabled) |
 
+A refused token is logged as a warning, `[openshop] MCP token refused`, with the
+token id (when the token names one, never the secret), the reason, the status
+and the address of the client (see
+[the operator dashboard](operator-dashboard.md) for how it is read behind a
+proxy). Repeated lines for one token id are what a guessed secret looks like.
+
 ## Permissions
 
 Core permissions are:
@@ -92,11 +98,15 @@ Core permissions are:
 | `run_flows` | high | Dispatch flows. |
 | `read_crons` | low | List crons. |
 | `manage_crons` | medium | Change cron enabled state. |
-| `read_providers` | low | Provider access reserved by the capability registry. |
-| `write_providers` | high | Provider access reserved by the capability registry. |
-| `read_functions` | low | Function access reserved by the capability registry. |
-| `manage_mcp_tokens` | high | Token management reserved by the capability registry. |
 | `shopify_admin_graphql` | high | Run arbitrary Admin GraphQL documents for installed shops. |
+
+`read_providers`, `write_providers`, `read_functions` and `manage_mcp_tokens`
+were offered by earlier versions and no tool ever checked them: a grant that
+does nothing is a false promise, so they are no longer offered, and a new token
+cannot be given them. A token that already holds one keeps working: the grant is
+ignored, and listed in `stalePermissions` like any permission the application no
+longer defines. Providers, functions and tokens are managed from the admin, not
+through MCP.
 
 Custom keys must match `namespace:action_resource`: a lowercase namespace
 (letters, digits, `-`), a colon, and lowercase words separated by `_`.

@@ -42,9 +42,21 @@ async fn get(ctx: &TestContext, path: &str, cookie: Option<&str>) -> Response {
 }
 
 async fn post_password(ctx: &TestContext, password: &str) -> Response {
-    ctx.http
+    post_password_from(ctx, password, None).await
+}
+
+/// The test server is on loopback, like a reverse proxy: `forwarded_for` is
+/// the client it says it saw.
+async fn post_password_from(ctx: &TestContext, password: &str, forwarded_for: Option<&str>) -> Response {
+    let request = ctx
+        .http
         .post(format!("{}/ops/login", ctx.url))
-        .header("content-type", "application/x-www-form-urlencoded")
+        .header("content-type", "application/x-www-form-urlencoded");
+    let request = match forwarded_for {
+        Some(client) => request.header("x-forwarded-for", client),
+        None => request,
+    };
+    request
         .body(format!("password={}", password.replace(' ', "+")))
         .send()
         .await
@@ -201,6 +213,8 @@ async fn the_dashboard_opens_with_the_password_only(ctx: &TestContext) {
     assert_eq!(cross_site.status(), StatusCode::FORBIDDEN);
     assert!(cross_site.headers().get("set-cookie").is_none());
 
+    // A wrong password makes the same client wait a little before the next attempt.
+    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
     let granted = post_password(ctx, PASSWORD).await;
     assert_eq!(granted.status(), StatusCode::SEE_OTHER);
     assert_eq!(location(&granted), "/ops");
@@ -609,4 +623,41 @@ async fn the_dashboard_only_reads(ctx: &TestContext) {
         .await
         .unwrap();
     assert_eq!(status, "failed");
+}
+
+#[openshop::test(context(with_dashboard()))]
+async fn a_client_that_guesses_does_not_keep_another_from_signing_in(ctx: &TestContext) {
+    // One client guesses without stopping, as fast as it can.
+    let mut refused = 0;
+    let mut throttled = 0;
+    for _ in 0..20 {
+        match post_password_from(ctx, "a wrong password", Some("198.51.100.1"))
+            .await
+            .status()
+        {
+            StatusCode::UNAUTHORIZED => refused += 1,
+            StatusCode::TOO_MANY_REQUESTS => throttled += 1,
+            other => panic!("{other}"),
+        }
+    }
+    // Only the first attempt was looked at.
+    assert_eq!((refused, throttled), (1, 19));
+
+    // The right password is not looked at for that client either, and it is told when to come back.
+    let blocked = post_password_from(ctx, PASSWORD, Some("198.51.100.1")).await;
+    assert_eq!(blocked.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert!(blocked.headers().get("set-cookie").is_none());
+    assert!(
+        blocked.headers()["retry-after"]
+            .to_str()
+            .unwrap()
+            .parse::<u64>()
+            .unwrap()
+            >= 1
+    );
+
+    // Another client signs in at once: it never waits for the first.
+    let granted = post_password_from(ctx, PASSWORD, Some("198.51.100.2")).await;
+    assert_eq!(granted.status(), StatusCode::SEE_OTHER);
+    assert!(granted.headers().get("set-cookie").is_some());
 }
