@@ -67,6 +67,15 @@ with `mtk_`. The stored hash is `scrypt:<salt>:<hash>` (scrypt with N = 16384,
 r = 8, p = 1 and a 32-byte key), and the fingerprint is the first 16 characters
 of the base64url SHA-256 digest of the token.
 
+Checking a secret against its scrypt hash is slow on purpose, so it is
+bounded: at most as many hashes as CPUs (4 at most) run at once, and a request
+that gets no turn within five seconds is answered with HTTP 503. A secret that
+was right is remembered for five minutes, under a keyed hash that lives in the
+memory of the process only; only the scrypt step is remembered. Whether a token
+is active, revoked, or expired, and its expiry, are read from the database at
+every request, and rotating a token changes its hash, so a token is refused at
+once when it is revoked, disabled, expired, or rotated.
+
 Missing, malformed, unknown, or cryptographically invalid tokens return HTTP
 401. Disabled, revoked, and expired tokens return HTTP 403. Successful
 authentication updates `lastUsedAt`.
@@ -80,6 +89,13 @@ authentication updates `lastUsedAt`.
 | `403` | `Forbidden: MCP token is not active` |
 | `403` | `Forbidden: MCP token has expired` |
 | `403` | `MCP is disabled` (valid token, endpoint disabled) |
+| `503` | `Service Unavailable: too many MCP tokens are being checked, try again` |
+
+A refused token is logged as a warning, `[openshop] MCP token refused`, with the
+token id (when the token names one, never the secret), the reason, the status
+and the address of the client (see
+[the operator dashboard](operator-dashboard.md) for how it is read behind a
+proxy). Repeated lines for one token id are what a guessed secret looks like.
 
 ## Permissions
 
@@ -92,11 +108,15 @@ Core permissions are:
 | `run_flows` | high | Dispatch flows. |
 | `read_crons` | low | List crons. |
 | `manage_crons` | medium | Change cron enabled state. |
-| `read_providers` | low | Provider access reserved by the capability registry. |
-| `write_providers` | high | Provider access reserved by the capability registry. |
-| `read_functions` | low | Function access reserved by the capability registry. |
-| `manage_mcp_tokens` | high | Token management reserved by the capability registry. |
-| `shopify_admin_graphql` | high | Run arbitrary Admin GraphQL documents for installed shops. |
+| `shopify_admin_graphql` | high | Run arbitrary Admin GraphQL documents for the shop of the token, and show its installation. |
+
+`read_providers`, `write_providers`, `read_functions` and `manage_mcp_tokens`
+were offered by earlier versions and no tool ever checked them: a grant that
+does nothing is a false promise, so they are no longer offered, and a new token
+cannot be given them. A token that already holds one keeps working: the grant is
+ignored, and listed in `stalePermissions` like any permission the application no
+longer defines. Providers, functions and tokens are managed from the admin, not
+through MCP.
 
 Custom keys must match `namespace:action_resource`: a lowercase namespace
 (letters, digits, `-`), a colon, and lowercase words separated by `_`.
@@ -282,15 +302,22 @@ Built-in resources are:
 
 | Tool | Permission | Important inputs/defaults |
 | --- | --- | --- |
-| `openshop.shops.list` | None | Lists installed shops for the token app. |
-| `openshop.admin.graphql` | `shopify_admin_graphql` | `shop` and `query` required; `variables` defaults `{}`; `apiVersion` is `YYYY-MM` or `latest` and defaults to the latest stable version. |
+| `openshop.shops.list` | `shopify_admin_graphql` | Shows the installation of the token's shop (scopes, install date) when it is installed; never another shop. |
+| `openshop.admin.graphql` | `shopify_admin_graphql` | `query` required; `shop` is optional and, when given, must be the token's shop; `variables` defaults `{}`; `apiVersion` is `YYYY-MM` or `latest` and defaults to the latest stable version. |
 | `openshop.logs.search` | `read_logs` | `runId` required; `q` uses the [log query syntax](logging.md#log-query-syntax); `levels` defaults to `info,warn,error`; `includeContext` defaults to true; `limit` 50, max 200. |
-| `openshop.flows.list` | `read_flows` | Includes input schemas and configured crons. |
-| `openshop.flows.run` | `run_flows` | `flow` required; `input` defaults `{}`; runs only for token shop. |
-| `openshop.crons.list` | `read_crons` | Includes per-token-shop override state. |
-| `openshop.crons.set_enabled` | `manage_crons` | Requires `key` and boolean `enabled`. |
+| `openshop.flows.list` | `read_flows` | Includes input schemas and the crons that apply to the token's shop. |
+| `openshop.flows.run` | `run_flows` | `flow` required; `input` defaults `{}` and must satisfy the input schema of the flow; runs only for token shop. |
+| `openshop.crons.list` | `read_crons` | The crons that apply to the token's shop (shared ones and those naming it), with its override state. A cron naming several shops shows only the token's shop. |
+| `openshop.crons.set_enabled` | `manage_crons` | Requires `key` and boolean `enabled`; the key must be of a cron listed by `openshop.crons.list`. |
 
-The GraphQL tool accepts only shops installed for the token's app handle. Its
+Every core tool acts on the `(app handle, shop)` pair of the token and on
+nothing else. The GraphQL tool always runs against the token's own shop: the
+`shop` argument is only kept so that a client written for the earlier schema
+keeps working, and a value that is not the token's shop (after the same
+normalization as a shop domain, so a URL form is accepted) is refused with
+`This token can only act on its own shop "<shop>"` before any request is sent
+to Shopify. If the token's shop has no usable installation, the call fails with
+`Shop "<shop>" is not installed for app "<app>"`. Its
 result includes `shop`, `apiVersion`, the HTTP `status`, `ok`, and Shopify's
 parsed response; unlike the regular Shopify client, it returns GraphQL error
 payloads to the MCP caller.
@@ -301,7 +328,8 @@ payloads to the MCP caller.
 fully granted. Calling a known but unauthorized capability still fails closed.
 Tool and resource calls are audited with token, capability, permissions, status
 (`success`, `denied`, or `error`), duration, request ID, and target shop where
-applicable. Calls rejected for an unknown name or invalid arguments are not
+applicable; for the GraphQL tool it is the shop the call asked for, so a refused
+cross-shop call shows where it aimed. Calls rejected for an unknown name or invalid arguments are not
 audited.
 
 ## Limits and JSON-RPC errors
@@ -317,7 +345,7 @@ body limit. Tool and resource executions time out after 30,000 ms and their
 | `-32601` | Unsupported method. |
 | `-32602` | Unknown capability or invalid arguments. |
 | `-32003` | Permission denied. |
-| `-32000` | Tool/resource error, panic, or timeout. |
+| `-32000` | Tool/resource error, panic, or timeout. Only an error written for the client is shown: a `PublicError`, `InvalidInput`, `InvalidFlowInput`, a flow concurrency conflict, and the errors of the core tools. Any other error a tool or a resource returns is logged under an id, and the message is `Internal error (error id <id>)`. |
 
 Application-level JSON-RPC errors normally use HTTP 200. Authentication and
 payload errors use their explicit HTTP status and a body of the form

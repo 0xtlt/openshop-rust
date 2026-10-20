@@ -1,0 +1,5 @@
+error: `#[input]` takes no argument
+ --> tests/macros/fail/input_takes_no_argument.rs:3:9
+  |
+3 | #[input(strict)]
+  |         ^^^^^^

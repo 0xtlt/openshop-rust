@@ -1,0 +1,10 @@
+# Read by `cargo audit`, which scans Cargo.lock whether or not a crate is built
+# (cargo-deny, see deny.toml, only looks at what is built).
+[advisories]
+ignore = [
+  # `rsa` is in Cargo.lock only through `sqlx-mysql`, an optional dependency of
+  # `sqlx-macros-core` that is never compiled (`cargo tree -i rsa` is empty):
+  # openshop speaks to PostgreSQL alone. The Marvin attack has no fix. Remove
+  # this line if something starts to compile `rsa`.
+  "RUSTSEC-2023-0071",
+]

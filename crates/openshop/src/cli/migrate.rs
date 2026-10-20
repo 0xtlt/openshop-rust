@@ -37,7 +37,7 @@ pub async fn run_migrate(config: &OpenShopConfig, args: &[String]) -> Result<()>
     match args.first().map(String::as_str) {
         Some("generate") => {
             let generated = generate_migrations(cwd, &args[1..], env.production, &config.models)?;
-            if generated.files.is_empty() && generated.snapshot.is_none() {
+            if generated.files.is_empty() && generated.snapshot.is_none() && generated.warnings.is_empty() {
                 println!("[openshop] No schema changes, nothing to generate");
             }
             for path in &generated.files {

@@ -621,10 +621,11 @@ async fn an_outage_in_background_work_does_not_send_a_later_launch_to_oauth(ctx:
 }
 
 #[tokio::test]
-async fn a_missing_encryption_key_fails_clearly_and_is_not_remembered() {
+async fn an_unusable_encryption_key_fails_clearly_and_is_not_remembered() {
+    // A missing key stops the application from starting; a malformed one is
+    // only found when it is used.
     let options = TestOptions {
-        encryption_key: None,
-        production: true,
+        encryption_key: Some("too-short".to_string()),
         ..options(Some(SHOP))
     };
     let ctx = TestContext::with_options(config(&[]), options).await.unwrap();
@@ -632,7 +633,7 @@ async fn a_missing_encryption_key_fails_clearly_and_is_not_remembered() {
 
     for _ in 0..2 {
         let error = format!("{:#}", shop_name(&ctx).await.unwrap_err());
-        assert!(error.contains("ENCRYPTION_KEY must be set in production"), "{error}");
+        assert!(error.contains("ENCRYPTION_KEY must be 64 hex characters"), "{error}");
     }
     // Nothing was asked, nothing was stored in plaintext.
     assert!(ctx.transport.requests().is_empty());
@@ -1037,7 +1038,9 @@ async fn a_session_token_replaces_an_expiring_grant_token_by_the_exchange(ctx: &
         Some("cc-token-1")
     );
 
+    // A refused exchange is not tried again for thirty seconds.
     *shopify.exchange_refused.lock().unwrap() = false;
+    wait(Duration::from_secs(31)).await;
     api_request(ctx).await;
     assert_eq!(
         token_requests(ctx),
@@ -1610,14 +1613,13 @@ async fn a_token_that_cannot_be_stored_shows_neither_itself_nor_its_ciphertext(c
 }
 
 #[tokio::test]
-async fn without_encryption_key_a_cron_of_every_shop_says_so_once_per_app() {
+async fn without_a_usable_encryption_key_a_cron_of_every_shop_says_so_once_per_app() {
     let _logging = LOGGING.lock().await;
     // A shop of its own, so that its lines are told from other tests'.
     let shop = "dev-store-8.myshopify.com";
     let crons = [Cron::new(EVERY_SECOND, "dev-store-flow").all_shops()];
     let options = TestOptions {
-        encryption_key: None,
-        production: true,
+        encryption_key: Some("too-short".to_string()),
         ..options(Some(shop))
     };
     let ctx = TestContext::with_options(config(&crons), options).await.unwrap();
@@ -1688,10 +1690,9 @@ async fn a_launch_keeps_its_token_when_shopify_refuses_the_exchange(ctx: &TestCo
 
 #[tokio::test]
 async fn a_launch_whose_token_cannot_be_stored_is_sent_to_oauth() {
-    // Production without `ENCRYPTION_KEY`: a token is never stored in plaintext.
+    // Without a usable `ENCRYPTION_KEY`: a token is never stored in plaintext.
     let options = TestOptions {
-        encryption_key: None,
-        production: true,
+        encryption_key: Some("too-short".to_string()),
         ..options(None)
     };
     let mut ctx = TestContext::with_options(config(&[]), options).await.unwrap();

@@ -4,6 +4,7 @@ use anyhow::Result;
 
 use super::{database_url, port, shutdown_signal};
 use crate::app::{OpenShop, OpenShopConfig};
+use crate::db::migrate::assert_migrated;
 use crate::engine::Scheduler;
 use crate::runtime::RuntimeEnv;
 use crate::server::{ServerOptions, UiSource, listen};
@@ -24,9 +25,11 @@ pub async fn start_prod(config: OpenShopConfig) -> Result<()> {
     println!("[openshop] Starting production server...");
     println!("[openshop] Database migrations are manual. Run `migrate` before starting production processes.");
 
+    let env = RuntimeEnv::from_env();
     let pool = crate::db::connect_to(&database_url()).await?;
+    assert_migrated(&pool, &env.cwd).await?;
     let ui = ui_source(&config);
-    let app = OpenShop::new(config, pool, RuntimeEnv::from_env())?;
+    let app = OpenShop::new(config, pool, env)?;
     println!(
         "[openshop] Loaded config: {} flows, {} providers",
         app.config().flows.len(),

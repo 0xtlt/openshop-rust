@@ -11,9 +11,7 @@ use sqlx::{Connection, PgConnection};
 const OTHER_SHOP: &str = "other-shop.myshopify.com";
 
 async fn schema_exists(schema: &str) -> bool {
-    let url = std::env::var("TEST_DATABASE_URL")
-        .or_else(|_| std::env::var("DATABASE_URL"))
-        .unwrap_or_else(|_| openshop::runtime::env::DEFAULT_DATABASE_URL.to_string());
+    let url = openshop::testing::test_database_url().unwrap();
     let mut connection = PgConnection::connect_with(&PgConnectOptions::from_str(&url).unwrap())
         .await
         .unwrap();

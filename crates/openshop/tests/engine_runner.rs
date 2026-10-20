@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use chrono::Utc;
-use common::{TEST_SHOP, TestApp, create_config, noop_flow};
+use common::{TEST_SHOP, TestApp, app_with_a_clock_ahead, create_config, noop_flow};
 use openshop::builder::Flow;
 use openshop::db::schema::{FlowRun, LogRow, StepResult};
 use openshop::engine::{RunFlowOptions, cancel_run, run_flow};
@@ -52,6 +52,20 @@ fn messages(logs: &[LogRow]) -> Vec<&str> {
 async fn dispatch(test: &TestApp) -> Uuid {
     test.app
         .dispatch_flow(DispatchOptions::new(FLOW, TEST_SHOP))
+        .await
+        .unwrap()
+        .run_id
+}
+
+/// Queues a run of a flow with an input schema, with an input it accepts: the
+/// tests then run it with the input they mean to try.
+async fn dispatch_valid(test: &TestApp, retry_policy: RetryPolicy) -> Uuid {
+    test.app
+        .dispatch_flow(
+            DispatchOptions::new(FLOW, TEST_SHOP)
+                .input(json!({ "limit": 1 }))
+                .retry_policy(retry_policy),
+        )
         .await
         .unwrap()
         .run_id
@@ -143,6 +157,134 @@ async fn returns_lease_lost_when_the_worker_no_longer_owns_the_run() {
     assert_eq!(run.status, "running");
     assert_eq!(run.worker_id.as_deref(), Some("worker-b"));
     assert!(run.completed_at.is_none());
+    test.cleanup().await;
+}
+
+#[tokio::test]
+async fn an_execution_whose_run_was_claimed_again_by_the_same_worker_cannot_record_its_outcome() {
+    // The same worker claims the run again, with the same attempts as the first
+    // claim since a retry reset them: only the lease tells the executions apart.
+    let flow = Flow::new(FLOW, |ctx: FlowContext| async move {
+        sqlx::query("UPDATE flow_runs SET lease_id = gen_random_uuid() WHERE worker_id = 'worker-a'")
+            .execute(&ctx.db)
+            .await?;
+        if ctx.input["then"] == "fail" {
+            bail!("boom");
+        }
+        Ok(())
+    })
+    .concurrency(Concurrency::Allow);
+    let test = TestApp::new(create_config([flow])).await;
+
+    for then in ["complete", "fail"] {
+        let run_id = dispatch(&test).await;
+        let lease_id = Uuid::new_v4();
+        sqlx::query(
+            "UPDATE flow_runs SET status = 'running', worker_id = 'worker-a', attempts = 1, lease_id = $2 WHERE id = $1",
+        )
+        .bind(run_id)
+        .bind(lease_id)
+        .execute(&test.db)
+        .await
+        .unwrap();
+
+        let result = run_flow(
+            &test.app,
+            options(run_id)
+                .input(json!({ "then": then }))
+                .worker_id("worker-a")
+                .attempt(1)
+                .lease_id(Some(lease_id)),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result, RunOutcome::LeaseLost, "{then}");
+
+        let run = find_run(&test, run_id).await;
+        assert_eq!(run.status, "running", "{then}");
+        assert_eq!(run.worker_id.as_deref(), Some("worker-a"), "{then}");
+        assert_eq!(run.attempts, 1, "{then}");
+        assert_eq!(run.error, None, "{then}");
+        assert!(run.completed_at.is_none(), "{then}");
+    }
+    test.cleanup().await;
+}
+
+#[tokio::test]
+async fn an_execution_that_lost_its_run_cannot_store_a_step_result() {
+    // The run is claimed again by the same worker, with the same `attempts` as
+    // after a cancel and a retry, so the old execution is still going when it
+    // reaches the end of a step, or the start of the next.
+    let flow = Flow::new(FLOW, |ctx: FlowContext| async move {
+        let reclaim = || async {
+            sqlx::query("UPDATE flow_runs SET lease_id = gen_random_uuid() WHERE worker_id = 'worker-a'")
+                .execute(&ctx.db)
+                .await
+        };
+        match ctx.input["when"].as_str().unwrap() {
+            "during" => {
+                let _: u32 = ctx
+                    .step
+                    .run("charge", || async {
+                        reclaim().await?;
+                        Ok(1)
+                    })
+                    .await?;
+            }
+            "failing" => {
+                let _: u32 = ctx
+                    .step
+                    .run("charge", || async {
+                        reclaim().await?;
+                        bail!("declined")
+                    })
+                    .await?;
+            }
+            _ => {
+                reclaim().await?;
+                let _: u32 = ctx.step.run("charge", || async { Ok(1) }).await?;
+            }
+        }
+        Ok(())
+    })
+    .concurrency(Concurrency::Allow);
+    let test = TestApp::new(create_config([flow])).await;
+
+    for when in ["during", "failing", "before"] {
+        let run_id = dispatch(&test).await;
+        let lease_id = Uuid::new_v4();
+        sqlx::query(
+            "UPDATE flow_runs SET status = 'running', worker_id = 'worker-a', attempts = 1, lease_id = $2 WHERE id = $1",
+        )
+        .bind(run_id)
+        .bind(lease_id)
+        .execute(&test.db)
+            .await
+            .unwrap();
+
+        let result = run_flow(
+            &test.app,
+            options(run_id)
+                .input(json!({ "when": when }))
+                .worker_id("worker-a")
+                .attempt(1)
+                .lease_id(Some(lease_id)),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result, RunOutcome::LeaseLost, "{when}");
+
+        let steps = find_steps(&test, run_id).await;
+        assert!(
+            steps.iter().all(|step| step.status == "running"),
+            "{when}: a stale execution stored {:?}",
+            steps.iter().map(|step| step.status.as_str()).collect::<Vec<_>>()
+        );
+        assert_eq!(steps.len(), usize::from(when != "before"), "{when}");
+        let run = find_run(&test, run_id).await;
+        assert_eq!((run.status.as_str(), run.attempts), ("running", 1), "{when}");
+        assert_eq!(run.error, None, "{when}");
+    }
     test.cleanup().await;
 }
 
@@ -247,10 +389,15 @@ async fn flow_with_retry_stays_pending_after_failure() {
     assert_eq!(run.status, "pending");
     assert_eq!(run.error.as_deref(), Some("retry me"));
     assert!(run.completed_at.is_none());
-    // The run was never claimed, so the backoff is the one before a first attempt: 500ms.
+    // The run was never claimed, so the backoff is the one before a first attempt:
+    // 500ms, of which the jitter keeps between half and all.
     let available_at = run.available_at.expect("retry time");
     assert!(
-        available_at >= before + chrono::Duration::milliseconds(400),
+        available_at >= before + chrono::Duration::milliseconds(240),
+        "{available_at}"
+    );
+    assert!(
+        available_at <= Utc::now() + chrono::Duration::milliseconds(500),
         "{available_at}"
     );
     test.cleanup().await;
@@ -343,7 +490,7 @@ async fn input_validation_rejects_invalid_input() {
     let test = TestApp::new(create_config([limit_flow(seen.clone())])).await;
 
     for input in [json!({ "limit": "not-a-number" }), json!({}), json!({ "limit": -1 })] {
-        let run_id = dispatch_without_retry(&test).await;
+        let run_id = dispatch_valid(&test, RetryPolicy::new().max_attempts(0)).await;
         let result = run_flow(&test.app, options(run_id).input(input.clone())).await.unwrap();
         let RunOutcome::Failed { error, will_retry } = result else {
             panic!("expected a failure for {input}, got {result:?}");
@@ -368,7 +515,7 @@ async fn typed_input_is_validated_and_exposed_to_the_flow() {
     let test = TestApp::new(create_config([limit_flow(seen.clone())])).await;
 
     for input in [json!({ "limit": 5 }), json!({ "limit": 7, "label": "nightly" })] {
-        let run_id = dispatch(&test).await;
+        let run_id = dispatch_valid(&test, RetryPolicy::default()).await;
         let result = run_flow(&test.app, options(run_id).input(input)).await.unwrap();
         assert_eq!(result, RunOutcome::Completed);
     }
@@ -1095,5 +1242,45 @@ async fn flow_panicking_before_returning_its_future_is_recorded_as_failed() {
         }
     );
     assert_eq!(find_run(&test, run_id).await.status, "failed");
+    test.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_retry_and_a_wake_up_are_dated_by_the_clock_of_the_database() {
+    let flow = Flow::new(FLOW, |ctx: FlowContext| async move {
+        if ctx.input["then"] == "sleep" {
+            ctx.step.sleep("nap", Duration::from_millis(50)).await?;
+        }
+        bail!("boom")
+    })
+    .retry_policy(
+        RetryPolicy::new()
+            .max_attempts(3)
+            .initial_interval(Duration::from_millis(50)),
+    )
+    .concurrency(Concurrency::Allow);
+    let test = TestApp::new(create_config([flow.clone()])).await;
+    let (ahead, pool) = app_with_a_clock_ahead(&test, create_config([flow])).await;
+    let an_hour_ahead = Utc::now() + chrono::Duration::minutes(59);
+
+    for then in ["fail", "sleep"] {
+        let run_id = dispatch(&test).await;
+        claim(&test, run_id).await;
+        let result = run_flow(&ahead, options(run_id).input(json!({ "then": then })))
+            .await
+            .unwrap();
+        let run = find_run(&test, run_id).await;
+        match (then, result) {
+            ("fail", RunOutcome::Failed { will_retry: true, .. }) => assert_eq!(run.status, "pending"),
+            ("sleep", RunOutcome::Sleeping { resume_at }) => {
+                assert_eq!(run.status, "sleeping");
+                assert!(resume_at > an_hour_ahead, "{then}: {resume_at}");
+            }
+            (_, other) => panic!("{then}: {other:?}"),
+        }
+        let at = run.available_at.expect("a date");
+        assert!(at > an_hour_ahead, "{then}: {at}, by the clock of the process");
+    }
+    pool.close().await;
     test.cleanup().await;
 }

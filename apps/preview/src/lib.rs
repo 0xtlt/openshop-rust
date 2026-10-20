@@ -172,6 +172,7 @@ impl Preview {
             shopify_api_key: Some(API_KEY.to_string()),
             shopify_api_secret: Some(API_SECRET.to_string()),
             host: Some(format!("http://localhost:{port}")),
+            development: true,
             cwd: std::env::temp_dir(),
             ..Default::default()
         };

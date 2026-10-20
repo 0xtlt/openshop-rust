@@ -14,16 +14,22 @@ share one version number and require Rust 1.88 or newer.
 - Deploy web and worker from the same binary.
 - Do not assume `openshop init` updates an existing project.
 
-`openshop init` pins the `openshop` dependency of a new project to the Git tag
-of the CLI that generated it:
+`openshop init` pins the `openshop` dependency of a new project to the Git
+commit the CLI that generated it was built from, which the CLI records when it
+is built from a checkout of the repository, as `cargo install --git` does:
 
 ```toml
 [dependencies]
-openshop = { git = "https://github.com/0xtlt/openshop-rust", tag = "v<version>" }
+openshop = { git = "https://github.com/0xtlt/openshop-rust", rev = "<commit>" }
 
 [dev-dependencies]
-openshop = { git = "https://github.com/0xtlt/openshop-rust", tag = "v<version>", features = ["testing"] }
+openshop = { git = "https://github.com/0xtlt/openshop-rust", rev = "<commit>", features = ["testing"] }
 ```
+
+A CLI built without git, from a package say, pins the tag `v<version>` of its
+own version instead, and says so: the tag has to exist in the repository.
+`--openshop-tag=<tag>`, `--openshop-rev=<commit>` and `--openshop-branch=<name>`
+name another source; see the [CLI reference](cli.md#scaffold-a-project).
 
 Change both entries together when you upgrade. A generated project is
 app-owned after creation. Updating the dependency does not rewrite its

@@ -3,7 +3,8 @@
 ## Required production controls
 
 1. Set `OPENSHOP_ENV=production` and a random 64-character hexadecimal
-   `ENCRYPTION_KEY`, and keep the key stable.
+   `ENCRYPTION_KEY`, and keep the key stable. Without a key, the application
+   refuses to start unless the environment is explicitly a development one.
 2. Terminate HTTPS before OpenShop and set `HOST` to the public HTTPS origin.
 3. Use a dedicated PostgreSQL role with access only to the OpenShop database.
 4. Run committed migrations before web and workers; do not grant runtime
@@ -37,24 +38,62 @@ returned as stored.
 
 | Situation | Behavior |
 | --- | --- |
-| No key, development | Values are stored in plaintext. A warning is logged once: `[openshop] ENCRYPTION_KEY not set — provider credentials stored in plaintext`. |
-| No key, production | Writes, and reads of encrypted values, fail with `ENCRYPTION_KEY must be set in production`. |
+| No key, development (`openshop dev`, or `OPENSHOP_ENV=development` or `test`) | Values are stored in plaintext. A warning is logged once: `[openshop] ENCRYPTION_KEY not set — provider credentials stored in plaintext`. |
+| No key, anything else (production, `staging`, a typo, `OPENSHOP_ENV` unset) | The application does not start: `ENCRYPTION_KEY must be set (64 hex characters, generate one with \`openssl rand -hex 32\`); to store secrets in plaintext on a development machine, run \`openshop dev\` or set OPENSHOP_ENV=development`. |
 | Key that is not 64 hex characters | Writes, and reads of encrypted values, fail with `ENCRYPTION_KEY must be 64 hex characters (32 bytes)`. |
 | Encrypted value, no key, development | Reads fail with `Cannot decrypt provider config: ENCRYPTION_KEY not set` or `Cannot decrypt secret: ENCRYPTION_KEY not set`. |
 | Wrong key or corrupted value | Reads fail with `Unable to decrypt: data is corrupted or the key is wrong`. |
 
-The key is checked when a value is first encrypted or decrypted, not when the
-process starts. Rotating the key requires decrypting and re-encrypting existing
+Plaintext is opt-in: only `OPENSHOP_ENV=development` or `test` (and the `dev`
+command) stores a secret without a key. `NODE_ENV=development` does not, and
+`OPENSHOP_ENV=production` never does. `start` and `worker` are not development commands: run
+locally without a key, they need `OPENSHOP_ENV=development`. A missing key is
+checked when the application starts; a key that is set is checked when a value
+is first encrypted or decrypted. Rotating the key requires decrypting and re-encrypting existing
 values; replacing it without a migration makes stored secrets unreadable.
 
+The format has no associated data and no key identifier: a ciphertext is not
+bound to the row it is in, so it could be copied to another row by whoever can
+write to the database, and nothing says which key encrypted it, so a rotation
+cannot be done gradually. Both would change the stored format, which the
+TypeScript runtime reads too; they need a re-encryption migration and are not
+done yet. Until then, treat write access to the database as access to the
+secrets of every row it can copy.
+
 MCP tokens are never stored: OpenShop keeps a salted scrypt hash and a
-display fingerprint. See [MCP](mcp.md#tokens).
+display fingerprint. See [MCP](mcp.md#tokens). Checking a secret is bounded:
+at most as many scrypt hashes as CPUs (4 at most) run at once, so a flood of
+wrong secrets cannot take the CPU or the memory of the server, and a secret
+that was right is remembered for five minutes in the memory of the process.
+Revoking, disabling, expiring or rotating a token takes effect at the next
+request.
+
+## Secrets in logs and memory dumps
+
+`Debug` of a configuration or of a stored row never shows a secret: it prints
+`[redacted]` for `api_secret` and `shopify_api_secret` (`ShopifyAppConfig`,
+`RuntimeEnv`, the resolved app), `encryption_key`, the access token and the
+nonce of an installation, the configuration of a provider, MCP tokens and their
+hashes, and the secret headers and body fields of an `OutboundRequest`. A
+failed MCP or session token is logged with the reason and the id of the token,
+never the token.
+
+## Outbound responses
+
+The body of an answer to a request OpenShop sends (Shopify, token exchanges,
+provider checks) is read as it arrives and refused beyond 10 MiB
+(`MAX_RESPONSE_BYTES`), by its `Content-Length` when it has one and by counting
+when it has not. A server that streams without end cannot fill the memory of the
+process.
 
 ## Authentication boundaries
 
 - `/api/*` trusts only a verified Shopify session token issued to a staff user.
-- `/webhooks` verifies the raw body with a matching Shopify app secret.
-- `/proxy/*` accepts App Proxy HMAC or a Customer Account JWT.
+- `/webhooks` verifies the raw bytes of the body with a matching Shopify app
+  secret, and runs a delivery Shopify repeats once (see
+  [Webhooks](webhooks.md#idempotence-and-durable-work)).
+- `/proxy/*` accepts App Proxy HMAC or a Customer Account JWT. `/proxy/*` and
+  `/ext/*` refuse the session token of a staff user.
 - `/ext/*` accepts only a Customer Account JWT.
 - `/routes/*` uses the authentication declared by each route function.
   `#[route(…, auth = <function>)]` runs the function before the handler; a
@@ -109,6 +148,13 @@ Request bodies are limited to 2 MB by default (`413` above that); change the
 limit with the `max_request_body_bytes` setting of `app!`. The MCP endpoint
 has its own limit of 1,000,000 bytes.
 
+A request whose response has not begun after 60 seconds is answered with
+`503`, and a request that comes while 1024 are being served is answered with
+`503` and `Retry-After: 1` (`/health` is always answered). Change them with the
+`request_timeout` and `max_concurrent_requests` settings of `app!`. Neither
+applies to a response already streaming. A server behind a proxy should still
+set the proxy's own limits on header and body read time and on connections.
+
 ## What Sentry receives
 
 Nothing is sent to Sentry unless the application sets `sentry`. With a DSN,
@@ -130,8 +176,9 @@ data out of it.
 opens it for everyone who has it: nothing records who signed in. Its pages
 only read, are sent with `Cache-Control: no-store` and a
 `Content-Security-Policy` that allows no script and no framing, and write
-what comes from a shop as text. Wrong passwords are answered one at a time,
-after a growing delay. See [Operator dashboard](operator-dashboard.md).
+what comes from a shop as text. Each client may try a password again only after
+a growing delay, and a client that guesses does not keep the others out. See
+[Operator dashboard](operator-dashboard.md).
 
 ## Embedded admin exposure
 

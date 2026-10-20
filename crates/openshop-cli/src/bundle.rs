@@ -298,6 +298,20 @@ fn toml_string(value: &str) -> String {
     format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
+/// `git = …` and the tag, branch or rev of a git source as `cargo metadata`
+/// prints the source of a declared dependency: `<url>?<kind>=<name>`. Cargo
+/// does not escape the name, which may hold `&`, `#`, `%` or `/`, and does not
+/// add the locked commit to a declared dependency (only a resolved package id
+/// has it): the name is the whole rest of the query, kept as it is.
+fn git_options(source: &str) -> Vec<String> {
+    let (url, reference) = source.split_once('?').unwrap_or((source, ""));
+    let mut options = vec![format!("git = {}", toml_string(url))];
+    if let Some((kind @ ("tag" | "branch" | "rev"), name)) = reference.split_once('=') {
+        options.push(format!("{kind} = {}", toml_string(name)));
+    }
+    options
+}
+
 /// A dependency of the project as a line of the manifest of the bundle.
 fn dependency(declared: &Value) -> Option<(String, String)> {
     // Dependencies of tests and of build scripts are not for the bundle, nor
@@ -320,14 +334,7 @@ fn dependency(declared: &Value) -> Option<(String, String)> {
         .as_str()
         .and_then(|source| source.strip_prefix("git+"))
     {
-        let git = git.split('#').next().unwrap_or(git);
-        let (url, reference) = git.split_once('?').unwrap_or((git, ""));
-        options.push(format!("git = {}", toml_string(url)));
-        for pair in reference.split('&') {
-            if let Some((kind @ ("tag" | "branch" | "rev"), value)) = pair.split_once('=') {
-                options.push(format!("{kind} = {}", toml_string(value)));
-            }
-        }
+        options.extend(git_options(git));
     } else {
         options.push(format!(
             "version = {}",
@@ -740,6 +747,47 @@ mod tests {
             "target_directory": "/work/target",
             "workspace_root": "/work"
         })
+    }
+
+    #[test]
+    fn keeps_the_reference_of_a_git_source_as_declared() {
+        let url = "https://github.com/0xtlt/openshop-rust";
+        let commit = "0123456789abcdef0123456789abcdef01234567";
+        for (source, expected) in [
+            (format!("{url}?tag=v1.2.3"), r#"tag = "v1.2.3""#.to_string()),
+            (format!("{url}?rev={commit}"), format!(r#"rev = "{commit}""#)),
+            (
+                format!("{url}?branch=feature/r&d"),
+                r#"branch = "feature/r&d""#.to_string(),
+            ),
+            (
+                format!("{url}?branch=a&b=c&tag=d"),
+                r#"branch = "a&b=c&tag=d""#.to_string(),
+            ),
+            (
+                format!("{url}?branch=50%25 off#1"),
+                r#"branch = "50%25 off#1""#.to_string(),
+            ),
+            (format!("{url}?branch=fix#12"), r#"branch = "fix#12""#.to_string()),
+            // A branch that ends like a commit hash is still a branch name.
+            (
+                format!("{url}?branch=fix#{commit}"),
+                format!(r#"branch = "fix#{commit}""#),
+            ),
+        ] {
+            assert_eq!(git_options(&source), [format!("git = {url:?}"), expected], "{source}");
+        }
+        // Into the manifest of the bundle, from what `cargo metadata` prints.
+        let declared = json!({
+            "name": "openshop", "source": format!("git+{url}?branch=feature/r&d"), "req": "*", "kind": null,
+            "rename": null, "uses_default_features": true, "features": [], "target": null
+        });
+        assert_eq!(
+            dependency(&declared).unwrap().1,
+            format!(r#"openshop = {{ git = "{url}", branch = "feature/r&d" }}"#)
+        );
+        // The default branch names none.
+        assert_eq!(git_options(url), [format!("git = {url:?}")]);
     }
 
     #[test]

@@ -18,9 +18,9 @@ afterwards has no effect on a running process.
 | `SHOPIFY_API_SECRET` | Single-app mode | Empty | OAuth, session-token, webhook, and proxy signature verification |
 | `HOST` | Production | Falls back to `SHOPIFY_APP_URL` | Public application URL and allowed CORS origin |
 | `SHOPIFY_APP_URL` | When `HOST` is absent | Empty | Legacy public application URL and allowed CORS origin |
-| `ENCRYPTION_KEY` | Production | Plaintext storage in development | Provider configuration and Shopify access-token encryption |
-| `OPENSHOP_ENV` | Production | Development mode | `production` enables production safety checks and encryption enforcement |
-| `NODE_ENV` | No | — | `production` is honored like `OPENSHOP_ENV=production` |
+| `ENCRYPTION_KEY` | Yes, unless the environment is `development` or `test` | None: the application does not start without it, except in development, where secrets are stored in plaintext | Provider configuration and Shopify access-token encryption |
+| `OPENSHOP_ENV` | Production | Unset: neither production nor development | `production` enables production safety checks. `development` or `test` allows plaintext secrets without `ENCRYPTION_KEY` (`openshop dev` does so itself) |
+| `NODE_ENV` | No | — | `production` is honored like `OPENSHOP_ENV=production`. It never allows plaintext secrets: only `OPENSHOP_ENV` does |
 | `PORT` | No | `3000` | HTTP port of `dev` and `start` |
 | `OPENSHOP_UI_DIR` | No | The bundle set with the `admin_ui` setting of `app!`, then the embedded admin UI | Directory of a custom admin UI bundle served by `dev` and `start` |
 | `PGPOOL_MAX` | No | `10` | Maximum PostgreSQL pool connections per process |
@@ -28,7 +28,7 @@ afterwards has no effect on a running process.
 | `PGPOOL_CONNECTION_TIMEOUT_MS` | No | `5000` | PostgreSQL connection acquisition timeout |
 | `RUST_LOG` | No | `info,sqlx=warn` | Log filter of the process logger |
 | `OPENSHOP_GRAPHQL_SCHEMA` | No | `graphql/admin.schema.json` when it exists, then the bundled schema | Read when the crate compiles, not when it runs: the schema file [`graphql!`](graphql.md#schema-and-api-version) checks operations against |
-| `TEST_DATABASE_URL` | No | Falls back to `DATABASE_URL`, then the local development database | Database of the test harness |
+| `TEST_DATABASE_URL` | No | Falls back to `DATABASE_URL` when it points at this machine (`localhost`, a loopback address, a socket), then the local development database | Database of the test harness |
 
 Notes:
 
@@ -145,6 +145,12 @@ fn main() -> Result<()> {
 A variable read before `APP.main()` is called, for example at the top of
 `main`, does not see values that only exist in `.env`.
 
+`APP.main()` loads `.env` before it starts the async runtime, because setting
+an environment variable is only sound while no other thread reads it. A `main`
+that starts its own runtime and calls `APP.run()` or `openshop::cli::run` loads
+`.env` after the runtime started, and logs a warning when that sets a
+variable: use `APP.main()`.
+
 ## Resolution priority
 
 ### Development `.env`
@@ -195,8 +201,8 @@ see [Idle connection check](database.md#idle-connection-check).
 ## Production rules
 
 - Set `OPENSHOP_ENV=production` in production.
-- Set a persistent, secret `ENCRYPTION_KEY`; OpenShop refuses encrypted writes
-  without one in production.
+- Set a persistent, secret `ENCRYPTION_KEY`; OpenShop does not start without
+  one, unless `OPENSHOP_ENV` is explicitly `development` or `test`.
 - Use an externally reachable HTTPS `HOST`.
 - Never expose `SHOPIFY_API_SECRET`, `ENCRYPTION_KEY`, or `DATABASE_URL` to browser
   code.

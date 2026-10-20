@@ -16,6 +16,20 @@ impl std::fmt::Display for FlowCanceledError {
 
 impl std::error::Error for FlowCanceledError {}
 
+/// Raised by a step that finds the run is no longer owned by its execution: the
+/// lease expired and another execution took it over. The execution ends
+/// without writing anything more.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct LeaseLostError;
+
+impl std::fmt::Display for LeaseLostError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Run was taken over by another execution")
+    }
+}
+
+impl std::error::Error for LeaseLostError {}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StepTimeoutError {
     pub step_name: String,
@@ -62,6 +76,42 @@ impl std::fmt::Display for FlowConcurrencyError {
 }
 
 impl std::error::Error for FlowConcurrencyError {}
+
+/// A run was asked for a flow that is not registered.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnknownFlowError {
+    pub flow_name: String,
+    pub available: Vec<String>,
+}
+
+impl std::fmt::Display for UnknownFlowError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Flow \"{}\" not found. Available: {}",
+            self.flow_name,
+            self.available.join(", ")
+        )
+    }
+}
+
+impl std::error::Error for UnknownFlowError {}
+
+/// The input of a run fails the input schema of its flow. A dispatch refuses
+/// it before a run is queued; a run that holds it anyway fails with it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InvalidFlowInput {
+    pub flow_name: String,
+    pub summary: String,
+}
+
+impl std::fmt::Display for InvalidFlowInput {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Invalid input for flow \"{}\": {}", self.flow_name, self.summary)
+    }
+}
+
+impl std::error::Error for InvalidFlowInput {}
 
 /// Raised by `step.sleep()` to suspend the run until `resume_at`.
 #[derive(Debug, Clone, PartialEq, Eq)]

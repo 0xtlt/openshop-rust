@@ -1,0 +1,5 @@
+error: `concurrency` is given twice
+ --> tests/macros/fail/flow_concurrency_twice.rs:3:29
+  |
+3 | #[flow(concurrency = allow, concurrency = reject)]
+  |                             ^^^^^^^^^^^

@@ -120,7 +120,14 @@ and in a log line, a URL is sent without:
 
 When in doubt, more is removed than less: what follows a `?` goes with it up
 to the next space, a closing parenthesis or quote included. This also applies
-to what the application captures itself.
+to what the application captures itself, wherever an event carries text: the
+tags, the extra data, every kind of context (OpenTelemetry included), the data of the breadcrumbs, and the
+parameters of a log entry are scrubbed like a message. A request an application
+attaches keeps its method and its address scrubbed as above; its query string,
+cookies and body are replaced by `[redacted]`, and so is the value of a header
+or an environment entry whose name says that it is a secret (it contains
+`authorization`, `cookie`, `token`, `secret`, `password`, `api-key`, `hmac` or
+`signature`).
 
 Nothing else is removed. A shorter secret in a path, a token quoted outside a
 URL, or a password in a message is sent as written: write errors the way you

@@ -12,10 +12,12 @@ and are recovered with `downcast_ref`.
 | `StepTimeoutError` | `step_name`, `timeout_ms` | `Step "<step>" timed out after <n>ms` | A step exceeded its effective timeout. | Shorten the operation or increase the step timeout. |
 | `FlowTimeoutError` | `flow_name`, `timeout_ms` | `Flow "<flow>" timed out after <n>ms` | An attempt exceeded the flow's `timeout`. | Increase `timeout` or split the job. |
 | `FlowCanceledError` | — | `Flow was canceled` | The run was canceled and its signal fired. | Stop external work and propagate the error. |
+| `LeaseLostError` | — | `Run was taken over by another execution` | A step found that its run is leased to another execution (the lease expired and the run was claimed again). The step stored nothing and the signal fired. | Propagate it; the run belongs to the new execution. |
 | `SleepSignal` | `resume_at` | `Flow sleeping until <timestamp>` | Internal continuation signal created by `step.sleep()`. | Propagate it; do not treat it as an application failure. |
 
-The four errors are exported from the crate root. `SleepSignal`, which an
-application only propagates, is `openshop::engine::SleepSignal`.
+The four errors are exported from the crate root. `SleepSignal` and
+`LeaseLostError`, which an application only propagates, are
+`openshop::engine::SleepSignal` and `openshop::engine::LeaseLostError`.
 
 ```rust,ignore
 use openshop::FlowConcurrencyError;
@@ -114,7 +116,7 @@ non-zero status before serving anything. See
 
 Error bodies generally contain an `error` message. MCP protocol failures use a
 JSON-RPC error object instead, and unexpected Admin API failures answer with
-the plain text `Internal Server Error`. Treat message text as diagnostic, not
+the plain text `Internal Server Error` with an `x-error-id` header. Treat message text as diagnostic, not
 as a stable machine-readable code unless the endpoint documents one.
 
 ## Application error hook

@@ -7,7 +7,7 @@ use crate::{
     components::page::Page,
     dom::{self, every, hide_modal, show_modal},
     events::event_value,
-    fetch::{api_fetch, api_json, api_request},
+    fetch::{api_json, api_json_or_report, api_request},
     http::Method,
     json,
     query::QueryParams,
@@ -115,7 +115,7 @@ pub fn Flows() -> impl IntoView {
     };
 
     spawn_local(async move {
-        if let Ok(Ok(items)) = api_fetch("/api/flows").await.map(|response| response.json()) {
+        if let Some(items) = api_json_or_report("/api/flows", "the flows").await {
             flows.set(items);
         }
     });

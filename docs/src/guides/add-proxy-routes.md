@@ -91,10 +91,10 @@ its handler, never in a Rust string. Create `src/proxy/reviews.liquid`:
 
 ```liquid
 <div class="reviews">
-  <h2>Customer reviews for {{ shop.name }}</h2>
-  <p>Loaded through the app proxy of {{ app_shop }}</p>
+  <h2>Customer reviews for {{ shop.name | escape }}</h2>
+  <p>Loaded through the app proxy of {{ app_shop | escape }}</p>
   {% if customer %}
-    <p>Hello {{ customer.first_name }}! Leave a review below.</p>
+    <p>Hello {{ customer.first_name | escape }}! Leave a review below.</p>
   {% endif %}
 </div>
 ```
@@ -120,7 +120,12 @@ knows, which the template reads as `{{ app_shop }}`. The value is written as a
 Liquid `assign` tag before the content of the file, as a literal it cannot
 close: what a customer typed is displayed, never executed. Strings, numbers,
 booleans and `None` keep their Liquid type; lists and objects are assigned as
-their JSON text.
+their JSON text, with `<`, `>`, `&` and the line separators U+2028 and U+2029
+written as `\uXXXX` escapes, so that a value holding `</script>` or `<!--`
+cannot break out of a `<script type="application/json">` that prints it.
+
+Liquid does not escape what `{{ … }}` prints. Write `| escape` after every
+value that ends up in HTML, a customer's name above all: it is theirs to set.
 
 Declare the module (`pub mod reviews;`) and list `reviews` in `proxies` like
 the two functions above. An `html` proxy returns its page the same way, for

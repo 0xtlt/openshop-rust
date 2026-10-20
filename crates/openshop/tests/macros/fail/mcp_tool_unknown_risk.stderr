@@ -1,0 +1,5 @@
+error: expected `low`, `medium` or `high`
+ --> tests/macros/fail/mcp_tool_unknown_risk.rs:4:35
+  |
+4 | #[mcp_tool("reviews.list", risk = extreme)]
+  |                                   ^^^^^^^

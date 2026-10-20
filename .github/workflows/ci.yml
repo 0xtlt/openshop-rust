@@ -9,6 +9,19 @@ env:
   CARGO_TERM_COLOR: always
   DATABASE_URL: postgresql://openshop:openshop@localhost:5432/openshop
 
+# Nothing here writes to the repository or to GitHub: a job that needs more asks
+# for it on its own.
+permissions:
+  contents: read
+
+# Every action is pinned to the commit of a release, the release in the comment
+# next to it: a tag can be moved, a commit cannot. Dependabot proposes the next
+# one. `dtolnay/rust-toolchain` has no release, its commit is the one of its
+# `master` branch, and the toolchain is the one of `mise.toml`, so that CI runs
+# what a contributor runs. trunk (`.github/actions/install-trunk`) and
+# cargo-deny are not installed by an action that downloads a binary unchecked:
+# their release archive is checked against a SHA-256 written in the repository.
+
 jobs:
   check:
     runs-on: ubuntu-latest
@@ -32,16 +45,19 @@ jobs:
           --health-timeout 5s
           --health-retries 5
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: "1.98.1"
           components: clippy, rustfmt
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - run: cargo fmt --all --check
-      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       # Each test owns a schema and a small pool: cap parallelism to stay under
       # the default max_connections of the service container.
-      - run: cargo test --workspace -- --test-threads=4
+      - run: cargo test --workspace --locked -- --test-threads=4
 
   ui:
     runs-on: ubuntu-latest
@@ -49,34 +65,40 @@ jobs:
       run:
         working-directory: crates/openshop-ui
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: "1.98.1"
           targets: wasm32-unknown-unknown
           components: clippy, rustfmt
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           workspaces: crates/openshop-ui
       - run: cargo fmt --check
-      - run: cargo clippy --target wasm32-unknown-unknown -- -D warnings
-      - run: cargo test
-      - uses: jetli/trunk-action@v0.5.0
-      - run: trunk build --release --dist target/ui-dist
+      - run: cargo clippy --target wasm32-unknown-unknown --locked -- -D warnings
+      - run: cargo test --locked
+      - uses: ./.github/actions/install-trunk
+      - run: trunk build --release --locked --dist target/ui-dist
 
   # The custom and public templates have admin pages with a view: `openshop
   # build-ui` compiles them to WebAssembly, into their own admin UI bundle.
   templates-ui:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: "1.98.1"
           targets: wasm32-unknown-unknown
-      - uses: Swatinem/rust-cache@v2
-      - uses: jetli/trunk-action@v0.5.0
-      - run: cargo run -p openshop-cli -- build-ui
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: ./.github/actions/install-trunk
+      - run: cargo run -p openshop-cli --locked -- build-ui
         working-directory: templates/custom
-      - run: cargo run -p openshop-cli -- build-ui
+      - run: cargo run -p openshop-cli --locked -- build-ui
         working-directory: templates/public
 
   # `check` tests the templates as members of the workspace; this checks the
@@ -86,12 +108,15 @@ jobs:
     env:
       CARGO_PROFILE_DEV_DEBUG: 0
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: "1.98.1"
           components: rustfmt
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo build -p openshop-cli
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - run: cargo build -p openshop-cli --locked
       - name: Check a project made from each template
         run: |
           for template in minimal custom public; do
@@ -99,3 +124,181 @@ jobs:
             cp Cargo.lock "$RUNNER_TEMP/app-$template/"
             (cd "$RUNNER_TEMP/app-$template" && cargo fmt --check && CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target" cargo check --all-targets)
           done
+
+  # What a user gets from `cargo install --git` then `openshop init`, with no
+  # path: a project that depends on the framework through git, on the commit
+  # under test, which cargo has to fetch from GitHub.
+  init-git:
+    runs-on: ubuntu-latest
+    env:
+      CARGO_PROFILE_DEV_DEBUG: 0
+      # The repository is private: cargo fetches it with git, which is given
+      # the token of the job.
+      CARGO_NET_GIT_FETCH_WITH_CLI: true
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # The head of a pull request, which GitHub serves, not its merge commit.
+      COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: "1.98.1"
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - run: git config --global url."https://x-access-token:${GH_TOKEN}@github.com/".insteadOf "https://github.com/"
+      - run: cargo build -p openshop-cli --locked
+      - name: Depend on the commit the CLI is built from
+        run: |
+          target/debug/openshop init "$RUNNER_TEMP/default" --template=minimal
+          grep -F "rev = \"$(git rev-parse HEAD)\"" "$RUNNER_TEMP/default/Cargo.toml"
+      - name: Check a project that depends on the commit under test
+        run: |
+          target/debug/openshop init "$RUNNER_TEMP/app" --template=minimal --openshop-rev="$COMMIT"
+          cp Cargo.lock "$RUNNER_TEMP/app/"
+          cd "$RUNNER_TEMP/app"
+          CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target" cargo check --all-targets
+
+  # The version in `rust-version` of Cargo.toml (and of the admin UI) is a
+  # promise: this is what keeps it.
+  msrv:
+    runs-on: ubuntu-latest
+    env:
+      CARGO_PROFILE_DEV_DEBUG: 0
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          # Keep in step with `rust-version`.
+          toolchain: "1.88"
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: |
+            .
+            crates/openshop-ui
+      - run: cargo check --workspace --all-targets --locked
+      - run: cargo check --all-targets --target wasm32-unknown-unknown --locked
+        working-directory: crates/openshop-ui
+
+  # Advisories, licenses and sources of the dependencies, as `deny.toml` says;
+  # the admin UI workspace has its own lockfile.
+  deny:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      # cargo-deny is not installed through its action, whose image fetches an
+      # archive without checking it: the release asset is checked against the
+      # SHA-256 written here (the `.sha256` of the release, confirmed by hashing
+      # the download).
+      - name: Install cargo-deny
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: 0.20.2
+          SHA256: 9f12ed4c49936e09b48bf862b595cde2fe64fcbd9d74dfacac6131ca824c8d5f
+        run: |
+          set -euo pipefail
+          asset="cargo-deny-$VERSION-x86_64-unknown-linux-musl.tar.gz"
+          gh release download "$VERSION" --repo EmbarkStudios/cargo-deny --pattern "$asset" --dir "$RUNNER_TEMP"
+          echo "$SHA256  $RUNNER_TEMP/$asset" | sha256sum --check -
+          mkdir -p "$HOME/.local/bin"
+          tar -xzf "$RUNNER_TEMP/$asset" -C "$HOME/.local/bin" --strip-components=1 "cargo-deny-$VERSION-x86_64-unknown-linux-musl/cargo-deny"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - run: cargo-deny --all-features check
+      - run: cargo-deny --all-features --manifest-path crates/openshop-ui/Cargo.toml check
+
+  # The committed admin UI bundle (`crates/openshop/ui-dist`) is what
+  # applications embed: it has to be the one of the sources. Its bytes depend
+  # on the platform it is built on, so CI cannot build it again and compare:
+  # the hash of its sources, written when it was built, is compared instead.
+  # The build itself runs here too, to keep `build-dist.sh` working.
+  ui-dist:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - name: The bundle is built from these sources
+        run: |
+          crates/openshop-ui/sources-hash.sh | diff - crates/openshop-ui/ui-dist.sha256 || {
+            echo "::error::crates/openshop/ui-dist is not built from crates/openshop-ui: run \`mise run ui:build\` and commit the result"
+            exit 1
+          }
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: "1.98.1"
+          targets: wasm32-unknown-unknown
+      - uses: ./.github/actions/install-trunk
+      - run: crates/openshop-ui/build-dist.sh "$RUNNER_TEMP/ui-dist"
+
+  # The `Dockerfile` of a generated project is what a deployment builds: one
+  # project of a template with admin views (`custom`, which builds the bundle)
+  # and one without (`minimal`), built into an image. The repository is private,
+  # so the build gets the token the way `init-git` does, as a BuildKit secret: a
+  # `gitconfig` that is never written to a layer. It lives in the runner temp
+  # directory, outside the project, which is the build context.
+  docker:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        template: [minimal, custom]
+    env:
+      CARGO_PROFILE_DEV_DEBUG: 0
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # The head of a pull request, which GitHub serves, not its merge commit.
+      COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
+      TEMPLATE: ${{ matrix.template }}
+      DOCKER_BUILDKIT: 1
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: "1.98.1"
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - run: cargo build -p openshop-cli --locked
+      - name: Make a project of the template
+        run: target/debug/openshop init "$RUNNER_TEMP/app" --template="$TEMPLATE" --openshop-rev="$COMMIT"
+      - name: Build its image
+        run: |
+          umask 077
+          printf '[url "https://x-access-token:%s@github.com/"]\n\tinsteadOf = https://github.com/\n' "$GH_TOKEN" > "$RUNNER_TEMP/gitconfig"
+          docker build --secret id=gitconfig,src="$RUNNER_TEMP/gitconfig" --tag "app-$TEMPLATE" "$RUNNER_TEMP/app"
+          rm "$RUNNER_TEMP/gitconfig"
+      - name: The app does not run as root
+        run: |
+          uid=$(docker run --rm "app-$TEMPLATE" id -u)
+          test "$uid" != 0 || { echo "::error::the image runs as root"; exit 1; }
+          docker run --rm "app-$TEMPLATE" app --help
+
+  # The guide builds.
+  docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/install-mdbook
+      - run: mdbook build docs
+
+  # `openshop dev` is used on Windows too: what is `cfg(unix)` there has a
+  # fallback, which this keeps compiling. Not the tests, which need PostgreSQL.
+  windows:
+    runs-on: windows-latest
+    env:
+      CARGO_PROFILE_DEV_DEBUG: 0
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: "1.98.1"
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - run: cargo check -p openshop-cli -p openshop --all-targets --locked

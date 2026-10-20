@@ -1,6 +1,7 @@
 //! A scripted replacement for Shopify HTTP calls.
 
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use anyhow::Result;
 use futures::future::BoxFuture;
@@ -15,6 +16,7 @@ type Responder = Arc<dyn Fn(&OutboundRequest) -> Result<OutboundResponse> + Send
 pub struct MockTransport {
     responder: Mutex<Responder>,
     requests: Mutex<Vec<OutboundRequest>>,
+    delay: Mutex<Duration>,
 }
 
 impl Default for MockTransport {
@@ -27,6 +29,7 @@ impl Default for MockTransport {
                 })
             })),
             requests: Mutex::new(Vec::new()),
+            delay: Mutex::new(Duration::ZERO),
         }
     }
 }
@@ -49,6 +52,12 @@ impl MockTransport {
         responder: impl Fn(&OutboundRequest) -> Result<OutboundResponse> + Send + Sync + 'static,
     ) {
         *self.responder.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Arc::new(responder);
+    }
+
+    /// Makes every request wait `delay` before it is answered, as a slow
+    /// Shopify would. The request is recorded when it is sent.
+    pub fn delay_responses(&self, delay: Duration) {
+        *self.delay.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = delay;
     }
 
     /// Answers every request with the same JSON body and status 200.
@@ -86,6 +95,12 @@ impl HttpTransport for MockTransport {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .push(request.clone());
-        Box::pin(async move { responder(&request) })
+        let delay = *self.delay.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        Box::pin(async move {
+            if !delay.is_zero() {
+                tokio::time::sleep(delay).await;
+            }
+            responder(&request)
+        })
     }
 }

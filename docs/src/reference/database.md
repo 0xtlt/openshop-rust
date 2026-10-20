@@ -412,17 +412,18 @@ inside them: they retain a PostgreSQL connection and may keep locks open.
 
 ## Framework tables
 
-The framework schema consists of nine tables. Every table has a UUID `id`
+The framework schema consists of ten tables. Every table has a UUID `id`
 primary key. Rows are scoped by `app_handle` (default `'default'`) and `shop`
 unless noted.
 
 | Table | Purpose | Other columns | Unique indexes |
 | --- | --- | --- | --- |
-| `installations` | Installed shops and their access tokens | `access_token`, `scopes`, `nonce`, `installed_at`, `uninstalled_at` | `(app_handle, shop)` |
-| `flow_runs` | Queue and history of flow runs | `flow_name`, `status`, `input`, `error`, `deadline_at`, `parent_run_id`, `attempts`, `available_at`, `worker_id`, `retry_policy`, `started_at`, `completed_at`, `created_at` | — |
+| `installations` | Installed shops and their access tokens | `access_token`, `scopes`, `nonce` (unused: OAuth states are signed, see [Authentication](authentication.md#oauth-installation)), `installed_at`, `uninstalled_at` | `(app_handle, shop)` |
+| `flow_runs` | Queue and history of flow runs | `flow_name`, `status`, `input`, `error`, `deadline_at`, `parent_run_id`, `attempts`, `available_at`, `worker_id`, `retry_policy`, `started_at`, `completed_at`, `created_at`; `lease_id` (Rust only, null or the uuid of the claim that holds the run; the TypeScript runtime ignores it and the Admin API does not return it) | — |
 | `step_results` | Checkpoints; scoped by `flow_run_id` | `step_name`, `attempt`, `status`, `output`, `error`, `duration_ms`, `created_at` | `(flow_run_id, step_name, attempt)` |
 | `provider_configs` | Saved provider configuration | `provider_name`, `config`, `last_checked_at`, `last_check_ok`, `updated_at` | `(app_handle, shop, provider_name)` |
 | `cron_overrides` | Per-shop cron enabled state | `cron_key`, `enabled`, `updated_at` | `(app_handle, shop, cron_key)` |
+| `cron_ticks` | Occurrences of a cron already queued for a shop, so that several schedulers queue each once; rows older than a day are removed. Rust only: the TypeScript runtime neither reads nor writes it | `cron_key`, `scheduled_at` | `(app_handle, shop, cron_key, scheduled_at)` |
 | `logs` | Flow log lines; scoped by `flow_run_id` | `level`, `message`, `payload`, `created_at` | — |
 | `mcp_tokens` | MCP token hashes and metadata | `name`, `token_id`, `token_hash`, `token_fingerprint`, `status`, `expires_at`, `revoked_at`, `last_used_at`, `created_at`, `updated_at` | `(token_id)` |
 | `mcp_permission_grants` | Permissions granted to MCP tokens | `token_id`, `permission_key`, `granted`, `created_at`, `updated_at` | `(app_handle, shop, token_id, permission_key)` |
@@ -438,6 +439,29 @@ Workers read `flow_runs` through two partial indexes limited to `pending`,
 `(available_at, created_at)` to claim runs, and `flow_runs_deadline_idx` on
 `deadline_at` to fail the runs past their deadline. A claim costs the same
 whatever the number of runs waiting.
+
+The log lines are read and purged through two indexes on `logs`,
+`logs_created_at_idx` on `(created_at)` and `logs_level_created_at_idx` on
+`(level, created_at)`, next to `(flow_run_id, created_at)` for the lines of one
+run. The operator dashboard joins a line to its run with `flow_runs.id::text =
+logs.flow_run_id`, since the column is text; `flow_runs_id_text_idx` on
+`((id::text))` lets that join use an index. The columns stay as they are: the
+migration `openshop_logs_indexes` only adds indexes, and the TypeScript runtime
+reads and writes the same table. On a `logs` table with many rows, creating an
+index blocks writes to it until it is built, and a migration runs in a
+transaction, which rules out `CREATE INDEX CONCURRENTLY`: run these statements
+by hand first (the migration then finds them and does nothing):
+
+```sql
+CREATE INDEX CONCURRENTLY IF NOT EXISTS logs_created_at_idx ON logs (created_at);
+CREATE INDEX CONCURRENTLY IF NOT EXISTS logs_level_created_at_idx ON logs (level, created_at);
+CREATE INDEX CONCURRENTLY IF NOT EXISTS flow_runs_id_text_idx ON flow_runs ((id::text));
+```
+
+`logs` grows with every line a flow writes. The
+[`log_retention`](configuration.md#settings) setting has the workers remove the
+lines past an age, in batches of 5,000 selected `FOR UPDATE SKIP LOCKED`;
+without it nothing is removed.
 
 The row types are exported from `openshop::db::schema` (`InstallationRow`,
 `FlowRun`, `StepResult`, `ProviderConfigRow`, `CronOverride`, `LogRow`,
@@ -571,6 +595,14 @@ A statement that can lose data or fail on existing rows is preceded by a
 `-- WARNING:` comment in the file, and `migrate generate` prints it. The file
 is yours to edit before it is applied: a backfill, a different cast, a
 statement in another order. Data is never moved for you.
+
+Some of those statements lose data: `DROP TABLE`, `DROP COLUMN`, and a type
+change that is not a widening (`smallint` to `integer` to `bigint`, `real` to
+`double precision`, `varchar(n)` to a longer `varchar` or `text` do not count).
+`migrate generate` refuses to write a migration that has one, and lists them,
+unless `--allow-destructive` is given. Nothing is written or recorded in the
+snapshot when it refuses. Dropping an index or a constraint, and `SET NOT NULL`,
+do not lose data and are not guarded.
 
 `migrate check` fails while a change has no migration:
 

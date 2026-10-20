@@ -82,6 +82,11 @@ larger configurations easier to split:
   statement, which caps a worker at `concurrency` runs per poll interval.
 - Claiming reads the queue through a partial index, so its cost does not grow
   with the number of runs waiting.
+- The logs of a run are served by page (`limit`, `cursor`, `next`, and
+  `levelCounts` beside `logs` and `total`) and the export is streamed. The
+  `logs` table has indexes on its time and its level, and workers remove the
+  lines past the `log_retention` setting when it is set. The columns are those
+  of the TypeScript runtime, which keeps reading and writing the table.
 - Runs past their deadline are failed once per poll interval, including while
   every slot is taken, instead of before each claim. A claim skips them, so
   none starts late.
@@ -98,7 +103,9 @@ larger configurations easier to split:
 - A run that completes after a failed attempt no longer keeps the error of that
   attempt; the logs still show it.
 - Cron schedules accept nicknames such as `@daily` in addition to five- and
-  six-field expressions.
+  six-field expressions. They are read in UTC, or in the IANA time zone given
+  with `.timezone(…)`, and not in the time zone of the host. A process that
+  wakes late fires the latest occurrence it missed, once.
 - Error messages stored on runs and steps include the context chain
   (`while syncing: connection refused`).
 
@@ -107,9 +114,19 @@ larger configurations easier to split:
 - An identifier that is not a UUID returns `404` (`Run not found`,
   `Token not found`) instead of a database error.
 - `POST /api/crons/toggle` requires `key` (string) and `enabled` (boolean) and
-  answers `400` otherwise.
+  answers `400` otherwise, and `404` (`Cron not found`) for a key that is not
+  a cron the shop sees.
+- A shop only sees the crons that apply to it: those that run once without a
+  shop, those of every shop, and those that name it. `GET /api/crons`,
+  `GET /api/flows` and the MCP tools `openshop.crons.list` and
+  `openshop.flows.list` leave out the crons of other shops, and show only the
+  shop of the caller among the shops a cron names.
 - `POST /api/runs/bulk-delete` answers `400 No IDs provided` for a missing or
   invalid body; identifiers that are not UUIDs count as skipped.
+- Retry, cancel and delete check the status of the run in the write itself, so
+  a run that changed meanwhile is answered `409`. A retry of a flow that
+  rejects concurrent runs answers `409` with `existingRunId` while another
+  run of it is active for the shop.
 - Log export uses JSON for any `format` other than `csv`, and only letters and
   digits are kept in the file extension.
 - Run details list steps in creation order.
@@ -117,6 +134,12 @@ larger configurations easier to split:
 - Request bodies are limited to 2 MB (`413` above that). Set
   `max_request_body_bytes` in `app!` to change the limit. The MCP endpoint
   keeps its own 1 MB limit.
+- A request whose response has not begun after 60 seconds is answered with
+  `503`, and one that comes while 1024 are being served with `503` and
+  `Retry-After: 1`; `request_timeout` and `max_concurrent_requests` in `app!`
+  change them. Verifying an MCP token runs at most a few scrypt hashes at
+  once and remembers a right secret for five minutes; the stored hash is the
+  same.
 - Responses of 1 KB or more are compressed (gzip or Brotli) when the client
   accepts it.
 - With custom admin pages, a static page takes precedence over a dynamic
@@ -174,7 +197,8 @@ larger configurations easier to split:
   the `OPENSHOP_UI_DIR` environment variable.
 - Assets whose file name carries a content hash are served with
   `Cache-Control: public, max-age=31536000, immutable`; other files with
-  `no-cache`.
+  `no-cache`. They have an `ETag` and answer `304` to `If-None-Match`, and are
+  sent with `X-Content-Type-Options: nosniff`.
 - Custom admin pages are Rust components registered in your own UI bundle
   instead of `page.tsx` files compiled by Vite.
 - In `dev`, the shell is served by the application itself (there is no separate
@@ -236,7 +260,11 @@ larger configurations easier to split:
 ## Environment
 
 - `OPENSHOP_ENV=production` enables production mode (`NODE_ENV=production` is
-  honored too): `ENCRYPTION_KEY` is required and the schema push is refused.
+  honored too): the schema push is refused.
+- `ENCRYPTION_KEY` is required unless `OPENSHOP_ENV` is
+  `development` or `test` (`NODE_ENV` does not count), or the command is `dev`. The application does not
+  start without it, in production or in any environment that is not explicitly
+  a development one.
 - `OPENSHOP_UI_DIR` replaces the embedded admin UI.
 
 ## Not ported

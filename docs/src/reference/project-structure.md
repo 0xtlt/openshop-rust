@@ -17,7 +17,11 @@ my-app/
 │       └── warehouse.rs
 ├── migrations/
 │   ├── <timestamp>_openshop_init.sql
-│   └── <timestamp>_openshop_queue_indexes.sql
+│   ├── <timestamp>_openshop_queue_indexes.sql
+│   ├── <timestamp>_openshop_cron_ticks.sql
+│   ├── <timestamp>_openshop_logs_indexes.sql
+│   ├── <timestamp>_openshop_run_lease.sql
+│   └── <timestamp>_openshop_drop_flow_runs_status_index.sql
 ├── Cargo.toml
 ├── shopify.app.toml
 ├── shopify.web.toml
@@ -91,9 +95,10 @@ src/
 
 Declares the package and its dependencies:
 
-- `openshop`, from the Git repository, pinned to the tag of the release that
-  created the project (`tag = "v<version>"`), or from a local path when the
-  project was created with `--openshop-path`;
+- `openshop`, from the Git repository, pinned to the commit of the CLI that
+  created the project (`rev = "<commit>"`), or to the `tag` or `branch` it was
+  given, or from a local path when the project was created with
+  `--openshop-path`;
 - `serde`, used to derive `Serialize` and `Deserialize` on the types the
   application exchanges, such as the arguments of a provider method or the
   payload of a webhook;
@@ -190,8 +195,9 @@ The generated `.gitignore` excludes `target/`, `.env`, `.shopify/`, and `dist/`.
 - `docker-compose.yml` starts a local PostgreSQL 17 with the `openshop` role
   and database expected by the default `DATABASE_URL`.
 - `.env.example` lists the variables to copy into `.env`. `ENCRYPTION_KEY` is
-  commented out: development stores credentials in plaintext until you set
-  it. See [Environment variables](environment-variables.md).
+  commented out: `openshop dev` stores credentials in plaintext until you set
+  it. `start` and `worker` refuse to run without it unless
+  `OPENSHOP_ENV=development`. See [Environment variables](environment-variables.md).
 
 ## Generated files
 

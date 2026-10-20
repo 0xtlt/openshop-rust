@@ -8,11 +8,12 @@ use crate::{
     components::table_header::TableHeader,
     dom::{self, every, locale_date_time},
     events::event_value,
-    fetch::{api_fetch, api_request},
+    fetch::{api_fetch, api_json, api_request},
     format::{elapsed_ms, summary_duration},
     http::Method,
     query::QueryParams,
     reactive::set_if_changed,
+    report::log_error,
     router::route,
     shopify,
     types::{LogEntry, LogsResponse, RunDetail, status_tone},
@@ -20,19 +21,38 @@ use crate::{
 use gloo_timers::callback::Timeout;
 use leptos::{prelude::*, task::spawn_local};
 use leptos_router::hooks::use_params_map;
-use log_query::{LevelCounts, all_logs_url, count_levels, logs_url, note_logs, page_url, parse_levels, toggle_level};
+use log_query::{LevelCounts, count_levels, logs_url, note_logs, page_url, parse_levels, toggle_level};
 use logs_section::LogsSection;
 use output::{OutputModal, build_step_rows, step_row};
 use run_action_modals::{ActionFuture, RunActionModals};
 use std::collections::HashSet;
 
-async fn load_run(id: &str, run: RwSignal<Option<RunDetail>>) {
-    if let Ok(response) = api_fetch(&format!("/api/runs/{id}")).await
-        && response.ok
-        && let Ok(detail) = response.json::<RunDetail>()
-    {
-        set_if_changed(run, Some(detail));
+/// Loads the run. It is polled: a failure is logged and kept in `load_error` for the page to
+/// show, and the next poll tries again.
+async fn load_run(id: &str, run: RwSignal<Option<RunDetail>>, load_error: RwSignal<Option<String>>) {
+    match api_json::<RunDetail>(&format!("/api/runs/{id}")).await {
+        Ok(detail) => {
+            load_error.try_set(None);
+            set_if_changed(run, Some(detail));
+        }
+        Err(error) => {
+            log_error("Could not load the run", &error);
+            load_error.try_set(Some(error.to_string()));
+        }
     }
+}
+
+/// Whether an answer is for the request sent last. Requests overlap: a slow
+/// answer to a replaced query arrives after the answer to its successor.
+fn is_current(latest: &str, answered: &str) -> bool {
+    latest == answered
+}
+
+/// The server's reason, or a plain one when it gave none.
+fn logs_error_message(reason: Option<String>) -> String {
+    reason
+        .filter(|reason| !reason.is_empty())
+        .unwrap_or_else(|| "The logs could not be loaded.".to_string())
 }
 
 fn is_finished(status: &str) -> bool {
@@ -46,8 +66,11 @@ pub fn FlowRun() -> impl IntoView {
     // Filters start from the URL search params.
     let initial_params = QueryParams::parse(&dom::location_search());
     let run = RwSignal::new(None::<RunDetail>);
+    let load_error = RwSignal::new(None::<String>);
     let filtered_logs = RwSignal::new(Vec::<LogEntry>::new());
     let total_logs = RwSignal::new(0_u64);
+    // The server sends the newest lines first; older ones are left to the export.
+    let has_more_logs = RwSignal::new(false);
     let query = RwSignal::new(initial_params.get("q").unwrap_or_default().to_string());
     let levels = RwSignal::new(parse_levels(initial_params.get("levels")));
     let show_help = RwSignal::new(false);
@@ -55,8 +78,12 @@ pub fn FlowRun() -> impl IntoView {
     let new_log_ids = RwSignal::new(HashSet::<String>::new());
     let known_log_ids = StoredValue::new(HashSet::<String>::new());
     let initial_load = StoredValue::new(true);
+    // The address of the last log request sent: an answer to another one is stale.
+    let latest_logs_url = StoredValue::new(String::new());
     let debounce = StoredValue::new_local(None::<Timeout>);
     let retrying = RwSignal::new(false);
+    // Why the logs cannot be shown, such as an invalid regular expression.
+    let logs_error = RwSignal::new(None::<String>);
 
     // App Bridge mirrors `replaceState` to the admin address bar.
     let sync_url = |query: &str, levels: &[String]| {
@@ -68,7 +95,7 @@ pub fn FlowRun() -> impl IntoView {
         let Some(id) = id.get() else { return };
         let load = move || {
             let id = id.clone();
-            spawn_local(async move { load_run(&id, run).await });
+            spawn_local(async move { load_run(&id, run, load_error).await });
         };
         load();
         every(3_000, load);
@@ -78,29 +105,42 @@ pub fn FlowRun() -> impl IntoView {
     let fetch_logs = move || {
         let Some(id) = id.get_untracked() else { return };
         let filtered_url = logs_url(&id, &query.get_untracked(), &levels.get_untracked());
+        latest_logs_url.set_value(filtered_url.clone());
         spawn_local(async move {
-            if let Ok(response) = api_fetch(&filtered_url).await
-                && response.ok
-                && let Ok(data) = response.json::<LogsResponse>()
-            {
-                let initial = initial_load.try_get_value().unwrap_or(false);
-                let fresh = known_log_ids
-                    .try_update_value(|known| note_logs(known, &data.logs, initial))
-                    .unwrap_or_default();
-                initial_load.try_set_value(false);
-                if !fresh.is_empty() {
-                    new_log_ids.set(fresh);
-                    Timeout::new(5_000, move || new_log_ids.set(HashSet::new())).forget();
+            // Polled like the run: a failure is logged, and the next poll tries again.
+            let response = api_fetch(&filtered_url).await;
+            // A slow answer to a query that was replaced since must change
+            // nothing: neither the lines, nor the error of the newer one.
+            let current = latest_logs_url
+                .try_get_value()
+                .is_some_and(|latest| is_current(&latest, &filtered_url));
+            match response {
+                Err(error) => log_error("Could not load the logs", &error),
+                Ok(_) if !current => {}
+                // A query the server refuses must not leave the lines of the
+                // previous one on screen as if they were its result.
+                Ok(refused) if !refused.ok => {
+                    logs_error.set(Some(logs_error_message(refused.error())));
+                    set_if_changed(filtered_logs, Vec::new());
                 }
-                set_if_changed(filtered_logs, data.logs);
-                set_if_changed(total_logs, data.total);
-            }
-            // All logs once more for the level counters, in the same cycle.
-            if let Ok(response) = api_fetch(&all_logs_url(&id)).await
-                && response.ok
-                && let Ok(data) = response.json::<LogsResponse>()
-            {
-                set_if_changed(level_counts, count_levels(&data.logs));
+                Ok(response) => {
+                    if let Ok(data) = response.json::<LogsResponse>() {
+                        logs_error.set(None);
+                        let initial = initial_load.try_get_value().unwrap_or(false);
+                        let fresh = known_log_ids
+                            .try_update_value(|known| note_logs(known, &data.logs, initial))
+                            .unwrap_or_default();
+                        initial_load.try_set_value(false);
+                        if !fresh.is_empty() {
+                            new_log_ids.set(fresh);
+                            Timeout::new(5_000, move || new_log_ids.set(HashSet::new())).forget();
+                        }
+                        set_if_changed(level_counts, count_levels(&data.level_counts));
+                        set_if_changed(has_more_logs, data.next.is_some());
+                        set_if_changed(filtered_logs, data.logs);
+                        set_if_changed(total_logs, data.total);
+                    }
+                }
             }
         });
     };
@@ -136,7 +176,7 @@ pub fn FlowRun() -> impl IntoView {
             let url = format!("/api/runs/{id}/retry?mode={mode}");
             if let Ok(response) = api_request(Method::Post, &url, None).await {
                 if response.ok {
-                    load_run(&id, run).await;
+                    load_run(&id, run, load_error).await;
                     shopify::toast(if mode == "reset" {
                         "Run restarted"
                     } else {
@@ -220,6 +260,11 @@ pub fn FlowRun() -> impl IntoView {
                 }}
 
                 {move || {
+                    load_error
+                        .get()
+                        .map(|error| view! { <s-banner tone="critical" heading="Could not load the run">{error}</s-banner> })
+                }}
+                {move || {
                     run.with(|run| run.as_ref().and_then(|run| run.error.clone()))
                         .filter(|error| !error.is_empty())
                         .map(|error| view! { <s-banner tone="critical" heading="Error">{error}</s-banner> })
@@ -279,7 +324,9 @@ pub fn FlowRun() -> impl IntoView {
                     levels
                     level_counts
                     filtered_logs
+                    logs_error
                     total_logs
+                    has_more_logs
                     new_log_ids
                     show_help
                     on_query_input=Callback::new(handle_query_input)
@@ -295,12 +342,38 @@ pub fn FlowRun() -> impl IntoView {
         } else {
             view! {
                 <Page heading="Run">
-                    <s-section>
-                        <s-spinner />
-                    </s-section>
+                    // A run that cannot be loaded says why, instead of spinning for ever.
+                    {move || match load_error.get() {
+                        Some(error) => {
+                            view! { <s-banner tone="critical" heading="Could not load the run">{error}</s-banner> }
+                                .into_any()
+                        }
+                        None => view! { <s-section><s-spinner /></s-section> }.into_any(),
+                    }}
                 </Page>
             }
             .into_any()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_the_answer_to_the_last_request_is_current() {
+        assert!(is_current("/api/runs/1/logs?q=a", "/api/runs/1/logs?q=a"));
+        assert!(!is_current("/api/runs/1/logs?q=%7C~%22(%22", "/api/runs/1/logs?q=a"));
+    }
+
+    #[test]
+    fn a_refused_search_shows_the_reason_of_the_server() {
+        assert_eq!(
+            logs_error_message(Some("Invalid regex \"(\": unclosed group".to_string())),
+            "Invalid regex \"(\": unclosed group"
+        );
+        assert_eq!(logs_error_message(None), "The logs could not be loaded.");
+        assert_eq!(logs_error_message(Some(String::new())), "The logs could not be loaded.");
     }
 }

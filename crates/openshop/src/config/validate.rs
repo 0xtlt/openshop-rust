@@ -10,7 +10,7 @@ use serde_json::Value;
 
 use crate::admin::validate_admin_menu;
 use crate::app::OpenShopConfig;
-use crate::engine::scheduler::parse_schedule;
+use crate::engine::scheduler::{parse_schedule, parse_timezone};
 use crate::runtime::time::millis;
 use crate::server::file_routes::resolve_route_paths;
 use crate::server::mcp::core::create_core_mcp_capabilities;
@@ -123,6 +123,11 @@ fn validate_field(field: &Field, path: &str) -> Result<()> {
 
 pub fn validate_openshop_config(config: &OpenShopConfig) -> Result<()> {
     validate_shopify_config(config.shopify.as_ref())?;
+    assert_positive_duration(config.request_timeout, "request_timeout")?;
+    assert_positive_integer(
+        config.max_concurrent_requests.map(|requests| requests as u64),
+        "max_concurrent_requests",
+    )?;
 
     for (key, provider) in &config.providers {
         if provider.name.trim().is_empty() {
@@ -173,6 +178,13 @@ pub fn validate_openshop_config(config: &OpenShopConfig) -> Result<()> {
             let message = error.to_string();
             fail!(
                 "crons[{index}].schedule is invalid: {}",
+                message.trim_start_matches("[openshop] ")
+            );
+        }
+        if let Err(error) = parse_timezone(cron) {
+            let message = error.to_string();
+            fail!(
+                "crons[{index}].timezone is invalid: {}",
                 message.trim_start_matches("[openshop] ")
             );
         }
@@ -248,6 +260,7 @@ pub fn validate_openshop_config(config: &OpenShopConfig) -> Result<()> {
     resolve_route_paths("proxy", config.proxies.keys().map(String::as_str))?;
 
     validate_worker_config(&config.worker)?;
+    assert_positive_duration(config.log_retention, "logRetention")?;
     validate_retry_policy(&config.retry_policy, "retryPolicy")?;
     build_mcp_registry(config.mcp.as_ref(), &create_core_mcp_capabilities())?;
     Ok(())

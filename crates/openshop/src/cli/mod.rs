@@ -135,11 +135,16 @@ pub async fn run(config: impl ConfigSource) -> Result<()> {
 
 pub async fn run_with_args(config: impl ConfigSource, args: &[String]) -> Result<()> {
     let command = args.first().map(String::as_str);
-    if command == Some("dev") {
-        // Before logging and the configuration, so that both can read `.env` values.
-        env::load_env_file(&std::env::current_dir()?);
-    }
+    // Before logging and the configuration, so that both can read `.env` values.
+    // `App::main` has done it before starting the runtime: this finds nothing
+    // left to set. It is a late `set_var` for a `main` that starts its own runtime.
+    let late = env::load_dev_env(args, &std::env::current_dir()?);
     init_logging();
+    if late > 0 {
+        tracing::warn!(
+            "[openshop] .env was loaded after the async runtime started, which is not sound while other threads read the environment. Run the app with `APP.main()` to load it before."
+        );
+    }
 
     match command {
         Some(process @ ("dev" | "start" | "worker")) => {

@@ -4,7 +4,7 @@ use std::sync::LazyLock;
 
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use rand::RngCore;
+use rand::Rng;
 use regex::Regex;
 use sha2::{Digest, Sha256};
 
@@ -16,7 +16,8 @@ const KEY_LENGTH: usize = 32;
 
 static TOKEN_ID_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^mtk_[A-Za-z0-9_-]+$").expect("valid regex"));
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// `Debug` does not show the token or its hash.
+#[derive(Clone, PartialEq, Eq)]
 pub struct GeneratedMcpToken {
     pub token_id: String,
     /// The full secret token. Shown once, never stored.
@@ -25,10 +26,32 @@ pub struct GeneratedMcpToken {
     pub token_fingerprint: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+impl std::fmt::Debug for GeneratedMcpToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        use crate::runtime::redact::redacted;
+        f.debug_struct("GeneratedMcpToken")
+            .field("token_id", &self.token_id)
+            .field("token", &redacted(&self.token))
+            .field("token_hash", &redacted(&self.token_hash))
+            .field("token_fingerprint", &self.token_fingerprint)
+            .finish()
+    }
+}
+
+/// `Debug` does not show the token.
+#[derive(Clone, PartialEq, Eq)]
 pub struct ParsedMcpToken {
     pub token_id: String,
     pub token: String,
+}
+
+impl std::fmt::Debug for ParsedMcpToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ParsedMcpToken")
+            .field("token_id", &self.token_id)
+            .field("token", &crate::runtime::redact::redacted(&self.token))
+            .finish()
+    }
 }
 
 fn random_token_part(bytes: usize) -> String {

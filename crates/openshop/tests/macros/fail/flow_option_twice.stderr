@@ -1,0 +1,5 @@
+error: `timeout` is given twice
+ --> tests/macros/fail/flow_option_twice.rs:3:25
+  |
+3 | #[flow(timeout = "10s", timeout = "20s")]
+  |                         ^^^^^^^

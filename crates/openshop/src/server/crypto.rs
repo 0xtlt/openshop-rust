@@ -9,7 +9,7 @@ use std::sync::{Arc, OnceLock};
 use aes_gcm::aead::{Aead, KeyInit};
 use aes_gcm::{Aes256Gcm, Nonce};
 use anyhow::{Result, anyhow, bail};
-use rand::RngCore;
+use rand::Rng;
 use serde_json::Value;
 
 use crate::runtime::logger;
@@ -20,26 +20,32 @@ const TAG_LENGTH: usize = 16;
 const ENCRYPTED_MARKER: &str = "aes-256-gcm";
 const ENCRYPTED_STRING_PREFIX: &str = "enc:aes-256-gcm:";
 
+/// What a missing key says. It names both ways out: a key, or an environment
+/// that is explicitly a development one.
+const MISSING_KEY: &str = "ENCRYPTION_KEY must be set (64 hex characters, generate one with `openssl rand -hex 32`); \
+     to store secrets in plaintext on a development machine, run `openshop dev` or set OPENSHOP_ENV=development";
+
 struct Inner {
     encryption_key: Option<String>,
-    production: bool,
+    allow_plaintext: bool,
     key: OnceLock<Result<[u8; 32], String>>,
     warned: AtomicBool,
 }
 
 /// Encrypts with `ENCRYPTION_KEY` (64 hex characters). Without a key, values are
-/// stored in plaintext outside production and refused in production.
+/// refused, unless plaintext is allowed: only a development environment does,
+/// see [`RuntimeEnv::allows_plaintext_secrets`](crate::runtime::RuntimeEnv::allows_plaintext_secrets).
 #[derive(Clone)]
 pub struct Crypto {
     inner: Arc<Inner>,
 }
 
 impl Crypto {
-    pub fn new(encryption_key: Option<String>, production: bool) -> Self {
+    pub fn new(encryption_key: Option<String>, allow_plaintext: bool) -> Self {
         Self {
             inner: Arc::new(Inner {
                 encryption_key: encryption_key.filter(|key| !key.is_empty()),
-                production,
+                allow_plaintext,
                 key: OnceLock::new(),
                 warned: AtomicBool::new(false),
             }),
@@ -48,8 +54,8 @@ impl Crypto {
 
     fn key(&self) -> Result<Option<[u8; 32]>> {
         let Some(hex_key) = &self.inner.encryption_key else {
-            if self.inner.production {
-                bail!("ENCRYPTION_KEY must be set in production");
+            if !self.inner.allow_plaintext {
+                bail!(MISSING_KEY);
             }
             if !self.inner.warned.swap(true, Ordering::Relaxed) {
                 logger::warn("[openshop] ENCRYPTION_KEY not set — provider credentials stored in plaintext");
@@ -142,8 +148,18 @@ impl Crypto {
         }
     }
 
-    /// Fails as [`Crypto::encrypt_string`] would, without a value: in
-    /// production without a valid `ENCRYPTION_KEY`.
+    /// Fails when no key is set and plaintext is not allowed, which is checked
+    /// when the application starts. A key that is set is only checked when it
+    /// is used.
+    pub(crate) fn check_configured(&self) -> Result<()> {
+        if self.inner.encryption_key.is_none() && !self.inner.allow_plaintext {
+            bail!(MISSING_KEY);
+        }
+        Ok(())
+    }
+
+    /// Fails as [`Crypto::encrypt_string`] would, without a value: without a
+    /// valid `ENCRYPTION_KEY` outside development.
     pub(crate) fn can_encrypt(&self) -> Result<()> {
         self.key().map(|_| ())
     }
@@ -256,18 +272,26 @@ mod tests {
     }
 
     #[test]
-    fn stores_plaintext_without_a_key_outside_production() {
-        let crypto = Crypto::new(None, false);
+    fn stores_plaintext_without_a_key_when_it_is_allowed() {
+        let crypto = Crypto::new(None, true);
         let config = object(json!({ "apiKey": "sk-123" }));
         assert_eq!(crypto.encrypt_config(&config).unwrap(), Value::Object(config));
         assert_eq!(crypto.encrypt_string("token").unwrap(), "token");
     }
 
     #[test]
-    fn refuses_to_run_without_a_key_in_production() {
-        let crypto = Crypto::new(None, true);
+    fn refuses_to_store_without_a_key_unless_plaintext_is_allowed() {
+        let crypto = Crypto::new(None, false);
         let error = crypto.encrypt_string("token").unwrap_err().to_string();
-        assert_eq!(error, "ENCRYPTION_KEY must be set in production");
+        assert_eq!(error, MISSING_KEY);
+        assert!(error.contains("openssl rand -hex 32") && error.contains("OPENSHOP_ENV=development"));
+        assert_eq!(
+            crypto.encrypt_config(&object(json!({ "apiKey": "sk-123" }))).unwrap_err().to_string(),
+            MISSING_KEY
+        );
+        assert_eq!(crypto.check_configured().unwrap_err().to_string(), MISSING_KEY);
+        assert!(Crypto::new(None, true).check_configured().is_ok());
+        assert!(Crypto::new(Some(KEY.into()), false).check_configured().is_ok());
     }
 
     #[test]
@@ -281,7 +305,7 @@ mod tests {
     fn cannot_decrypt_without_a_key() {
         let encrypted_config = crypto().encrypt_config(&object(json!({ "a": 1 }))).unwrap();
         let encrypted_string = crypto().encrypt_string("token").unwrap();
-        let keyless = Crypto::new(None, false);
+        let keyless = Crypto::new(None, true);
         assert_eq!(
             keyless.decrypt_config(Some(&encrypted_config)).unwrap_err().to_string(),
             "Cannot decrypt provider config: ENCRYPTION_KEY not set"

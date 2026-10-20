@@ -92,8 +92,9 @@ impl Installation {
     }
 }
 
-/// A whole row of `installations`, with the stored access token.
-#[derive(Debug, Clone, PartialEq, Serialize, FromRow)]
+/// A whole row of `installations`, with the stored access token. `Debug` does
+/// not show the token, nor the nonce.
+#[derive(Clone, PartialEq, Serialize, FromRow)]
 #[serde(rename_all = "camelCase")]
 pub struct InstallationRow {
     pub id: Uuid,
@@ -106,6 +107,22 @@ pub struct InstallationRow {
     pub installed_at: DateTime<Utc>,
     #[serde(serialize_with = "iso_option::serialize")]
     pub uninstalled_at: Option<DateTime<Utc>>,
+}
+
+impl std::fmt::Debug for InstallationRow {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        use crate::runtime::redact::redacted_option;
+        f.debug_struct("InstallationRow")
+            .field("id", &self.id)
+            .field("app_handle", &self.app_handle)
+            .field("shop", &self.shop)
+            .field("access_token", &redacted_option(&self.access_token))
+            .field("scopes", &self.scopes)
+            .field("nonce", &redacted_option(&self.nonce))
+            .field("installed_at", &self.installed_at)
+            .field("uninstalled_at", &self.uninstalled_at)
+            .finish()
+    }
 }
 
 /// A run of a flow for a shop. `status` is `pending`, `sleeping`, `running`,
@@ -203,7 +220,8 @@ impl StepResult {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, FromRow)]
+/// `Debug` does not show the configuration, which holds the credentials of the provider.
+#[derive(Clone, PartialEq, Serialize, FromRow)]
 #[serde(rename_all = "camelCase")]
 pub struct ProviderConfigRow {
     pub id: Uuid,
@@ -216,6 +234,21 @@ pub struct ProviderConfigRow {
     pub last_check_ok: Option<bool>,
     #[serde(serialize_with = "iso::serialize")]
     pub updated_at: DateTime<Utc>,
+}
+
+impl std::fmt::Debug for ProviderConfigRow {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProviderConfigRow")
+            .field("id", &self.id)
+            .field("app_handle", &self.app_handle)
+            .field("shop", &self.shop)
+            .field("provider_name", &self.provider_name)
+            .field("config", &self.config.as_ref().map(|_| "[redacted]"))
+            .field("last_checked_at", &self.last_checked_at)
+            .field("last_check_ok", &self.last_check_ok)
+            .field("updated_at", &self.updated_at)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, FromRow)]
@@ -260,7 +293,8 @@ impl LogRow {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, FromRow)]
+/// `Debug` does not show the hash of the token.
+#[derive(Clone, PartialEq, Serialize, FromRow)]
 #[serde(rename_all = "camelCase")]
 pub struct McpToken {
     pub id: Uuid,
@@ -281,6 +315,26 @@ pub struct McpToken {
     pub created_at: DateTime<Utc>,
     #[serde(serialize_with = "iso::serialize")]
     pub updated_at: DateTime<Utc>,
+}
+
+impl std::fmt::Debug for McpToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("McpToken")
+            .field("id", &self.id)
+            .field("app_handle", &self.app_handle)
+            .field("shop", &self.shop)
+            .field("name", &self.name)
+            .field("token_id", &self.token_id)
+            .field("token_hash", &crate::runtime::redact::redacted(&self.token_hash))
+            .field("token_fingerprint", &self.token_fingerprint)
+            .field("status", &self.status)
+            .field("expires_at", &self.expires_at)
+            .field("revoked_at", &self.revoked_at)
+            .field("last_used_at", &self.last_used_at)
+            .field("created_at", &self.created_at)
+            .field("updated_at", &self.updated_at)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, FromRow)]

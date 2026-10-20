@@ -1,4 +1,8 @@
-//! Checkpointed steps: a completed step is never executed twice for a run.
+//! Checkpointed steps: a step whose result was stored is not executed again for
+//! the run. Execution is at-least-once, not exactly-once: the result is stored
+//! after the step ran, so a process that dies in between, or a lease that
+//! expires while the step is still running, makes the next attempt run it a
+//! second time, and its side effects with it.
 
 use std::future::Future;
 use std::time::{Duration, Instant};
@@ -12,7 +16,8 @@ use sqlx::PgPool;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use super::errors::{FlowCanceledError, SleepSignal, StepTimeoutError};
+use super::errors::{FlowCanceledError, LeaseLostError, SleepSignal, StepTimeoutError};
+use super::transient::retry;
 use crate::runtime::FlowLogger;
 use crate::runtime::time::to_iso;
 use crate::types::StepOptions;
@@ -23,16 +28,20 @@ pub(crate) fn error_message(error: &anyhow::Error) -> String {
 }
 
 /// Marks a step as failed when its future is dropped mid-run (flow timeout,
-/// panic), so that it does not stay `running` forever.
+/// panic), so that it does not stay `running` forever. Not when the signal of
+/// the run was cancelled: then the engine dropped the flow because the run
+/// belongs to another execution now (a lease lost, a run handed back), and the
+/// step is not this execution's to write.
 struct InterruptedStepGuard {
     db: PgPool,
     step_id: Uuid,
+    signal: CancellationToken,
     armed: bool,
 }
 
 impl Drop for InterruptedStepGuard {
     fn drop(&mut self) {
-        if !self.armed {
+        if !self.armed || self.signal.is_cancelled() {
             return;
         }
         let Ok(runtime) = tokio::runtime::Handle::try_current() else {
@@ -52,6 +61,47 @@ impl Drop for InterruptedStepGuard {
     }
 }
 
+fn is_unique_violation(error: &sqlx::Error) -> bool {
+    error
+        .as_database_error()
+        .is_some_and(|error| error.is_unique_violation())
+}
+
+/// Who an execution is, when a worker leased the run for it. Every claim of
+/// the run sets a new `lease_id`, which tells this execution from every other
+/// one, including an earlier one of the same worker whose lease expired or
+/// whose run was canceled and retried, which resets `attempts`.
+#[derive(Debug, Clone)]
+pub struct RunOwner {
+    pub worker_id: String,
+    /// The lease the claim returned. Any lease matches when unset.
+    pub lease_id: Option<Uuid>,
+}
+
+/// The condition for a write to apply: the run is still leased to the
+/// execution. The arguments are the numbers of the parameters that hold the run
+/// ID, the worker and the lease of the owner; without an owner the last two
+/// are `NULL` and the condition always holds.
+///
+/// The status of the run is not part of it: a run canceled from the API keeps
+/// its worker and its lease, and its steps still record that they were
+/// canceled. Whoever takes a run over, or finishes it, changes the worker or the
+/// lease.
+///
+/// The row of the run is locked `FOR SHARE` until the statement ends. Reading
+/// it is not enough: the statement may wait for another one that holds the row
+/// it writes, and the run could be taken over in the meantime. A claim, a
+/// heartbeat or the end of the run wait for the write instead (or, for a claim,
+/// skip the run). The lock on the run is always taken before the one on the
+/// step, and no statement takes them the other way round.
+fn owned(run: u8, worker: u8, lease: u8) -> String {
+    format!(
+        "(${worker}::text IS NULL OR EXISTS (SELECT 1 FROM flow_runs \
+           WHERE id = ${run}::uuid AND worker_id = ${worker} \
+             AND (${lease}::uuid IS NULL OR lease_id = ${lease}) FOR SHARE))"
+    )
+}
+
 #[derive(Clone)]
 pub struct StepExecutor {
     db: PgPool,
@@ -60,9 +110,13 @@ pub struct StepExecutor {
     signal: CancellationToken,
     default_timeout: Option<Duration>,
     attempt: i32,
+    owner: Option<RunOwner>,
 }
 
 impl StepExecutor {
+    /// With an `owner`, a step only writes while the run is still owned by it:
+    /// once another execution took the run over, the step fails with
+    /// [`LeaseLostError`], stops the flow and stores nothing.
     pub fn new(
         db: PgPool,
         flow_run_id: impl Into<String>,
@@ -70,6 +124,7 @@ impl StepExecutor {
         signal: Option<CancellationToken>,
         default_timeout: Option<Duration>,
         attempt: i32,
+        owner: Option<RunOwner>,
     ) -> Self {
         Self {
             db,
@@ -78,7 +133,69 @@ impl StepExecutor {
             signal: signal.unwrap_or_default(),
             default_timeout,
             attempt,
+            owner,
         }
+    }
+
+    /// Stores the state of a step, if the run is still owned. A step that
+    /// finds it is not stops the flow: it belongs to another execution now.
+    /// Only the columns given are changed.
+    async fn store(
+        &self,
+        step_id: Uuid,
+        status: &str,
+        output: Option<String>,
+        error: Option<&str>,
+        duration_ms: i32,
+    ) -> Result<()> {
+        let sql = format!(
+            "UPDATE step_results SET status = $1, output = COALESCE($2::json, output), \
+               error = COALESCE($3, error), duration_ms = $4 \
+             WHERE id = $5 AND {}",
+            owned(6, 7, 8)
+        );
+        let written = retry(format!("storing the state of step {step_id}"), || async {
+            let result = sqlx::query(&sql)
+                .bind(status)
+                .bind(&output)
+                .bind(error)
+                .bind(duration_ms)
+                .bind(step_id)
+                .bind(&self.flow_run_id)
+                .bind(self.owner.as_ref().map(|owner| owner.worker_id.as_str()))
+                .bind(self.owner.as_ref().and_then(|owner| owner.lease_id))
+                .execute(&self.db)
+                .await?;
+            Ok(result.rows_affected() > 0)
+        })
+        .await?;
+        self.require(written)
+    }
+
+    /// Whether the row `id` is there. It was written by an earlier try of an
+    /// insert whose answer was lost: `id` is generated for the insert and
+    /// belongs to nobody else. An error is not an absent row: it is returned,
+    /// and the insert is tried again with its recognition.
+    async fn is_stored(&self, id: Uuid) -> Result<bool> {
+        let row = sqlx::query_scalar::<_, i32>("SELECT 1 FROM step_results WHERE id = $1")
+            .bind(id)
+            .fetch_optional(&self.db)
+            .await?;
+        Ok(row.is_some())
+    }
+
+    /// Fails when a write was refused because the run is not owned any more.
+    fn require(&self, written: bool) -> Result<()> {
+        if written || self.owner.is_none() {
+            return Ok(());
+        }
+        Err(self.lost())
+    }
+
+    /// The run belongs to another execution: stop the flow.
+    fn lost(&self) -> anyhow::Error {
+        self.signal.cancel();
+        anyhow!(LeaseLostError)
     }
 
     /// Runs `f` once and stores its output. On a retried run the stored output
@@ -121,18 +238,37 @@ impl StepExecutor {
         self.logger
             .info_with(format!("Step \"{name}\" started"), json!({ "step": name }));
 
-        let inserted: Result<(Uuid,), sqlx::Error> = sqlx::query_as(
-            "INSERT INTO step_results (flow_run_id, step_name, attempt, status) \
-             VALUES ($1, $2, $3, 'running') RETURNING id",
-        )
-        .bind(&self.flow_run_id)
-        .bind(name)
-        .bind(self.attempt)
-        .fetch_one(&self.db)
+        // The ID is chosen before the first try: if that one commits and its
+        // answer is lost, the next one finds the row and knows it is its own.
+        let new_id = Uuid::new_v4();
+        let insert = format!(
+            "INSERT INTO step_results (id, flow_run_id, step_name, attempt, status) \
+             SELECT $6::uuid, $1::text, $2::text, $3::int, 'running' WHERE {} RETURNING id",
+            owned(1, 4, 5)
+        );
+        let inserted: Result<Option<(Uuid,)>> = retry(format!("starting step \"{name}\""), || async {
+            let result = sqlx::query_as(&insert)
+                .bind(&self.flow_run_id)
+                .bind(name)
+                .bind(self.attempt)
+                .bind(self.owner.as_ref().map(|owner| owner.worker_id.as_str()))
+                .bind(self.owner.as_ref().and_then(|owner| owner.lease_id))
+                .bind(new_id)
+                .fetch_optional(&self.db)
+                .await;
+            match result {
+                Err(error) if is_unique_violation(&error) => match self.is_stored(new_id).await? {
+                    true => Ok(Some((new_id,))),
+                    false => Err(error.into()),
+                },
+                other => Ok(other?),
+            }
+        })
         .await;
 
         let step_id = match inserted {
-            Ok((id,)) => id,
+            Ok(Some((id,))) => id,
+            Ok(None) => return Err(self.lost()),
             Err(insert_error) => {
                 // The step already ran in this attempt: reuse its outcome instead of running twice.
                 let current: Option<(String, Option<Value>, Option<String>)> = sqlx::query_as(
@@ -152,7 +288,7 @@ impl StepExecutor {
                     Some((status, _, error)) if status == "failed" => Err(anyhow!(
                         error.unwrap_or_else(|| format!("Step \"{name}\" already failed in attempt {}", self.attempt))
                     )),
-                    _ => Err(insert_error.into()),
+                    _ => Err(insert_error),
                 };
             }
         };
@@ -160,6 +296,7 @@ impl StepExecutor {
         let mut interrupted = InterruptedStepGuard {
             db: self.db.clone(),
             step_id,
+            signal: self.signal.clone(),
             armed: true,
         };
         let start = Instant::now();
@@ -195,14 +332,8 @@ impl StepExecutor {
             Ok(result) => {
                 let duration_ms = elapsed_ms(start);
                 let output = serde_json::to_value(&result)?;
-                sqlx::query(
-                    "UPDATE step_results SET status = 'completed', output = $1::json, duration_ms = $2 WHERE id = $3",
-                )
-                .bind(output.to_string())
-                .bind(duration_ms)
-                .bind(step_id)
-                .execute(&self.db)
-                .await?;
+                self.store(step_id, "completed", Some(output.to_string()), None, duration_ms)
+                    .await?;
 
                 self.logger.info_with(
                     format!("Step \"{name}\" completed ({duration_ms}ms)"),
@@ -214,21 +345,12 @@ impl StepExecutor {
                 let duration_ms = elapsed_ms(start);
 
                 if error.downcast_ref::<FlowCanceledError>().is_some() {
-                    sqlx::query("UPDATE step_results SET status = 'canceled', duration_ms = $1 WHERE id = $2")
-                        .bind(duration_ms)
-                        .bind(step_id)
-                        .execute(&self.db)
-                        .await?;
+                    self.store(step_id, "canceled", None, None, duration_ms).await?;
                     return Err(error);
                 }
 
                 let message = error_message(&error);
-                sqlx::query("UPDATE step_results SET status = 'failed', error = $1, duration_ms = $2 WHERE id = $3")
-                    .bind(&message)
-                    .bind(duration_ms)
-                    .bind(step_id)
-                    .execute(&self.db)
-                    .await?;
+                self.store(step_id, "failed", None, Some(&message), duration_ms).await?;
                 self.logger.info_with(
                     format!("Step \"{name}\" failed ({duration_ms}ms)"),
                     json!({ "step": name, "durationMs": duration_ms, "error": message }),
@@ -267,7 +389,10 @@ impl StepExecutor {
         .await?;
 
         let duration_ms = duration.as_millis().min(i32::MAX as u128) as i32;
-        let resume_at = Utc::now() + chrono::Duration::milliseconds(duration.as_millis() as i64);
+        // The wake-up is dated with the clock of the database, the one the workers
+        // claim the run with.
+        let (now,): (DateTime<Utc>,) = sqlx::query_as("SELECT now()").fetch_one(&self.db).await?;
+        let resume_at = now + chrono::Duration::milliseconds(duration.as_millis().min(i64::MAX as u128) as i64);
 
         if let Some((id, output)) = sleeping {
             let stored_resume_at = output
@@ -276,12 +401,8 @@ impl StepExecutor {
                 .and_then(|text| DateTime::parse_from_rfc3339(text).ok())
                 .map(|date| date.with_timezone(&Utc))
                 .unwrap_or(resume_at);
-            if stored_resume_at <= Utc::now() {
-                sqlx::query("UPDATE step_results SET status = 'completed', duration_ms = $1 WHERE id = $2")
-                    .bind(duration_ms)
-                    .bind(id)
-                    .execute(&self.db)
-                    .await?;
+            if stored_resume_at <= now {
+                self.store(id, "completed", None, None, duration_ms).await?;
                 return Ok(());
             }
             bail!(SleepSignal {
@@ -289,16 +410,33 @@ impl StepExecutor {
             });
         }
 
-        sqlx::query(
-            "INSERT INTO step_results (flow_run_id, step_name, attempt, status, output) \
-             VALUES ($1, $2, $3, 'sleeping', $4::json)",
-        )
-        .bind(&self.flow_run_id)
-        .bind(name)
-        .bind(self.attempt)
-        .bind(Value::from(to_iso(&resume_at)).to_string())
-        .execute(&self.db)
+        let new_id = Uuid::new_v4();
+        let insert = format!(
+            "INSERT INTO step_results (id, flow_run_id, step_name, attempt, status, output) \
+             SELECT $7::uuid, $1::text, $2::text, $3::int, 'sleeping', $4::json WHERE {}",
+            owned(1, 5, 6)
+        );
+        let inserted = retry(format!("suspending at step \"{name}\""), || async {
+            let result = sqlx::query(&insert)
+                .bind(&self.flow_run_id)
+                .bind(name)
+                .bind(self.attempt)
+                .bind(Value::from(to_iso(&resume_at)).to_string())
+                .bind(self.owner.as_ref().map(|owner| owner.worker_id.as_str()))
+                .bind(self.owner.as_ref().and_then(|owner| owner.lease_id))
+                .bind(new_id)
+                .execute(&self.db)
+                .await;
+            match result {
+                Err(error) if is_unique_violation(&error) => match self.is_stored(new_id).await? {
+                    true => Ok(true),
+                    false => Err(error.into()),
+                },
+                other => Ok(other?.rows_affected() > 0),
+            }
+        })
         .await?;
+        self.require(inserted)?;
         bail!(SleepSignal { resume_at })
     }
 }

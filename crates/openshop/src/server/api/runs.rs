@@ -9,16 +9,23 @@ use serde_json::{Value, json};
 use sqlx::{Postgres, QueryBuilder};
 use uuid::Uuid;
 
-use super::run_logs::{RunLogOptions, create_log_export_response, get_filtered_run_logs};
+use super::run_logs::{
+    DEFAULT_LIMIT, LogCursor, MAX_LIMIT, RunLogOptions, create_log_export_response, get_filtered_run_logs,
+};
 use crate::app::OpenShop;
 use crate::db::schema::{FlowRun, StepResult};
 use crate::engine::abort::cancel_run;
-use crate::engine::dispatch::DispatchOptions;
-use crate::engine::errors::FlowConcurrencyError;
+use crate::engine::dispatch::{DispatchOptions, lock_flow, reject_when_active};
+use crate::engine::errors::{FlowConcurrencyError, InvalidFlowInput, UnknownFlowError};
 use crate::runtime::time::parse_date;
-use crate::server::http::{ApiResult, json_error, json_object_body, json_response, parse_query};
+use crate::server::http::{ApiResult, containing, json_error, json_object_body, json_response, parse_query};
+use crate::server::log_query::InvalidLogQuery;
 use crate::server::shop::ShopSession;
-use crate::types::{ACTIVE_RUN_STATUSES, ALL_RUN_STATUSES};
+use crate::types::{ACTIVE_RUN_STATUSES, ALL_RUN_STATUSES, Concurrency};
+
+/// The deepest page a list can be asked for. A deeper `OFFSET` makes the
+/// database read and drop every row before it; narrow the filters instead.
+const MAX_OFFSET: i64 = 10_000;
 
 /// `Number(value) || fallback`, floored.
 fn number_param(query: &IndexMap<String, String>, name: &str, fallback: i64) -> i64 {
@@ -38,6 +45,12 @@ async fn list_runs_for(
 ) -> ApiResult {
     let limit = number_param(query, "limit", 50).clamp(1, 200);
     let offset = number_param(query, "offset", 0).max(0);
+    if offset > MAX_OFFSET {
+        return Ok(json_error(
+            StatusCode::BAD_REQUEST,
+            format!("offset must be at most {MAX_OFFSET}"),
+        ));
+    }
     let param = |name: &str| query.get(name).filter(|value| !value.is_empty());
 
     let mut sql: QueryBuilder<'_, Postgres> = QueryBuilder::new("SELECT * FROM flow_runs WHERE app_handle = ");
@@ -47,10 +60,11 @@ async fn list_runs_for(
         sql.push(" AND flow_name = ").push_bind(flow_name);
     }
     if let Some(search) = param("search") {
-        let pattern = format!("%{search}%");
+        let pattern = containing(search);
         sql.push(" AND (flow_name ILIKE ").push_bind(pattern.clone());
-        sql.push(" OR status ILIKE ").push_bind(pattern.clone());
-        sql.push(" OR id::text ILIKE ").push_bind(pattern).push(")");
+        sql.push(" ESCAPE '\\' OR status ILIKE ").push_bind(pattern.clone());
+        sql.push(" ESCAPE '\\' OR id::text ILIKE ").push_bind(pattern);
+        sql.push(" ESCAPE '\\')");
     }
     if let Some(status) = param("status").filter(|status| ALL_RUN_STATUSES.contains(&status.as_str())) {
         sql.push(" AND status = ").push_bind(status);
@@ -131,6 +145,14 @@ async fn run_logs(
     let Some(run) = find_run(&app, &session, &id).await? else {
         return Ok(run_not_found());
     };
+    let cursor = match query.get("cursor").filter(|cursor| !cursor.is_empty()) {
+        Some(cursor) => match LogCursor::parse(cursor) {
+            Some(cursor) => Some(cursor),
+            None => return Ok(json_error(StatusCode::BAD_REQUEST, "Invalid cursor")),
+        },
+        None => None,
+    };
+    let limit = number_param(&query, "limit", DEFAULT_LIMIT as i64).clamp(1, MAX_LIMIT as i64);
     let logs = get_filtered_run_logs(
         app.db(),
         &run.id.to_string(),
@@ -138,10 +160,24 @@ async fn run_logs(
             query: query.get("q").map(String::as_str).unwrap_or_default(),
             levels: query.get("levels").map(String::as_str).unwrap_or("info,warn,error"),
             include_context: true,
+            limit: limit as usize,
+            cursor,
         },
     )
-    .await?;
-    Ok(json_response(StatusCode::OK, json!(logs)))
+    .await;
+    match logs {
+        Ok(logs) => Ok(json_response(StatusCode::OK, json!(logs))),
+        Err(error) => log_query_failure(error),
+    }
+}
+
+/// A query the engine refuses is a `400` with the reason; any other failure is
+/// unexpected.
+pub(super) fn log_query_failure(error: anyhow::Error) -> ApiResult {
+    match error.downcast_ref::<InvalidLogQuery>() {
+        Some(invalid) => Ok(json_error(StatusCode::BAD_REQUEST, invalid.to_string())),
+        None => Err(error.into()),
+    }
 }
 
 async fn export_run_logs(
@@ -154,19 +190,23 @@ async fn export_run_logs(
     let Some(run) = find_run(&app, &session, &id).await? else {
         return Ok(run_not_found());
     };
-    let run_id = run.id.to_string();
-    let result = get_filtered_run_logs(
-        app.db(),
-        &run_id,
+    let format = query.get("format").map(String::as_str).unwrap_or("json");
+    let response = create_log_export_response(
+        app.db().clone(),
+        &run.id.to_string(),
+        format,
         RunLogOptions {
             query: query.get("q").map(String::as_str).unwrap_or_default(),
             levels: query.get("levels").map(String::as_str).unwrap_or("info,warn,error"),
             include_context: false,
+            limit: MAX_LIMIT,
+            cursor: None,
         },
-    )
-    .await?;
-    let format = query.get("format").map(String::as_str).unwrap_or("json");
-    Ok(create_log_export_response(&run_id, format, &result.logs))
+    );
+    match response {
+        Ok(response) => Ok(response),
+        Err(invalid) => Ok(json_error(StatusCode::BAD_REQUEST, invalid.to_string())),
+    }
 }
 
 async fn run_flow(
@@ -190,15 +230,50 @@ async fn run_flow(
         .await;
     match dispatched {
         Ok(result) => Ok(json_response(StatusCode::ACCEPTED, json!(result))),
-        Err(error) => match error.downcast_ref::<FlowConcurrencyError>() {
-            Some(conflict) => Ok(json_response(
-                StatusCode::CONFLICT,
-                json!({ "error": conflict.to_string(), "existingRunId": conflict.existing_run_id }),
-            )),
-            None => Err(error.into()),
-        },
+        Err(error) => {
+            if let Some(conflict) = error.downcast_ref::<FlowConcurrencyError>() {
+                Ok(json_response(
+                    StatusCode::CONFLICT,
+                    json!({ "error": conflict.to_string(), "existingRunId": conflict.existing_run_id }),
+                ))
+            } else if let Some(unknown) = error.downcast_ref::<UnknownFlowError>() {
+                Ok(json_error(
+                    StatusCode::NOT_FOUND,
+                    format!("Flow \"{}\" not found", unknown.flow_name),
+                ))
+            } else if let Some(invalid) = error.downcast_ref::<InvalidFlowInput>() {
+                Ok(json_error(StatusCode::UNPROCESSABLE_ENTITY, invalid.to_string()))
+            } else {
+                Err(error.into())
+            }
+        }
     }
 }
+
+/// The answer to a transition that matched no row: the run is gone (`404`), or
+/// it was not in a status the transition starts from (`409`, saying which). The
+/// run is read again because it can have changed since the request read it.
+async fn refused_transition(
+    app: &OpenShop,
+    session: &ShopSession,
+    id: &str,
+    allowed: &[&str],
+    conflict: impl FnOnce(&FlowRun) -> String,
+) -> ApiResult {
+    let Some(run) = find_run(app, session, id).await? else {
+        return Ok(run_not_found());
+    };
+    if allowed.contains(&run.status.as_str()) {
+        return Ok(json_error(
+            StatusCode::CONFLICT,
+            "The run changed while the request was processed — try again",
+        ));
+    }
+    Ok(json_error(StatusCode::CONFLICT, conflict(&run)))
+}
+
+/// Runs that are over, and so that can be retried.
+const FINISHED_RUN_STATUSES: [&str; 3] = ["failed", "completed", "canceled"];
 
 async fn retry_run(
     State(app): State<OpenShop>,
@@ -211,23 +286,52 @@ async fn retry_run(
     let Some(run) = find_run(&app, &session, &id).await? else {
         return Ok(run_not_found());
     };
-    if !["failed", "completed", "canceled"].contains(&run.status.as_str()) {
-        return Ok(json_error(
-            StatusCode::CONFLICT,
-            format!("Cannot retry a run with status \"{}\"", run.status),
-        ));
-    }
 
-    let deadline_at: Option<DateTime<Utc>> = app
-        .config()
-        .flows
-        .get(&run.flow_name)
+    let flow = app.config().flows.get(&run.flow_name);
+    let deadline_at: Option<DateTime<Utc>> = flow
         .and_then(|flow| flow.timeout)
         .map(|timeout| Utc::now() + Duration::milliseconds(timeout.as_millis() as i64));
+    let rejects_concurrency = flow.is_some_and(|flow| flow.concurrency.unwrap_or_default() == Concurrency::Reject);
     let run_id = run.id.to_string();
     let reset = mode == "reset";
 
+    // Like a dispatch, under the lock of the flow for the shop: the status is
+    // checked by the update itself, and a flow that rejects concurrent runs is
+    // not given a second active one.
     let mut tx = app.db().begin().await?;
+    lock_flow(&mut tx, &run.app_handle, &run.shop, &run.flow_name).await?;
+    let retried = sqlx::query(
+        "UPDATE flow_runs SET \
+           status = 'pending', error = NULL, available_at = now(), completed_at = NULL, worker_id = NULL, \
+           attempts = 0, deadline_at = $2, started_at = NULL, retry_policy = NULL \
+         WHERE id = $1 AND app_handle = $4 AND shop = $5 AND status = ANY($3)",
+    )
+    .bind(run.id)
+    .bind(deadline_at)
+    .bind(FINISHED_RUN_STATUSES.as_slice())
+    .bind(&run.app_handle)
+    .bind(&run.shop)
+    .execute(&mut *tx)
+    .await?;
+    if retried.rows_affected() == 0 {
+        tx.rollback().await?;
+        return refused_transition(&app, &session, &id, &FINISHED_RUN_STATUSES, |run| {
+            format!("Cannot retry a run with status \"{}\"", run.status)
+        })
+        .await;
+    }
+    if rejects_concurrency
+        && let Err(error) = reject_when_active(&mut tx, &run.app_handle, &run.shop, &run.flow_name, Some(run.id)).await
+    {
+        return match error.downcast_ref::<FlowConcurrencyError>() {
+            Some(conflict) => Ok(json_response(
+                StatusCode::CONFLICT,
+                json!({ "error": conflict.to_string(), "existingRunId": conflict.existing_run_id }),
+            )),
+            None => Err(error.into()),
+        };
+    }
+
     if reset {
         sqlx::query("DELETE FROM step_results WHERE flow_run_id = $1")
             .bind(&run_id)
@@ -239,16 +343,6 @@ async fn retry_run(
             .execute(&mut *tx)
             .await?;
     }
-    sqlx::query(
-        "UPDATE flow_runs SET \
-           status = 'pending', error = NULL, available_at = now(), completed_at = NULL, worker_id = NULL, \
-           attempts = 0, deadline_at = $2, started_at = NULL, retry_policy = NULL \
-         WHERE id = $1",
-    )
-    .bind(run.id)
-    .bind(deadline_at)
-    .execute(&mut *tx)
-    .await?;
     sqlx::query("INSERT INTO logs (flow_run_id, level, message, payload) VALUES ($1, 'info', $2, $3::json)")
         .bind(&run_id)
         .bind(format!(
@@ -275,27 +369,58 @@ async fn cancel(
     Extension(session): Extension<ShopSession>,
     Path(id): Path<String>,
 ) -> ApiResult {
-    let Some(run) = find_run(&app, &session, &id).await? else {
+    let Ok(run_id) = Uuid::parse_str(&id) else {
         return Ok(run_not_found());
     };
-    if !ACTIVE_RUN_STATUSES.contains(&run.status.as_str()) {
-        return Ok(json_error(
-            StatusCode::CONFLICT,
-            format!("Cannot cancel a run with status \"{}\"", run.status),
-        ));
+    // The status is checked by the update itself: a run that finished since it
+    // was read is not overwritten.
+    let mut tx = app.db().begin().await?;
+    let canceled = sqlx::query(
+        "UPDATE flow_runs SET status = 'canceled', completed_at = now() \
+         WHERE id = $1 AND app_handle = $2 AND shop = $3 AND status = ANY($4)",
+    )
+    .bind(run_id)
+    .bind(&session.shopify_app)
+    .bind(&session.shop)
+    .bind(ACTIVE_RUN_STATUSES.as_slice())
+    .execute(&mut *tx)
+    .await?;
+    if canceled.rows_affected() == 0 {
+        tx.rollback().await?;
+        return refused_transition(&app, &session, &id, &ACTIVE_RUN_STATUSES, |run| {
+            format!("Cannot cancel a run with status \"{}\"", run.status)
+        })
+        .await;
     }
 
-    cancel_run(&run.id.to_string());
-    sqlx::query("UPDATE flow_runs SET status = 'canceled', completed_at = now() WHERE id = $1")
-        .bind(run.id)
-        .execute(app.db())
-        .await?;
+    // The worker that executes the run, when it is this process, is told while
+    // the row is still locked: a retry waits for the commit, so no new execution
+    // of the run can register itself before this signal and receive it. The
+    // writes of the worker are refused once the run is canceled.
+    cancel_run(&run_id.to_string());
+    tx.commit().await?;
     Ok(json_response(StatusCode::OK, json!({ "ok": true })))
 }
 
-async fn delete_runs(app: &OpenShop, ids: &[Uuid]) -> Result<(), sqlx::Error> {
-    let text_ids: Vec<String> = ids.iter().map(Uuid::to_string).collect();
+/// Deletes the runs of the session that are over, with their steps and logs, and
+/// returns the ones that were deleted. A run is deleted only while it is not
+/// active, whatever its status was when the caller read it.
+async fn delete_runs(app: &OpenShop, session: &ShopSession, ids: &[Uuid]) -> Result<Vec<Uuid>, sqlx::Error> {
     let mut tx = app.db().begin().await?;
+    let deleted: Vec<(Uuid,)> = sqlx::query_as(
+        "DELETE FROM flow_runs \
+         WHERE id = ANY($1) AND app_handle = $2 AND shop = $3 AND status != ALL($4) \
+         RETURNING id",
+    )
+    .bind(ids)
+    .bind(&session.shopify_app)
+    .bind(&session.shop)
+    .bind(ACTIVE_RUN_STATUSES.as_slice())
+    .fetch_all(&mut *tx)
+    .await?;
+    let deleted: Vec<Uuid> = deleted.into_iter().map(|(id,)| id).collect();
+
+    let text_ids: Vec<String> = deleted.iter().map(Uuid::to_string).collect();
     sqlx::query("DELETE FROM logs WHERE flow_run_id = ANY($1)")
         .bind(&text_ids)
         .execute(&mut *tx)
@@ -304,11 +429,8 @@ async fn delete_runs(app: &OpenShop, ids: &[Uuid]) -> Result<(), sqlx::Error> {
         .bind(&text_ids)
         .execute(&mut *tx)
         .await?;
-    sqlx::query("DELETE FROM flow_runs WHERE id = ANY($1)")
-        .bind(ids)
-        .execute(&mut *tx)
-        .await?;
-    tx.commit().await
+    tx.commit().await?;
+    Ok(deleted)
 }
 
 async fn delete_run(
@@ -316,16 +438,15 @@ async fn delete_run(
     Extension(session): Extension<ShopSession>,
     Path(id): Path<String>,
 ) -> ApiResult {
-    let Some(run) = find_run(&app, &session, &id).await? else {
+    let Ok(run_id) = Uuid::parse_str(&id) else {
         return Ok(run_not_found());
     };
-    if ACTIVE_RUN_STATUSES.contains(&run.status.as_str()) {
-        return Ok(json_error(
-            StatusCode::CONFLICT,
-            "Cannot delete an active run — cancel it first",
-        ));
+    if delete_runs(&app, &session, &[run_id]).await?.is_empty() {
+        return refused_transition(&app, &session, &id, &FINISHED_RUN_STATUSES, |_| {
+            "Cannot delete an active run — cancel it first".to_string()
+        })
+        .await;
     }
-    delete_runs(&app, &[run.id]).await?;
     Ok(json_response(StatusCode::OK, json!({ "ok": true })))
 }
 
@@ -343,28 +464,10 @@ async fn bulk_delete(
     }
 
     let candidates: Vec<Uuid> = ids.iter().filter_map(|id| Uuid::parse_str(id.as_str()?).ok()).collect();
-    let to_delete: Vec<(Uuid,)> = sqlx::query_as(
-        "SELECT id FROM flow_runs \
-         WHERE app_handle = $1 AND shop = $2 AND id = ANY($3) \
-           AND status NOT IN ('running', 'pending', 'sleeping')",
-    )
-    .bind(&session.shopify_app)
-    .bind(&session.shop)
-    .bind(&candidates)
-    .fetch_all(app.db())
-    .await?;
-
-    let delete_ids: Vec<Uuid> = to_delete.into_iter().map(|(id,)| id).collect();
-    if delete_ids.is_empty() {
-        return Ok(json_response(
-            StatusCode::OK,
-            json!({ "deleted": 0, "skipped": ids.len() }),
-        ));
-    }
-    delete_runs(&app, &delete_ids).await?;
+    let deleted = delete_runs(&app, &session, &candidates).await?;
     Ok(json_response(
         StatusCode::OK,
-        json!({ "deleted": delete_ids.len(), "skipped": ids.len() - delete_ids.len() }),
+        json!({ "deleted": deleted.len(), "skipped": ids.len() - deleted.len() }),
     ))
 }
 

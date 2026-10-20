@@ -4,7 +4,10 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use common::{TEST_SHOP, TestApp, create_config, noop_flow};
+use common::{
+    TEST_SHOP, TestApp, app_with_a_clock_ahead, create_config, heal_write_fault, inject_write_fault, noop_flow,
+    write_fault_hits,
+};
 use openshop::builder::{Flow, InputSchema};
 use openshop::db::schema::{FlowRun, StepResult};
 use openshop::engine::{Worker, cancel_run};
@@ -549,8 +552,8 @@ async fn resumes_a_sleeping_run_after_its_resume_time() {
     let elapsed = started.elapsed();
     worker.stop().await;
 
-    // One attempt up to the sleep, one after it; the worker was free in between.
-    assert_eq!(run.attempts, 2);
+    // The worker was free during the sleep, and waking up is not a new attempt.
+    assert_eq!(run.attempts, 1);
     assert_eq!(before_runs.load(Ordering::SeqCst), 1);
     assert!(elapsed >= Duration::from_millis(150), "{elapsed:?}");
 
@@ -562,7 +565,7 @@ async fn resumes_a_sleeping_run_after_its_resume_time() {
     let expected = [
         ("before", "completed", 1),
         ("nap", "completed", 1),
-        ("after", "completed", 2),
+        ("after", "completed", 1),
     ]
     .map(|(name, status, attempt)| (name.to_string(), status.to_string(), attempt));
     assert_eq!(steps, expected);
@@ -574,6 +577,398 @@ async fn resumes_a_sleeping_run_after_its_resume_time() {
             .await
             .unwrap();
     assert_eq!(sleeping_logs, 1);
+    test.cleanup().await;
+}
+
+#[tokio::test]
+async fn sleeping_does_not_use_up_the_attempts_of_a_run() {
+    let flow = Flow::new("nap-flow", |ctx: FlowContext| async move {
+        for nap in ["first", "second", "third"] {
+            ctx.step.sleep(nap, Duration::from_millis(30)).await?;
+        }
+        Ok(())
+    })
+    .retry_policy(RetryPolicy::new().max_attempts(1));
+    let test = TestApp::new(create_config([flow])).await;
+    let run_id = dispatch(&test, "nap-flow").await;
+
+    let worker = worker(&test.app, 1);
+    worker.start().await;
+    let run = wait_for_status(&test, run_id, "completed").await;
+    worker.stop().await;
+
+    assert_eq!(run.attempts, 1);
+    assert_eq!(run.error, None);
+    test.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_failure_after_a_sleep_is_counted_once() {
+    let tries = Arc::new(AtomicUsize::new(0));
+    let flow = Flow::new("nap-then-fail", {
+        let tries = tries.clone();
+        move |ctx: FlowContext| {
+            let tries = tries.clone();
+            async move {
+                ctx.step.sleep("nap", Duration::from_millis(30)).await?;
+                bail!("failure #{}", tries.fetch_add(1, Ordering::SeqCst) + 1)
+            }
+        }
+    })
+    .retry_policy(
+        RetryPolicy::new()
+            .max_attempts(2)
+            .initial_interval(Duration::from_millis(10)),
+    );
+    let test = TestApp::new(create_config([flow])).await;
+    let run_id = dispatch(&test, "nap-then-fail").await;
+
+    let worker = worker(&test.app, 1);
+    worker.start().await;
+    let run = wait_for_status(&test, run_id, "failed").await;
+    worker.stop().await;
+
+    // The sleep is replayed: the failure of the second attempt is the last.
+    assert_eq!(run.attempts, 2);
+    assert_eq!(run.error.as_deref(), Some("failure #2"));
+    test.cleanup().await;
+}
+
+/// Puts a run in the state a crashed worker leaves: leased, and past its lease.
+async fn abandon(test: &TestApp, run_id: Uuid, attempts: i32) {
+    sqlx::query(
+        "UPDATE flow_runs SET status = 'running', worker_id = 'dead-worker', attempts = $2, \
+           started_at = now(), available_at = now() - interval '1 second' WHERE id = $1",
+    )
+    .bind(run_id)
+    .bind(attempts)
+    .execute(&test.db)
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn fails_a_run_that_used_all_its_attempts_instead_of_claiming_it_again() {
+    let executions = Arc::new(AtomicUsize::new(0));
+    let flow = Flow::new("crashing-flow", {
+        let executions = executions.clone();
+        move |_ctx: FlowContext| {
+            let executions = executions.clone();
+            async move {
+                executions.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }
+        }
+    })
+    .concurrency(Concurrency::Allow);
+    let test = TestApp::new(create_config([flow, noop_flow("quick-flow")])).await;
+
+    // Each of the first two was claimed as often as its policy allows, and
+    // took its worker down every time.
+    let exhausted = dispatch_with(
+        &test,
+        DispatchOptions::new("crashing-flow", TEST_SHOP).retry_policy(RetryPolicy::new().max_attempts(2)),
+    )
+    .await;
+    abandon(&test, exhausted, 2).await;
+    let without_retries = dispatch_with(
+        &test,
+        DispatchOptions::new("crashing-flow", TEST_SHOP).retry_policy(without_retry()),
+    )
+    .await;
+    abandon(&test, without_retries, 1).await;
+    // This one has an attempt left.
+    let spared = dispatch_with(
+        &test,
+        DispatchOptions::new("crashing-flow", TEST_SHOP).retry_policy(RetryPolicy::new().max_attempts(2)),
+    )
+    .await;
+    abandon(&test, spared, 1).await;
+
+    let worker = worker(&test.app, 1);
+    worker.start().await;
+    wait_for_status(&test, spared, "completed").await;
+    let after = dispatch(&test, "quick-flow").await;
+    wait_for_status(&test, after, "completed").await;
+    worker.stop().await;
+
+    for (run_id, attempts) in [(exhausted, 2), (without_retries, 1)] {
+        let run = find_run(&test, run_id).await;
+        assert_eq!(run.status, "failed");
+        assert_eq!(run.attempts, attempts, "it is not claimed again");
+        assert_eq!(run.worker_id, None);
+        assert!(run.completed_at.is_some());
+        let error = run.error.expect("the reason");
+        assert!(error.contains("attempts"), "{error}");
+    }
+    assert_eq!(find_run(&test, spared).await.attempts, 2);
+    assert_eq!(executions.load(Ordering::SeqCst), 1, "only the spared run executed");
+    test.cleanup().await;
+}
+
+/// How a run still executing comes to be claimed again.
+#[derive(Clone, Copy, Debug)]
+enum Takeover {
+    /// Its lease expired.
+    LeaseExpired,
+    /// It was canceled and retried from the Admin API, which resets its attempts.
+    CanceledAndRetried,
+}
+
+/// A run claimed twice by one worker: the first execution, which lost the run,
+/// is still going while the second one runs.
+struct Reclaimed {
+    test: TestApp,
+    worker: Worker,
+    run_id: Uuid,
+    /// Lets the first execution return.
+    release_first: CancellationToken,
+    /// Lets the second execution return.
+    release_second: CancellationToken,
+    /// How many executions were told to stop, first and second.
+    stopped: [Arc<AtomicUsize>; 2],
+}
+
+/// Counts the flow that is dropped before it returned: the engine took it away.
+struct DroppedUnfinished {
+    count: Arc<AtomicUsize>,
+    finished: bool,
+}
+
+impl Drop for DroppedUnfinished {
+    fn drop(&mut self) {
+        if !self.finished {
+            self.count.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+}
+
+async fn reclaim_a_run_in_flight(takeover: Takeover) -> Reclaimed {
+    let starts = Arc::new(AtomicUsize::new(0));
+    let stopped = [Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0))];
+    let started = Arc::new(Notify::new());
+    let (release_first, release_second) = (CancellationToken::new(), CancellationToken::new());
+    let flow = Flow::new("slow-flow", {
+        let (starts, stopped, started) = (starts.clone(), stopped.clone(), started.clone());
+        let releases = [release_first.clone(), release_second.clone()];
+        move |ctx: FlowContext| {
+            let (starts, stopped, started) = (starts.clone(), stopped.clone(), started.clone());
+            let releases = releases.clone();
+            async move {
+                let nth = starts.fetch_add(1, Ordering::SeqCst).min(1);
+                started.notify_one();
+                let mut dropped = DroppedUnfinished {
+                    count: stopped[nth].clone(),
+                    finished: false,
+                };
+                tokio::select! {
+                    _ = releases[nth].cancelled() => {}
+                    _ = ctx.signal.cancelled() => { stopped[nth].fetch_add(1, Ordering::SeqCst); }
+                }
+                dropped.finished = true;
+                Ok(())
+            }
+        }
+    });
+    let test = TestApp::new(create_config([flow])).await;
+    let run_id = dispatch(&test, "slow-flow").await;
+
+    let worker = worker(&test.app, 2);
+    worker.start().await;
+    tokio::time::timeout(TIMEOUT, started.notified())
+        .await
+        .expect("run claimed");
+    assert_eq!(find_run(&test, run_id).await.attempts, 1);
+
+    // The same worker claims it again while the first execution is still going.
+    let lose = match takeover {
+        Takeover::LeaseExpired => "UPDATE flow_runs SET available_at = now() - interval '1 second' WHERE id = $1",
+        // Cancel, then retry: what the two endpoints write, without the signal
+        // that would stop the first execution.
+        Takeover::CanceledAndRetried => {
+            "UPDATE flow_runs SET status = 'pending', error = NULL, available_at = now(), completed_at = NULL, \
+               worker_id = NULL, attempts = 0, started_at = NULL WHERE id = $1"
+        }
+    };
+    sqlx::query(lose).bind(run_id).execute(&test.db).await.unwrap();
+    tokio::time::timeout(TIMEOUT, started.notified())
+        .await
+        .expect("run claimed again");
+    assert_eq!(worker.active_count(), 2);
+
+    Reclaimed {
+        test,
+        worker,
+        run_id,
+        release_first,
+        release_second,
+        stopped,
+    }
+}
+
+const TAKEOVERS: [(Takeover, i32); 2] = [(Takeover::LeaseExpired, 2), (Takeover::CanceledAndRetried, 1)];
+
+#[tokio::test]
+async fn an_execution_that_lost_its_run_cannot_finish_it() {
+    // The attempts of the second claim: 2, or 1 again once a retry reset them.
+    for (takeover, attempts) in TAKEOVERS {
+        let Reclaimed {
+            test,
+            worker,
+            run_id,
+            release_first,
+            release_second,
+            ..
+        } = reclaim_a_run_in_flight(takeover).await;
+
+        // The old execution returns first, successfully.
+        release_first.cancel();
+        wait_until("the old execution to end", || worker.active_count() == 1).await;
+        let run = find_run(&test, run_id).await;
+        assert_eq!(
+            run.status, "running",
+            "{takeover:?}: the old execution finished the run"
+        );
+        assert_eq!(run.attempts, attempts, "{takeover:?}");
+        assert_eq!(run.worker_id.as_deref(), Some(worker.worker_id()), "{takeover:?}");
+        assert!(run.completed_at.is_none(), "{takeover:?}");
+
+        // The current execution is the one that counts.
+        release_second.cancel();
+        let run = wait_for_status(&test, run_id, "completed").await;
+        assert_eq!(run.attempts, attempts, "{takeover:?}");
+        assert_eq!(run.error, None, "{takeover:?}");
+        worker.stop().await;
+        test.cleanup().await;
+    }
+}
+
+#[tokio::test]
+async fn an_execution_that_lost_its_run_stops_at_its_next_heartbeat() {
+    for (takeover, attempts) in TAKEOVERS {
+        let Reclaimed {
+            test,
+            worker,
+            run_id,
+            release_second,
+            stopped,
+            ..
+        } = reclaim_a_run_in_flight(takeover).await;
+
+        // Both executions send a heartbeat; only the current one extends the lease.
+        skip_to_next_heartbeat().await;
+        wait_until("the old execution to be told to stop", || {
+            stopped[0].load(Ordering::SeqCst) == 1
+        })
+        .await;
+        wait_until("the old execution to end", || worker.active_count() == 1).await;
+        let run = find_run(&test, run_id).await;
+        assert_eq!(
+            (run.status.as_str(), run.attempts),
+            ("running", attempts),
+            "{takeover:?}"
+        );
+        assert!(run.available_at.is_some_and(|lease| lease > chrono::Utc::now()));
+        assert_eq!(stopped[1].load(Ordering::SeqCst), 0, "{takeover:?}");
+
+        // A cancellation still reaches the current execution.
+        assert!(cancel_run(&run_id.to_string()), "{takeover:?}");
+        wait_until("the current execution to be told to stop", || {
+            stopped[1].load(Ordering::SeqCst) == 1
+        })
+        .await;
+        release_second.cancel();
+        worker.stop().await;
+        test.cleanup().await;
+    }
+}
+
+/// A flow that checkpoints a step, then ends; counts its executions.
+fn charging_flow(executions: Arc<AtomicUsize>, charges: Arc<AtomicUsize>) -> Flow {
+    Flow::new("charging-flow", move |ctx: FlowContext| {
+        let (executions, charges) = (executions.clone(), charges.clone());
+        async move {
+            executions.fetch_add(1, Ordering::SeqCst);
+            let _: usize = ctx
+                .step
+                .run(
+                    "charge",
+                    || async move { Ok(charges.fetch_add(1, Ordering::SeqCst) + 1) },
+                )
+                .await?;
+            Ok(())
+        }
+    })
+}
+
+#[tokio::test]
+async fn retries_writing_the_outcome_of_a_run_after_a_transient_error() {
+    let (executions, charges) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+    let test = TestApp::new(create_config([charging_flow(executions.clone(), charges.clone())])).await;
+    // Two lost connections in a row, as the run completes.
+    inject_write_fault(&test.db, "flow_runs", "NEW.status = 'completed'", 2).await;
+    let run_id = dispatch(&test, "charging-flow").await;
+
+    let worker = worker(&test.app, 1);
+    worker.start().await;
+    let run = wait_for_status(&test, run_id, "completed").await;
+    worker.stop().await;
+
+    assert_eq!(
+        write_fault_hits(&test.db, "flow_runs").await,
+        3,
+        "two failures, then the write"
+    );
+    assert_eq!(run.attempts, 1);
+    assert_eq!(run.error, None);
+    assert_eq!(run.worker_id, None);
+    assert!(run.completed_at.is_some());
+    assert_eq!(executions.load(Ordering::SeqCst), 1, "the flow ran once");
+    test.cleanup().await;
+}
+
+#[tokio::test]
+async fn leaves_a_run_to_its_lease_when_its_outcome_cannot_be_written() {
+    let (executions, charges) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+    let test = TestApp::new(create_config([charging_flow(executions.clone(), charges.clone())])).await;
+    inject_write_fault(&test.db, "flow_runs", "NEW.status = 'completed'", i64::MAX).await;
+    let run_id = dispatch(&test, "charging-flow").await;
+
+    let worker = worker_with(
+        &test.app,
+        WorkerConfig::new()
+            .concurrency(1)
+            .lease_duration(Duration::from_secs(3)),
+    );
+    worker.start().await;
+    wait_until("the flow to end", || executions.load(Ordering::SeqCst) == 1).await;
+    wait_until("the worker to give up writing the outcome", || {
+        worker.active_count() == 0
+    })
+    .await;
+
+    // The run is not failed: it keeps its lease, which nothing extends any more.
+    let run = find_run(&test, run_id).await;
+    assert_eq!(run.status, "running");
+    assert_eq!(run.error, None);
+    assert_eq!(run.worker_id.as_deref(), Some(worker.worker_id()));
+    assert!(run.completed_at.is_none());
+    assert_eq!(run.attempts, 1);
+
+    // The database is back before the lease expires: the run is claimed again
+    // and resumes from its checkpoint.
+    heal_write_fault(&test.db, "flow_runs").await;
+    let run = wait_for_status(&test, run_id, "completed").await;
+    worker.stop().await;
+
+    assert_eq!(run.attempts, 2);
+    assert_eq!(run.error, None);
+    assert_eq!(executions.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        charges.load(Ordering::SeqCst),
+        1,
+        "the checkpointed step does not run twice"
+    );
     test.cleanup().await;
 }
 
@@ -1026,19 +1421,29 @@ async fn records_a_panicking_flow_as_failed_and_frees_its_slot() {
 
 #[tokio::test]
 async fn survives_a_panic_outside_of_the_flow_body() {
-    let validated = noop_flow("validated-flow")
-        .input_schema(InputSchema::custom(json!({ "type": "object" }), |_input| {
-            panic!("validator exploded")
+    // The validator explodes on an input that a dispatch lets through: it is
+    // changed in the table before a worker takes the run.
+    let validated =
+        noop_flow("validated-flow").input_schema(InputSchema::custom(json!({ "type": "object" }), |input| {
+            if input.get("explode").is_some() {
+                panic!("validator exploded");
+            }
+            Ok(input)
         }));
     let test = TestApp::new(create_config([validated, noop_flow("quick-flow")])).await;
-    let worker = worker(&test.app, 1);
-    worker.start().await;
-
     let run_id = dispatch_with(
         &test,
         DispatchOptions::new("validated-flow", TEST_SHOP).retry_policy(without_retry()),
     )
     .await;
+    sqlx::query("UPDATE flow_runs SET input = '{\"explode\": true}'::json WHERE id = $1")
+        .bind(run_id)
+        .execute(&test.db)
+        .await
+        .unwrap();
+    let worker = worker(&test.app, 1);
+    worker.start().await;
+
     let run = wait_for_status(&test, run_id, "failed").await;
     assert_eq!(run.error.as_deref(), Some("Worker error: panicked: validator exploded"));
     assert_eq!(run.worker_id, None);
@@ -1073,7 +1478,6 @@ async fn heartbeat_extends_the_lease_of_a_long_run() {
         .await
         .expect("run claimed");
     let leased_until = find_run(&test, run_id).await.available_at.expect("lease");
-
     skip_to_next_heartbeat().await;
     let deadline = Instant::now() + TIMEOUT;
     loop {
@@ -1133,12 +1537,438 @@ async fn worker_that_lost_its_lease_cancels_the_flow_on_the_next_heartbeat() {
     wait_until("the flow to be interrupted", || worker.active_count() == 0).await;
     worker.stop().await;
 
+    // The step does not record its cancellation either: it belongs to the
+    // other worker's run now, like the run itself.
     let steps = find_steps(&test, run_id).await;
     assert_eq!(
         (steps[0].step_name.as_str(), steps[0].status.as_str()),
-        ("forever", "canceled")
+        ("forever", "running")
     );
     // The run itself now belongs to the other worker and is left untouched.
     assert_eq!(find_run(&test, run_id).await, stolen);
     test.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_lease_is_dated_by_the_clock_of_the_database() {
+    let started = Arc::new(Notify::new());
+    let release = CancellationToken::new();
+    let flow = gated_flow("slow-flow", started.clone(), release.clone());
+    let test = TestApp::new(create_config([flow.clone()])).await;
+    let (ahead, pool) = app_with_a_clock_ahead(&test, create_config([flow])).await;
+    let run_id = dispatch(&test, "slow-flow").await;
+
+    let first = worker(&ahead, 1);
+    first.start().await;
+    tokio::time::timeout(TIMEOUT, started.notified())
+        .await
+        .expect("run claimed");
+
+    // The lease ends 30 seconds after `now()` of the database, whatever the
+    // clock of the worker says.
+    let run = find_run(&test, run_id).await;
+    let lease = run.available_at.expect("a lease");
+    let hour_ahead = chrono::Utc::now() + chrono::Duration::minutes(59);
+    assert!(
+        lease > hour_ahead,
+        "the lease ends at {lease}, by the clock of the worker"
+    );
+
+    // Another replica sees the lease still holds, and does not steal the run.
+    let second = worker(&ahead, 1);
+    second.start().await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let run = find_run(&test, run_id).await;
+    assert_eq!((run.status.as_str(), run.attempts), ("running", 1));
+    assert_eq!(run.worker_id.as_deref(), Some(first.worker_id()));
+
+    release.cancel();
+    wait_for_status(&test, run_id, "completed").await;
+    second.stop().await;
+    first.stop().await;
+    pool.close().await;
+    test.cleanup().await;
+}
+
+#[tokio::test]
+async fn shutdown_hands_back_the_runs_it_still_holds() {
+    let (starts, stopped, ticks) = (
+        Arc::new(AtomicUsize::new(0)),
+        Arc::new(AtomicUsize::new(0)),
+        Arc::new(AtomicUsize::new(0)),
+    );
+    let started = Arc::new(Notify::new());
+    let flow = Flow::new("slow-flow", {
+        let (starts, stopped, started, ticks) = (starts.clone(), stopped.clone(), started.clone(), ticks.clone());
+        move |_ctx: FlowContext| {
+            let (starts, stopped, started, ticks) = (starts.clone(), stopped.clone(), started.clone(), ticks.clone());
+            async move {
+                started.notify_one();
+                if starts.fetch_add(1, Ordering::SeqCst) == 0 {
+                    // The first execution never ends by itself, and does what it does
+                    // outside of any step: it ignores the signal of the run.
+                    let _dropped = DroppedUnfinished {
+                        count: stopped,
+                        finished: false,
+                    };
+                    loop {
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                        ticks.fetch_add(1, Ordering::SeqCst);
+                    }
+                }
+                Ok(())
+            }
+        }
+    })
+    .retry_policy(RetryPolicy::new().max_attempts(1));
+    let test = TestApp::new(create_config([flow])).await;
+    let run_id = dispatch(&test, "slow-flow").await;
+
+    let first = worker_with(
+        &test.app,
+        WorkerConfig::new()
+            .concurrency(1)
+            .lease_duration(Duration::from_secs(1)),
+    );
+    first.start().await;
+    tokio::time::timeout(TIMEOUT, started.notified())
+        .await
+        .expect("run claimed");
+
+    // The run does not end within the time a stop waits for it.
+    first.stop().await;
+
+    // It is back in the queue at once, not when its lease would have expired, and
+    // its execution was told to stop without recording anything.
+    let run = find_run(&test, run_id).await;
+    assert_eq!(run.status, "pending");
+    assert_eq!(run.worker_id, None);
+    assert_eq!(run.error, None);
+    assert!(run.completed_at.is_none());
+    assert!(run.available_at.is_some_and(|at| at <= chrono::Utc::now()));
+    assert_eq!(first.active_count(), 0);
+    assert_eq!(stopped.load(Ordering::SeqCst), 1, "the flow was dropped");
+    // Nothing of the flow runs any more: it would go on beside the next owner.
+    let ticked = ticks.load(Ordering::SeqCst);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(ticks.load(Ordering::SeqCst), ticked, "the flow went on after the stop");
+
+    let second = worker(&test.app, 1);
+    let claimed_at = Instant::now();
+    second.start().await;
+    let run = wait_for_status(&test, run_id, "completed").await;
+    assert!(
+        claimed_at.elapsed() < Duration::from_millis(900),
+        "{:?}: it waited for the lease",
+        claimed_at.elapsed()
+    );
+    second.stop().await;
+
+    // The interrupted attempt stays counted, and the run runs again although its
+    // policy has a single attempt: it was handed back, not abandoned.
+    assert_eq!(run.attempts, 2);
+    assert_eq!(run.error, None);
+    assert_eq!(run.worker_id, None);
+    assert_eq!(starts.load(Ordering::SeqCst), 2);
+    test.cleanup().await;
+}
+
+#[tokio::test]
+async fn shutdown_does_not_take_back_a_run_claimed_again() {
+    let (started, release) = (Arc::new(Notify::new()), CancellationToken::new());
+    let flow = gated_flow("slow-flow", started.clone(), release.clone());
+    let test = TestApp::new(create_config([flow])).await;
+    let run_id = dispatch(&test, "slow-flow").await;
+
+    let first = worker_with(
+        &test.app,
+        WorkerConfig::new()
+            .concurrency(1)
+            .lease_duration(Duration::from_millis(600)),
+    );
+    first.start().await;
+    tokio::time::timeout(TIMEOUT, started.notified())
+        .await
+        .expect("run claimed");
+    // The run was claimed again, as after an expired lease: by another claim, which
+    // here is the same worker's, so only the claim tells it from the execution.
+    sqlx::query("UPDATE flow_runs SET lease_id = gen_random_uuid(), attempts = 2 WHERE id = $1")
+        .bind(run_id)
+        .execute(&test.db)
+        .await
+        .unwrap();
+
+    first.stop().await;
+    let run = find_run(&test, run_id).await;
+    assert_eq!((run.status.as_str(), run.attempts), ("running", 2));
+    assert_eq!(run.worker_id.as_deref(), Some(first.worker_id()));
+    release.cancel();
+    test.cleanup().await;
+}
+
+/// Holds the row of a run locked, so that the heartbeat of the run waits.
+async fn lock_run(test: &TestApp, run_id: Uuid) -> sqlx::Transaction<'static, sqlx::Postgres> {
+    let mut tx = test.db.begin().await.unwrap();
+    sqlx::query("SELECT id FROM flow_runs WHERE id = $1 FOR UPDATE")
+        .bind(run_id)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    tx
+}
+
+struct Lines(Mutex<Vec<String>>);
+
+impl openshop::runtime::RuntimeLogger for Lines {
+    fn info(&self, message: &str, _context: Option<&serde_json::Value>) {
+        self.0.lock().unwrap().push(message.to_string());
+    }
+    fn warn(&self, message: &str, _context: Option<&serde_json::Value>) {
+        self.0.lock().unwrap().push(message.to_string());
+    }
+    fn error(&self, message: &str, _context: Option<&serde_json::Value>) {
+        self.0.lock().unwrap().push(message.to_string());
+    }
+}
+
+#[tokio::test]
+async fn a_heartbeat_that_cannot_extend_the_lease_is_logged_and_stops_the_run_before_it_is_taken_over() {
+    let (started, stopped, ticks) = (
+        Arc::new(Notify::new()),
+        Arc::new(AtomicUsize::new(0)),
+        Arc::new(AtomicUsize::new(0)),
+    );
+    let flow = Flow::new("slow-flow", {
+        let (started, stopped, ticks) = (started.clone(), stopped.clone(), ticks.clone());
+        move |_ctx: FlowContext| {
+            let (started, stopped, ticks) = (started.clone(), stopped.clone(), ticks.clone());
+            async move {
+                started.notify_one();
+                // Does what it does outside of any step, and ignores the signal.
+                let _dropped = DroppedUnfinished {
+                    count: stopped,
+                    finished: false,
+                };
+                loop {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                    ticks.fetch_add(1, Ordering::SeqCst);
+                }
+            }
+        }
+    });
+    let test = TestApp::new(create_config([flow])).await;
+    let run_id = dispatch(&test, "slow-flow").await;
+    let lines = Arc::new(Lines(Mutex::new(Vec::new())));
+    let previous = openshop::runtime::set_logger(lines.clone());
+
+    let worker = worker_with(
+        &test.app,
+        WorkerConfig::new()
+            .concurrency(1)
+            .lease_duration(Duration::from_secs(1)),
+    );
+    worker.start().await;
+    tokio::time::timeout(TIMEOUT, started.notified())
+        .await
+        .expect("run claimed");
+
+    // The database holds the row: the heartbeat waits for it, and gives up
+    // instead of waiting for ever.
+    let lock = lock_run(&test, run_id).await;
+    wait_until("the execution to be stopped", || stopped.load(Ordering::SeqCst) == 1).await;
+    openshop::runtime::set_logger(previous);
+    // The flow is dropped, not only told to stop: nothing of it runs on, beside the
+    // worker that may own the run now.
+    let ticked = ticks.load(Ordering::SeqCst);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(ticks.load(Ordering::SeqCst), ticked, "the flow went on after its lease");
+
+    let lines = lines.0.lock().unwrap().clone();
+    let failure = format!("Heartbeat of run {run_id} failed");
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains(&failure) && (line.contains("timed out") || line.contains("statement timeout"))),
+        "{lines:#?}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains(&format!("Lease of run {run_id} expired"))),
+        "{lines:#?}"
+    );
+    // The execution stopped, but the run was not canceled nor failed: its lease
+    // runs out and the run is claimed again.
+    let run = find_run(&test, run_id).await;
+    assert_eq!(run.status, "running");
+    assert_eq!(run.error, None);
+    assert!(run.completed_at.is_none());
+    lock.rollback().await.unwrap();
+    worker.stop().await;
+    test.cleanup().await;
+}
+
+/// Makes the release of the run `run_id` wait, as a lock held by someone else would.
+async fn delay_release(test: &TestApp, run_id: Uuid) {
+    sqlx::raw_sql(&format!(
+        "CREATE FUNCTION hold_release() RETURNS trigger LANGUAGE plpgsql AS $$ \
+         BEGIN PERFORM pg_sleep(30); RETURN NEW; END $$; \
+         CREATE TRIGGER hold_release BEFORE UPDATE ON flow_runs FOR EACH ROW \
+           WHEN (OLD.id = '{run_id}' AND OLD.status = 'running' AND NEW.status = 'pending') \
+           EXECUTE FUNCTION hold_release()"
+    ))
+    .execute(&test.db)
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn a_release_that_waits_does_not_hold_back_the_shutdown_nor_the_other_releases() {
+    let (started, stopped) = (Arc::new(Notify::new()), Arc::new(AtomicUsize::new(0)));
+    let flow = Flow::new("slow-flow", {
+        let (started, stopped) = (started.clone(), stopped.clone());
+        move |_ctx: FlowContext| {
+            let (started, stopped) = (started.clone(), stopped.clone());
+            async move {
+                started.notify_one();
+                let _dropped = DroppedUnfinished {
+                    count: stopped,
+                    finished: false,
+                };
+                std::future::pending::<()>().await;
+                Ok(())
+            }
+        }
+    })
+    .concurrency(Concurrency::Allow);
+    let test = TestApp::new(create_config([flow])).await;
+    let (stuck, free) = (dispatch(&test, "slow-flow").await, dispatch(&test, "slow-flow").await);
+    delay_release(&test, stuck).await;
+
+    let worker = worker_with(
+        &test.app,
+        WorkerConfig::new()
+            .concurrency(2)
+            .lease_duration(Duration::from_millis(500)),
+    );
+    worker.start().await;
+    for _ in 0..2 {
+        tokio::time::timeout(TIMEOUT, started.notified())
+            .await
+            .expect("runs claimed");
+    }
+    // Keeps the leases alive while the worker waits for its runs, as a healthy one does.
+    let stopping = Instant::now();
+    tokio::time::timeout(Duration::from_secs(8), worker.stop())
+        .await
+        .expect("the shutdown waits for the release of a run");
+    assert!(stopping.elapsed() < Duration::from_secs(6), "{:?}", stopping.elapsed());
+
+    // Every execution is gone, whether or not its run could be released.
+    assert_eq!(worker.active_count(), 0);
+    assert_eq!(stopped.load(Ordering::SeqCst), 2);
+    // The other run was released although the first release was stuck.
+    let free = find_run(&test, free).await;
+    assert_eq!((free.status.as_str(), free.worker_id), ("pending", None));
+    // The stuck one is left to its lease: it is not released, and not lost.
+    let stuck = find_run(&test, stuck).await;
+    assert_eq!(stuck.status, "running");
+    assert_eq!(stuck.worker_id.as_deref(), Some(worker.worker_id()));
+    test.cleanup().await;
+}
+
+/// Counts the flows alive at once.
+struct Live(Arc<AtomicUsize>);
+
+impl Drop for Live {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+#[tokio::test]
+async fn a_flow_whose_lease_ran_out_is_gone_before_another_worker_starts_the_run() {
+    lease_overlap(false).await;
+}
+
+#[tokio::test]
+async fn a_slow_claim_does_not_stretch_the_lease_of_the_flow() {
+    // The claim answers 1.2 s after it began, with a lease of 2 s dated from its
+    // beginning: the flow starts with less than a second left.
+    lease_overlap(true).await;
+}
+
+/// The first worker lost its heartbeat (see the tests above); the second takes the
+/// run over when the lease expires. Never two flows of the run at once.
+async fn lease_overlap(slow_first_claim: bool) {
+    let (live, starts) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+    let release = CancellationToken::new();
+    let flow = Flow::new("lease-overlap", {
+        let (live, starts, release) = (live.clone(), starts.clone(), release.clone());
+        move |_ctx: FlowContext| {
+            let (live, starts, release) = (live.clone(), starts.clone(), release.clone());
+            async move {
+                live.fetch_add(1, Ordering::SeqCst);
+                starts.fetch_add(1, Ordering::SeqCst);
+                let _alive = Live(live);
+                release.cancelled().await;
+                Ok(())
+            }
+        }
+    })
+    .concurrency(Concurrency::Allow);
+    let config = create_config([flow]);
+    let test = TestApp::new(config.clone()).await;
+    if slow_first_claim {
+        sqlx::raw_sql(
+            "CREATE FUNCTION slow_first_claim() RETURNS trigger LANGUAGE plpgsql AS $$ \
+             BEGIN IF OLD.attempts = 0 AND NEW.status = 'running' THEN PERFORM pg_sleep(1.2); END IF; \
+             RETURN NEW; END $$; \
+             CREATE TRIGGER slow_first_claim BEFORE UPDATE ON flow_runs FOR EACH ROW \
+               EXECUTE FUNCTION slow_first_claim()",
+        )
+        .execute(&test.db)
+        .await
+        .unwrap();
+    }
+    // The first worker has a pool of one connection, which the test then keeps:
+    // its heartbeat waits for a connection that does not come, and no lock keeps
+    // the other worker from taking the run over.
+    let first_pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect_with((*test.db.connect_options()).clone())
+        .await
+        .unwrap();
+    let first_app =
+        OpenShop::with_transport(config, first_pool.clone(), common::test_env(), test.transport.clone()).unwrap();
+    let settings = WorkerConfig::new()
+        .concurrency(1)
+        .lease_duration(Duration::from_secs(2))
+        .poll_interval(Duration::from_millis(20))
+        .poll_max_interval(Duration::from_millis(20));
+    dispatch(&test, "lease-overlap").await;
+    let first = Worker::new(first_app, settings);
+    first.start().await;
+    wait_until("the first worker to start the run", || {
+        starts.load(Ordering::SeqCst) == 1
+    })
+    .await;
+    let held_connection = first_pool.acquire().await.unwrap();
+
+    let second = Worker::new(test.app.clone(), settings);
+    second.start().await;
+    wait_until("the second worker to take the run over", || {
+        starts.load(Ordering::SeqCst) == 2
+    })
+    .await;
+    // The flow of the first worker was dropped before the other one began.
+    let alive_with_the_new_owner = live.load(Ordering::SeqCst);
+
+    drop(held_connection);
+    release.cancel();
+    first.stop().await;
+    second.stop().await;
+    first_pool.close().await;
+    test.cleanup().await;
+    assert_eq!(alive_with_the_new_owner, 1, "two flows of one run were alive at once");
 }

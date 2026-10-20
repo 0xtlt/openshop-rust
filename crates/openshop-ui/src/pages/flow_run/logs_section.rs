@@ -2,6 +2,7 @@ use super::log_query::{LOG_LEVELS, LevelCounts, export_url, payload_text};
 use crate::{
     dom::{self, localized},
     fetch::api_download,
+    report::report_error,
     types::LogEntry,
 };
 use leptos::{prelude::*, task::spawn_local};
@@ -29,8 +30,15 @@ fn log_level_color(level: &str) -> &'static str {
 fn download_logs(run_id: Option<String>, query: String, levels: Vec<String>, format: &'static str) {
     let Some(run_id) = run_id else { return };
     spawn_local(async move {
-        if let Ok((bytes, content_type)) = api_download(&export_url(&run_id, &query, &levels, format)).await {
-            dom::download_bytes(&bytes, &content_type, &format!("run-{run_id}-logs.{format}"));
+        match api_download(&export_url(&run_id, &query, &levels, format)).await {
+            Ok((bytes, content_type)) => {
+                dom::download_bytes(&bytes, &content_type, &format!("run-{run_id}-logs.{format}"));
+            }
+            Err(error) => report_error(
+                "Could not export the logs",
+                &error,
+                &format!("Could not export the logs: {error}"),
+            ),
         }
     });
 }
@@ -42,7 +50,9 @@ pub fn LogsSection(
     levels: RwSignal<Vec<String>>,
     level_counts: RwSignal<LevelCounts>,
     filtered_logs: RwSignal<Vec<LogEntry>>,
+    logs_error: RwSignal<Option<String>>,
     total_logs: RwSignal<u64>,
+    has_more_logs: RwSignal<bool>,
     new_log_ids: RwSignal<HashSet<String>>,
     show_help: RwSignal<bool>,
     on_query_input: Callback<web_sys::Event>,
@@ -115,6 +125,20 @@ pub fn LogsSection(
                     "?"
                 </s-button>
             </div>
+
+            {move || {
+                logs_error
+                    .get()
+                    .map(|reason| {
+                        view! {
+                            <div style="margin-bottom:12px">
+                                <s-banner tone="critical" heading="The search was refused">
+                                    {reason}
+                                </s-banner>
+                            </div>
+                        }
+                    })
+            }}
 
             <div style="display:flex;gap:6px;margin-bottom:12px">
                 {LOG_LEVELS
@@ -212,6 +236,11 @@ pub fn LogsSection(
                                 children=log_line
                             />
                         </div>
+                        <Show when=move || has_more_logs.get()>
+                            <s-text color="subdued">
+                                "Showing the newest lines only. Export the logs for the whole run."
+                            </s-text>
+                        </Show>
                     }
                         .into_any()
                 } else {

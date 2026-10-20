@@ -8,10 +8,10 @@ forward one surface's credential to another.
 | Embedded admin API `/api/*` | Shopify session token in `Authorization: Bearer …` | HMAC JWT signature, audience, time claims, destination, and a staff subject | `shop`, `shopify_app`, staff user subject (`sub`) |
 | Admin UI shell (production) | Signed launch query from Shopify admin | Shopify HMAC and an active installation | shop and app |
 | OAuth start `/auth` | Shop domain and optional configured app handle | Shop normalization and configured app lookup | requested shop and app |
-| OAuth callback `/auth/callback` | Signed Shopify query plus OAuth `state` | Shopify HMAC and stored nonce | verified shop and app |
+| OAuth callback `/auth/callback` | Signed Shopify query plus OAuth `state` and the cookie `/auth` set | Shopify HMAC, and a signed, unexpired, unspent `state` of the browser that started it | verified shop and app |
 | `/webhooks` | `X-Shopify-Hmac-Sha256` | HMAC over the raw request body | shop and app selected by the matching secret |
-| `/proxy/*` | Shopify App Proxy query signature, or Customer Account JWT | Query HMAC or JWT | shop, app, optional customer |
-| `/ext/*` | Customer Account session JWT | JWT signature and audience | shop, app, customer |
+| `/proxy/*` | Shopify App Proxy query signature, or Customer Account JWT | Query HMAC or JWT (never the session token of a staff user) | shop, app, optional customer |
+| `/ext/*` | Customer Account session JWT | JWT signature and audience (never the session token of a staff user) | shop, app, customer |
 | `/routes/*` | Route-defined | Authentication function named by `auth = …` in `#[route]`, or intentionally public without it | Route-defined; optional `for_shop()` context |
 | `/mcp` | OpenShop token in `Authorization: Bearer …` | Stored token hash, status, expiry, shop, and permissions | token, shop, app, grants |
 | `/ops/*` | Session cookie obtained with the password of the application | Signature and expiry of the cookie | The operator; no shop |
@@ -47,9 +47,12 @@ A session token is accepted when:
 | --- | --- |
 | `Unauthorized: missing session token` | No `Authorization: Bearer …` header. |
 | `Unauthorized: missing token audience` | The token has no readable `aud` claim. |
-| `Unauthorized: [openshop] No Shopify app matches the session token audience` | `aud` matches no configured API key. |
-| `Unauthorized: Invalid JWT signature`, `JWT expired`, `JWT not yet valid`, `JWT dest/iss mismatch`, … | The token fails verification. |
+| `Unauthorized: invalid session token` | `aud` matches no configured API key, or the token fails verification (signature, expiry, `dest`, `iss`, …). |
 | `Unauthorized: session token was not issued to a staff user` | Empty or customer `sub`. |
+
+The reason a token is refused is not sent to the client, which would learn from
+it which claim to forge or which apps are configured. It is logged as a warning
+(`[openshop] Session token refused`, with the reason and the path).
 
 When the shop has no stored access token yet, the first authenticated request
 gets one and stores it encrypted, by exchanging the session token for an
@@ -57,7 +60,15 @@ offline access token, which does not expire. When Shopify refuses the exchange,
 or it cannot run, the request asks for a token with the
 [client credentials grant](#client-credentials-grant), which only a development
 store of the organization that owns the app obtains. Both are best-effort:
-their failure does not fail the request. A token this process obtained with the
+their failure does not fail the request.
+
+One request at a time runs the exchange of a shop; the requests that arrive
+while it is out wait for it, then use the token it stored, so a shop gets one
+exchange, not one per request. Shopify is asked for five seconds at most, and a
+failed exchange (a refusal, an error, a timeout) is not tried again for that
+shop for thirty seconds. A shop never waits for the exchange of another. When
+Shopify did not answer in time, the request is served at once, without asking
+the client credentials grant, which would wait for the same Shopify. A token this process obtained with the
 grant is replaced by the exchange when it is about to expire.
 
 ## OAuth installation
@@ -74,17 +85,35 @@ Multi-app mode also requires the configured handle:
 /auth?shop=example.myshopify.com&app=clientA
 ```
 
-`/auth` stores a one-time nonce and redirects to Shopify's authorization page
-with the app's scopes and the redirect URI `<app URL>/auth/callback`. The
-callback validates the HMAC and the one-time state before storing the access
-token, then redirects to the app in Shopify admin. Access tokens are encrypted
-when `ENCRYPTION_KEY` is configured.
+`/auth` redirects to Shopify's authorization page with the app's scopes and the
+redirect URI `<app URL>/auth/callback`. It writes nothing, since anybody can
+call it: the `state` it sends is `<expiry>.<nonce>.<signature>`, signed with
+the secret of the app over the app handle, the shop, the expiry, the nonce and
+the browser, and good for ten minutes. The browser is a random identifier in
+the cookie `openshop_oauth` (`HttpOnly`, `SameSite=Lax`, `Path=/auth`,
+`Max-Age=600`, and `Secure` when the application URL is `https`), which a
+browser that already has one keeps. So a shop may have any number of
+installations pending, a second `/auth` never invalidates the first, and a
+`state` is of no use to a browser other than the one that started it.
+
+The callback validates the HMAC, then the `state` (signature compared in
+constant time, shop, app, expiry, cookie) and spends it: a `state` works once
+per process, and Shopify's own code only once. It stores the access token,
+then redirects to the app in Shopify admin. A callback whose token request
+fails has spent its `state`: the merchant starts again at `/auth`. Access
+tokens are encrypted when `ENCRYPTION_KEY` is configured.
+
+The `installations.nonce` column is no longer written or read: a nonce an
+earlier version, or the TypeScript runtime, left in a row is not accepted, and
+the callback clears it. An installation started in one runtime is finished in
+the same one.
 
 | Endpoint | Status | `error` |
 | --- | --- | --- |
+| `/auth` | `500` | `[openshop] The Shopify app has no API secret` |
 | `/auth` | `400` | `Missing shop parameter`, `Invalid shop parameter`, `[openshop] Missing Shopify app handle`, or `[openshop] Unknown Shopify app "<handle>"` |
 | `/auth/callback` | `400` | `Missing required parameters` or `Invalid shop parameter` |
-| `/auth/callback` | `401` | `Invalid HMAC` or `Invalid state/nonce` |
+| `/auth/callback` | `401` | `Invalid HMAC` or `Invalid state/nonce` (missing cookie, expired, spent, altered, or another browser) |
 | `/auth/callback` | `500` | `Token exchange failed: <Shopify response>` |
 
 Only `*.myshopify.com` domains are accepted as shops, everywhere a shop is
@@ -221,9 +250,11 @@ A token is used as it is stored, whoever stored it:
 [openshop] Shopify refused the client credentials of app "default" for dev-store-1.myshopify.com (400: shop_not_permitted)
 ```
 
-In production without `ENCRYPTION_KEY`, nothing is asked: the caller fails
-with `ENCRYPTION_KEY must be set in production`, which is not remembered as a
-refusal, and no token is ever stored in plaintext. When the token cannot be
+Without a usable `ENCRYPTION_KEY`, nothing is asked: the caller fails with the
+error of the key (`ENCRYPTION_KEY must be 64 hex characters (32 bytes)` for a
+malformed one; a missing one stops the application from starting outside
+development), which is not remembered as a refusal, and no token is ever stored
+in plaintext. When the token cannot be
 written, the error is
 `[openshop] Could not store the client credentials token of app "<app>" for <shop>`,
 which quotes neither the token, its ciphertext nor the database's message; it
@@ -273,15 +304,52 @@ the signed query parameters. In proxy handlers, trust `ctx.shop`,
 parse yourself. A secret that is empty or only whitespace never verifies a
 signature.
 
+Shopify signs the query parameters only, not the path, the method or the body:
+the same signed query is valid for any proxy route and method for as long as it
+is accepted. OpenShop therefore also checks the query itself:
+
+- `timestamp` must be present and within five minutes of the server clock,
+  before or after it. A signed URL that was kept, or captured, stops working
+  after that.
+- Shopify joins the `key=value` pairs without separator, so the same signature
+  can stand for a query cut in other pairs, with another `shop` for instance.
+  A parameter whose name or value contains `=` (also when encoded as `%3D`) is
+  refused, as is an empty name.
+- A parameter repeated in the query is signed with its values joined by `,`, as
+  Shopify does, and verified that way. `shop`, `timestamp`, `path_prefix`,
+  `logged_in_customer_id` and `signature` are set by Shopify and appear once.
+- Even without a `=`, the characters between two of them can be read as the end
+  of a value or as the start of the next key. So that a signed query cannot be
+  read as another shop, another customer or another time, a parameter of the
+  visitor is refused when the end of the value before it, glued to its name,
+  ends with `shop`, `timestamp`, `path_prefix` or `logged_in_customer_id`
+  (`myshop`, or a value ending `logged_in_customer_` followed by `id`);
+  `timestamp` must be digits; `path_prefix` a plain path (letters, digits,
+  `/`, `-`, `_`); and `shop` exactly a `<name>.myshopify.com` domain, not a
+  URL, with no blank. A `shop` that is not one is answered
+  `Invalid shop parameter`.
+
+  The end of `path_prefix` can still be cut into the name of the parameter that
+  follows it, so do not take decisions on it: `ctx.shop`, `ctx.shopify_app` and
+  `ctx.customer_id` are the verified identity. This holds because Shopify sends
+  all its parameters on every request, `logged_in_customer_id` empty for a
+  visitor without account.
+
+A request refused for one of these reasons gets the `Invalid proxy signature`
+answer like any other bad signature.
+
 ## Browser origins
 
-OpenShop allows known Shopify origins, configured app origins, local development
-origins, and `https://extensions.shopifycdn.com`. Arbitrary origins are not
-reflected in CORS responses.
+OpenShop allows known Shopify origins, configured app origins,
+`https://extensions.shopifycdn.com`, and in development (`OPENSHOP_ENV` other
+than `production`) local origins. Arbitrary origins are not reflected in CORS
+responses. In production a page on `localhost` is never allowed: it runs on the
+visitor's own machine, not on an origin of the application, unless `HOST` or
+`SHOPIFY_APP_URL` is itself that address.
 
 | Allowed origin | Example |
 | --- | --- |
-| Local development hosts, any port | `http://localhost:3000`, `https://app.localhost`, `http://127.0.0.1:8080`, `http://[::1]:3000` |
+| Local development hosts, any port, outside production | `http://localhost:3000`, `https://app.localhost`, `http://127.0.0.1:8080`, `http://[::1]:3000` |
 | Shopify admin and Shopify | `https://admin.shopify.com`, `https://shopify.com` |
 | Shop domains | `https://example.myshopify.com` |
 | Shopify's extension CDN | `https://extensions.shopifycdn.com` |

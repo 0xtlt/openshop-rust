@@ -82,7 +82,9 @@ types and the `#[field(…)]` options of a
 [provider struct](providers.md#the-configuration): `String` for text, a
 password, or a select, a number type for a number, and `bool` for a checkbox.
 Fields are required unless their type is an `Option`. Numbers and checkboxes
-are coerced before validation.
+are coerced before validation, and a value of the wrong type or a select value that
+is not an option is refused, as for a provider
+(see [what is checked](providers.md#what-is-checked-when-a-configuration-is-saved)).
 
 As on a provider struct, `label` is optional: a `min_quantity` field without
 one is labeled `Min quantity`. The constraints `url`, `non_empty`,

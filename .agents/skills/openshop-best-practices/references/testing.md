@@ -20,7 +20,7 @@ crate, the CLI, and the templates of `openshop init`.
 Integration tests need PostgreSQL 17. From the repo root, `docker compose up -d`
 starts one on `localhost:5432` with the `openshop` role and database.
 
-- The harness connects with `TEST_DATABASE_URL`, then `DATABASE_URL`, then `postgresql://openshop:openshop@localhost:5432/openshop`.
+- The harness connects with `TEST_DATABASE_URL`, then `DATABASE_URL` (only when it points at this machine), then `postgresql://openshop:openshop@localhost:5432/openshop`.
 - Each test creates its own PostgreSQL schema, pushes the framework tables into it, and drops it afterwards. Tests run in parallel and never touch the `public` schema.
 - Every test holds a small connection pool. CI runs `cargo test --workspace -- --test-threads=4` to stay under the server's connection limit; do the same if a local run exhausts connections.
 

@@ -11,3 +11,6 @@ publish = false
 openshop = { workspace = true, features = ["testing"] }
 # The preview starts the server, a worker and the scheduler by hand.
 tokio.workspace = true
+
+[lints]
+workspace = true

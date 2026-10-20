@@ -114,7 +114,10 @@ the environment (`shopify: shopify_apps()?`): the error is the one
 | `builtin_pages` | [`AdminPagesConfig`](#admin-pages), or `AdminPagesConfig::none()` for an admin made of the pages of the application | Every built-in page of the admin `visible` |
 | `admin_ui` | `UiSource` | The admin UI bundle built into the framework; see [Custom admin pages](custom-admin-pages.md#serve-the-bundle) |
 | `max_request_body_bytes` | `usize` | `2 * 1024 * 1024` (2 MB); larger request bodies are answered with `413` |
+| `request_timeout` | `Duration` | `60 s`; a request whose response has not begun by then is answered with `503` (`Request timed out`). The time to read the body counts; a response already streaming does not |
+| `max_concurrent_requests` | `usize` | `1024`; a request that comes while that many are being served is answered with `503` and `Retry-After: 1`, and `/health` is always answered |
 | `ops_password` | `Option<String>`, or a `String`: the password of the [operator dashboard](operator-dashboard.md) | No dashboard: `/ops` answers `404` |
+| `log_retention` | `Option<Duration>`, or a `Duration`: the age after which workers remove a log line, in batches; see [Retention and export](logging.md#retention-and-export). Zero is refused with `logRetention must be a positive number` | `None`: log lines are kept forever |
 | `sentry` | `Option<String>`, or a `String`: the DSN of the project failures are reported to, or a `SentryConfig` that also names the environment and the release; see [Sentry](sentry.md) | Nothing is reported |
 | `client_credentials_shop` | `Option<String>`, or a `String`: the one `*.myshopify.com` development store that work no Shopify request vouches for (flows, crons, routes, webhook handlers, proxies, the MCP tool) may get an access token for with the [client credentials grant](authentication.md#client-credentials-grant) without an installation row. A value that is not a shop domain stops the application with `[openshop] client_credentials_shop must be a *.myshopify.com domain` | Only a signed launch, a session token whose exchange Shopify refused, or the renewal of a stored token asks |
 
@@ -178,7 +181,10 @@ configuration is built.
 | `.model(table)` | `Table` | No app tables pushed in development |
 | `.admin_ui(ui)` | `UiSource` | The admin UI bundle built into the framework; see [Custom admin pages](custom-admin-pages.md#serve-the-bundle) |
 | `.max_request_body_bytes(bytes)` | `usize` | `2 * 1024 * 1024` (2 MB); larger request bodies are answered with `413` |
+| `.request_timeout(timeout)` | `Duration` | `60 s`; see the setting of the same name |
+| `.max_concurrent_requests(requests)` | `usize` | `1024`; see the setting of the same name |
 | `.ops_password(password)` | `Option<String>` or `String` | No [operator dashboard](operator-dashboard.md) |
+| `.log_retention(retention)` | `Option<Duration>` or `Duration` | Log lines are kept forever |
 | `.sentry(sentry)` | `Option<String>`, `String`, `&str` or `SentryConfig`; needs the `sentry` feature, on by default | Nothing is reported to [Sentry](sentry.md) |
 | `.client_credentials_shop(shop)` | `Option<String>` or `String` | Background work asks no token for a shop without a row |
 | `.worker(config)` | `WorkerConfig` | See [Worker defaults](#worker-defaults) |
@@ -207,7 +213,9 @@ Calling the other methods again:
 - `.builtin_pages(…)` and `.builtin_page(…)` merge with earlier calls; later values win.
 - The remaining settings (`.shopify(…)`, `.worker(…)`, `.retry_policy(…)`,
   `.on_error(…)`, `.admin_menu(…)`, `.admin_ui(…)`,
-  `.max_request_body_bytes(…)`, `.ops_password(…)`, `.sentry(…)`) replace the
+  `.max_request_body_bytes(…)`, `.request_timeout(…)`,
+  `.max_concurrent_requests(…)`, `.ops_password(…)`, `.log_retention(…)`,
+  `.sentry(…)`) replace the
   earlier value.
 
 The fields of `OpenShopConfig` are public. `OpenShop::new` validates the
@@ -345,6 +353,7 @@ with builder methods.
 | `flow` | `Cron::new` | registered flow key, such as `sync_orders::NAME` | Required |
 | `input` | `.input(…)` | JSON object (`serde_json::Value`) | `{}` |
 | `shops` | `.all_shops()`, `.shop(…)`, or `.shops([…])` | `CronShops`; see [Cron shop targeting](#cron-shop-targeting) | `CronShops::Global`: the cron runs once, for no shop |
+| `timezone` | `.timezone(…)` | IANA name, such as `"Europe/Paris"` | UTC |
 
 ```rust,ignore
 Cron::new("0 2 * * *", sync_orders::NAME)
@@ -355,9 +364,17 @@ Cron::new("0 2 * * *", sync_orders::NAME)
 
 The schedule is a five-field cron expression, a six-field expression with
 leading seconds, or one of the nicknames `@yearly`, `@annually`, `@monthly`,
-`@weekly`, `@daily`, and `@hourly`. It is evaluated in the local time zone of
-the process that runs the scheduler. An invalid expression is rejected when the
-configuration is built.
+`@weekly`, `@daily`, and `@hourly`. It is evaluated in UTC, whatever the time
+zone of the host, or in the `timezone` of the cron, daylight saving time
+included: `Cron::new("0 9 * * *", sync_orders::NAME).timezone("Europe/Paris")`
+fires at 09:00 in Paris. An invalid expression or time zone is rejected when
+the configuration is built.
+
+A process that was stopped or suspended does not catch up on what it missed.
+When it wakes after several occurrences went by, it fires the latest one, once.
+A scheduler that stops, because its schedule has no occurrence left or because
+it panicked, logs an error, reports it to Sentry, and starts again after a
+wait that grows from one second to five minutes.
 
 The `input` of a cron is checked against the [input](flows.md#input) of its
 flow when the configuration is built. An input the flow would refuse makes
@@ -367,7 +384,10 @@ A cron without `input` is checked as `{}`: give an input to the cron of a flow
 that requires one.
 
 `Cron::key()` returns `<flow>:<schedule>`, the identifier used by per-shop
-overrides. An `input` that is not a JSON object is ignored.
+overrides. Changing the schedule of a cron changes its key: the overrides of the
+old key are never read again, and `/api/crons/toggle` and the MCP tool answer
+`Cron not found` to a key the application does not declare. An `input` that is
+not a JSON object is ignored.
 
 ## Admin pages
 
@@ -538,7 +558,7 @@ runtime defaults:
 | `poll_interval` | `Duration`, positive | 1 second | Initial polling interval of an empty queue, and interval between two sweeps of the runs past their deadline. |
 | `poll_max_interval` | `Duration`, positive | 5 seconds | Maximum empty-queue backoff. |
 | `poll_backoff_coefficient` | `f64`, positive | `1.5` | Multiplier applied after consecutive empty polls. |
-| `lease_duration` | `Duration`, positive | 30 seconds | Claim lease and graceful-stop deadline. Active runs refresh their lease every 15 seconds, or twice per lease period when that is shorter. |
+| `lease_duration` | `Duration`, positive | 30 seconds | Claim lease and graceful-stop deadline. Active runs refresh their lease every 15 seconds, or twice per lease period when that is shorter. The lease is dated by the clock of the database. A run still executing when the stop deadline passes is handed back to the queue. |
 
 Each field has a builder method of the same name on `WorkerConfig`:
 `WorkerConfig::new().concurrency(10).lease_duration(Duration::from_secs(60))`.

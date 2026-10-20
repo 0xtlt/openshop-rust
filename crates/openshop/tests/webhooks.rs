@@ -389,6 +389,50 @@ async fn post_webhooks_handler_can_dispatch_a_flow_through_the_app() {
 }
 
 #[tokio::test]
+async fn post_webhooks_acknowledges_a_delivery_whose_dispatch_input_is_refused() {
+    // A handler that queues a run with input the flow refuses fails like any
+    // handler error: logged, no run, and Shopify gets its 200, so it does not
+    // redeliver the same payload for ever.
+    let strict = noop_flow("wh-flow").input_schema(openshop::builder::InputSchema::custom(
+        json!({ "type": "object" }),
+        |value| match value.get("orderId") {
+            Some(Value::Number(_)) => Ok(value),
+            _ => Err("orderId must be a number".to_string()),
+        },
+    ));
+    let config = OpenShopConfig::builder()
+        .flow(strict)
+        .webhook(
+            "ORDERS_CREATE",
+            Webhook::new(|ctx: WebhookContext| async move {
+                ctx.app
+                    .dispatch_flow(
+                        DispatchOptions::new("wh-flow", ctx.shop.clone())
+                            .input(json!({ "orderId": ctx.payload["name"] })),
+                    )
+                    .await?;
+                Ok(())
+            }),
+        )
+        .build()
+        .unwrap();
+    let ctx = TestContext::new(config).await.unwrap();
+
+    assert_ok(
+        deliver(
+            &ctx,
+            "orders/create",
+            "shop-hooks.myshopify.com",
+            r#"{"name":"order one"}"#,
+        )
+        .await,
+    )
+    .await;
+    assert!(flow_runs(&ctx).await.is_empty());
+    ctx.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn post_webhooks_resolves_the_matching_shopify_app_from_hmac() {
     let recorder = Recorder::default();
     let ctx = TestContext::new(multi_app_config(&recorder)).await.unwrap();
@@ -510,4 +554,172 @@ async fn post_webhooks_without_shopify_api_secret_returns_500() {
         ctx.shutdown().await.unwrap();
     }
     assert_eq!(recorder.count(), 0);
+}
+
+#[tokio::test]
+async fn post_webhooks_verifies_the_bytes_that_were_sent_not_a_lossy_text() {
+    let recorder = Recorder::default();
+    let ctx = TestContext::new(orders_create_config(&recorder)).await.unwrap();
+    // Latin-1 `é`: not UTF-8, so not JSON either.
+    let body: Vec<u8> = b"{\"note\":\"caf\xe9\"}".to_vec();
+    let mangled = String::from_utf8_lossy(&body).into_owned();
+    let send = async |hmac: String| {
+        ctx.http
+            .post(format!("{}/webhooks", ctx.url))
+            .header("x-shopify-hmac-sha256", hmac)
+            .header("x-shopify-topic", "products/update")
+            .header("x-shopify-shop-domain", "test.myshopify.com")
+            .body(body.clone())
+            .send()
+            .await
+            .unwrap()
+    };
+
+    // The signature of the bytes is the one that counts...
+    assert_ok(send(sign_webhook_body(&body, SECRET)).await).await;
+    // ...and the signature of what a lossy conversion made of them is not one.
+    let response = send(sign_webhook_body(&mangled, SECRET)).await;
+    assert_error(response, 401, "Invalid webhook HMAC").await;
+    assert_eq!(recorder.count(), 0);
+    ctx.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn post_webhooks_runs_a_delivery_that_shopify_sends_again_once() {
+    let recorder = Recorder::default();
+    let ctx = TestContext::new(orders_create_config(&recorder)).await.unwrap();
+    let body = r#"{"id":7}"#;
+    let hmac = sign_webhook_body(body, SECRET);
+    let send = async |header: &str, id: &str, hmac: &str| {
+        ctx.http
+            .post(format!("{}/webhooks", ctx.url))
+            .header("x-shopify-hmac-sha256", hmac)
+            .header("x-shopify-topic", "orders/create")
+            .header("x-shopify-shop-domain", "test.myshopify.com")
+            .header(header, id)
+            .body(body)
+            .send()
+            .await
+            .unwrap()
+    };
+
+    // The same delivery again, and again: acknowledged, and run once.
+    for _ in 0..3 {
+        assert_ok(send("x-shopify-webhook-id", "delivery-1", &hmac).await).await;
+    }
+    assert_eq!(recorder.count(), 1);
+
+    // Another delivery of the same event is another delivery; the event id stands in for a missing webhook id.
+    assert_ok(send("x-shopify-webhook-id", "delivery-2", &hmac).await).await;
+    assert_ok(send("x-shopify-event-id", "event-1", &hmac).await).await;
+    assert_ok(send("x-shopify-event-id", "event-1", &hmac).await).await;
+    assert_eq!(recorder.count(), 3);
+
+    // A forged request does not use up the id of a real one.
+    let response = send("x-shopify-webhook-id", "delivery-3", "forged").await;
+    assert_error(response, 401, "Invalid webhook HMAC").await;
+    assert_ok(send("x-shopify-webhook-id", "delivery-3", &hmac).await).await;
+    assert_eq!(recorder.count(), 4);
+
+    // Without an id, nothing says it is a repeat.
+    assert_ok(deliver(&ctx, "orders/create", "test.myshopify.com", body).await).await;
+    assert_ok(deliver(&ctx, "orders/create", "test.myshopify.com", body).await).await;
+    assert_eq!(recorder.count(), 6);
+    ctx.shutdown().await.unwrap();
+}
+
+/// A handler that does what `behave` says for the number of its call, counting the calls.
+fn scripted<F, Fut>(behave: F) -> (Webhook, Arc<std::sync::atomic::AtomicUsize>)
+where
+    F: Fn(usize) -> Fut + Send + Sync + 'static,
+    Fut: std::future::Future<Output = openshop::Result<()>> + Send + 'static,
+{
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counted = calls.clone();
+    let webhook =
+        Webhook::new(move |_ctx: WebhookContext| behave(counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1));
+    (webhook, calls)
+}
+
+fn calls_of(calls: &Arc<std::sync::atomic::AtomicUsize>) -> usize {
+    calls.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+fn delivery(ctx: &TestContext, client: &reqwest::Client, id: &str) -> reqwest::RequestBuilder {
+    let body = r#"{"id":7}"#;
+    client
+        .post(format!("{}/webhooks", ctx.url))
+        .header("x-shopify-hmac-sha256", sign_webhook_body(body, SECRET))
+        .header("x-shopify-topic", "orders/create")
+        .header("x-shopify-shop-domain", "test.myshopify.com")
+        .header("x-shopify-webhook-id", id)
+        .body(body)
+}
+
+#[tokio::test]
+async fn post_webhooks_runs_again_a_delivery_whose_handler_failed() {
+    let (webhook, calls) = scripted(|call| async move {
+        if call == 1 {
+            bail!("first attempt failed");
+        }
+        Ok(())
+    });
+    let config = builder().webhook("ORDERS_CREATE", webhook).build().unwrap();
+    let ctx = TestContext::new(config).await.unwrap();
+
+    // The failure is still answered 200, but the delivery was not handled.
+    assert_ok(delivery(&ctx, &ctx.http, "delivery-1").send().await.unwrap()).await;
+    assert_eq!(calls_of(&calls), 1);
+    // The repeat runs, completes, and is the last to run.
+    assert_ok(delivery(&ctx, &ctx.http, "delivery-1").send().await.unwrap()).await;
+    assert_eq!(calls_of(&calls), 2);
+    assert_ok(delivery(&ctx, &ctx.http, "delivery-1").send().await.unwrap()).await;
+    assert_eq!(calls_of(&calls), 2);
+    ctx.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn post_webhooks_runs_again_a_delivery_whose_request_was_cancelled() {
+    let (webhook, calls) = scripted(|call| async move {
+        if call == 1 {
+            // Never ends: Shopify gives up first.
+            std::future::pending::<()>().await;
+        }
+        Ok(())
+    });
+    let config = builder().webhook("ORDERS_CREATE", webhook).build().unwrap();
+    let ctx = TestContext::new(config).await.unwrap();
+
+    let impatient = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_millis(1500))
+        .build()
+        .unwrap();
+    let first = tokio::spawn(delivery(&ctx, &impatient, "delivery-1").send());
+    while calls_of(&calls) == 0 {
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+
+    // While the handler runs, a repeat is not taken for handled: Shopify is asked to come back.
+    let meanwhile = delivery(&ctx, &ctx.http, "delivery-1").send().await.unwrap();
+    assert_eq!(meanwhile.status(), 503);
+    assert_eq!(meanwhile.headers()["retry-after"], "5");
+    assert_eq!(calls_of(&calls), 1);
+
+    // Shopify hangs up: the handler is cancelled.
+    assert!(first.await.unwrap().is_err());
+    let mut retry = delivery(&ctx, &ctx.http, "delivery-1").send().await.unwrap();
+    for _ in 0..100 {
+        if retry.status() != 503 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        retry = delivery(&ctx, &ctx.http, "delivery-1").send().await.unwrap();
+    }
+    assert_ok(retry).await;
+    assert_eq!(calls_of(&calls), 2, "the retry ran the handler");
+
+    // Completed: the next repeat is acknowledged and not run.
+    assert_ok(delivery(&ctx, &ctx.http, "delivery-1").send().await.unwrap()).await;
+    assert_eq!(calls_of(&calls), 2);
+    ctx.shutdown().await.unwrap();
 }

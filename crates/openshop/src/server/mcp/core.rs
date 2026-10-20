@@ -2,7 +2,7 @@
 
 use std::future::Future;
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Result, anyhow};
 use chrono::{DateTime, Datelike, TimeZone, Utc};
 use indexmap::IndexMap;
 use serde_json::{Value, json};
@@ -11,6 +11,7 @@ use super::registry::core_mcp_permissions;
 use crate::engine::dispatch::DispatchOptions;
 use crate::runtime::time::to_iso;
 use crate::server::api::run_logs::{RunLogOptions, get_filtered_run_logs};
+use crate::server::http::public_error;
 use crate::server::shop_domain::normalize_shop_domain;
 use crate::shopify::is_api_version;
 use crate::types::{JsonMap, McpContext, McpResource, McpResourceContent, McpRiskLevel, McpTool};
@@ -68,7 +69,7 @@ async fn assert_run_visible(ctx: &McpContext, run_id: &str) -> Result<()> {
         Err(_) => false,
     };
     if !visible {
-        bail!("Run not found");
+        return Err(public_error("Run not found"));
     }
     Ok(())
 }
@@ -104,18 +105,20 @@ fn api_version_input(input: &JsonMap) -> Result<String> {
         Some(requested) => requested.to_string(),
     };
     if !is_api_version(&value) {
-        bail!("apiVersion must use YYYY-MM format or \"latest\"");
+        return Err(public_error("apiVersion must use YYYY-MM format or \"latest\""));
     }
     Ok(value)
 }
 
+/// The installation of the shop of the token. A token never sees another shop.
 async fn list_installed_shops(ctx: &McpContext) -> Result<Value> {
     let rows: Vec<(String, Option<String>, DateTime<Utc>)> = sqlx::query_as(
         "SELECT shop, scopes, installed_at FROM installations \
-         WHERE app_handle = $1 AND access_token IS NOT NULL AND uninstalled_at IS NULL \
+         WHERE app_handle = $1 AND shop = $2 AND access_token IS NOT NULL AND uninstalled_at IS NULL \
          ORDER BY shop ASC",
     )
     .bind(&ctx.shopify_app)
+    .bind(&ctx.shop)
     .fetch_all(&ctx.db)
     .await?;
 
@@ -127,16 +130,28 @@ async fn list_installed_shops(ctx: &McpContext) -> Result<Value> {
 }
 
 async fn run_admin_graphql(ctx: McpContext, input: JsonMap) -> Result<Value> {
-    let Some(shop) = string_input(&input, "shop").and_then(normalize_shop_domain) else {
-        bail!("shop must be a myshopify.com domain");
-    };
+    // The shop is the one of the token. `shop` is only accepted so that a
+    // client written for the previous schema keeps working, as long as it
+    // names that same shop.
+    let shop = ctx.shop.clone();
+    if let Some(requested) = string_input(&input, "shop") {
+        let Some(requested) = normalize_shop_domain(requested) else {
+            return Err(public_error("shop must be a myshopify.com domain"));
+        };
+        if requested != shop {
+            return Err(public_error(format!("This token can only act on its own shop \"{shop}\"")));
+        }
+    }
     let Some(query) = string_input(&input, "query") else {
-        bail!("query is required");
+        return Err(public_error("query is required"));
     };
     let variables = object_input(&input, "variables");
     let api_version = api_version_input(&input)?;
 
-    let not_installed = || anyhow!("Shop \"{shop}\" is not installed for app \"{}\"", ctx.shopify_app);
+    let not_installed = || public_error(format!(
+            "Shop \"{shop}\" is not installed for app \"{}\"",
+            ctx.shopify_app
+        ));
     let uninstalled: bool = sqlx::query_scalar(
         "SELECT EXISTS (SELECT 1 FROM installations \
          WHERE app_handle = $1 AND shop = $2 AND uninstalled_at IS NOT NULL)",
@@ -178,7 +193,7 @@ async fn run_admin_graphql(ctx: McpContext, input: JsonMap) -> Result<Value> {
 
 async fn search_logs(ctx: McpContext, input: JsonMap) -> Result<Value> {
     let Some(run_id) = string_input(&input, "runId") else {
-        bail!("runId is required");
+        return Err(public_error("runId is required"));
     };
     assert_run_visible(&ctx, run_id).await?;
 
@@ -190,13 +205,18 @@ async fn search_logs(ctx: McpContext, input: JsonMap) -> Result<Value> {
             query: string_input(&input, "q").unwrap_or_default(),
             levels: string_input(&input, "levels").unwrap_or("info,warn,error"),
             include_context: boolean_input(&input, "includeContext").unwrap_or(true),
+            limit,
+            cursor: None,
         },
     )
     .await?;
+    // Context lines of the last match can come past the limit.
     result.logs.truncate(limit);
 
     let returned = result.logs.len();
     let mut value = serde_json::to_value(result)?;
+    // The tool has a limit and no pages.
+    value.as_object_mut().map(|fields| fields.remove("next"));
     value["returned"] = Value::from(returned);
     Ok(structured_result(value))
 }
@@ -210,8 +230,8 @@ fn list_flows(ctx: &McpContext) -> Value {
             let crons: Vec<Value> = config
                 .crons
                 .iter()
-                .filter(|cron| cron.flow == *name)
-                .map(|cron| json!({ "name": cron.name, "schedule": cron.schedule, "shops": cron.shops_json() }))
+                .filter(|cron| cron.flow == *name && cron.is_visible_to(&ctx.shop))
+                .map(|cron| json!({ "name": cron.name, "schedule": cron.schedule, "shops": cron.shops_json_for(&ctx.shop) }))
                 .collect();
             json!({
                 "name": name,
@@ -225,10 +245,10 @@ fn list_flows(ctx: &McpContext) -> Value {
 
 async fn run_flow_tool(ctx: McpContext, input: JsonMap) -> Result<Value> {
     let Some(flow) = string_input(&input, "flow") else {
-        bail!("flow is required");
+        return Err(public_error("flow is required"));
     };
     if !ctx.app.config().flows.contains_key(flow) {
-        bail!("Unknown flow \"{flow}\"");
+        return Err(public_error(format!("Unknown flow \"{flow}\"")));
     }
     let result = ctx
         .app
@@ -259,6 +279,7 @@ pub(crate) async fn cron_items(
         .crons
         .iter()
         .enumerate()
+        .filter(|(_, cron)| cron.is_visible_to(shop))
         .map(|(index, cron)| {
             let key = cron.key();
             let enabled = overrides
@@ -272,11 +293,11 @@ pub(crate) async fn cron_items(
             item.insert("flow".into(), Value::from(cron.flow.clone()));
             item.insert("schedule".into(), Value::from(cron.schedule.clone()));
             if shops_first {
-                item.insert("shops".into(), cron.shops_json());
+                item.insert("shops".into(), cron.shops_json_for(shop));
                 item.insert("input".into(), json!(cron.input));
             } else {
                 item.insert("input".into(), json!(cron.input));
-                item.insert("shops".into(), cron.shops_json());
+                item.insert("shops".into(), cron.shops_json_for(shop));
             }
             item.insert("enabled".into(), Value::from(enabled));
             Value::Object(item)
@@ -284,13 +305,23 @@ pub(crate) async fn cron_items(
         .collect())
 }
 
+/// Enables or disables a cron of the shop. `false` when no cron of that key is
+/// visible to the shop: nothing is written then.
 pub(crate) async fn set_cron_enabled(
     app: &crate::app::OpenShop,
     app_handle: &str,
     shop: &str,
     key: &str,
     enabled: bool,
-) -> Result<()> {
+) -> Result<bool> {
+    if !app
+        .config()
+        .crons
+        .iter()
+        .any(|cron| cron.key() == key && cron.is_visible_to(shop))
+    {
+        return Ok(false);
+    }
     sqlx::query(
         "INSERT INTO cron_overrides (app_handle, shop, cron_key, enabled) VALUES ($1, $2, $3, $4) \
          ON CONFLICT (app_handle, shop, cron_key) DO UPDATE SET enabled = EXCLUDED.enabled, updated_at = now()",
@@ -301,17 +332,19 @@ pub(crate) async fn set_cron_enabled(
     .bind(enabled)
     .execute(app.db())
     .await?;
-    Ok(())
+    Ok(true)
 }
 
 async fn set_cron_enabled_tool(ctx: McpContext, input: JsonMap) -> Result<Value> {
     let Some(key) = string_input(&input, "key") else {
-        bail!("key is required");
+        return Err(public_error("key is required"));
     };
     let Some(enabled) = boolean_input(&input, "enabled") else {
-        bail!("enabled is required");
+        return Err(public_error("enabled is required"));
     };
-    set_cron_enabled(&ctx.app, &ctx.shopify_app, &ctx.shop, key, enabled).await?;
+    if !set_cron_enabled(&ctx.app, &ctx.shopify_app, &ctx.shop, key, enabled).await? {
+        return Err(public_error(format!("Unknown cron \"{key}\"")));
+    }
     Ok(structured_result(json!({ "ok": true, "key": key, "enabled": enabled })))
 }
 
@@ -366,8 +399,8 @@ pub fn create_core_mcp_capabilities() -> CoreCapabilities {
     tools.insert(
         "openshop.shops.list".to_string(),
         tool(
-            "List installed shops for this OpenShop app.",
-            &[],
+            "Show the installation of the shop of this token.",
+            &["shopify_admin_graphql"],
             McpRiskLevel::Low,
             empty_schema(),
             |ctx, _input| async move { Ok(structured_result(list_installed_shops(&ctx).await?)) },
@@ -377,15 +410,15 @@ pub fn create_core_mcp_capabilities() -> CoreCapabilities {
     tools.insert(
         "openshop.admin.graphql".to_string(),
         tool(
-            "Run arbitrary Shopify Admin GraphQL queries and mutations for an installed shop.",
+            "Run arbitrary Shopify Admin GraphQL queries and mutations for the shop of this token.",
             &["shopify_admin_graphql"],
             McpRiskLevel::High,
             json!({
                 "type": "object",
                 "additionalProperties": false,
-                "required": ["shop", "query"],
+                "required": ["query"],
                 "properties": {
-                    "shop": { "type": "string", "description": "Installed shop domain from openshop.shops.list." },
+                    "shop": { "type": "string", "description": "Optional. Must be the shop domain of the token: calls for any other shop are refused." },
                     "query": { "type": "string", "description": "Shopify Admin GraphQL query or mutation." },
                     "variables": { "type": "object", "description": "GraphQL variables object." },
                     "apiVersion": { "type": "string", "description": "Shopify Admin API version, for example 2026-04. Defaults to the latest stable version when omitted or set to \"latest\"." },

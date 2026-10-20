@@ -100,8 +100,10 @@ A context can also be started by hand:
 3. inserts an installation for `shop` when `access_token` is set;
 4. serves the application on a random port of `127.0.0.1`.
 
-The test database is `TEST_DATABASE_URL`, then `DATABASE_URL`, then the local
-development database. Contexts are independent, so tests can run in parallel
+The test database is `TEST_DATABASE_URL`, then `DATABASE_URL` when it points at
+this machine, then the local development database. A `DATABASE_URL` of another
+host is refused: set `TEST_DATABASE_URL` to the database the tests may use.
+Contexts are independent, so tests can run in parallel
 against one database.
 
 `shutdown()` destroys factory-created resources, closes the server, and drops
@@ -159,9 +161,10 @@ in a test that ends with `ctx.shutdown().await`.
 | `api_key` | `test-app` | Shopify API key of the single-app setup. Session-token audience. |
 | `access_token` | `None`; `test-access-token` with `TestOptions::installed()` | Inserts an installation so Shopify client calls and factories can run. |
 | `encryption_key` | `None` | `ENCRYPTION_KEY` of the application. |
+| `development` | `true` | A development environment: without an `encryption_key`, secrets are stored in plaintext. With `false` (or `production: true`) and no key, the context does not start. |
 | `client_credentials_shop` | `None` | The `client_credentials_shop` setting of the application, in place of the one its configuration gives: the shop background work may get a token for with the [client credentials grant](authentication.md#client-credentials-grant), from the mock transport. A token stored by `access_token` is used as it is. |
 | `host` | `None` | `HOST` of the application. |
-| `production` | `false` | Production mode, for example to test encryption enforcement. |
+| `production` | `false` | Production mode, for example to test the checks it turns on. |
 | `cwd` | A directory without Shopify TOML files | Project root used to resolve Shopify TOML files. |
 | `server` | `ServerOptions::default()` | API only: no admin UI is served. |
 | `transport` | A new `MockTransport` | Transport shared with other contexts or prepared in advance. |
@@ -485,7 +488,7 @@ does not build:
 | `sign_session_token(&claims, secret)` | An HS256 JWT with the claims you choose. |
 | `sign_webhook_body(body, secret)` | The `X-Shopify-Hmac-Sha256` value for a webhook body. |
 | `sign_query(&[(key, value)], secret)` | The query map with the `hmac` parameter Shopify adds to OAuth and app-launch URLs. |
-| `proxy_signature(&query, secret)` | The `signature` parameter of an app proxy query. |
+| `proxy_signature(&query, secret)` | The `signature` parameter of an app proxy query. The query needs a `timestamp` within five minutes of now to be accepted. |
 | `to_query_string(&query)` | A query map serialized for a URL. |
 
 ```rust,ignore

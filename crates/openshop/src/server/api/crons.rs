@@ -28,7 +28,9 @@ async fn toggle_cron(
         return Ok(json_error(StatusCode::BAD_REQUEST, "key and enabled are required"));
     };
 
-    set_cron_enabled(&app, &session.shopify_app, &session.shop, key, enabled).await?;
+    if !set_cron_enabled(&app, &session.shopify_app, &session.shop, key, enabled).await? {
+        return Ok(json_error(StatusCode::NOT_FOUND, "Cron not found"));
+    }
     Ok(json_response(
         StatusCode::OK,
         json!({ "ok": true, "key": key, "enabled": enabled }),

@@ -8,13 +8,14 @@ use axum::response::Response;
 use serde_json::{Value, json};
 
 use super::http::{header, json_error};
-use super::jwt::{customer_id_from_jwt_sub, read_jwt_audience, verify_session_token};
+use super::jwt::{is_staff_subject, read_jwt_audience, verify_session_token};
 use super::shopify_apps::ResolvedShopifyApp;
 use crate::admin::AdminActor;
 use crate::app::OpenShop;
 use crate::runtime::{OutboundRequest, logger, report};
 use crate::shopify::client::ShopifyClient;
 use crate::shopify::client_credentials::Grant;
+use crate::shopify::token_exchange::TIMEOUT;
 
 /// The authenticated shop of an Admin API request.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -53,13 +54,20 @@ pub(crate) async fn shop_middleware(State(app): State<OpenShop>, mut request: Re
     });
     let (shopify_app, verified) = match verified {
         Ok(verified) => verified,
-        Err(error) => return json_error(StatusCode::UNAUTHORIZED, format!("Unauthorized: {error}")),
+        Err(error) => {
+            // Why a token fails (which claim, which app) is for the logs, not for
+            // whoever sent it.
+            logger::warn_with(
+                "[openshop] Session token refused",
+                json!({ "reason": error.to_string(), "path": request.uri().path() }),
+            );
+            return json_error(StatusCode::UNAUTHORIZED, "Unauthorized: invalid session token");
+        }
     };
 
     // Checkout and customer account extensions get tokens signed with the same secret,
     // for a customer or an anonymous buyer. The Admin API is for staff sessions only.
-    let subject = &verified.payload.sub;
-    if subject.is_empty() || customer_id_from_jwt_sub(subject).is_some() {
+    if !is_staff_subject(&verified.payload.sub) {
         return json_error(
             StatusCode::UNAUTHORIZED,
             "Unauthorized: session token was not issued to a staff user",
@@ -90,22 +98,21 @@ pub(crate) async fn shop_middleware(State(app): State<OpenShop>, mut request: Re
 /// grant. A token this process obtained with the grant, at a launch for
 /// example, is replaced by the exchange at the first session after it, and
 /// before it expires.
+///
+/// One request at a time runs the exchange of a shop, for five seconds at
+/// most; the others wait for it and use its token. A failed exchange is not
+/// tried again for thirty seconds.
 async fn ensure_installation(
     app: &OpenShop,
     shopify_app: &ResolvedShopifyApp,
     shop: &str,
     session_token: &str,
 ) -> anyhow::Result<()> {
-    let existing: Option<(Option<String>,)> =
-        sqlx::query_as("SELECT access_token FROM installations WHERE app_handle = $1 AND shop = $2 LIMIT 1")
-            .bind(&shopify_app.handle)
-            .bind(shop)
-            .fetch_optional(app.db())
-            .await?;
-    if let Some(stored) = existing.and_then(|(token,)| token).filter(|token| !token.is_empty()) {
+    let existing = stored_token(app, shopify_app, shop).await?;
+    if let Some(stored) = existing.as_ref().filter(|token| !token.is_empty()) {
         let expiring = app
             .crypto()
-            .decrypt_string(Some(&stored))
+            .decrypt_string(Some(stored))
             .ok()
             .flatten()
             .is_some_and(|token| {
@@ -121,8 +128,11 @@ async fn ensure_installation(
         return Ok(());
     }
 
-    if matches!(exchange_token(app, shopify_app, shop, session_token).await, Ok(true)) {
-        return Ok(());
+    match exchange_once(app, shopify_app, shop, session_token, &existing).await {
+        Ok(Exchange::Done) => return Ok(()),
+        // Shopify does not answer: the grant would wait for it as well.
+        Ok(Exchange::TimedOut) => return Ok(()),
+        Ok(Exchange::Failed) | Err(_) => {}
     }
     let Some(grant) = Grant::vouched(&shopify_app.handle, shop) else {
         return Ok(());
@@ -137,6 +147,71 @@ async fn ensure_installation(
         Err(error) => logger::warn(format!("{error:#}")),
     }
     Ok(())
+}
+
+/// The access token of the row as it is stored, if the row has one.
+async fn stored_token(app: &OpenShop, shopify_app: &ResolvedShopifyApp, shop: &str) -> anyhow::Result<Option<String>> {
+    let row: Option<(Option<String>,)> =
+        sqlx::query_as("SELECT access_token FROM installations WHERE app_handle = $1 AND shop = $2 LIMIT 1")
+            .bind(&shopify_app.handle)
+            .bind(shop)
+            .fetch_optional(app.db())
+            .await?;
+    Ok(row.and_then(|(token,)| token))
+}
+
+/// How the exchange of a request ended.
+enum Exchange {
+    /// Shopify gave a token that is stored, or another request stored one
+    /// while this one waited for its turn.
+    Done,
+    /// No token: refused, failed, or held back by an earlier failure.
+    Failed,
+    /// Shopify did not answer in time.
+    TimedOut,
+}
+
+/// The exchange of the shop, once for the requests that arrive together.
+/// `seen` is the token the row held when the request looked.
+async fn exchange_once(
+    app: &OpenShop,
+    shopify_app: &ResolvedShopifyApp,
+    shop: &str,
+    session_token: &str,
+    seen: &Option<String>,
+) -> anyhow::Result<Exchange> {
+    let exchanges = &app.client_credentials().exchanges;
+    if exchanges.held_back(&shopify_app.handle, shop) {
+        return Ok(Exchange::Failed);
+    }
+    let _turn = exchanges.turn(&shopify_app.handle, shop).await;
+    // What the request that had the turn did is what this one needs.
+    if exchanges.held_back(&shopify_app.handle, shop) {
+        return Ok(Exchange::Failed);
+    }
+    if stored_token(app, shopify_app, shop).await? != *seen {
+        return Ok(Exchange::Done);
+    }
+
+    let exchanged = tokio::time::timeout(TIMEOUT, exchange_token(app, shopify_app, shop, session_token)).await;
+    let outcome = match exchanged {
+        Ok(Ok(true)) => return Ok(Exchange::Done),
+        Ok(Ok(false)) => Exchange::Failed,
+        Ok(Err(error)) => {
+            logger::warn(format!("{error:#}"));
+            Exchange::Failed
+        }
+        Err(_) => {
+            logger::warn(format!(
+                "[openshop] The token exchange of app \"{}\" for {shop} timed out after {} s",
+                shopify_app.handle,
+                TIMEOUT.as_secs()
+            ));
+            Exchange::TimedOut
+        }
+    };
+    exchanges.hold_back(&shopify_app.handle, shop);
+    Ok(outcome)
 }
 
 /// Exchanges the session token for an offline access token and stores it:

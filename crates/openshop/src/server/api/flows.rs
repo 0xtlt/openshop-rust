@@ -1,5 +1,5 @@
 use axum::Router;
-use axum::extract::State;
+use axum::extract::{Extension, State};
 use axum::http::StatusCode;
 use axum::response::Response;
 use axum::routing::get;
@@ -7,10 +7,12 @@ use serde_json::{Value, json};
 
 use crate::app::OpenShop;
 use crate::server::http::json_response;
+use crate::server::shop::ShopSession;
 use crate::types::{Cron, JsonMap};
 
-/// A cron entry as configured; unset fields are omitted.
-fn cron_json(cron: &Cron) -> Value {
+/// A cron entry as configured; unset fields are omitted. The shops it names
+/// are only the one of the session.
+fn cron_json(cron: &Cron, shop: &str) -> Value {
     let mut entry = JsonMap::new();
     if let Some(name) = &cron.name {
         entry.insert("name".into(), Value::from(name.clone()));
@@ -21,12 +23,12 @@ fn cron_json(cron: &Cron) -> Value {
         entry.insert("input".into(), input.clone());
     }
     if let Some(shops) = &cron.shops {
-        entry.insert("shops".into(), shops.to_json());
+        entry.insert("shops".into(), shops.to_json_for(shop));
     }
     Value::Object(entry)
 }
 
-async fn list_flows(State(app): State<OpenShop>) -> Response {
+async fn list_flows(State(app): State<OpenShop>, Extension(session): Extension<ShopSession>) -> Response {
     let config = app.config();
     let flows: Vec<Value> = config
         .flows
@@ -35,8 +37,8 @@ async fn list_flows(State(app): State<OpenShop>) -> Response {
             let crons: Vec<Value> = config
                 .crons
                 .iter()
-                .filter(|cron| cron.flow == *name)
-                .map(cron_json)
+                .filter(|cron| cron.flow == *name && cron.is_visible_to(&session.shop))
+                .map(|cron| cron_json(cron, &session.shop))
                 .collect();
             json!({
                 "name": name,

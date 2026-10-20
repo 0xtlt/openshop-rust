@@ -14,6 +14,10 @@ templates, by the tables of their models:
 migrations/
   20261006143115_openshop_init.sql
   20261006143116_openshop_queue_indexes.sql
+  20261006143117_openshop_cron_ticks.sql
+  20261006143118_openshop_logs_indexes.sql
+  20261006143119_openshop_run_lease.sql
+  20261006143120_openshop_drop_flow_runs_status_index.sql
 ```
 
 Each file starts with a marker line:
@@ -104,19 +108,37 @@ ALTER TABLE "reviews" ADD COLUMN IF NOT EXISTS "author" text NOT NULL;
 ```
 
 A statement that can lose data or fail on existing rows comes with such a
-warning, which `migrate generate` also prints. Three things need your
-attention:
+warning, which `migrate generate` also prints. A migration that drops a table
+or a column, or converts a column to a type that can truncate or round its
+values (`bigint` to `integer`, `text` to `varchar(20)`), is not written at all
+unless you pass `--allow-destructive`; the error lists those statements. Three
+things need your attention:
 
 - **Renames.** A renamed field looks like one column dropped and another
   added, which loses its data. Add `#[model(renamed_from = "old_name")]` to the
   field, or to the struct for its table, before generating. See
-  [Renames](../reference/database.md#renames).
+  [Renames](../reference/database.md#renames). When the drop is what you want,
+  run `cargo run -- migrate generate --allow-destructive`.
 - **Warnings.** Edit the file when the generated statement is not the one you
   want: add a default, backfill before `SET NOT NULL`, change the cast of a
   type change, clean up the rows that a new foreign key would refuse.
 - **Data.** Moving or transforming rows is never generated. Write it in the
   same file, or in an empty one created with `--name` when nothing else
   changed.
+
+A change that cannot be written automatically, such as the primary key or the
+constraints of a column, is left as a line in the file:
+
+```sql
+-- TODO: the constraints of reviews.product_id changed from none to `REFERENCES products(id)`. Write the statements by hand.
+```
+
+Write the statements below it. Until you say they are written, the snapshot
+keeps the previous state of that column, `migrate check` fails, and
+`migrate generate` reminds you without writing the line again. When the
+migrations do what the models say, run
+`cargo run -- migrate generate --manual-done`: it records the models as they
+are. The flag covers the changes pending when you run it, not later ones.
 
 Review the new SQL under `migrations/` and commit it, with the snapshot and
 the code that needs it. `migrate check` does not decide whether a schema change

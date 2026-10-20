@@ -93,14 +93,32 @@ fn client_apps() -> OpenShopConfig {
     ])
 }
 
-/// A query string signed the way Shopify's app proxy signs it.
-fn signed_query(params: &[(&str, &str)], secret: &str) -> String {
+fn now() -> i64 {
+    chrono::Utc::now().timestamp()
+}
+
+/// A query string signed the way Shopify's app proxy signs it, with the
+/// parameters as given and nothing added.
+fn signed_as_given(params: &[(&str, &str)], secret: &str) -> String {
     let mut query: IndexMap<String, String> = params
         .iter()
         .map(|(key, value)| (key.to_string(), value.to_string()))
         .collect();
     query.insert("signature".to_string(), proxy_signature(&query, secret));
     to_query_string(&query)
+}
+
+/// A query string signed at `timestamp` the way Shopify's app proxy signs it.
+fn signed_query_at(params: &[(&str, &str)], secret: &str, timestamp: i64) -> String {
+    let timestamp = timestamp.to_string();
+    let mut params = params.to_vec();
+    params.push(("timestamp", &timestamp));
+    signed_as_given(&params, secret)
+}
+
+/// A query string signed just now the way Shopify's app proxy signs it.
+fn signed_query(params: &[(&str, &str)], secret: &str) -> String {
+    signed_query_at(params, secret, now())
 }
 
 /// A session token with full control over its claims.
@@ -168,6 +186,191 @@ async fn get_with_invalid_proxy_signature_returns_401(ctx: &TestContext) {
     let tampered = signed_query(&params, &ctx.secret).replace("logged_in_customer_id=42", "logged_in_customer_id=43");
     let response = get(ctx, &format!("/proxy/ping?{tampered}")).send().await.unwrap();
     assert_error(response, 401, "Invalid proxy signature").await;
+}
+
+#[openshop::test(TestContext::new(ping_config()))]
+async fn a_signed_query_is_only_good_for_a_few_minutes(ctx: &TestContext) {
+    let params = [("shop", "test.myshopify.com"), ("logged_in_customer_id", "42")];
+
+    // A little skew on either side is tolerated.
+    for timestamp in [now() - 120, now() + 120] {
+        let query = signed_query_at(&params, &ctx.secret, timestamp);
+        let response = get(ctx, &format!("/proxy/ping?{query}")).send().await.unwrap();
+        assert_eq!(response.status(), 200, "{timestamp}");
+    }
+
+    // A signed URL that was kept, or one that is not due yet, is no credential.
+    for timestamp in [now() - 3600, now() - 600, now() + 600, 1_700_000_000] {
+        let query = signed_query_at(&params, &ctx.secret, timestamp);
+        let response = get(ctx, &format!("/proxy/ping?{query}")).send().await.unwrap();
+        assert_error(response, 401, "Invalid proxy signature").await;
+    }
+
+    // Shopify always sends one: without it, or with one that is no time, there is nothing to check.
+    let query = signed_as_given(&params, &ctx.secret);
+    let response = get(ctx, &format!("/proxy/ping?{query}")).send().await.unwrap();
+    assert_error(response, 401, "Invalid proxy signature").await;
+    for timestamp in ["", "soon", "1.5e9", "-1"] {
+        let query = signed_as_given(&[params[0], params[1], ("timestamp", timestamp)], &ctx.secret);
+        let response = get(ctx, &format!("/proxy/ping?{query}")).send().await.unwrap();
+        assert_error(response, 401, "Invalid proxy signature").await;
+    }
+}
+
+#[openshop::test(TestContext::new(ping_config()))]
+async fn a_parameter_sent_several_times_is_signed_with_its_values_joined(ctx: &TestContext) {
+    // Shopify signs `extra=1,2` for `extra=1&extra=2`.
+    let signed = signed_query(&[("shop", "test.myshopify.com"), ("extra", "1,2")], &ctx.secret);
+    let repeated = signed.replace("extra=1%2C2", "extra=1&extra=2");
+    assert_ne!(repeated, signed);
+    let response = get(ctx, &format!("/proxy/ping?{repeated}")).send().await.unwrap();
+    assert_eq!(response.status(), 200);
+    assert_eq!(json_body(response).await["shop"], "test.myshopify.com");
+
+    // But not a parameter of Shopify's own: a second `shop` or `timestamp`, signed or not.
+    let timestamp = now().to_string();
+    let two_shops = signed_query(&[("shop", "test.myshopify.com,other.myshopify.com")], &ctx.secret)
+        .replace("test.myshopify.com%2Cother", "test.myshopify.com&shop=other");
+    let two_timestamps = signed_as_given(
+        &[
+            ("shop", "test.myshopify.com"),
+            ("timestamp", &format!("{timestamp},{timestamp}")),
+        ],
+        &ctx.secret,
+    )
+    .replace("%2C", "&timestamp=");
+    for query in [
+        format!(
+            "{}&shop=other.myshopify.com",
+            signed_query(&[("shop", "test.myshopify.com")], &ctx.secret)
+        ),
+        two_shops,
+        two_timestamps,
+    ] {
+        let response = get(ctx, &format!("/proxy/ping?{query}")).send().await.unwrap();
+        assert_error(response, 401, "Invalid proxy signature").await;
+    }
+}
+
+/// The pairs are signed glued together, so the text of one request can be cut
+/// in other pairs: the signature of the request of a shop the sender owns then
+/// stands for another shop.
+#[openshop::test(TestContext::new(ping_config()))]
+async fn a_signed_query_cannot_be_split_again_to_change_its_shop(ctx: &TestContext) {
+    let timestamp = now().to_string();
+    // What the sender has Shopify sign for their own shop: the parameter `m`
+    // holds the text of a request for the victim's.
+    let note = format!("1path_prefix=/apps/xshop=victim.myshopify.comtimestamp={timestamp}");
+    let own = [
+        ("m", note.as_str()),
+        ("path_prefix", "/apps/x"),
+        ("shop", "attacker.myshopify.com"),
+        ("timestamp", timestamp.as_str()),
+    ];
+    // A value with a `=` is refused, even for the shop that signed it.
+    let own_query = signed_as_given(&own, &ctx.secret);
+    let response = get(ctx, &format!("/proxy/ping?{own_query}")).send().await.unwrap();
+    assert_error(response, 401, "Invalid proxy signature").await;
+
+    // The same signature, on the same text cut so that the shop is the victim's.
+    let signature = own_query.rsplit("signature=").next().unwrap();
+    let tail = format!("{timestamp}path_prefix=/apps/xshop=attacker.myshopify.comtimestamp={timestamp}");
+    let forged = to_query_string(&IndexMap::from([
+        ("m".to_string(), "1".to_string()),
+        ("path_prefix".to_string(), "/apps/x".to_string()),
+        ("shop".to_string(), "victim.myshopify.com".to_string()),
+        ("timestamp".to_string(), tail),
+        ("signature".to_string(), signature.to_string()),
+    ]));
+    let response = get(ctx, &format!("/proxy/ping?{forged}")).send().await.unwrap();
+    assert_error(response, 401, "Invalid proxy signature").await;
+}
+
+/// Without any `=` in a key or a value, the characters that stand between two
+/// `=` still go to the value before them or to the key after them. Here the
+/// request of an anonymous visitor is read as the one of customer 42, with the
+/// signature of the first.
+#[openshop::test(TestContext::new(ping_config()))]
+async fn a_signed_query_cannot_be_cut_again_to_log_a_customer_in(ctx: &TestContext) {
+    let timestamp = now().to_string();
+    let shared = [
+        ("path_prefix", "/apps/openshop"),
+        ("shop", "test.myshopify.com"),
+        ("timestamp", timestamp.as_str()),
+    ];
+    let original = [
+        &[
+            ("1", "foo"),
+            ("2logged_in_customer_id", "4"),
+            ("2m", "o"),
+            ("logged_in_customer_id", ""),
+        ][..],
+        &shared,
+    ]
+    .concat();
+    let signed = signed_as_given(&original, &ctx.secret);
+    let signature = signed.rsplit("signature=").next().unwrap();
+
+    let forged = [
+        &[
+            ("1", "foo2"),
+            ("logged_in_customer_id", "42"),
+            ("m", ""),
+            ("ologged_in_customer_id", ""),
+        ][..],
+        &shared,
+        &[("signature", signature)],
+    ]
+    .concat();
+    let forged = forged
+        .iter()
+        .map(|(key, value)| (key.to_string(), value.to_string()))
+        .collect::<Vec<_>>();
+    // The two read the same to the signature.
+    let query = url::form_urlencoded::Serializer::new(String::new())
+        .extend_pairs(&forged)
+        .finish();
+    let response = get(ctx, &format!("/proxy/ping?{query}")).send().await.unwrap();
+    assert_error(response, 401, "Invalid proxy signature").await;
+
+    // What the visitor had Shopify sign is not a request of a customer either.
+    let response = get(ctx, &format!("/proxy/ping?{signed}")).send().await.unwrap();
+    assert_error(response, 401, "Invalid proxy signature").await;
+}
+
+/// `a.myshopify.comt@b.myshopify.com` is a URL whose host is `b.myshopify.com`:
+/// a shop that was cut out of the beginning of a parameter of the visitor.
+#[openshop::test(TestContext::new(ping_config()))]
+async fn a_signed_query_cannot_be_cut_again_to_take_the_shop_of_a_url(ctx: &TestContext) {
+    let timestamp = now().to_string();
+    let signed = signed_as_given(
+        &[
+            ("logged_in_customer_id", ""),
+            ("path_prefix", "/apps/openshop"),
+            ("shop", "test.myshopify.com"),
+            ("t@victim.myshopify.comta", "1"),
+            ("timestamp", &timestamp),
+        ],
+        &ctx.secret,
+    );
+    let response = get(ctx, &format!("/proxy/ping?{signed}")).send().await.unwrap();
+    assert_eq!(response.status(), 200);
+    assert_eq!(json_body(response).await["shop"], "test.myshopify.com");
+
+    let signature = signed.rsplit("signature=").next().unwrap();
+    let forged = to_query_string(&IndexMap::from([
+        ("logged_in_customer_id".to_string(), String::new()),
+        ("path_prefix".to_string(), "/apps/openshop".to_string()),
+        (
+            "shop".to_string(),
+            "test.myshopify.comt@victim.myshopify.com".to_string(),
+        ),
+        ("ta".to_string(), "1".to_string()),
+        ("timestamp".to_string(), timestamp),
+        ("signature".to_string(), signature.to_string()),
+    ]));
+    let response = get(ctx, &format!("/proxy/ping?{forged}")).send().await.unwrap();
+    assert_error(response, 401, "Invalid shop parameter").await;
 }
 
 #[openshop::test(TestContext::new(ping_config()))]
@@ -625,20 +828,30 @@ async fn extension_mode_rejects_expired_bearer_token(ctx: &TestContext) {
 }
 
 #[openshop::test(TestContext::new(ping_config()))]
-async fn numeric_admin_sub_is_not_treated_as_a_customer_id(ctx: &TestContext) {
-    let token = ctx.session_token_for("jwt-shop.myshopify.com", "123");
+async fn the_session_token_of_a_staff_user_is_refused_on_proxy_and_ext_routes(ctx: &TestContext) {
+    let not_staff = "Unauthorized: session token was issued to a staff user";
+    let query = signed_query(&[("shop", "test.myshopify.com")], &ctx.secret);
+    // The subject of a staff user is a numeric id, never a customer GID.
+    for sub in ["123", "gid://shopify/StaffMember/9", "gid://shopify/Customer/abc"] {
+        let token = ctx.session_token_for("jwt-shop.myshopify.com", sub);
+        for path in [
+            "/ext/ping?logged_in_customer_id=123".to_string(),
+            format!("/proxy/ping?{query}"),
+        ] {
+            let response = get(ctx, &path).bearer_auth(&token).send().await.unwrap();
+            assert_error(response, 401, not_staff).await;
+        }
+    }
 
-    let response = get(ctx, "/ext/ping?logged_in_customer_id=123")
-        .bearer_auth(token)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(response.status(), 200);
-    let body = json_body(response).await;
-    assert_eq!(body["shop"], "jwt-shop.myshopify.com");
-    assert_eq!(body["customerId"], Value::Null);
-    assert_eq!(body["queryShop"], "jwt-shop.myshopify.com");
-    assert_eq!(body["queryCustomerId"], Value::Null);
+    // The tokens of customer account and checkout extensions are accepted, a buyer without an account included.
+    for (sub, customer_id) in [(CUSTOMER_GID, json!("123")), ("", Value::Null)] {
+        let token = ctx.session_token_for("jwt-shop.myshopify.com", sub);
+        let response = get(ctx, "/ext/ping").bearer_auth(token).send().await.unwrap();
+        assert_eq!(response.status(), 200, "{sub}");
+        let body = json_body(response).await;
+        assert_eq!(body["shop"], "jwt-shop.myshopify.com");
+        assert_eq!(body["customerId"], customer_id);
+    }
 }
 
 #[openshop::test(TestContext::new(ping_config()))]

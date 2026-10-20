@@ -3,6 +3,7 @@
 pub mod env;
 pub mod flow_logger;
 pub mod logger;
+pub(crate) mod redact;
 pub(crate) mod report;
 pub mod time;
 pub mod transport;

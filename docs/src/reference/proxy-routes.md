@@ -152,7 +152,7 @@ to the function that answers with it, never a Rust string.
 `src/proxy/banner.liquid`:
 
 ```liquid
-<p>{{ shop.name }} via {{ app_shop }}</p>
+<p>{{ shop.name | escape }} via {{ app_shop | escape }}</p>
 ```
 
 `src/proxy/banner.rs`:
@@ -178,7 +178,7 @@ calls. For `demo.myshopify.com`, the function above sends:
 
 ```liquid
 {%- assign app_shop = "demo.myshopify.com" -%}
-<p>{{ shop.name }} via {{ app_shop }}</p>
+<p>{{ shop.name | escape }} via {{ app_shop | escape }}</p>
 ```
 
 A value keeps its type where Liquid has one:
@@ -189,12 +189,13 @@ A value keeps its type where Liquid has one:
 | A number | A number. |
 | `true`, `false` | A boolean. |
 | `None` | `nil`. |
-| A list or an object | A string holding its JSON text, to print in a `<script type="application/json">` for the scripts of the page. |
+| A list or an object | A string holding its JSON text, to print in a `<script type="application/json">` for the scripts of the page. `<`, `>`, `&`, U+2028 and U+2029 are written as `\uXXXX` escapes (the same JSON), so `</script>` or `<!--` in a value cannot break out of the script. |
 
 A value is never pasted into the template. A string is written as a literal
 that its text cannot close: `"`, `%`, `{`, and `}` each go in a literal of
 their own, joined with `append`. What a customer typed is displayed and never
-executed.
+executed. Liquid does not escape what `{{ }}` prints, though: put `| escape` after
+every value that is written in HTML.
 
 The name of a variable is made of letters, digits, `_`, and `-`, and starts
 with a letter or `_`. Another name, or a value that does not serialize, is a
@@ -241,12 +242,16 @@ run of a flow for it.
 the app origin directly without Shopify CLI intercepting `/proxy`.
 
 A request with an `Authorization: Bearer …` header is authenticated as a JWT,
-even on `/proxy`; the query signature is then not considered.
+even on `/proxy`; the query signature is then not considered. The session token
+of a staff user (the one `/api` accepts) is refused on both: these routes are
+for the storefront and its extensions, and a token that opens the admin does
+not open them. Only the tokens of customer account and checkout extensions, for
+a customer or for a buyer without an account, are accepted.
 
 The app proxy customer ID is trusted only when it is numeric. For JWTs,
 the customer ID is taken from a subject of the form
-`gid://shopify/Customer/<id>`; any other subject, including numeric Shopify
-admin subjects, yields `None`.
+`gid://shopify/Customer/<id>`; the empty subject of a buyer without an account
+yields `None`, and any other subject is a staff user, who is refused.
 
 ## Shopify app proxy configuration
 
@@ -264,9 +269,9 @@ Enable network access in the extension's TOML:
 network_access = true
 ```
 
-Send the session token as `Authorization: Bearer ...`. CORS allows local
-origins, Shopify admin, Shopify storefront domains, Shopify's extension CDN,
-and configured `HOST` / `SHOPIFY_APP_URL` origins. Other origins receive no
+Send the session token as `Authorization: Bearer ...`. CORS allows Shopify
+admin, Shopify storefront domains, Shopify's extension CDN, and configured
+`HOST` / `SHOPIFY_APP_URL` origins, and in development local origins. Other origins receive no
 `Access-Control-Allow-Origin` header. Preflight `OPTIONS` requests are answered
 with `204`.
 
@@ -276,10 +281,11 @@ Error bodies are JSON objects of the form `{ "error": "<message>" }`.
 
 | Status | Message | Condition |
 | --- | --- | --- |
-| `401` | `Invalid proxy signature` | No bearer token, and the query signature matched zero or several configured apps. |
+| `401` | `Invalid proxy signature` | No bearer token, and the query signature matched zero or several configured apps, or the query is stale, has no `timestamp` or is ambiguous (see [Authentication](authentication.md#webhook-and-proxy-bodies)). |
 | `401` | `Invalid shop parameter` | Valid signature, but `shop` is not a `*.myshopify.com` domain. |
 | `401` | `Unauthorized: missing token audience` | The bearer token has no readable `aud` claim. |
 | `401` | `Unauthorized: invalid or expired session token` | The audience matches no single app, or the token fails verification. |
+| `401` | `Unauthorized: session token was issued to a staff user` | The bearer token is a valid session token of a staff user. |
 | `401` | `Unauthorized: missing session token` | `/ext` request without a bearer token. |
 | `422` | `Invalid input: <reason>` | The request does not fit the [typed input](#typed-input) of the function. |
 | `500` | `SHOPIFY_API_SECRET is not configured` | No Shopify secret is configured. |

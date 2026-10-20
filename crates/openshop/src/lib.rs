@@ -134,14 +134,15 @@ not_wasm! {
     pub use db::{FlowRun, Installation, LogRow, Model, Record, StepResult};
     pub use declare::{App, InvalidInput};
     pub use engine::{
-        DispatchOptions, FlowCanceledError, FlowConcurrencyError, FlowTimeoutError, QueuedRun, RunOutcome,
-        StepTimeoutError,
+        DispatchOptions, FlowCanceledError, FlowConcurrencyError, FlowTimeoutError, InvalidFlowInput, QueuedRun,
+        RunOutcome, StepTimeoutError, UnknownFlowError,
     };
     pub use runtime::logger::{logger, set_logger};
     #[cfg(feature = "sentry")]
     pub use runtime::SentryConfig;
     pub use runtime::{FlowLogger, RuntimeLogger};
     pub use server::UiSource;
+    pub use server::http::PublicError;
     pub use server::connectors::Connectors;
     pub use shopify::{GraphqlOperation, ShopifyClient};
     pub use template::Liquid;
@@ -182,7 +183,7 @@ pub mod prelude {
     not_wasm! {
         pub use crate::{
             AdminContext, App, Cron, ErrorContext, FlowContext, FunctionConfig, InvalidInput, Liquid, McpConfig,
-            McpContext, McpPermission, McpRiskLevel, Model, ProviderConfig, ProxyContext, QueuedRun, RetryPolicy,
+            McpContext, McpPermission, McpRiskLevel, Model, ProviderConfig, ProxyContext, PublicError, QueuedRun, RetryPolicy,
             RouteAuthContext, RouteAuthOutcome, RouteContext, RunOutcome, ShopScope, Uuid, WebhookContext,
             WorkerConfig, flow, graphql, liquid, mcp_resource, mcp_tool, provider, proxy, response, route,
             validators, webhook,
@@ -432,7 +433,7 @@ pub use openshop_macros::graphql;
 /// Every other entry is a setting, written `name: value` and passed to the
 /// method of that name of [`OpenShopBuilder`](builder::OpenShopBuilder): `crons`, `on_error`, `mcp`,
 /// `shopify`, `worker`, `retry_policy`, `builtin_pages`, `admin_menu`, `admin_ui`,
-/// `max_request_body_bytes`, `ops_password`, `sentry`… A value can fail with `?`, such as one read from
+/// `max_request_body_bytes`, `request_timeout`, `max_concurrent_requests`, `ops_password`, `log_retention`, `sentry`… A value can fail with `?`, such as one read from
 /// the environment (`shopify: shopify_apps()?`): the error is the one
 /// `APP.config()` and `APP.main()` return.
 ///

@@ -1,4 +1,5 @@
 //! `openshop`: scaffold and develop OpenShop applications.
+#![forbid(unsafe_code)]
 
 mod bundle;
 mod codegen;
@@ -17,7 +18,10 @@ const USAGE: &str = "
 
   Commands:
     init [<dir>]                Scaffold a new OpenShop project from a template; asks for what
-                                it is not given (--template=minimal|custom|public)
+                                it is not given (--template=minimal|custom|public). The project
+                                depends on the commit this CLI was built from; name another
+                                source with --openshop-rev=<commit>, --openshop-tag=<tag>,
+                                --openshop-branch=<name> or --openshop-path=<dir>
     init-ui                     Scaffold a custom admin page with its view
     dev                         Start the app in dev mode and restart it when sources change
     codegen                     Download the Shopify Admin GraphQL schema of another API version
@@ -80,12 +84,27 @@ async fn run(args: &[String]) -> Result<()> {
         Some("test") => cargo(&["test"], rest).await,
         Some("migrate") => cargo(&["run", "--", "migrate"], rest).await,
         Some(command @ ("start" | "worker")) => cargo(&["run", "--release", "--", command], rest).await,
-        _ => {
+        None | Some("help" | "--help" | "-h") => {
             println!("{USAGE}");
             Ok(())
         }
+        Some(unknown) => Err(UnknownCommand(unknown.to_string()).into()),
     }
 }
+
+/// A command that does not exist: the usage goes to stderr and the exit code is
+/// 2, as for a command line that cannot be parsed, so that a script that
+/// mistypes a command stops.
+#[derive(Debug)]
+struct UnknownCommand(String);
+
+impl std::fmt::Display for UnknownCommand {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "[openshop] Unknown command: {}\n{USAGE}", self.0)
+    }
+}
+
+impl std::error::Error for UnknownCommand {}
 
 #[tokio::main]
 async fn main() -> ExitCode {
@@ -94,7 +113,10 @@ async fn main() -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("{error:#}");
-            ExitCode::FAILURE
+            match error.downcast_ref::<UnknownCommand>() {
+                Some(_) => ExitCode::from(2),
+                None => ExitCode::FAILURE,
+            }
         }
     }
 }

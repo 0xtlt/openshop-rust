@@ -36,8 +36,11 @@ HOST=https://your-app.example.com
 ENCRYPTION_KEY=replace-with-64-hex-characters
 ```
 
-`OPENSHOP_ENV=production` turns on production mode: `ENCRYPTION_KEY` becomes
-mandatory for storing credentials, and migration generation is refused.
+`OPENSHOP_ENV=production` turns on production mode: migration generation and
+the schema push are refused. `ENCRYPTION_KEY` is mandatory in any environment
+that is not explicitly `development` or `test`: without it, the web and worker
+processes do not start, instead of storing credentials and access tokens in
+plaintext.
 Generate `ENCRYPTION_KEY` once with `openssl rand -hex 32`, store it securely, and
 reuse it across deployments. Both services need the same key, database, and
 Shopify configuration. Production commands do not load `.env` automatically.
@@ -61,13 +64,31 @@ UI bundle; see [Ship the bundle](add-admin-page.md#ship-the-bundle).
 
 The generated `Dockerfile` is a starting point: it builds the binary, installs
 it as `app`, copies `migrations/` and `shopify.app*.toml`, sets
-`OPENSHOP_ENV=production` and `PORT=3000`, and starts the web process. With
-the `custom` and `public` templates, it builds the admin UI bundle first and
-serves it from `/app/dist`.
+`OPENSHOP_ENV=production` and `PORT=3000`, and starts the web process, as a
+user without privileges (`app`, uid 10001): the app only reads the files copied
+into the image. With the `custom` and `public` templates, it builds the admin UI
+bundle first and serves it from `/app/dist`. The base images are named by
+digest, and trunk is checked against the SHA-256 of its release; keep both when
+you edit the file.
 
 ```bash
 docker build -t my-app .
 ```
+
+While the `openshop` repository is private, cargo needs a token to fetch it.
+Give it to the build as a secret, which stays out of the image. Write the file
+outside the project: whatever is in the directory is in the build context, and
+`COPY . .` would put the token in a layer.
+
+```bash
+secret=$(mktemp)
+printf '[url "https://x-access-token:%s@github.com/"]\n\tinsteadOf = https://github.com/\n' "$GITHUB_TOKEN" > "$secret"
+docker build --secret id=gitconfig,src="$secret" -t my-app .
+rm "$secret"
+```
+
+The generated `.dockerignore` and `.gitignore` list `gitconfig` as a second
+guard.
 
 One container runs one process. Start workers and the migration job from the
 same image with a different command, as the generated `Procfile` does:
@@ -88,7 +109,9 @@ app migrate status
 ```
 
 Confirm `pending: 0` before starting the new processes. This command applies
-committed SQL only. Neither the web process nor the worker migrates on startup.
+committed SQL only. Neither the web process nor the worker migrates on startup,
+and both refuse to start while a migration of `migrations/` is not applied:
+`Not starting: 1 migration is not applied (…). Run `migrate` first.`
 
 ## 5. Start both services
 
@@ -104,9 +127,10 @@ or process-manager entries; two sequential lines in a shell script would never
 start the worker. The web process serves HTTP and dispatches scheduled runs.
 The worker executes the queued work.
 
-Keep one web replica when using crons: every web replica starts a scheduler and
-there is no leader election. Scale workers after measuring database and provider
-capacity. See [Operate an app](operate-app.md) for that procedure.
+Several web replicas are fine with crons: every replica starts a scheduler, and
+the first to reach an occurrence of a cron for a shop queues its run, so it
+runs once. Scale workers after measuring database and provider capacity. See
+[Operate an app](operate-app.md) for that procedure.
 
 Both processes stop cleanly on `SIGTERM`. Give the worker up to its lease
 duration, 30 seconds by default, to finish active runs before the platform kills
@@ -133,7 +157,10 @@ scope authorization as needed.
 4. Run a harmless flow and verify it reaches **completed** with the expected steps.
 5. Confirm both service logs show no database, encryption, or configuration errors.
 
-`/health` only proves the HTTP process responds. A completed smoke flow also
+`/health` only proves the HTTP process responds, and it is answered even when
+the server sheds load. A request is cut after 60 seconds and the server serves
+1024 at once; the `request_timeout` and `max_concurrent_requests` settings of
+`app!` change both (see [Configuration](../reference/configuration.md)). A completed smoke flow also
 exercises the queue and worker. If runs stay pending, use
 [Troubleshooting](troubleshooting.md#runs-stay-pending).
 

@@ -2,6 +2,7 @@
 
 use std::future::Future;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Result;
 use indexmap::IndexMap;
@@ -22,6 +23,7 @@ use crate::server::mcp::registry::{McpRegistry, build_mcp_registry};
 use crate::server::shopify_apps::ShopifyApps;
 use crate::server::static_ui::UiSource;
 use crate::shopify::client::ShopifyClient;
+use crate::server::webhooks::WebhookDeliveries;
 use crate::shopify::client_credentials::ClientCredentials;
 use crate::types::{
     AdminMenuItem, AdminPageId, AdminPageMode, AdminPagesConfig, Cron, ErrorContext, Flow, Function, McpConfig,
@@ -60,11 +62,19 @@ pub struct OpenShopConfig {
     pub admin_ui: Option<UiSource>,
     /// Maximum size of a request body. Defaults to 2 MB.
     pub max_request_body_bytes: Option<usize>,
+    /// How long a request may take to get the head of its response. Defaults
+    /// to 60 seconds.
+    pub request_timeout: Option<std::time::Duration>,
+    /// How many requests are served at once; the ones above are answered with
+    /// `503`. Defaults to 1024.
+    pub max_concurrent_requests: Option<usize>,
     /// The password of the operator dashboard, served under `/ops` when set.
     pub ops_password: Option<String>,
     /// The development store whose token work no Shopify request vouches for
     /// may get with the client credentials grant.
     pub client_credentials_shop: Option<String>,
+    /// How long the log lines of the runs are kept. `None` keeps them forever.
+    pub log_retention: Option<Duration>,
     /// Where failures are reported, when the application gives a Sentry DSN.
     #[cfg(feature = "sentry")]
     pub sentry: Option<SentryConfig>,
@@ -359,6 +369,21 @@ impl OpenShopBuilder {
         self
     }
 
+    /// Answers `503` to a request whose response has not begun after this
+    /// long. The time the handler takes to read the body counts; the time a
+    /// response already begun takes to stream does not. Defaults to 60 seconds.
+    pub fn request_timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.config.request_timeout = Some(timeout);
+        self
+    }
+
+    /// Answers `503` to a request that comes while this many are being
+    /// served. `/health` is always answered. Defaults to 1024.
+    pub fn max_concurrent_requests(mut self, requests: usize) -> Self {
+        self.config.max_concurrent_requests = Some(requests);
+        self
+    }
+
     /// Serves the operator dashboard under `/ops`, behind this password: what
     /// happens in every shop, read-only, outside Shopify admin. Without a
     /// password, or with an empty one, `/ops` does not exist.
@@ -383,6 +408,17 @@ impl OpenShopBuilder {
     /// `client_credentials_shop: std::env::var("SHOPIFY_CLIENT_CREDENTIALS_SHOP").ok()`.
     pub fn client_credentials_shop(mut self, shop: impl Into<Option<String>>) -> Self {
         self.config.client_credentials_shop = shop.into().filter(|shop| !shop.trim().is_empty());
+        self
+    }
+
+    /// Removes the log lines older than `retention`, in small batches, from
+    /// the workers (`dev`, `start` and `worker`). Without it, or with `None`,
+    /// the lines are kept forever. Runs and step results are not purged.
+    ///
+    /// The application gives the duration, from wherever it keeps its
+    /// settings: `log_retention: Duration::from_secs(30 * 24 * 3600)`.
+    pub fn log_retention(mut self, retention: impl Into<Option<Duration>>) -> Self {
+        self.config.log_retention = retention.into();
         self
     }
 
@@ -425,6 +461,7 @@ struct Inner {
     client_credentials: ClientCredentials,
     custom_pages: Vec<CustomAdminPage>,
     mcp_registry: McpRegistry,
+    webhook_deliveries: WebhookDeliveries,
 }
 
 /// A running application: configuration plus the database pool and environment.
@@ -449,7 +486,8 @@ impl OpenShop {
         validate_openshop_config(&config)?;
         crate::server::ops::check_password(config.ops_password.as_deref(), env.production)?;
         let apps = ShopifyApps::resolve(config.shopify.as_ref(), &env)?;
-        let crypto = Crypto::new(env.encryption_key.clone(), env.production);
+        let crypto = Crypto::new(env.encryption_key.clone(), env.allows_plaintext_secrets());
+        crypto.check_configured()?;
         let client_credentials = ClientCredentials::new(config.client_credentials_shop.as_deref())?;
         let custom_pages = config.resolved_admin_pages()?;
         let mcp_registry = build_mcp_registry(config.mcp.as_ref(), &create_core_mcp_capabilities())?;
@@ -464,6 +502,7 @@ impl OpenShop {
                 client_credentials,
                 custom_pages,
                 mcp_registry,
+                webhook_deliveries: WebhookDeliveries::default(),
             }),
         })
     }
@@ -501,6 +540,11 @@ impl OpenShop {
     /// `client_credentials_shop` setting background work may use it for.
     pub(crate) fn client_credentials(&self) -> &ClientCredentials {
         &self.inner.client_credentials
+    }
+
+    /// The webhook deliveries this process ran, to run none of them twice.
+    pub(crate) fn webhook_deliveries(&self) -> &WebhookDeliveries {
+        &self.inner.webhook_deliveries
     }
 
     pub(crate) fn custom_pages(&self) -> &[CustomAdminPage] {

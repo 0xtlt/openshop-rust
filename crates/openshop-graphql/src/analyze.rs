@@ -256,10 +256,16 @@ pub fn analyze(schema: &Schema, source: &str) -> Result<Operation> {
         }
         analyzer.variables.push(Variable {
             name: definition.name.clone(),
-            ty,
+            ty: ty.clone(),
             has_default: definition.default_value.is_some(),
             base,
         });
+        if let Some(default) = &definition.default_value {
+            // The parser refuses a variable here.
+            let expected = InputValue { ty, has_default: false };
+            let place = format!("the default value of `${}`", definition.name);
+            analyzer.check_value(default, &expected, &place, definition.position)?;
+        }
     }
 
     analyzer.check_directives(directives)?;
@@ -638,6 +644,15 @@ impl<'a> Analyzer<'a> {
     /// Checks a literal or a variable given where `expected` is wanted.
     fn check_value(&mut self, value: &Value<'a>, expected: &InputValue, place: &str, position: Pos) -> Result<()> {
         let inner = expected.ty.nullable();
+        // A custom scalar, `JSON` among them, defines its own literals: an object
+        // or a list is a value of it, not an input object or a list of the schema.
+        if let TypeRef::Named(name) = inner
+            && !matches!(value, ast::Value::Variable(_) | ast::Value::Null)
+            && !matches!(name.as_str(), "Int" | "Float" | "String" | "Boolean" | "ID")
+            && matches!(self.schema.get(name), Some(TypeDef::Scalar))
+        {
+            return self.mark_variables(value, position);
+        }
         match value {
             ast::Value::Variable(name) => {
                 let variable = self.variable(name, position)?;
@@ -739,6 +754,12 @@ impl<'a> Analyzer<'a> {
                     );
                 }
             },
+            ast::Value::Int(number) if inner.name() == "Int" && !fits_int(number) => {
+                return error_at(
+                    position,
+                    format!("The integer is outside the range of `Int`, a 32-bit integer, given for {place}"),
+                );
+            }
             literal => {
                 let given = match literal {
                     ast::Value::Int(_) => "an integer",
@@ -766,6 +787,11 @@ impl<'a> Analyzer<'a> {
         }
         Ok(())
     }
+}
+
+/// `Int` is a signed 32-bit integer in GraphQL.
+fn fits_int(number: &ast::Number) -> bool {
+    number.as_i64().is_some_and(|number| i32::try_from(number).is_ok())
 }
 
 /// The rule of the GraphQL specification for using a variable at a location.

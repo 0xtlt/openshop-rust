@@ -37,7 +37,7 @@ framework and its tests and can change without notice.
 | `openshop::builder` | `OpenShopBuilder` and the definitions it takes: `Flow`, `Provider`, `Field`, `Proxy`, `Route`, `Webhook`, `Function`, `McpTool`, `McpResource`, `AdminPage`, `Table`, `InputSchema` | [`OpenShopConfig::builder()`](#openshopconfigbuilder) |
 | `openshop::cli` | `run`, `run_with_args`, `init_logging`, and `env::load_env_file` | [CLI commands](cli.md) |
 | `openshop::db` | `connect`, `connect_to`, `pool_options`, models, and the `migrate` functions | [Database](database.md) |
-| `openshop::engine` | `Worker`, `Scheduler`, `run_flow`, `cancel_run`, `StepExecutor`, default policies, and `SleepSignal` | [Flows](flows.md), [Errors](errors.md) |
+| `openshop::engine` | `Worker`, `Scheduler`, `run_flow`, `cancel_run`, `StepExecutor`, default policies, `SleepSignal`, and `LeaseLostError` | [Flows](flows.md), [Errors](errors.md) |
 | `openshop::admin` | Server side of experimental custom admin pages | [Custom admin pages](custom-admin-pages.md) |
 | `openshop::response` | Helpers and re-exports for building HTTP responses | [Public server routes](server-routes.md) |
 | `openshop::server` | `router`, `listen`, and `serve`, to embed the HTTP server | [Server, worker, and scheduler](#server-worker-and-scheduler) |
@@ -338,7 +338,7 @@ async fn queue_sync(app: &OpenShop) -> Result<()> {
 | --- | --- | --- | --- |
 | `flow_name` | `DispatchOptions::new` | `String` | Registered flow key, such as `sync_orders::NAME`. |
 | `shop` | `DispatchOptions::new` | `String` | Target `*.myshopify.com` domain, or the cron global sentinel when used internally. |
-| `input` | `.input(…)` | `serde_json::Value` | Defaults to `{}`. Validated by the worker, not at dispatch. |
+| `input` | `.input(…)` | `serde_json::Value` | Defaults to `{}`. A dispatch fails with `InvalidFlowInput` when it fails the input schema of the flow, and with `UnknownFlowError` for a flow that is not registered; no run is queued. |
 | `shopify_app` | `.shopify_app(…)` | `String` | Defaults to the `default` app handle. |
 | `parent_run_id` | `.parent_run_id(…)` | `String` | Optional parent run relationship. |
 | `delay` | `.delay(…)` | `Duration` | Delays the initial `available_at`. |
@@ -616,7 +616,7 @@ code uses.
 | What | Where |
 | --- | --- |
 | A block built by hand: `Flow`, `Provider`, `Field`, `Proxy`, `Route`, `Webhook`, `Function`, `McpTool`, `McpResource`, `AdminPage`, `Table`, `InputSchema`, and `OpenShopBuilder` | `openshop::builder` |
-| `Worker`, `Scheduler`, `run_flow`, `RunFlowOptions`, `cancel_run`, `dispatch_flow`, `StepExecutor`, `SleepSignal` | `openshop::engine` |
+| `Worker`, `Scheduler`, `run_flow`, `RunFlowOptions`, `cancel_run`, `dispatch_flow`, `StepExecutor`, `RunOwner`, `SleepSignal`, `LeaseLostError` | `openshop::engine` |
 | `router`, `listen`, `serve`, `ServerOptions`, `ShopSession` | `openshop::server` |
 | `RuntimeEnv`, `HttpTransport` | `openshop::runtime` |
 | `IntoVariable`, `SHOPIFY_API_VERSION` | `openshop::shopify` |

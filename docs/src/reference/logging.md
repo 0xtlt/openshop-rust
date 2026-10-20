@@ -47,6 +47,15 @@ ones, which are written with it in one statement, and the lines a flow logged
 are stored before the outcome of its run is. `flush().await` writes the lines
 logged so far without waiting.
 
+At most 10,000 lines wait to be written. A flow that logs faster than the
+database takes them loses the newest lines instead of slowing down, and the run
+gets one `warn` line saying how many (`1500 log lines were dropped`). A write
+that fails is told to the runtime logger with the run and the number of lines
+lost. A statement holds at most 1,000 lines or 1 MiB of text, however fast the
+flow logs. A NUL byte, which PostgreSQL cannot store, is replaced by U+FFFD in a
+message and in the strings and keys of a payload; keys that become equal get
+`#2`, `#3`… after them.
+
 Logs are associated with the current run and appear in the embedded admin. The
 Admin API supports level/text filters, context expansion, and JSON or CSV
 export. The run-log endpoint returns the complete filtered set and does not
@@ -78,13 +87,17 @@ any of these terms:
 - `from:<date>`, `to:<date>` — keeps lines after, or before, a date;
 - `between:<from>,<to>` — both bounds at once.
 
-All terms must hold. Matching is case-insensitive and runs against the message
+All terms must hold. A context count above 100 is read as 100. Matching is case-insensitive and runs against the message
 followed by the top-level `key=value` pairs of an object payload, for example
 `Fetching orders limit=10`. Values of nested objects are not searchable.
 
 Regular expressions are limited to 120 characters and must not contain
 backreferences, nested quantifiers such as `(a+)+`, or repeated `.*`. A pattern
-that is rejected or invalid matches nothing.
+that is rejected, invalid, or compiles to more than 1 MiB fails the whole
+query: the Admin API answers `400` with the reason, and the MCP tool answers
+an error. A query is at most 2,000 characters and holds at most 20 filters. A
+`last:` that reaches back further than the calendar fails the query the same
+way.
 
 Dates are RFC 3339 timestamps, `YYYY-MM-DDTHH:MM[:SS]` (read as UTC), or
 `YYYY-MM-DD`. Lines are listed newest first, and context lines are taken from
@@ -145,7 +158,28 @@ directly to standard output.
 
 ## Retention and export
 
-OpenShop does not currently apply an automatic retention policy to flow logs.
-Plan database retention, backup, and deletion according to application
-requirements. Deleting a run through the Admin API deletes its logs. Export is
-intended for diagnosis, not as a durable analytics pipeline.
+OpenShop keeps flow logs forever unless the application sets
+[`log_retention`](configuration.md#settings), the age after which the workers
+remove a log line:
+
+```rust
+openshop::app! {
+    // …
+    log_retention: std::time::Duration::from_secs(30 * 24 * 3600),
+}
+```
+
+A worker (`dev`, `start`, and `worker`) removes the lines older than that once
+an hour, 5,000 at a time with a short pause between two statements, and at
+most 1,000,000 per sweep: a larger backlog goes on at the next sweep. Several
+workers can purge at the same time. Only the `logs` table is purged; runs and
+step results stay. The default is to keep everything, since removing data is
+not something an upgrade should start doing: set a retention that fits your
+needs, and plan backups and deletion with the rest of your policy. Deleting a
+run through the Admin API deletes its logs.
+
+The logs of a run are read and exported without holding the run in memory. The
+logs endpoint returns the newest 1,000 lines by default, 5,000 at most, with a
+`next` cursor for the following page; the export streams the whole run. See
+[Run logs](admin-api.md#run-logs). Export is intended for diagnosis, not as a
+durable analytics pipeline.

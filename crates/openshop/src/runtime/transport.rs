@@ -14,11 +14,32 @@ pub const FORM_CONTENT_TYPE: &str = "application/x-www-form-urlencoded";
 /// `headers` is [`FORM_CONTENT_TYPE`] (parameters such as `charset` aside):
 /// it is then an object of strings, one per field. A custom [`HttpTransport`]
 /// that sends the client credentials request must do the same.
-#[derive(Debug, Clone, PartialEq)]
+/// `Debug` hides the headers and the body fields that hold a secret: an access
+/// token, a client secret, an authorization code.
+#[derive(Clone, PartialEq)]
 pub struct OutboundRequest {
     pub url: String,
     pub headers: Vec<(String, String)>,
     pub body: Value,
+}
+
+impl std::fmt::Debug for OutboundRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        use super::redact::{is_secret_name, redacted_json};
+        let headers: Vec<(&str, &str)> = self
+            .headers
+            .iter()
+            .map(|(name, value)| {
+                let shown = if is_secret_name(name) { "[redacted]" } else { value.as_str() };
+                (name.as_str(), shown)
+            })
+            .collect();
+        f.debug_struct("OutboundRequest")
+            .field("url", &self.url)
+            .field("headers", &headers)
+            .field("body", &redacted_json(&self.body))
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -73,6 +94,31 @@ impl Default for ReqwestTransport {
     }
 }
 
+/// The most of an answer that is read: 10 MiB. A GraphQL answer of Shopify,
+/// a token, the check of a provider are far below. A server that sends more is
+/// broken or hostile, and the body of an answer is held in memory.
+pub const MAX_RESPONSE_BYTES: usize = 10 * 1024 * 1024;
+
+/// The body of `response` as text, read as it arrives and given up on as soon
+/// as it is over `limit` bytes: a `Content-Length` that is too large is refused
+/// before anything is read, and a body without one, or lying about it, is
+/// counted.
+pub(crate) async fn read_body(mut response: reqwest::Response, limit: usize) -> Result<String> {
+    let too_large = || anyhow::anyhow!("[openshop] The response is larger than {limit} bytes: not read");
+    if response.content_length().is_some_and(|length| length > limit as u64) {
+        return Err(too_large());
+    }
+    let mut body: Vec<u8> = Vec::new();
+    while let Some(chunk) = response.chunk().await? {
+        if body.len() + chunk.len() > limit {
+            return Err(too_large());
+        }
+        body.extend_from_slice(&chunk);
+    }
+    // As `reqwest::Response::text` does: what is not UTF-8 is replaced.
+    Ok(String::from_utf8_lossy(&body).into_owned())
+}
+
 /// Whether the `Content-Type` of `headers` is a URL-encoded form, whatever
 /// its parameters and its case.
 fn is_form(headers: &[(String, String)]) -> bool {
@@ -98,7 +144,7 @@ impl HttpTransport for ReqwestTransport {
             }
             let response = builder.send().await?;
             let status = response.status().as_u16();
-            let body = response.text().await?;
+            let body = read_body(response, MAX_RESPONSE_BYTES).await?;
             Ok(OutboundResponse { status, body })
         })
     }
@@ -173,6 +219,67 @@ mod tests {
         )
         .await;
         assert!(request.ends_with("\r\n\r\ngrant_type=client_credentials"), "{request}");
+    }
+
+    /// Answers one request with `head`, then `body`, and closes.
+    async fn answered_with(head: &'static str, body: Vec<u8>) -> reqwest::Response {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let url = format!("http://{}/", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut buffer = [0u8; 4096];
+            let _ = stream.read(&mut buffer).await.unwrap();
+            let _ = stream.write_all(head.as_bytes()).await;
+            let _ = stream.write_all(&body).await;
+            let _ = stream.shutdown().await;
+        });
+        reqwest::get(url).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_body_is_read_up_to_the_limit_and_not_beyond() {
+        // Exactly the limit is read, with or without a length.
+        let response = answered_with("HTTP/1.1 200 OK\r\ncontent-length: 8\r\n\r\n", b"12345678".to_vec()).await;
+        assert_eq!(read_body(response, 8).await.unwrap(), "12345678");
+        let response = answered_with("HTTP/1.1 200 OK\r\nconnection: close\r\n\r\n", b"12345678".to_vec()).await;
+        assert_eq!(read_body(response, 8).await.unwrap(), "12345678");
+
+        // A length over the limit is refused before the body is read.
+        let response = answered_with("HTTP/1.1 200 OK\r\ncontent-length: 9\r\n\r\n", b"123456789".to_vec()).await;
+        let error = read_body(response, 8).await.unwrap_err().to_string();
+        assert_eq!(error, "[openshop] The response is larger than 8 bytes: not read");
+
+        // So is a body that has no length and goes on, however it arrives.
+        let response = answered_with("HTTP/1.1 200 OK\r\nconnection: close\r\n\r\n", vec![b'x'; 1_000_000]).await;
+        assert!(read_body(response, 1024).await.is_err());
+        let chunked = "HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\n";
+        let mut body = Vec::new();
+        for _ in 0..100 {
+            body.extend_from_slice(b"10\r\n0123456789abcdef\r\n");
+        }
+        body.extend_from_slice(b"0\r\n\r\n");
+        let response = answered_with(chunked, body).await;
+        assert!(read_body(response, 1024).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn what_a_transport_answers_is_capped_at_ten_mebibytes() {
+        assert_eq!(MAX_RESPONSE_BYTES, 10 * 1024 * 1024);
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let url = format!("http://{}/", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut buffer = [0u8; 4096];
+            let _ = stream.read(&mut buffer).await.unwrap();
+            let head = format!("HTTP/1.1 200 OK\r\ncontent-length: {}\r\n\r\n", MAX_RESPONSE_BYTES + 1);
+            let _ = stream.write_all(head.as_bytes()).await;
+            let _ = stream.shutdown().await;
+        });
+        let error = ReqwestTransport::new()
+            .post_json(OutboundRequest { url, headers: Vec::new(), body: json!({}) })
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("larger than 10485760 bytes"), "{error}");
     }
 
     #[test]

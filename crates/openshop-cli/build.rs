@@ -1,9 +1,11 @@
 //! Embeds the templates of `openshop init`, from `templates/` at the root of
 //! the repository: `$OUT_DIR/templates.rs` lists the files a project gets from
-//! each, with their content.
+//! each, with their content. It also sets `OPENSHOP_GIT_COMMIT`, the commit of
+//! the repository the CLI is built from, when there is one.
 
 use std::fmt::Write;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 /// The templates, each a crate of the workspace.
 const TEMPLATES: &[&str] = &["minimal", "custom", "public"];
@@ -47,6 +49,38 @@ fn slice(name: &str, root: &Path, files: &[PathBuf]) -> String {
     code + "];\n"
 }
 
+/// The output of `git <args>` in `directory`, when it succeeds.
+fn git(directory: &Path, args: &[&str]) -> Option<String> {
+    let output = Command::new("git").arg("-C").arg(directory).args(args).output().ok()?;
+    let text = String::from_utf8(output.stdout).ok()?;
+    (output.status.success() && !text.trim().is_empty()).then(|| text.trim().to_string())
+}
+
+/// The commit the CLI is built from: `HEAD` of the repository whose root is
+/// `workspace`. `cargo install --git` builds from a checkout of its own, with
+/// its `.git`, at the commit it installs. `None` for a source without git, or
+/// inside another repository (a registry unpacked in a versioned home
+/// directory, say).
+fn commit(workspace: &Path) -> Option<String> {
+    let top = PathBuf::from(git(workspace, &["rev-parse", "--show-toplevel"])?);
+    if top.canonicalize().ok()? != workspace.canonicalize().ok()? {
+        return None;
+    }
+    // A new commit, or another branch, is a new build: nothing else is. The
+    // branches are watched as a directory, since the file of the current one
+    // may not exist yet (it is packed until it gets a commit).
+    for name in ["HEAD", "packed-refs", "refs/heads"] {
+        if let Some(path) = git(workspace, &["rev-parse", "--git-path", name]) {
+            let path = workspace.join(path);
+            if path.exists() {
+                println!("cargo::rerun-if-changed={}", path.display());
+            }
+        }
+    }
+    let commit = git(workspace, &["rev-parse", "HEAD"])?;
+    (commit.len() == 40 && commit.chars().all(|character| character.is_ascii_hexdigit())).then_some(commit)
+}
+
 fn main() {
     let templates = Path::new(&std::env::var("CARGO_MANIFEST_DIR").unwrap()).join("../../templates");
     // The templates are crates of the workspace: the CLI is built from a checkout
@@ -82,6 +116,10 @@ fn main() {
     files_in(&shared, &mut files);
     files.sort();
     code += &slice("SHARED", &shared, &files);
+
+    if let Some(commit) = templates.parent().and_then(commit) {
+        println!("cargo::rustc-env=OPENSHOP_GIT_COMMIT={commit}");
+    }
 
     let out = PathBuf::from(std::env::var("OUT_DIR").unwrap()).join("templates.rs");
     std::fs::write(out, code).unwrap();

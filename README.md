@@ -17,13 +17,19 @@ You need Rust 1.88+, PostgreSQL 17, the Shopify CLI, and access to a
 development store.
 
 ```bash
-cargo install --git https://github.com/0xtlt/openshop-rust openshop-cli
+cargo install --locked --git https://github.com/0xtlt/openshop-rust openshop-cli
 openshop init my-app       # asks for a template: minimal, custom or public
 cd my-app
 docker compose up -d
 cp .env.example .env
 openshop dev
 ```
+
+The project depends on `openshop` at the commit the CLI was built from, which
+`cargo install --git` takes from the repository. To follow another commit, tag
+or branch, or a local checkout, pass `--openshop-rev=<commit>`,
+`--openshop-tag=<tag>`, `--openshop-branch=<name>` or `--openshop-path=<dir>`
+to `openshop init`.
 
 `openshop dev` pushes the database schema, then serves the API, the admin UI,
 a worker and the cron scheduler on `http://localhost:3000`. It restarts when

@@ -5,14 +5,15 @@ use crate::{
         CustomPageView, use_custom_admin_pages, use_custom_home,
     },
     dom::{self, every, hold_until_cleanup, listen},
-    fetch::api_json,
+    fetch::{ApiError, api_json},
     navigation::{self, NavigateEvent, NavigateTarget},
     pages::{
         crons::Crons, flow_run::FlowRun, flows::Flows, functions::Functions, home::Home, mcp::Mcp, providers::Providers,
     },
+    report::{log_error, report_error},
     router, shopify,
 };
-use futures_util::future::{join, try_join};
+use futures_util::future::join;
 use gloo_timers::future::TimeoutFuture;
 use leptos::{mount::mount_to, prelude::*, task::spawn_local};
 use leptos_router::{
@@ -93,8 +94,8 @@ impl App {
     }
 }
 
-async fn load_custom_admin_pages() -> CustomAdminPagesResponse {
-    api_json("/api/pages/custom").await.unwrap_or_default()
+async fn load_custom_admin_pages() -> Result<CustomAdminPagesResponse, ApiError> {
+    api_json("/api/pages/custom").await
 }
 
 fn current_url() -> Signal<String> {
@@ -163,7 +164,10 @@ fn NavMenu() -> impl IntoView {
 enum AuthStatus {
     Checking,
     Ready,
+    /// There is no App Bridge session: the app is not open in Shopify admin.
     Blocked,
+    /// There is a session, and what the app needs to start could not be loaded.
+    Failed,
 }
 
 /// Waits for an App Bridge session, then keeps the page visibility config fresh.
@@ -171,6 +175,8 @@ enum AuthStatus {
 fn AuthGate(children: ChildrenFn) -> impl IntoView {
     let location = use_location();
     let status = RwSignal::new(AuthStatus::Checking);
+    // Why the app could not start, when `status` is `Failed`.
+    let failure = RwSignal::new(String::new());
     let pages = RwSignal::new(resolve_admin_pages(None, None));
     let custom_pages = RwSignal::new(CustomAdminPagesResponse::default());
     provide_context(AdminPagesContext(pages.read_only()));
@@ -182,21 +188,40 @@ fn AuthGate(children: ChildrenFn) -> impl IntoView {
             TimeoutFuture::new(100).await;
             attempt += 1;
         }
-        if !matches!(shopify::id_token().await, Ok(Some(token)) if !token.is_empty()) {
-            status.set(AuthStatus::Blocked);
-            return;
-        }
-        let loaded = try_join(api_json::<ResolvedAdminPages>("/api/pages"), async {
-            Ok(load_custom_admin_pages().await)
-        });
-        match loaded.await {
-            Ok((data, custom_data)) => {
-                pages.set(data);
-                custom_pages.set(custom_data);
-                status.set(AuthStatus::Ready);
+        match shopify::id_token().await {
+            Ok(Some(token)) if !token.is_empty() => {}
+            Ok(_) => {
+                status.set(AuthStatus::Blocked);
+                return;
             }
-            Err(_) => status.set(AuthStatus::Blocked),
+            Err(error) => {
+                log_error("Could not get a session token from App Bridge", &error);
+                failure.set(format!("Could not get a session from Shopify: {error}"));
+                status.set(AuthStatus::Failed);
+                return;
+            }
         }
+        let (data, custom_data) = join(api_json::<ResolvedAdminPages>("/api/pages"), load_custom_admin_pages()).await;
+        let data = match data {
+            Ok(data) => data,
+            Err(error) => {
+                log_error("Could not load the pages of the app", &error);
+                failure.set(format!("Could not load the app: {error}"));
+                status.set(AuthStatus::Failed);
+                return;
+            }
+        };
+        // Without its own pages, the app still opens on the built-in ones.
+        match custom_data {
+            Ok(custom_data) => custom_pages.set(custom_data),
+            Err(error) => report_error(
+                "Could not load the custom pages of the app",
+                &error,
+                &format!("Could not load the pages of the app: {error}"),
+            ),
+        }
+        pages.set(data);
+        status.set(AuthStatus::Ready);
     });
 
     Effect::new(move |_| {
@@ -216,15 +241,25 @@ fn AuthGate(children: ChildrenFn) -> impl IntoView {
             spawn_local(async move {
                 let (data, custom_data) =
                     join(api_json::<ResolvedAdminPages>("/api/pages"), load_custom_admin_pages()).await;
-                let Ok(data) = data else { return };
                 if !active.load(Ordering::Relaxed) {
                     return;
                 }
-                if pages.try_with_untracked(|current| !same_admin_pages(current, &data)) == Some(true) {
-                    pages.set(data);
+                // A refresh that fails keeps what is shown: the next one tries again.
+                match data {
+                    Ok(data) => {
+                        if pages.try_with_untracked(|current| !same_admin_pages(current, &data)) == Some(true) {
+                            pages.set(data);
+                        }
+                    }
+                    Err(error) => log_error("Could not refresh the pages of the app", &error),
                 }
-                if custom_pages.try_with_untracked(|current| *current != custom_data) == Some(true) {
-                    custom_pages.set(custom_data);
+                match custom_data {
+                    Ok(custom_data) => {
+                        if custom_pages.try_with_untracked(|current| *current != custom_data) == Some(true) {
+                            custom_pages.set(custom_data);
+                        }
+                    }
+                    Err(error) => log_error("Could not refresh the custom pages of the app", &error),
                 }
             });
         };
@@ -243,29 +278,40 @@ fn AuthGate(children: ChildrenFn) -> impl IntoView {
         hold_until_cleanup(listen(&window(), "focus", move |_| refresh()));
     });
 
-    move || match status.get() {
+    move || {
+        match status.get() {
         AuthStatus::Ready => children().into_any(),
         // The page the server gives a visitor without a shop, for one without a session.
         status => view! {
             <s-page inlineSize="small">
                 <s-section>
-                    {if status == AuthStatus::Checking {
-                        view! { <s-paragraph>"Loading..."</s-paragraph> }.into_any()
-                    } else {
-                        view! {
-                            <s-stack gap="base">
-                                <s-heading>"Open this app from Shopify admin"</s-heading>
-                                <s-paragraph>
-                                    "This app works inside Shopify admin. Open it from the Apps section of your store."
-                                </s-paragraph>
-                            </s-stack>
+                    {match status {
+                        AuthStatus::Checking => view! { <s-paragraph>"Loading..."</s-paragraph> }.into_any(),
+                        AuthStatus::Failed => {
+                            view! {
+                                <s-banner tone="critical" heading="The app could not start">
+                                    {failure.get()}
+                                </s-banner>
+                            }
+                                .into_any()
                         }
-                            .into_any()
+                        _ => {
+                            view! {
+                                <s-stack gap="base">
+                                    <s-heading>"Open this app from Shopify admin"</s-heading>
+                                    <s-paragraph>
+                                        "This app works inside Shopify admin. Open it from the Apps section of your store."
+                                    </s-paragraph>
+                                </s-stack>
+                            }
+                                .into_any()
+                        }
                     }}
                 </s-section>
             </s-page>
         }
         .into_any(),
+    }
     }
 }
 

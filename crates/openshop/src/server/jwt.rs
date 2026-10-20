@@ -64,6 +64,13 @@ pub fn customer_id_from_jwt_sub(sub: &str) -> Option<String> {
     CUSTOMER_GID_RE.captures(sub).map(|captures| captures[1].to_string())
 }
 
+/// Whether the subject of a session token is a staff user of the admin: neither
+/// a customer nor the empty subject of an anonymous buyer. Tokens of checkout and
+/// customer account extensions never are, and the Admin API accepts nothing else.
+pub fn is_staff_subject(sub: &str) -> bool {
+    !sub.is_empty() && customer_id_from_jwt_sub(sub).is_none()
+}
+
 /// Reads the `aud` claim without verifying the token, to pick the matching app.
 pub fn read_jwt_audience(token: &str) -> Option<String> {
     let payload = token.split('.').nth(1)?;

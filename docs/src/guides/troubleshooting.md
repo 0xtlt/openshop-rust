@@ -43,7 +43,9 @@ requests:
 
 An `Invalid HMAC` response means the request was not signed with the secret of
 a configured app. An `Invalid state/nonce` response means the OAuth callback is
-stale or belongs to a different installation attempt.
+stale (older than ten minutes, or already used), or belongs to a different
+browser or installation attempt: start again at `/auth` in the browser that
+will finish the installation, with cookies enabled.
 
 ## The embedded UI returns 401
 
@@ -72,6 +74,9 @@ If the worker repeatedly loses work, compare the `lease_duration` of the
 `worker` setting with the 15-second interval at which a worker renews its
 leases: keep the lease well above it. Also look for blocking code that stalls the process for longer than
 the lease, because the renewal only happens while the worker can run its tasks.
+A renewal that fails is logged as `Heartbeat of run … failed`; a pool kept busy by
+the flows themselves delays it, so size the pool above the concurrency of the
+worker.
 
 ## A run retries or fails unexpectedly
 
@@ -140,12 +145,33 @@ has arrived. The server then reads what the caller still sends for up to five
 seconds, so that a caller in the middle of its upload reads the answer instead
 of a connection reset.
 
+## A request is refused with 503
+
+`Request timed out` means the handler did not produce a response within 60
+seconds; the work it was doing is cancelled. `Server is busy, try again`, with
+a `Retry-After: 1` header, means 1024 requests were already being served.
+Find out what is slow (a provider call without a timeout, a query), or raise
+the `request_timeout` and `max_concurrent_requests` settings of `app!` if the
+load is legitimate. For work that takes longer than a request should, dispatch
+a flow and answer at once. `/health` is answered even when the server is full.
+An MCP call can also answer `503` when many tokens are being checked at once;
+it is safe to retry.
+
 ## Provider secrets cannot be read back
 
 Password fields are intentionally write-only. An empty password submitted from
 the admin keeps the current value. To replace it, submit a new value. If the
 `ENCRYPTION_KEY` changed, restore the original key; existing ciphertext cannot
 be decrypted with a replacement.
+
+## The application does not start: `ENCRYPTION_KEY must be set`
+
+Without an `ENCRYPTION_KEY`, OpenShop refuses to start rather than store
+provider credentials and access tokens in plaintext. Set a key
+(`openssl rand -hex 32`) in the environment of the process. On a development
+machine, `openshop dev` does not need one; `start` and `worker` do, unless
+`OPENSHOP_ENV=development`. `OPENSHOP_ENV=staging`, `prod` or a typo is not a
+development environment.
 
 ## Tests cannot reach the database
 

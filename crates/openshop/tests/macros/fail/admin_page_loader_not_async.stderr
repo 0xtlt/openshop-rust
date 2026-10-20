@@ -1,0 +1,5 @@
+error: expected `async fn(ctx: AdminContext) -> Result<…>` or `async fn(ctx: AdminContext, input: Input) -> Result<…>` for `#[loader]`
+ --> tests/macros/fail/admin_page_loader_not_async.rs:8:8
+  |
+8 |     fn list(_ctx: AdminContext) -> Result<Value> {
+  |        ^^^^

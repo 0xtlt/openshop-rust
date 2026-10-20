@@ -116,9 +116,10 @@ without `serde` or `schemars` among the dependencies of the application.
 `#[input]` is the short form. The function accepts any type that implements
 `Deserialize` and `JsonSchema`; `dispatch` needs `Serialize` as well.
 
-The type gives the flow a JSON Schema. In the worker, the dispatched value
-must satisfy that schema and deserialize into the type; otherwise the run
-fails with `Invalid input for flow "<key>": <summary>`, for example
+The type gives the flow a JSON Schema. The dispatched value must satisfy that
+schema and deserialize into the type. A dispatch refuses a value that does not
+before it queues a run, with an `InvalidFlowInput` error (`422` on the Admin
+API); a run that holds such a value anyway fails with `Invalid input for flow "<key>": <summary>`, for example
 `Invalid input for flow "syncOrders": input.limit must be >= 1`. The schema is
 also what `GET /api/flows` and the MCP tool `openshop.flows.list` return as
 `inputSchema`. A function without a second argument declares a flow without a
@@ -129,8 +130,9 @@ The schema check understands the keywords listed under
 expressed with other keywords are enforced only if deserialization into the
 type enforces them.
 
-Input is validated when a worker starts the run, not at dispatch. A dispatched
-input that is not a JSON object is replaced with `{}` before validation. The
+Input is validated at dispatch, and again when a worker starts the run. A
+dispatched input that is not a JSON object is replaced with `{}` before
+validation. The
 `input` of a [cron](configuration.md#crons) is also checked when the
 configuration is built.
 
@@ -218,7 +220,9 @@ A field left unset keeps the value of the level before it.
 
 The merged policy is stored on the run at dispatch. The delay before retry
 `n` is `initial_interval × backoff_coefficient^(n − 1)`, capped at
-`max_interval`.
+`max_interval`. That is the longest delay: the retry is scheduled after a delay
+drawn at random between half of it and all of it, so that runs which failed
+together do not retry together. The date is taken from the clock of the database.
 
 A retry is not scheduled when `max_attempts` is reached or when its next start
 would be at or after the deadline stored at dispatch. Each attempt still uses
@@ -226,8 +230,23 @@ the full `timeout` in its execution race. The `on_error` hook runs after each
 failed attempt, including attempts that will be retried; a failure or panic
 inside the hook is ignored.
 
+Every time a worker takes a run, it counts as an attempt, except when the run
+wakes up from `ctx.step.sleep`: a sleep is not a failure, so a flow can sleep as
+often as it needs to, even with `max_attempts(1)`. If a worker dies without
+recording the outcome of an attempt, the run is taken again once its lease has
+expired. When that attempt was the last one, the run is marked `failed` with the
+error `Run abandoned: …` instead, so a flow that takes its worker down is not
+taken forever.
+
 A run requeued with the Admin API retry endpoint carries no retry policy: if it
-fails again it is marked `failed` without further attempts.
+fails again, or if its worker dies, it is marked `failed` without further
+attempts.
+
+Only the worker that took a run last can record its outcome. If the lease of a
+slow execution expired and the run was taken again, even by the same worker, the
+old execution is told to stop at its next heartbeat, and what it returns is
+ignored. Its steps are fenced the same way: a step that finishes after the run
+was taken again stores no result and fails with `LeaseLostError`.
 
 ## Concurrency
 

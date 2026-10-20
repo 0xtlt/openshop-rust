@@ -8,8 +8,8 @@ use std::path::{Path, PathBuf};
 use common::{TEST_SHOP, TempProject, create_config, empty_database, noop_flow, test_env};
 use openshop::db::Table;
 use openshop::db::migrate::{
-    FRAMEWORK_MIGRATIONS, MigrationStatus, check_migrations, generate_migrations, get_client_migration_status,
-    migrate_schema, push_schema,
+    FRAMEWORK_MIGRATIONS, MigrationStatus, assert_migrated, check_migrations, generate_migrations,
+    get_client_migration_status, migrate_schema, push_schema,
 };
 use openshop::testing::{MockTransport, TestDb};
 use openshop::{DispatchOptions, OpenShop, PgPool};
@@ -69,6 +69,9 @@ async fn indexes(pool: &PgPool, table: &str) -> Vec<String> {
 }
 
 const QUEUE_INDEXES: [&str; 2] = ["flow_runs_claimable_idx", "flow_runs_deadline_idx"];
+
+/// Made redundant by the queue indexes, and dropped by a later migration.
+const DROPPED_INDEX: &str = "flow_runs_status_available_created_idx";
 
 /// Generates for an application without models and returns the files.
 fn generate(cwd: &Path, args: &[String], production: bool) -> openshop::Result<Vec<PathBuf>> {
@@ -405,6 +408,7 @@ async fn generate_then_migrate_creates_the_framework_tables() {
         [
             "__openshop_migrations",
             "cron_overrides",
+            "cron_ticks",
             "flow_runs",
             "installations",
             "logs",
@@ -472,7 +476,74 @@ async fn generate_then_migrate_upgrades_a_deployed_framework_schema() {
         QUEUE_INDEXES.iter().all(|index| after.contains(&index.to_string())),
         "{after:?}"
     );
-    assert!(before.iter().all(|index| after.contains(index)));
+    // Nothing is lost but the index that the queue indexes replace.
+    assert!(before.contains(&DROPPED_INDEX.to_string()) && !after.contains(&DROPPED_INDEX.to_string()));
+    assert!(
+        before
+            .iter()
+            .filter(|index| *index != DROPPED_INDEX)
+            .all(|index| after.contains(index))
+    );
+    db.cleanup().await.unwrap();
+}
+
+const LOGS_INDEXES: [&str; 2] = ["logs_created_at_idx", "logs_level_created_at_idx"];
+
+#[tokio::test]
+async fn the_logs_indexes_come_with_a_migration_that_keeps_the_table_as_it_is() {
+    // A project deployed with the first two framework migrations, whose logs
+    // table is shared with the TypeScript runtime and has lines in it.
+    let db = empty_database().await;
+    let project = TempProject::new();
+    for (stamp, migration) in ["20260101000000", "20260101000001"].iter().zip(FRAMEWORK_MIGRATIONS) {
+        project.write(
+            &format!("{stamp}_{}", migration.name),
+            &format!("-- openshop:framework {}\n\n{}", migration.id, migration.sql),
+        );
+    }
+    migrate_schema(&db.pool, project.path()).await.unwrap();
+    sqlx::query("INSERT INTO logs (flow_run_id, level, message) VALUES ('not-a-uuid', 'info', 'kept')")
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    let definition = || async {
+        sqlx::query_as::<_, (String, String, String)>(
+            "SELECT column_name::text, data_type::text, is_nullable::text FROM information_schema.columns \
+             WHERE table_schema = current_schema() AND table_name = 'logs' ORDER BY ordinal_position",
+        )
+        .fetch_all(&db.pool)
+        .await
+        .unwrap()
+    };
+    let before = definition().await;
+    let indexes_before = indexes(&db.pool, "logs").await;
+    assert!(
+        LOGS_INDEXES
+            .iter()
+            .all(|index| !indexes_before.contains(&index.to_string()))
+    );
+
+    let created = generate(project.path(), &[], false).unwrap();
+    assert_eq!(created.len(), FRAMEWORK_MIGRATIONS.len() - 2);
+    migrate_schema(&db.pool, project.path()).await.unwrap();
+
+    let after = indexes(&db.pool, "logs").await;
+    assert!(
+        LOGS_INDEXES.iter().all(|index| after.contains(&index.to_string())),
+        "{after:?}"
+    );
+    assert!(indexes_before.iter().all(|index| after.contains(index)), "{after:?}");
+    assert!(
+        indexes(&db.pool, "flow_runs")
+            .await
+            .contains(&"flow_runs_id_text_idx".to_string())
+    );
+    assert_eq!(definition().await, before);
+    let (kept,): (i64,) = sqlx::query_as("SELECT count(*) FROM logs WHERE message = 'kept'")
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(kept, 1);
     db.cleanup().await.unwrap();
 }
 
@@ -569,5 +640,50 @@ async fn push_schema_creates_framework_and_model_tables() {
         columns(&db.pool, "reviews").await,
         ["created_at", "id", "rating", "shop", "updated_at"]
     );
+    db.cleanup().await.unwrap();
+}
+
+#[tokio::test]
+async fn start_and_worker_refuse_a_database_that_is_behind_the_migrations() {
+    let db = empty_database().await;
+    let project = TempProject::new();
+
+    // No migrations folder: nothing to compare the database with.
+    assert_migrated(&db.pool, project.path()).await.unwrap();
+
+    // The framework schema is not in the folder yet.
+    project.write(INIT, INIT_SQL);
+    let error = assert_migrated(&db.pool, project.path()).await.unwrap_err();
+    assert!(error.to_string().contains("is not covered by ./migrations"), "{error}");
+
+    // Covered, but never applied: the table that tracks them does not exist either.
+    generate(project.path(), &[], false).unwrap();
+    let error = assert_migrated(&db.pool, project.path()).await.unwrap_err().to_string();
+    let count = FRAMEWORK_MIGRATIONS.len() + 1;
+    assert!(
+        error.starts_with(&format!(
+            "[openshop] Not starting: {count} migrations are not applied ("
+        )),
+        "{error}"
+    );
+    assert!(
+        error.contains(INIT) && error.ends_with("Run `migrate` first."),
+        "{error}"
+    );
+    // Looking did not create anything.
+    assert!(tables(&db.pool).await.is_empty());
+
+    // One more migration, after the others were applied.
+    migrate_schema(&db.pool, project.path()).await.unwrap();
+    assert_migrated(&db.pool, project.path()).await.unwrap();
+    project.write(NEXT, NEXT_SQL);
+    let error = assert_migrated(&db.pool, project.path()).await.unwrap_err().to_string();
+    assert_eq!(
+        error,
+        format!("[openshop] Not starting: 1 migration is not applied ({NEXT}). Run `migrate` first.")
+    );
+
+    migrate_schema(&db.pool, project.path()).await.unwrap();
+    assert_migrated(&db.pool, project.path()).await.unwrap();
     db.cleanup().await.unwrap();
 }

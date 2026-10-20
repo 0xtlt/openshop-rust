@@ -40,8 +40,8 @@ still answers `401` without a valid token.
 - JSON keys are camelCase. Timestamps are UTC ISO 8601 strings with
   millisecond precision, such as `2026-04-01T12:30:05.123Z`.
 - Errors are `{ "error": "<message>" }` unless stated otherwise. An unexpected
-  failure answers `500` with the plain text `Internal Server Error`; the cause
-  is written to the runtime log.
+  failure answers `500` with the plain text `Internal Server Error` and an
+  `x-error-id` header; the cause is written to the runtime log under that id.
 - An identifier that is not a UUID is answered like an unknown one (`404`).
 - An unknown path, or an unsupported method on a known path, answers a plain
   `404 Not Found`.
@@ -96,7 +96,7 @@ error contract.
 | `GET /api/runs` | Query filters below | Run rows for the authenticated app and shop, newest first. |
 | `GET /api/flows/:name/runs` | Same filters | Run rows restricted to one flow. |
 | `GET /api/runs/:id` | — | Run row plus `steps`, in creation order. |
-| `POST /api/flows/:name/run` | `{ "input": { ... } }` | `202` with `{ runId, status: "pending" }`. |
+| `POST /api/flows/:name/run` | `{ "input": { ... } }` | `202` with `{ runId, status: "pending" }`. `404` for an unknown flow, `422` when the input fails the input schema of the flow; no run is queued. A dispatch from code refuses the same input. |
 | `POST /api/runs/:id/retry?mode=resume` | — | Requeues a finished run: `{ ok: true, runId, mode }`. |
 | `POST /api/runs/:id/retry?mode=reset` | — | Deletes every step result, then requeues. |
 | `POST /api/runs/:id/cancel` | — | Cancels a pending, running, or sleeping run: `{ ok: true }`. |
@@ -112,8 +112,12 @@ has `id`, `stepName`, `attempt`, `status`, `output`, `error`, `durationMs`,
 Run list query parameters:
 
 - `limit`: `1`–`200`, default `50`.
-- `offset`: non-negative, default `0`.
-- `search`: case-insensitive flow name, status, or run-ID search.
+- `offset`: non-negative, default `0`, at most `10000`: a deeper page makes the
+  database read and drop every row before it, so `400` with
+  `offset must be at most 10000` answers it. Narrow the list with the filters
+  below instead.
+- `search`: case-insensitive flow name, status, or run-ID search. It is text:
+  `%`, `_` and `\` match themselves.
 - `status`: `pending`, `running`, `sleeping`, `completed`, `failed`, or `canceled`. Other values are ignored.
 - `from`, `to`: dates applied to `createdAt`. Accepted forms are RFC 3339 timestamps, `YYYY-MM-DDTHH:MM[:SS]` (read as UTC), and `YYYY-MM-DD`. Unparsable values are ignored.
 
@@ -122,28 +126,60 @@ other than `reset` behaves as `resume`. Retry accepts only `failed`,
 `completed`, or `canceled` runs; it resets the attempt count and the deadline.
 Active runs cannot be deleted.
 
+Each of these transitions is decided by the write itself, not by the status
+the request read: a cancel never overwrites a run that has just completed, a
+retry never resets a run that has just started, and a delete never removes a
+run that has just started. The request then answers `409` with the status the
+run has now, or `404` if the run is gone. A retry follows the concurrency of
+the flow like a dispatch: when the flow rejects concurrent runs and another run
+of it is active for the shop, the retry is refused with the `409` below and the
+run is left as it was.
+
 | Status | `error` | Condition |
 | --- | --- | --- |
 | `400` | `No IDs provided` | Bulk delete without a non-empty `ids` array. |
 | `400` | `Max 100 runs per batch` | Bulk delete with more than 100 IDs. |
 | `404` | `Run not found` | The run does not exist for the authenticated app and shop. |
-| `409` | `Cannot retry a run with status "<status>"` | Retry of an active run. |
-| `409` | `Cannot cancel a run with status "<status>"` | Cancel of a finished run. |
-| `409` | `Cannot delete an active run — cancel it first` | Delete of an active run. |
-| `409` | `Flow "<name>" is already running for shop "<shop>" (run #<id>)` | Flow concurrency conflict. The body also contains `existingRunId`. |
+| `404` | `Flow "<name>" not found` | Dispatch of an unregistered flow name. |
+| `422` | `Invalid input for flow "<name>": <reason>` | The input fails the input schema of the flow. |
+| `409` | `Cannot retry a run with status "<status>"` | Retry of a run that is active, or became active meanwhile. |
+| `409` | `Cannot cancel a run with status "<status>"` | Cancel of a run that is finished, or finished meanwhile. |
+| `409` | `Cannot delete an active run — cancel it first` | Delete of a run that is active, or became active meanwhile. |
+| `409` | `The run changed while the request was processed — try again` | The status of the run changed twice while the request was processed. |
+| `409` | `Flow "<name>" is already running for shop "<shop>" (run #<id>)` | Flow concurrency conflict, on a dispatch or on a retry. The body also contains `existingRunId`. |
 
-Dispatching an unregistered flow name is an unexpected failure (`500`). In a
-bulk delete, IDs that are unknown, active, or not UUIDs count as skipped.
+In a bulk delete, IDs that are unknown, active (or active by the time of the delete), or not UUIDs count as skipped.
 
 ## Run logs
 
 | Method and path | Request | Response |
 | --- | --- | --- |
-| `GET /api/runs/:id/logs` | `q`, `levels` | `{ logs, total }`, newest first, with matching context markers. |
-| `GET /api/runs/:id/logs/export` | `format`, `q`, `levels` | Downloadable JSON or CSV. |
+| `GET /api/runs/:id/logs` | `q`, `levels`, `limit`, `cursor` | `{ logs, total, levelCounts, next }`, newest first, with matching context markers. |
+| `GET /api/runs/:id/logs/export` | `format`, `q`, `levels` | Downloadable JSON or CSV, streamed. |
 
 A log has the keys `id`, `flowRunId`, `level`, `message`, `payload`, and
-`createdAt`. `total` is the number of log lines of the run before filtering.
+`createdAt`. `total` is the number of log lines of the run before filtering,
+and `levelCounts` the number of each level (`{ "info": 4, "error": 1 }`) in
+the whole run.
+
+A page holds `limit` lines: 1,000 when it is absent or not a number, 5,000 at
+most. `next` is a cursor, `null` on the last page; pass it as `cursor` with the
+same `q` and `levels` to get the following lines. Lines are ordered by
+`(createdAt, id)`, newest first, so pages neither repeat nor skip a line. A
+cursor that is not one answers `400` with `Invalid cursor`. A `q` the engine refuses (an invalid or rejected regular
+expression, a query over its limits) answers `400` with the reason, for the
+export too. A page never holds
+more than `limit` lines, however many lines match and whatever the context
+(`A:`, `B:`, `C:`) asked for; the cursor carries the context still to come, so
+the pages put end to end are the list one unbounded request would give. The one
+exception is a match whose context before it is longer than `limit`: it is not
+split, so a page that starts with it holds it, up to 1,001 lines. Levels and time bounds
+are applied by the database; the text of the filters is checked on the lines as
+they are read, so a rare match in a long run still reads the run, a chunk at a
+time. `before` context is limited to 1,000 lines.
+
+The export is written as the lines are read, 500 at a time, and is never held
+whole by the server: it has no `Content-Length`.
 
 `levels` is a comma-separated subset of `info,warn,error`; all three are enabled by
 default. `q` uses the [log query syntax](logging.md#log-query-syntax), including
@@ -151,7 +187,9 @@ text filters, time bounds, and context expansion. When `q` contains a text
 filter, each returned log carries `_matched`: `true` for a match, `false` for a
 context line. Export uses only matching rows and omits context
 expansion. `format=csv` selects CSV with the columns
-`id,level,message,payload,createdAt`; every other value returns JSON. The
+`id,level,message,payload,createdAt`; a cell that starts with `=`, `+`, `-`, `@`,
+a tab or a carriage return starts with `'` so that a spreadsheet does not read
+it as a formula; every other value returns JSON. The
 response is sent as an attachment named `run-<id>-logs.<format>`; a `format`
 that contains anything but letters and digits is replaced with `json` in the
 file name.
@@ -174,7 +212,7 @@ with `key and enabled are required`.
 | --- | --- | --- |
 | `GET /api/providers` | — | `[{ name, fields, config, configured, lastCheckedAt, lastCheckOk }]`: definitions, public config, and last health check. |
 | `PUT /api/providers/:name` | `{ "config": { ... } }` | Validates, keeps stored passwords left blank, encrypts, and stores config: `{ ok: true }`. |
-| `POST /api/providers/:name/check` | — | `{ ok }`, or `{ ok: false, error }` with `500`. |
+| `POST /api/providers/:name/check` | — | `{ ok }`; `{ ok: false, error }` with `500` when the checker fails; `{ ok: false, error }` with `504` when it takes longer than 10 seconds. |
 
 Each entry of `fields` has `type`, `label`, and, when set, `placeholder`,
 `options`, and `required`; password fields also have `hasValue`. Password
@@ -194,7 +232,7 @@ instances.
 | Method and path | Request | Response |
 | --- | --- | --- |
 | `GET /api/functions` | — | `[{ key, label, type, handle, modes, supportsUpdate, singleton, fields }]`: local function definitions and editable fields. `modes` is present for discount functions only. |
-| `GET /api/functions/:handle/instances` | — | Up to 50 live Shopify instances. |
+| `GET /api/functions/:handle/instances` | — | The live Shopify instances, read page after page (50 at a time, at most 20 pages: 1,000 instances). |
 | `POST /api/functions/:handle/instances` | Function config and owner fields | `201` with `{ ok: true, data }`, where `data` is the mutation payload. |
 | `PUT /api/functions/:handle/instances/:id` | Function config and owner fields | `{ ok: true }`. |
 | `DELETE /api/functions/:handle/instances/:id` | Optional `mode` query | `{ ok: true }`. |
@@ -265,9 +303,11 @@ its ID and fingerprint.
 | `200` | Read or mutation completed. |
 | `201` | Function instance or MCP token created. |
 | `202` | Flow accepted for asynchronous execution. |
-| `400` | Invalid request, provider config, function config, or MCP permission. |
+| `400` | Invalid request, provider config, function config, MCP permission, or log query. |
 | `401` | Missing, expired, malformed, or invalid Shopify session token. |
 | `404` | Resource not found within the authenticated app and shop, unknown path, or the admin page is `disabled`. |
 | `409` | Lifecycle or concurrency conflict. |
+| `422` | Flow input that fails the input schema of the flow. |
 | `413` | Request body larger than the request body limit. |
 | `500` | Provider checker or unexpected server failure. |
+| `504` | Provider checker that took longer than 10 seconds. |

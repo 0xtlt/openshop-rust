@@ -52,7 +52,7 @@ pub struct McpRegistry {
     pub resources: IndexMap<String, RegisteredMcpResource>,
 }
 
-fn core_permission_definitions() -> [(&'static str, &'static str, &'static str, &'static str, McpRiskLevel); 10] {
+fn core_permission_definitions() -> [(&'static str, &'static str, &'static str, &'static str, McpRiskLevel); 6] {
     use McpRiskLevel::{High, Low, Medium};
     [
         (
@@ -85,37 +85,9 @@ fn core_permission_definitions() -> [(&'static str, &'static str, &'static str, 
             Medium,
         ),
         (
-            "read_providers",
-            "Read providers",
-            "List provider status and public field metadata.",
-            "Providers",
-            Low,
-        ),
-        (
-            "write_providers",
-            "Write providers",
-            "Update provider configuration.",
-            "Providers",
-            High,
-        ),
-        (
-            "read_functions",
-            "Read functions",
-            "Read Shopify Function definitions and instances.",
-            "Functions",
-            Low,
-        ),
-        (
-            "manage_mcp_tokens",
-            "Manage MCP tokens",
-            "Create, revoke and grant MCP tokens.",
-            "MCP",
-            High,
-        ),
-        (
             "shopify_admin_graphql",
             "Shopify Admin GraphQL",
-            "Run arbitrary Shopify Admin GraphQL queries and mutations for installed shops.",
+            "Run arbitrary Shopify Admin GraphQL queries and mutations for the shop of the token.",
             "Shopify Admin",
             High,
         ),

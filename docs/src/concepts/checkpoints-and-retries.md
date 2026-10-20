@@ -1,8 +1,10 @@
 # Checkpoints and retries
 
-A checkpoint lets a run reuse completed work after a failure or a pause. It does
-not make an external API call and a PostgreSQL write one atomic operation.
-That distinction matters for order creation, payments, emails, and other side effects.
+A checkpoint lets a run reuse completed work after a failure or a pause. Steps
+run **at least once**: a step whose result is stored is not run again for that
+run, but a step whose result was not stored yet can be. A checkpoint does not
+make an external API call and a PostgreSQL write one atomic operation. That
+distinction matters for order creation, payments, emails, and other side effects.
 
 ## The function starts again; completed steps supply their results
 
@@ -33,7 +35,10 @@ Warehouse accepts order → worker exits → checkpoint was never saved
 ```
 
 A later attempt cannot know the warehouse already accepted the order. It calls
-the service again. Use the service's idempotency mechanism with a stable business
+the service again. The same happens when the lease of a run expires while its
+step still runs, because the worker was stalled or lost the database: another
+worker claims the run and runs the step, as long as the first one did not store
+its result. Use the service's idempotency mechanism with a stable business
 identifier, or design the write as an upsert. A named step reduces repeated
 work; it does not guarantee exactly-once delivery.
 
@@ -68,9 +73,62 @@ data you extracted from them.
 | Manual retry in reset mode | Discards step results and starts the work again |
 | Dispatch a new run | Creates an independent set of checkpoints |
 
-Retries use the configured attempt limit and backoff. A flow deadline can stop
-further retries even when attempts remain. The
+Retries use the configured attempt limit and backoff, and wait between half the
+backoff and all of it, drawn at random, so that runs that failed together do not
+all come back at the same moment. Waking up from a sleep is
+not a retry and does not use an attempt. A flow deadline can stop further retries
+even when attempts remain. The
 [flow reference](../reference/flows.md) gives the exact defaults and precedence.
+
+## A failed write is retried, not counted as a failure
+
+The engine writes the state of a run and of its steps to the database. When such
+a write fails because the connection dropped or the pool timed out, it is tried
+again a few times, over about a second and a half, before the error stands. The
+write carries the same ownership check each time, so a try that comes after the
+run was taken over by another execution writes nothing.
+
+If the outcome of a run still cannot be recorded, the run is not marked `failed`:
+that write would go through the same database. The worker stops extending its
+lease and drops the run, which another claim takes up once the lease expires,
+and the completed steps are replayed from their checkpoints. The claim uses an
+attempt, and a flow that is not idempotent between two checkpoints runs that
+part again, as after any crash.
+
+A step whose result cannot be stored after those tries fails with the database
+error, like any step that fails. A step that finds its run taken over by another
+execution stops the flow with `LeaseLostError` and stores nothing.
+
+## A lease is kept, or given up
+
+A worker holds the lease of a run for `lease_duration` and extends it while the
+run executes. Every time of a lease is read from the clock of the database, never
+from the one of a worker, so replicas whose clocks differ agree on when a lease
+ends. The extension has a time limit of a quarter of the lease (at least 250 ms,
+at most 10 s), which covers the wait for a free connection of the pool and the
+statement itself. A failed extension is logged (`Heartbeat of run … failed`: the
+first time and every tenth in a row) and tried again at the next heartbeat. The
+worker counts the lease from the moment it sent the last request that extended
+it, or the claim that took the run, less a tenth of the lease. A claim that
+answered so late that this time has passed does not start the run. When that time has passed, the lease has
+expired and another worker may own the run, whether or not a heartbeat is still
+waiting for an answer: the flow is dropped, with whatever it was doing at its current
+`.await`, no outcome is recorded, and the run is claimed again. Code that never
+yields, or a task started with `tokio::spawn`, is not reached by a drop. An application that runs many flows at once should leave room in the pool
+for the heartbeats: a pool kept busy by the flows delays them (see
+[Database pool sizing](../reference/environment-variables.md#database-pool-sizing)).
+
+On a graceful stop, a worker waits up to one lease for its runs. A run still
+executing then goes back to `pending` at once, so that another worker takes it up
+without waiting for the lease to expire. Its flow is dropped first and no outcome
+is recorded; the run is only handed back once the flow is gone, so that nothing of
+it runs beside the next owner (a flow that does not yield within a second is left
+to its lease instead). The release waits at most two seconds for a connection and
+for a lock: a run that cannot be released in time is logged and left to its
+lease, and does not hold back the shutdown nor the other runs. The attempt that was interrupted stays counted in
+`attempts` (it keys the rows of its steps), so the run has one retry fewer; it is
+never failed as abandoned for that, and it runs again even with a single attempt.
+If the run was claimed by another worker in the meantime, it is left alone.
 
 ## Sleep releases capacity; cancellation acts at await points
 

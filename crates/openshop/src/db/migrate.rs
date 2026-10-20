@@ -19,7 +19,7 @@ use chrono::Utc;
 use sha2::{Digest, Sha256};
 use sqlx::{Executor, PgPool};
 
-use super::diff::{self, SNAPSHOT_FILE, SchemaSnapshot};
+use super::diff::{self, MANUAL_TODO, SNAPSHOT_FILE, SchemaSnapshot};
 use super::model::Table;
 
 pub const MIGRATIONS_DIR: &str = "migrations";
@@ -46,6 +46,26 @@ pub const FRAMEWORK_MIGRATIONS: &[FrameworkMigration] = &[
         id: "0002_openshop_queue_indexes",
         name: "openshop_queue_indexes",
         sql: include_str!("../../migrations/0002_openshop_queue_indexes.sql"),
+    },
+    FrameworkMigration {
+        id: "0003_openshop_cron_ticks",
+        name: "openshop_cron_ticks",
+        sql: include_str!("../../migrations/0003_openshop_cron_ticks.sql"),
+    },
+    FrameworkMigration {
+        id: "0004_openshop_logs_indexes",
+        name: "openshop_logs_indexes",
+        sql: include_str!("../../migrations/0004_openshop_logs_indexes.sql"),
+    },
+    FrameworkMigration {
+        id: "0005_openshop_run_lease",
+        name: "openshop_run_lease",
+        sql: include_str!("../../migrations/0005_openshop_run_lease.sql"),
+    },
+    FrameworkMigration {
+        id: "0006_openshop_drop_flow_runs_status_index",
+        name: "openshop_drop_flow_runs_status_index",
+        sql: include_str!("../../migrations/0006_openshop_drop_flow_runs_status_index.sql"),
     },
 ];
 
@@ -167,6 +187,49 @@ pub async fn get_client_migration_status(pool: &PgPool, cwd: &Path) -> Result<Mi
     Ok(status)
 }
 
+/// Refuses to go on while `./migrations` holds a migration the database has not
+/// applied, or lacks part of the framework schema. The processes that serve and
+/// run flows start with it: against a schema that is behind, they fail at the
+/// first statement that needs what is missing, or worse.
+///
+/// Without a `./migrations` folder there is nothing to compare the database
+/// with, and it passes. It reads the database and writes nothing.
+pub async fn assert_migrated(pool: &PgPool, cwd: &Path) -> Result<()> {
+    let Some(folder) = resolve_client_migrations_folder(cwd) else {
+        return Ok(());
+    };
+    let files = read_migration_files(&folder)?;
+    if !missing_framework_migrations(&files).is_empty() {
+        bail!(
+            "[openshop] Not starting: the current OpenShop schema is not covered by ./migrations. {GENERATE_THEN_MIGRATE}"
+        );
+    }
+
+    let applied: Vec<(String,)> = match sqlx::query_as(&format!("SELECT tag FROM {MIGRATIONS_TABLE}"))
+        .fetch_all(pool)
+        .await
+    {
+        Ok(applied) => applied,
+        // `undefined_table`: no migration was ever applied.
+        Err(sqlx::Error::Database(error)) if error.code().as_deref() == Some("42P01") => Vec::new(),
+        Err(error) => return Err(error.into()),
+    };
+    let pending: Vec<&str> = files
+        .iter()
+        .map(|file| file.tag.as_str())
+        .filter(|tag| !applied.iter().any(|(applied,)| applied == tag))
+        .collect();
+    if !pending.is_empty() {
+        bail!(
+            "[openshop] Not starting: {} migration{} not applied ({}). Run `migrate` first.",
+            pending.len(),
+            if pending.len() == 1 { " is" } else { "s are" },
+            pending.join(", ")
+        );
+    }
+    Ok(())
+}
+
 const NO_MIGRATIONS: &str = "[openshop] No client migrations found in ./migrations. Run `openshop migrate generate`, review the generated SQL, then run `openshop migrate`.";
 
 /// Applies pending migrations, each in its own transaction. Returns the applied tags.
@@ -216,6 +279,16 @@ fn covered_framework_ids(files: &[MigrationFile]) -> Vec<String> {
         .flat_map(|file| file.sql.lines())
         .filter_map(|line| line.trim().strip_prefix(FRAMEWORK_MARKER))
         .map(|id| id.trim().to_string())
+        .collect()
+}
+
+/// The changes to write by hand that the files already list as a `-- TODO:` line.
+fn listed_todos(files: &[MigrationFile]) -> Vec<String> {
+    files
+        .iter()
+        .flat_map(|file| file.sql.lines())
+        .filter_map(|line| line.trim().strip_prefix(MANUAL_TODO))
+        .map(|explanation| explanation.trim().to_string())
         .collect()
 }
 
@@ -301,6 +374,9 @@ pub struct GeneratedMigrations {
 ///
 /// The snapshot is then updated to `models`: pass every model of the
 /// application, since a recorded table without a model is dropped.
+///
+/// A migration that drops a table or a column, or converts a column in a way
+/// that can lose values, is refused unless `--allow-destructive` is given.
 pub fn generate_migrations(
     cwd: &Path,
     args: &[String],
@@ -314,6 +390,7 @@ pub fn generate_migrations(
         );
     }
 
+    let allow_destructive = args.iter().any(|arg| arg == "--allow-destructive");
     let name = args
         .iter()
         .find_map(|arg| arg.strip_prefix("--name="))
@@ -323,13 +400,42 @@ pub fn generate_migrations(
     let files = read_migration_files(&folder)?;
     let missing = missing_framework_migrations(&files);
     let (previous, recorded) = baseline(&folder, &files, models)?;
-    let changes = diff::diff(&previous, models);
+    // A change to write by hand is not recorded until the author says the
+    // migrations write it, with `--manual-done`. It is not written to a file
+    // twice: a file already lists it.
+    let accepted = args.iter().any(|arg| arg == "--manual-done");
+    let listed = listed_todos(&files);
+    let all = diff::diff(&previous, models);
+    let changes = diff::without_manual(all.clone(), |explanation| {
+        accepted || listed.iter().any(|todo| todo == explanation)
+    });
+    let waiting: Vec<String> = if accepted {
+        Vec::new()
+    } else {
+        all.iter()
+            .filter(|change| !changes.contains(change))
+            .filter_map(|change| change.warning())
+            .map(|warning| format!("still to write by hand: {warning}"))
+            .collect()
+    };
+    let destructive = diff::destructive(&changes);
+    if !allow_destructive && !destructive.is_empty() {
+        let statements: String = destructive.iter().map(|change| format!("\n  - {change}")).collect();
+        bail!(
+            "[openshop] Refusing to generate a migration that loses data:{statements}\n\
+             If a column or a table was renamed, declare it with `renamed_from`. \
+             Otherwise pass `--allow-destructive` to generate it anyway."
+        );
+    }
     // A project without models and without snapshot does not get one.
     let new_snapshot = (recorded || !models.is_empty())
-        .then(|| SchemaSnapshot::of(models).to_json())
+        .then(|| diff::recorded(&previous, models, accepted).to_json())
         .filter(|json| !recorded || *json != previous.to_json());
 
-    let mut generated = GeneratedMigrations::default();
+    let mut generated = GeneratedMigrations {
+        warnings: waiting,
+        ..Default::default()
+    };
     if missing.is_empty() && changes.is_empty() && name.is_none() && new_snapshot.is_none() {
         return Ok(generated);
     }
@@ -366,10 +472,9 @@ pub fn generate_migrations(
             ),
         )?;
         generated.files.push(path);
-        generated.warnings = changes
-            .iter()
-            .filter_map(|change| change.warning().map(str::to_string))
-            .collect();
+        generated
+            .warnings
+            .extend(changes.iter().filter_map(|change| change.warning().map(str::to_string)));
     } else if let Some(name) = name {
         let path = next_path(&name);
         std::fs::write(&path, format!("-- {name}\n-- Write your schema changes below.\n"))?;
@@ -413,8 +518,13 @@ pub fn check_migrations(cwd: &Path, models: &[Table]) -> Result<()> {
         .into_iter()
         .map(|change| format!("\n  - {change}"))
         .collect();
+    let by_hand = if pending.iter().any(|change| matches!(change, diff::Change::Manual(_))) {
+        "\nA change to write by hand stays pending until the migrations write it and `migrate generate --manual-done` records it."
+    } else {
+        ""
+    };
     bail!(
-        "[openshop] The models changed since the last generated migration:{}\n{GENERATE_THEN_MIGRATE}",
+        "[openshop] The models changed since the last generated migration:{}\n{GENERATE_THEN_MIGRATE}{by_hand}",
         changes.concat()
     );
 }
@@ -635,6 +745,72 @@ mod tests {
         std::fs::remove_dir_all(dir).ok();
     }
 
+    const ALLOW_DESTRUCTIVE: &str = "--allow-destructive";
+
+    fn folder_listing(dir: &Path) -> Vec<String> {
+        sql_file_names(&dir.join(MIGRATIONS_DIR))
+    }
+
+    #[test]
+    fn refuses_a_migration_that_loses_data_without_the_flag() {
+        use crate::db::{ColumnDef, Table};
+
+        let dir = temp_dir("destructive");
+        let folder = dir.join(MIGRATIONS_DIR);
+        let wide = Table::conventional("reviews")
+            .with_column(ColumnDef::new("rating", "integer"))
+            .with_column(ColumnDef::new("legacy", "text").nullable(true));
+        let votes = Table::conventional("votes");
+        generate(&dir, &[wide.clone(), votes.clone()]);
+        let files = folder_listing(&dir);
+        let snapshot = std::fs::read_to_string(folder.join(SNAPSHOT_FILE)).unwrap();
+
+        // A column and a table that are gone, and a conversion that can truncate.
+        let narrow = Table::conventional("reviews").with_column(ColumnDef::new("rating", "smallint"));
+        let error = generate_migrations(&dir, &[], false, std::slice::from_ref(&narrow))
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            error,
+            "[openshop] Refusing to generate a migration that loses data:\n  \
+             - ALTER TABLE \"reviews\" ALTER COLUMN \"rating\" TYPE smallint USING \"rating\"::smallint: \
+             converts the values of reviews.rating from integer to smallint. Check that the cast is the one you want.\n  \
+             - ALTER TABLE \"reviews\" DROP COLUMN IF EXISTS \"legacy\": drops reviews.legacy and its data.\n  \
+             - DROP TABLE IF EXISTS \"votes\": drops the table votes and its data.\n\
+             If a column or a table was renamed, declare it with `renamed_from`. \
+             Otherwise pass `--allow-destructive` to generate it anyway."
+        );
+        // Nothing was written, nor recorded.
+        assert_eq!(folder_listing(&dir), files);
+        assert_eq!(std::fs::read_to_string(folder.join(SNAPSHOT_FILE)).unwrap(), snapshot);
+
+        let allowed = generate_migrations(&dir, &[ALLOW_DESTRUCTIVE.to_string()], false, &[narrow]).unwrap();
+        assert_eq!(allowed.files.len(), 1);
+        assert_eq!(allowed.warnings.len(), 3);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn generates_what_does_not_lose_data_without_the_flag() {
+        use crate::db::{ColumnDef, Table};
+
+        let dir = temp_dir("not-destructive");
+        let reviews = Table::conventional("reviews")
+            .with_column(ColumnDef::new("rating", "integer"))
+            .with_column(ColumnDef::new("note", "text").nullable(true))
+            .index("reviews_rating_idx", &["rating"]);
+        generate(&dir, std::slice::from_ref(&reviews));
+
+        // Wider type, tighter or looser nullability, another index, a renamed column and a new table.
+        let next = Table::conventional("reviews")
+            .with_column(ColumnDef::new("rating", "bigint"))
+            .with_column(ColumnDef::new("remark", "text").renamed_from("note"))
+            .index("reviews_remark_idx", &["remark"]);
+        let created = generate(&dir, &[next, Table::conventional("votes")]);
+        assert_eq!(created.files.len(), 1);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
     fn generate(dir: &Path, models: &[Table]) -> GeneratedMigrations {
         generate_migrations(dir, &[], false, models).unwrap()
     }
@@ -718,8 +894,10 @@ mod tests {
             GeneratedMigrations::default()
         );
 
-        // A model that is no longer registered has its table dropped.
-        let third = generate(&dir, &[]);
+        // A model that is no longer registered has its table dropped, once that is allowed.
+        let error = generate_migrations(&dir, &[], false, &[]).unwrap_err().to_string();
+        assert!(error.contains("drops the table reviews and its data."), "{error}");
+        let third = generate_migrations(&dir, &[ALLOW_DESTRUCTIVE.to_string()], false, &[]).unwrap();
         assert_eq!(third.warnings, ["drops the table reviews and its data."]);
         assert!(
             std::fs::read_to_string(&third.files[0])
@@ -834,5 +1012,54 @@ mod tests {
         assert!(assert_unmodified(&file, &[("0001_a".into(), checksum("SELECT 2;"))]).unwrap());
         let error = assert_unmodified(&file, &[("0001_a".into(), checksum("SELECT 1;"))]).unwrap_err();
         assert!(error.to_string().contains("was modified after it was applied"));
+    }
+
+
+    #[test]
+    fn a_change_to_write_by_hand_is_not_recorded_until_the_author_accepts_it() {
+        use crate::db::{ColumnDef, Table};
+
+        let dir = temp_dir("manual");
+        let folder = dir.join(MIGRATIONS_DIR);
+        let plain = Table::conventional("reviews").with_column(ColumnDef::new("code", "text"));
+        let keyed = Table::conventional("reviews").with_column(ColumnDef::new("code", "text").primary_key());
+        let recorded = |dir: &Path| std::fs::read_to_string(dir.join(MIGRATIONS_DIR).join(SNAPSHOT_FILE)).unwrap();
+        generate(&dir, std::slice::from_ref(&plain));
+        let first = recorded(&dir);
+
+        // The migration tells what to write, and the snapshot keeps the old key.
+        let second = generate(&dir, std::slice::from_ref(&keyed));
+        let [path] = &second.files[..] else {
+            panic!("{:?}", second.files)
+        };
+        assert!(std::fs::read_to_string(path).unwrap().contains("-- TODO: the primary key of reviews changed: code is now part of the primary key"));
+        assert_eq!(recorded(&dir), first);
+        let error = check_migrations(&dir, std::slice::from_ref(&keyed)).unwrap_err().to_string();
+        assert!(error.contains("the primary key of reviews changed: code is now part of the primary key"), "{error}");
+        assert!(error.contains("--manual-done"), "{error}");
+
+        // Asked again, it does not write the same TODO twice, and says what is left.
+        let third = generate(&dir, std::slice::from_ref(&keyed));
+        assert!(third.files.is_empty() && third.snapshot.is_none(), "{third:?}");
+        assert!(third.warnings[0].starts_with("still to write by hand: the primary key of reviews"));
+        assert!(check_migrations(&dir, std::slice::from_ref(&keyed)).is_err());
+
+        // Written by the author, who says so: the models are recorded.
+        let accepted = generate_migrations(&dir, &["--manual-done".to_string()], false, std::slice::from_ref(&keyed))
+            .unwrap();
+        assert!(accepted.files.is_empty() && accepted.warnings.is_empty(), "{accepted:?}");
+        assert_eq!(accepted.snapshot, Some(folder.join(SNAPSHOT_FILE)));
+        check_migrations(&dir, std::slice::from_ref(&keyed)).unwrap();
+        assert_eq!(generate(&dir, std::slice::from_ref(&keyed)), GeneratedMigrations::default());
+
+        // The same change again later is a new change: what was accepted before does not cover it.
+        let back = generate(&dir, std::slice::from_ref(&plain));
+        assert_eq!(back.files.len(), 1, "{back:?}");
+        generate_migrations(&dir, &["--manual-done".to_string()], false, std::slice::from_ref(&plain)).unwrap();
+        check_migrations(&dir, std::slice::from_ref(&plain)).unwrap();
+        let again = generate(&dir, std::slice::from_ref(&keyed));
+        assert!(again.snapshot.is_none(), "{again:?}");
+        assert!(check_migrations(&dir, std::slice::from_ref(&keyed)).is_err());
+        std::fs::remove_dir_all(dir).ok();
     }
 }

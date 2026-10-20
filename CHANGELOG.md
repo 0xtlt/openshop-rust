@@ -2,6 +2,440 @@
 
 ## Unreleased
 
+- CI checks three things it did not. The committed admin UI bundle
+  (`crates/openshop/ui-dist`) is compared with its sources: `mise run ui:build`
+  (now `crates/openshop-ui/build-dist.sh`) writes the hash of what the bundle is
+  built from to `crates/openshop-ui/ui-dist.sha256`, and the `ui-dist` job fails
+  when the sources moved without a new bundle. The bundle was already stale (the
+  admin UI was fixed for Rust 1.88 without rebuilding it) and carried the paths
+  of the machine that built it: it is rebuilt, from a fixed place with the paths
+  rewritten. The bytes of a bundle depend on the platform that builds it, so CI
+  cannot compare them. The `docker` job makes a project of the `minimal` and of
+  the `custom` template and builds its image; the `docs` job builds the guide;
+  the `windows` job checks that `openshop` and the CLI compile there.
+- The `Dockerfile` of a generated project is stricter. The image runs as a user
+  without privileges (`app`, uid 10001) instead of root, trunk is checked against
+  the SHA-256 of its release before it runs, and both base images are named by
+  digest (Dependabot proposes the next ones). A private `openshop` repository
+  is fetched with the optional build secret `gitconfig` (a git configuration
+  with a token, kept outside the project so that `COPY . .` cannot copy it, and
+  never written to a layer): `docker build --secret id=gitconfig,src=<file> .`;
+  without it the build is the same as before. `gitconfig` is in the generated
+  `.dockerignore` and `.gitignore`.
+- CI is hardened. Every action is pinned to the commit of a release, the
+  workflows only get `contents: read`, trunk and cargo-deny are installed from
+  their release with a SHA-256 written in the repository (a release asset can
+  be replaced), checkouts keep no credentials, and
+  cargo runs with `--locked` (in `mise.toml` too) so a build never moves
+  `Cargo.lock`. The toolchain is the one of `mise.toml` (1.98.1) instead of
+  whatever `stable` is that day. Two jobs are new: `msrv`, which checks the
+  workspace and the admin UI on Rust 1.88, the `rust-version` we promise, and
+  `deny`, which runs cargo-deny on both lockfiles (advisories, licenses,
+  sources; `deny.toml`). Dependabot proposes weekly updates of the crates and
+  of the actions. Both found something: `openshop-ui` did not build on 1.88
+  (a temporary borrowed in a struct literal, fixed), and the lockfile had
+  `rustls` 0.23.45, which has four advisories fixed in 0.23.46 (updated).
+- The CLI fails on a command it does not know: `openshop frobnicate` prints
+  `[openshop] Unknown command: frobnicate` and the usage on stderr and exits
+  with status 2, where it used to print the usage and exit 0, so a script that
+  mistyped a command went on. No command, `help`, `--help` and `-h` still print
+  the usage and exit 0.
+- `openshop init` leaves no partial project behind: when it fails after it
+  started writing, it removes the files it wrote and the directories it made,
+  and nothing else (another `init` may write next to it). It rewrites the manifest of a template
+  with `toml_edit` instead of line by line, so `workspace = true` is replaced
+  whatever the layout (tables on several lines, dotted keys,
+  `[dependencies.<name>]`), with comments kept. The generated projects are
+  unchanged.
+- `openshop codegen` gives up when the schema endpoint does not connect in 15
+  seconds or the download takes more than 120, with a message that names the
+  endpoint, instead of waiting for ever.
+- The install command is `cargo install --locked --git … openshop-cli` in the
+  README and the docs, so that the CLI is built with the dependency versions
+  the repository tested. CONTRIBUTING lists what keeps `openshop-cli` from
+  being published on crates.io (nothing is published).
+- The admin UI shows and logs its failures instead of swallowing them. When the
+  app cannot start, the page says why (a banner) instead of "Open this app from
+  Shopify admin", which is kept for a missing session. A failed refresh of the
+  custom pages keeps the ones shown, where it used to empty them. A request
+  that gets no answer is logged to the browser console, with a toast for a
+  write; a flow or function list that cannot be loaded, a log export that
+  fails (it saved the error body as a file), a cron toggle the server refuses
+  and a run that cannot be loaded are shown. The embedded bundle
+  (`crates/openshop/ui-dist`) is rebuilt.
+- `openshop init` makes a project that builds: its `openshop` dependency was
+  pinned to the tag `v<version>` of the CLI, which the repository does not
+  have, so the project of `cargo install --git … openshop-cli` followed by
+  `openshop init` failed on its first `cargo` command. The CLI now records the
+  commit it is built from, and the project depends on that commit (`rev`). A
+  CLI built without git, from a package say, falls back to the tag and says at
+  the end of `init` that the tag has to exist. `--openshop-rev=<commit>`,
+  `--openshop-tag=<tag>` and `--openshop-branch=<name>` name another source,
+  next to `--openshop-path=<dir>`; at most one of the four. CI checks a project of
+  the `minimal` template that depends on the commit under test through git.
+- Crons are read in UTC, not in the time zone of the host, and a cron takes an
+  IANA `timezone` with `.timezone("Europe/Paris")`, daylight saving time
+  included. This is a breaking change on a host whose time zone is not UTC: the
+  same schedule fires at another hour until a `timezone` is given. A process
+  that wakes late (a suspended host, a clock set forward) fires the latest
+  occurrence it missed, once, where it used to fire every one at once. A
+  scheduler that stops, because its schedule has no occurrence left or because it
+  panicked, logs an error, reports it to Sentry and starts again after a wait
+  that grows to five minutes, where it used to end without a word. The overrides
+  of a firing are read in one query for all its shops instead of one per shop,
+  and `/api/crons/toggle` and the MCP tool answer `Cron not found` to a key the
+  application does not declare (the overrides of an old key, whose schedule
+  changed, were never read and are still ignored).
+- The log lines of a run wait in a queue of 10,000 instead of an unbounded one:
+  a flow that logs faster than the database takes them loses the newest lines,
+  never waits, and the run gets a `warn` line with the number dropped. A log
+  write that fails is told to the runtime logger, and a NUL byte in a message
+  or a payload is replaced by U+FFFD, where it used to make PostgreSQL refuse
+  every line written in the same statement. A statement holds at most 1,000
+  lines or 1 MiB of text: a flow that logged without pause used to grow one
+  batch with everything the queue held.
+- The framework schema has a migration, `openshop_drop_flow_runs_status_index`,
+  that drops the index `flow_runs_status_available_created_idx` on
+  `(status, available_at, created_at)`: the partial queue indexes of the second
+  migration serve the claim and the expiry, and nothing else reads it. It loses
+  no data. Run
+  `migrate generate` then `migrate` before starting the new version: `start` and
+  `worker` now refuse to start while `migrations/` holds a migration the
+  database has not applied, or does not cover the framework schema, with
+  `Not starting: … Run `migrate` first.`. Without a `migrations/` folder they
+  start as before.
+- `migrate generate` no longer records in the snapshot a change it can only
+  leave as a `-- TODO` line (the primary key or the constraints of a column): the
+  snapshot keeps the previous state, `migrate check` fails, and a second
+  `generate` does not write the line again. Once the migrations write the change,
+  `migrate generate --manual-done` records the models.
+- `APP.main()` loads `.env` for `dev` before it starts the async runtime,
+  instead of calling `set_var` from inside it. `cli::env::load_env_file` returns
+  the number of variables it set; a `main` with its own runtime that calls
+  `APP.run()` still gets `.env`, with a warning.
+- Sentry events are scrubbed of URLs wherever they carry text: the tags, the
+  extra data, every kind of context, the data of the breadcrumbs and the parameters of a
+  log entry, and a request the application attaches loses its query string,
+  cookies and body and the headers named like a secret.
+- Several `start` processes can run crons: an occurrence of a cron for a shop
+  is queued once, not once per process. Each process still starts a scheduler,
+  and all of them compute the same occurrences; the first to insert a row in
+  the new `cron_ticks` table `(app_handle, shop, cron_key, scheduled_at)` queues
+  the run, in the same transaction, and the others skip it. A run that
+  the flow's concurrency refuses leaves the occurrence free. There is no leader
+  and nothing to elect again when a process stops. Two crons of the same flow
+  and schedule, with another name, shops or input, each claim their own
+  occurrences; the override key stays `flow:schedule`. The scheduler removes
+  the rows older than a day, and skips, with a warning, an occurrence it
+  reaches more than an hour late, such as after the process was paused: the
+  others fired it long ago and its claim may be gone. The claim itself
+  refuses an occurrence that old, by the clock of the database, so a process
+  that stalls after the check cannot queue it again. The framework schema has
+  a third migration, `openshop_cron_ticks`: run `migrate generate` then `migrate` before starting
+  the new version, or every occurrence of a cron fails with a missing table
+  (`migrate check` fails until it is there). The TypeScript runtime does not
+  use the table. Until now, N replicas fired every cron N times, and the
+  documentation told to keep a single web replica.
+- The queries of the Admin API are bounded and escaped. Behaviour change:
+  `GET /api/runs` and `GET /api/flows/:name/runs` answer `400` for an `offset`
+  above 10,000 (a deeper page makes the database read every row before it;
+  narrow the list with the filters), and `search` is text, where `%`, `_` and
+  `\` used to be a pattern. The Shopify Functions listings read every
+  page of Shopify's connections (50 at a time, up to 20 pages) instead of the
+  first 50; the cart transform listing makes one request for the functions of
+  the app and one for the cart transforms. On `/ops`, `Older` cuts a page on
+  the time and the id of the last row, so rows created at the same instant are
+  no longer skipped; an old `before` with the time alone still works. The
+  percent-decoder of the custom admin pages and the one of the static assets
+  are one (`openshop_shared::rpc::decode_uri_component`): `%+1` is no longer
+  read as `%01`. Assets of the admin UI have a strong `ETag` and answer `304`
+  to `If-None-Match`, are sent with `X-Content-Type-Options: nosniff` (the
+  shell too), are not copied for each request when they are compiled in, and
+  are read from a directory without blocking the runtime.
+- Retrying, canceling and deleting a run are decided by the write, not by the
+  status the request read before: a cancel no longer overwrites a run that
+  completed meanwhile, a retry no longer resets a run that started again, and
+  a delete (single or bulk) no longer removes a run that just started and its
+  steps and logs; the request answers `409` with the current status, or `404`
+  if the run is gone. Behaviour change: a retry follows the concurrency of the
+  flow like a dispatch, under the same lock; when the flow rejects concurrent
+  runs (the default) and another run of it is active for the shop, it answers
+  `409` with `existingRunId` and the run stays as it was, where it used to run
+  beside the other one. A cancel tells the worker of the run while it
+  still holds the row, so a retry and a new claim of the run cannot take place
+  before the signal and receive it.
+- The Admin API answers what the caller got wrong with a `4xx`, and no longer
+  shows what the server got wrong. Behaviour change:
+  `POST /api/flows/:name/run` answers `404` for an unknown flow, and `422`
+  with the reason when the input fails the input schema of the flow, instead
+  of `500` and of `202` for a run that was bound to fail; the MCP tool
+  `openshop.flows.run` checks the input too. A log query with an invalid or
+  rejected regex, or past its limits (2,000 characters, 20 filters), answers
+  `400` instead of an empty list, in the MCP tool as in the API; the regex is
+  compiled once per query, not once per line, and `C:`, `A:` and `B:` counts
+  are capped at 100. An unexpected failure keeps its `500` and gets an
+  `x-error-id` header; an error of the database, the network or a file in an
+  MCP tool or in a provider check is logged under an id, and the client reads
+  `Internal error (error id <id>)` and that id, not the text, which can hold a
+  query or a URL with a key. Errors a tool raises itself are shown as before.
+  A provider check that takes more than 10 seconds answers `504`. Only an
+  error written for the client is shown by the MCP endpoint and by a provider
+  check: `openshop::PublicError`, `InvalidInput`, `InvalidFlowInput`,
+  `FlowConcurrencyError` and the errors of the core tools. Any other error,
+  including a decoding error that quotes a stored credential, gets the id.
+  Behaviour change for an application: an MCP tool or a provider checker that
+  returned a plain `anyhow!("…")` and wants it read by the client returns
+  `PublicError::new("…")` instead. `app.dispatch_flow` (so `#[flow]`'s
+  `dispatch`) now refuses input that fails the input schema of the flow with
+  `InvalidFlowInput`, and a flow that is not registered with
+  `UnknownFlowError`, before it queues a run; from a webhook handler this is a
+  logged handler error, and Shopify still gets its `200`. A `last:` that
+  reaches back further than the calendar answers `400` instead of panicking.
+  The run page of the admin shows the reason when the server refuses a log
+  search, instead of keeping the previous lines.
+- Minor security findings of the review, one by one:
+  - A webhook's HMAC (`/webhooks` and `/auth/webhooks/app-uninstalled`) is
+    computed over the raw bytes of the body. It was computed over a lossy
+    UTF-8 conversion of it, so a body that was not UTF-8 verified against a
+    mangled payload. `verify_webhook_hmac` and `ShopifyApps::by_webhook_hmac`
+    take `&[u8]`; `sign_webhook_body` takes anything that is bytes.
+  - A webhook delivery that Shopify sends again (same `X-Shopify-Webhook-Id`,
+    or `X-Shopify-Event-Id` without it) is acknowledged and its handler is
+    not run again, within an hour, once its handler has completed. A handler
+    that fails or panics, or a request Shopify cancels by hanging up, leaves
+    nothing remembered and the repeat runs; a repeat that arrives while the
+    handler is still running is answered `503` with `Retry-After: 5`. The
+    memory is the process's, bounded to 100,000 deliveries, and keyed by app,
+    topic, id and signature; a handler must still be idempotent across
+    replicas and restarts. A delivery without either header is run as before.
+  - A refused session token on `/api` is answered `Unauthorized: invalid
+    session token`, where the answer named the claim that failed or the apps
+    configured. The reason is logged as a warning. **Behaviour change** for a
+    client that read the message.
+  - A refused MCP token is logged (`[openshop] MCP token refused`: token id,
+    reason, status, client address), never with the secret.
+  - **Behaviour change:** `read_providers`, `write_providers`, `read_functions`
+    and `manage_mcp_tokens` are no longer MCP permissions: no tool checked
+    them, so granting them promised something that did not exist. A new token
+    cannot be given them (`Unknown permission`); a token that holds one keeps
+    working, the grant is ignored and listed in `stalePermissions`.
+  - **Behaviour change:** in production, CORS no longer allows `localhost`,
+    `127.0.0.1` and `[::1]` origins (unless `HOST` or `SHOPIFY_APP_URL` is
+    one). `*.myshopify.com`, `admin.shopify.com`, `shopify.com`, Shopify's
+    extension CDN and the application's own origin are allowed as before.
+    `is_allowed_cors_origin` takes a `production` flag.
+  - The body of an answer to an outbound request (`ReqwestTransport`) is read
+    up to 10 MiB (`MAX_RESPONSE_BYTES`) and refused beyond, by
+    `Content-Length` or by counting.
+  - The sign-in of the operator dashboard no longer has one lock for everyone,
+    that a client guessing wrong passwords kept held: each client (the peer
+    address, a `/64` for IPv6, or the last `X-Forwarded-For` address when the
+    peer is on a private network) attempts once, then again after a delay that
+    doubles from 250 ms to 8 seconds. An attempt that comes sooner is `429`
+    with `Retry-After`, at once, and not looked at. The server now hands the
+    address of the peer to the handlers (`ConnectInfo`).
+  - Shop domains are read as ASCII only: `normalize_shop_domain` refuses a
+    non-ASCII name instead of lowercasing it with Unicode rules (the Kelvin
+    sign became `k`).
+  - **Behaviour change:** `/proxy/*` and `/ext/*` refuse the session token of a
+    staff user (`Unauthorized: session token was issued to a staff user`); they
+    took it for a customer-account token without a customer. Tokens of customer
+    account and checkout extensions, buyers without an account included, are
+    accepted as before.
+  - `Debug` of `ShopifyAppConfig`, `RuntimeEnv`, the resolved Shopify app, the
+    generated and parsed MCP tokens, the rows of installations, provider
+    configurations and MCP tokens, and `OutboundRequest` prints `[redacted]`
+    for secrets.
+  - The CSV export of the logs of a run prefixes a cell that starts with `=`,
+    `+`, `-`, `@`, a tab or a carriage return with `'`, so that a spreadsheet
+    does not run it.
+  - The JSON that `Liquid::assign` gives for a list or an object writes `<`,
+    `>`, `&`, U+2028 and U+2029 as `\uXXXX`, so `</script>` or `<!--` in a value
+    cannot end the `<script>` that prints it; the `custom` template prints
+    every value with `| escape`.
+  - Not addressed: the AES-GCM format has no associated data nor key id (a
+    re-encryption migration, TypeScript parity); see
+    [Security](docs/src/reference/security.md#encryption-at-rest).
+
+- The token exchange of the session token, run by the first `/api` request of
+  a shop without a token, is bounded: one request at a time exchanges for an
+  app and shop, and the requests that arrive meanwhile wait for it and use its
+  token, where each asked Shopify on its own, for up to the 60 seconds of the
+  HTTP client. Shopify is asked for five seconds at most, and a failed
+  exchange is not tried again for thirty seconds. A shop never waits for the
+  exchange of another. After a timeout, the request is served without asking
+  the client credentials grant too. `MockTransport::delay_responses` makes the
+  mock answer late, for tests of a slow Shopify.
+- `/auth` no longer writes to the database, and no longer overwrites the nonce
+  of an installation in progress, which anybody could do by calling it for a
+  shop. The `state` of the authorization is signed with the secret of the app
+  (app handle, shop, expiry of ten minutes, nonce, browser) and bound to the
+  browser by the cookie `openshop_oauth` (`HttpOnly`, `SameSite=Lax`, `Secure`
+  on an `https` application URL, ten minutes). Several installations of a shop
+  may be pending; the callback compares the signature in constant time,
+  refuses a `state` that is expired, altered, of another browser, shop or app,
+  or already spent, and creates the row of the installation if there is none.
+  The `installations.nonce` column is no longer read or written, so an
+  installation begun in the TypeScript runtime is not finished in this one,
+  nor the reverse; `pending` in the operator dashboard only shows rows left by
+  earlier versions. A callback whose token request fails has spent its
+  `state`: the merchant starts again at `/auth`.
+- Breaking, a security fix: an MCP token only acts on its own shop. The staff
+  of one shop could create a token with `shopify_admin_graphql`, list every
+  installed shop of the app with `openshop.shops.list`, and run
+  `openshop.admin.graphql` on any of them with its offline token.
+  `openshop.admin.graphql` now always runs against the shop of the token: its
+  `shop` argument is optional, and a shop other than the token's is refused,
+  without a request to Shopify. `openshop.shops.list` shows the installation of
+  the token's shop only, and needs the `shopify_admin_graphql` permission; a
+  token without it no longer sees the tool. A client that passed another shop
+  must use a token of that shop.
+- A shop only sees the crons that apply to it. `openshop.crons.list`,
+  `openshop.flows.list`, `GET /api/crons` and `GET /api/flows` returned every
+  configured cron, with its input and the shops it names, so a shop read the
+  input and the domain of another shop's cron. They now list the crons that run
+  without a shop, those of every shop and those that name the shop, and a cron
+  naming several shops shows only the shop of the caller. Switching a cron
+  that the shop does not see is refused (`Unknown cron` through MCP, `404
+  Cron not found` on `POST /api/crons/toggle`).
+- **Breaking:** secrets are no longer stored in plaintext by default. Without
+  an `ENCRYPTION_KEY`, the offline access tokens of Shopify and the
+  credentials of providers were stored in plaintext unless `OPENSHOP_ENV` was
+  exactly `production`, so `staging`, `prod`, a typo or no `OPENSHOP_ENV` at
+  all silently stored them in clear. Now an application without a key does not
+  start (`OpenShop::new` fails with `ENCRYPTION_KEY must be set …`, which
+  names how to set one), unless the environment is explicitly a development
+  one: `OPENSHOP_ENV` is `development` or `test` (`NODE_ENV` does not count),
+  or the command is `openshop dev`. `OPENSHOP_ENV=production` never allows plaintext.
+  `start` and `worker` run locally without a key now need a key or
+  `OPENSHOP_ENV=development`; set `ENCRYPTION_KEY` in every deployed
+  environment. Rows already stored in plaintext are still read, and the
+  encryption format is unchanged. A `RuntimeEnv` built by hand gets a
+  `development` field (false by default) that
+  `RuntimeEnv::allows_plaintext_secrets()` reads, and `TestOptions` a
+  `development` field, true by default, so tests keep working without a key;
+  with `false` and no key the context does not start.
+- An app proxy request is checked beyond its signature. Its `timestamp` must
+  be present and within five minutes of the server clock, on either side: a
+  signed URL that was captured could be replayed for ever, since nothing in
+  the signature expires. A parameter whose name or value contains `=`, or
+  whose name is empty, is refused: Shopify signs the `key=value` pairs glued
+  without separator, so the same signature stood for the query cut in other
+  pairs, with another `shop` for instance. A repeated parameter is verified as
+  Shopify signs it, its values joined by `,` (`extra=1&extra=2` is signed
+  `extra=1,2`; it was verified as `extra=1`, and refused), and the pairs are
+  sorted as the `key=value` strings Shopify sorts, not by key. `shop`,
+  `timestamp`, `path_prefix`, `logged_in_customer_id` and `signature` cannot be
+  repeated. A `=` is not the only way to move the end of a value into the
+  next key: a parameter of the visitor is also refused when the value before
+  it, glued to its name, ends with `shop`, `timestamp`, `path_prefix` or
+  `logged_in_customer_id` (a request of an anonymous visitor could be read as
+  the one of customer 42); `timestamp` must be digits, `path_prefix` a plain
+  path, and `shop` exactly a `<name>.myshopify.com` domain (`shop` used to be
+  read as a URL, and `a.myshopify.comt@b.myshopify.com` is one for `b`; it is
+  answered `Invalid shop parameter`). All of these answer `401 Invalid proxy
+  signature`. The signature
+  still covers neither the path, the method nor the body, which Shopify does
+  not sign. Breaking for code that calls `server::hmac::verify_proxy_signature`
+  (it takes the query pairs and the current Unix time) or signs proxy queries
+  without a `timestamp` in its tests: `testing::proxy_signature` signs what it
+  is given, add a fresh `timestamp`.
+- `migrate generate` refuses to write a migration that loses data: a dropped
+  table or column, or a column converted to a type that can truncate or round
+  its values (a widening such as `integer` to `bigint` is fine). The error
+  lists the statements, and nothing is written or recorded in the snapshot.
+  Pass `--allow-destructive` to generate it anyway, or declare a rename with
+  `renamed_from` when the data is meant to be kept. The `dev` push never
+  drops anything and is unchanged.
+- A request that has no response after 60 seconds is answered with `503`
+  (`Request timed out`) and its work is cancelled, and a request that comes
+  while 1024 are being served is answered with `503` and `Retry-After: 1`;
+  `/health` is always answered. The `request_timeout` and
+  `max_concurrent_requests` settings of `app!` change them, and a value of
+  zero is refused. A response already streaming is not counted. Before, a
+  request could hold the server for as long as its handler ran, and nothing
+  bounded how many ran at once.
+- Checking the secret of an MCP token no longer lets whoever knows a token id
+  cost the server a scrypt hash per request: at most as many hashes as CPUs (4
+  at most) run at once, a request that gets no turn in five seconds is
+  answered with `503`, and a secret that was right is remembered for five
+  minutes under a keyed hash that lives in the memory of the process. The
+  stored hash is unchanged (scrypt, shared with the TypeScript runtime), and
+  the state of a token is still read at every request, so a revoked, disabled,
+  expired or rotated token is refused at once.
+- The macros refuse more of what they used to take, each with an error at the
+  item: an option of `#[flow]` given twice (`timeout`, `step_timeout`,
+  `concurrency`, `retry_policy`); a field of a `Model` named `table`,
+  `columns` or `has_shop`, whose constant would hide `Record::TABLE`,
+  `Record::COLUMNS` or `Model::HAS_SHOP`, and two fields that give the same
+  constant; an item of a `#[provider]` block named `NAME`, `provider` or `on`,
+  or a method whose constant (`name` is `NAME`) is already in the block; an
+  item named `PATH`, or like the constant of a loader or an action, in an
+  `#[admin_page]` block. `#[input]` leaves the naming of the fields to a type
+  only when its `#[serde(…)]` has a `rename_all` option, no longer when the
+  text appears anywhere in it.
+- `graphql!` checks the default value of a variable against its type, and
+  refuses an integer literal beyond the 32 bits of `Int`. When `openshop
+  codegen` creates `graphql/admin.schema.json`, it touches `src/main.rs` and
+  `src/lib.rs`, so that the crate is built again with the schema; `cargo` did
+  not know a file that did not exist at the first build.
+
+- The tests refuse a `DATABASE_URL` that is not on the machine: the harness
+  (`TestDb`, `#[openshop::test]`) uses `TEST_DATABASE_URL`, then `DATABASE_URL`
+  when its host is `localhost`, a loopback address or a socket, then the local
+  development database. A shell with the `DATABASE_URL` of a real database in
+  it no longer creates and drops schemas there; set `TEST_DATABASE_URL` to
+  choose such a database on purpose. `openshop::testing::test_database_url()`
+  gives the URL the harness uses. Without PostgreSQL, a test fails within ten
+  seconds saying so (`mise run db:up`, or `TEST_DATABASE_URL`) instead of
+  hanging.
+- `FakeMethod::call` takes its place in the record when the call starts: two
+  calls running at once each get their own index for `on_call_returns` and
+  `on_call_rejects`, and `calls()` lists them in the order they started in
+  (it listed them in the order they finished, the second one taking the rule
+  of the first). A call is recorded as soon as it starts, with its result
+  filled in when it ends; a `reset()` in the meantime forgets it.
+- `docker-compose.yml` publishes PostgreSQL on `127.0.0.1:5432` only, not on
+  every interface of the machine.
+- The workspace declares its lints (`[workspace.lints]`: `unsafe_code` and
+  unused `#[must_use]` results denied, no `dbg!`, `todo!` or `unimplemented!`
+  left in) and its members inherit them with `[lints] workspace = true`. A
+  project made by `openshop init` does not get the section. `rand` is 0.10, the
+  version `sentry` already uses: the lockfile loses `rand` 0.9, its
+  `rand_chacha` and `rand_core`, and one `getrandom`.
+- The logs of a run are indexed, bounded and paged. The framework schema gets
+  a migration, `openshop_logs_indexes` (also added to the three templates):
+  indexes on `logs (created_at)`, on `logs (level, created_at)` and on
+  `flow_runs ((id::text))`, which the operator dashboard reads the latest
+  lines and joins a line to its run through. Nothing else changes in the
+  table, which the TypeScript runtime shares: `flow_run_id` stays text, with
+  no foreign key. The statements of the dashboard are cancelled after 10
+  seconds instead of running for as long as the database lets them.
+  `GET /api/runs/:id/logs` returns the newest 1,000 lines (`limit` up to
+  5,000) with a `next` cursor to pass as `cursor` for the following page, and
+  `levelCounts`, the lines of each level in the run, which the admin UI reads
+  instead of fetching the whole run a second time; levels and time bounds are
+  filtered by the database, and the text filters on the lines as they are read.
+  The export is streamed instead of built in memory. The tool
+  `openshop.logs.search` is unchanged. The admin UI bundle is rebuilt.
+- The new `log_retention` setting of `app!` (a `Duration`, or `None`) has the
+  workers remove the log lines older than it, once an hour, 5,000 at a time.
+  It is unset by default: the lines are kept as before.
+
+- A provider configuration is checked against the type of each field before it
+  is saved, and a Shopify Function configuration likewise. A `select` value
+  must be one of the options, a `number` a number (`"abc"` was dropped without
+  an error for an optional field), a `checkbox` `true`, `false`, `"true"` or
+  `"false"` (`"yes"` was saved as false), and a `text` or `password` a string.
+  The error names the field: `Field "mode": must be one of "live", "test"
+  (was "prod")`. Keys that are not fields are still ignored. Configurations
+  that used to be accepted are now refused with `400`.
+- `validators::url()` accepts only `http` and `https` URLs with a host:
+  `file:///etc/passwd` and `gopher://…` are refused. The new
+  `validators::public_url()` also refuses `localhost`, `metadata.google.internal`
+  and IP addresses that are loopback, private, link-local (the cloud metadata
+  endpoint), shared, multicast or unspecified, for a URL the server fetches on
+  behalf of a merchant. It cannot see through DNS rebinding.
 - `openshop init` makes a project from one of three templates: `minimal`, one
   provider and one flow, as before; `custom`, a custom app with every building
   block and a page of its own next to the built-in admin; `public`, a public
@@ -385,6 +819,91 @@
 - An open connection no longer holds its own copy of the route table, which
   axum made for every connection it accepted. With the routes of the demo, a
   connection goes from 62 KB to 19 KB: 43 MB less with 1,000 connections open.
+- A worker claims a run at most `max_attempts` times. A run whose lease
+  expired after its last attempt, because its worker died before recording the
+  outcome (out of memory, abort), is marked `failed` with a `Run abandoned`
+  error and reported, instead of being claimed again for ever. A run without a
+  retry policy, such as one requeued from the Admin API, has one attempt.
+- Waking up from `ctx.step.sleep` no longer uses an attempt: a flow can sleep
+  as often as it needs to, also with `max_attempts(1)`, and a failure after a
+  sleep is retried as far as the policy says. Breaking: `attempts` of a run
+  that slept is lower than before, and the steps run after a sleep belong to
+  the attempt that slept. No schema change.
+- Only the last claim of a run can record its outcome. Each claim sets a new
+  `lease_id` on the run, and the write that ends an attempt, the heartbeat and
+  the failure of a run only apply while the worker holds it. A slow execution
+  whose lease expired, or whose run was canceled and retried, and which was
+  claimed again by another worker or by the same one, can no longer finish,
+  sleep, fail or cancel it, and stops at its next heartbeat. It no longer takes
+  the cancellation token of the new execution with it either. The framework
+  schema has a migration for it, `openshop_run_lease`, one nullable column on
+  `flow_runs` that the TypeScript runtime ignores: run `migrate generate` then
+  `migrate` before starting the new worker (`migrate check` fails until it is
+  there; `dev` adds the column on start).
+- A transient database error no longer fails a run. The write that records the
+  outcome of a run (completed, sleeping, canceled, retry or failure), the one
+  that reads its retry policy, the failure of a run, and the writes of a step
+  are tried up to five times, 100 ms apart and doubling, when the error comes
+  from the connection or the load of the database: I/O, TLS, pool timeout,
+  SQLSTATE 08, 53, 57P01-03, 40001 and 40P01. Each try keeps the ownership
+  check, and each failure is logged. When the outcome still cannot be written,
+  the worker leaves the run `running` and stops its heartbeat instead of
+  marking it `failed` through the same database: the lease expires and the
+  run is claimed again, its completed steps replayed from their checkpoints.
+- The writes of a step carry the worker and the lease of the claim as well:
+  an execution whose run was taken over, by another worker or by the same one,
+  can no longer store the result of a step, start one or suspend at a sleep.
+  The step fails with the new `engine::LeaseLostError`, stops the flow, and
+  the run is left to the new execution. Breaking: `StepExecutor::new` takes
+  the owner (`engine::RunOwner`, `None` outside a worker) as a last argument,
+  and a stale step is no longer recorded as `canceled` or `failed`.
+  The write locks the row of the run until it ends, so a claim cannot slip in
+  between the check and the write of a step that waits for its own row. A
+  step or a sleep that starts is inserted under an ID chosen before the first
+  try: when a try commits and its answer is lost, the next one recognizes its
+  row instead of failing on the unique key and failing the run.
+- A lease, a deadline, a retry and the wake-up of a sleeping run are dated by
+  the clock of the database (`now()` in SQL), no longer by the one of the
+  process that writes them. A replica whose clock was ahead made leases that
+  the others saw already expired and took the runs over, or leases that
+  outlived their worker. Breaking, only in timing: `compute_next_retry_at`
+  takes the date it counts from as a last argument.
+- The heartbeat that extends a lease no longer fails silently. It has a time
+  limit of a quarter of the lease (250 ms to 10 s), for the wait for a
+  connection of a busy pool as well as for the statement, which the server
+  enforces with `statement_timeout`. A failure is logged as `Heartbeat of run
+  … failed` (the first and every tenth in a row). The worker keeps a deadline for
+  the lease, the moment it sent the last request that extended it (the claim for the
+  first one, not the moment its answer came back; a run whose claim answered
+  after that deadline is not started) plus `lease_duration` less a tenth, and it runs while the worker waits for a tick
+  as well as for a heartbeat stuck on a saturated pool or a lock. When it
+  passes, the lease has expired: the flow is dropped
+  (not only told to stop through its signal) and nothing is recorded, so a run
+  another worker may have claimed is not run by two at once; the same when the
+  run turns out to be owned by another execution. The step that was running is
+  left as it is, as it is not this execution's to write. `RunFlowOptions` has two new fields, `lease_duration` and
+  `interrupt`.
+- A worker that stops hands back the runs it still executes once its wait of
+  one lease is over: they go back to `pending`, claimable at once, instead of
+  staying `running` until the lease expires. Their flows are dropped first,
+  without recording an outcome, and a run is only released once its flow is
+  gone, so that nothing of it runs beside the next owner. The release waits at
+  most two seconds for a connection and a lock, the releases run together, and
+  one that fails is logged and left to its lease without holding back the
+  shutdown or the others. The release is fenced by worker and
+  claim (`lease_id`, which it clears) like every write of an execution. The
+  interrupted attempt stays counted in `attempts`, which still keys its step
+  rows, so the run has one retry fewer; it is not failed as abandoned for that, and it runs again even with
+  `max_attempts(1)`.
+- Retries wait between half of the backoff and all of it, drawn at random,
+  instead of exactly the backoff, so that runs that failed together, because
+  a provider went down, do not all retry at the same moment. `max_interval`
+  still caps the delay.
+- The documentation of steps no longer says that a step is never executed
+  twice. Steps run at least once: a step whose result is stored is not run
+  again, but a process that dies before the result is stored, or a lease that
+  expires while the step runs, makes the next attempt run it again, side
+  effects included.
 
 ## 0.0.12-beta.0
 

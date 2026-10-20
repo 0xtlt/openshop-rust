@@ -1,5 +1,5 @@
 use super::types::{FunctionDef, type_label};
-use crate::{components::page::Page, fetch::api_fetch, router::route};
+use crate::{components::page::Page, fetch::api_json_or_report, router::route};
 use leptos::{prelude::*, task::spawn_local};
 
 #[component]
@@ -7,7 +7,7 @@ pub fn FunctionList() -> impl IntoView {
     let functions = RwSignal::new(Vec::<FunctionDef>::new());
 
     spawn_local(async move {
-        if let Ok(Ok(definitions)) = api_fetch("/api/functions").await.map(|response| response.json()) {
+        if let Some(definitions) = api_json_or_report("/api/functions", "the functions").await {
             functions.set(definitions);
         }
     });

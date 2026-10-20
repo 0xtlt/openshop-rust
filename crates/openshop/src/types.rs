@@ -369,8 +369,16 @@ impl<T, E: Into<anyhow::Error>> MethodResult for std::result::Result<T, E> {
 
 /// The stored configuration of a provider as the type its methods expect.
 fn typed_provider_config<C: DeserializeOwned>(provider: &str, config: JsonMap) -> Result<C> {
-    serde_json::from_value(Value::Object(config))
-        .map_err(|error| anyhow!("Invalid configuration for provider \"{provider}\": {error}"))
+    serde_json::from_value(Value::Object(config)).map_err(|error| {
+        let message = format!("Invalid configuration for provider \"{provider}\": {error}");
+        // A missing field names the field and nothing else; any other serde
+        // error quotes the stored value, which can be a credential.
+        if error.to_string().starts_with("missing field") {
+            crate::server::http::public_error(message)
+        } else {
+            anyhow!(message)
+        }
+    })
 }
 
 /// The arguments of a call as the type its method expects.
@@ -714,6 +722,28 @@ impl CronShops {
     }
 }
 
+impl CronShops {
+    /// Whether a shop may see a cron: one that runs for no shop or for every
+    /// shop says nothing about others, one that names shops is seen by those.
+    pub fn is_visible_to(&self, shop: &str) -> bool {
+        match self {
+            Self::Global | Self::All => true,
+            Self::Shop(named) => named == shop,
+            Self::Shops(named) => named.iter().any(|named| named == shop),
+        }
+    }
+
+    /// [`CronShops::to_json`] for a shop that sees the cron: the shops it
+    /// names are reduced to that shop, never the others.
+    pub fn to_json_for(&self, shop: &str) -> Value {
+        match self {
+            Self::Shop(_) => Value::from(shop),
+            Self::Shops(_) => Value::from(vec![shop]),
+            Self::Global | Self::All => self.to_json(),
+        }
+    }
+}
+
 impl From<Vec<String>> for CronShops {
     fn from(value: Vec<String>) -> Self {
         Self::Shops(value)
@@ -729,6 +759,8 @@ pub struct Cron {
     pub flow: String,
     pub input: Option<Value>,
     pub shops: Option<CronShops>,
+    /// The IANA time zone the schedule is read in. UTC when unset.
+    pub timezone: Option<String>,
 }
 
 impl Cron {
@@ -739,6 +771,7 @@ impl Cron {
             flow: flow.into(),
             input: None,
             shops: None,
+            timezone: None,
         }
     }
 
@@ -749,6 +782,13 @@ impl Cron {
 
     pub fn input(mut self, input: Value) -> Self {
         self.input = Some(input);
+        self
+    }
+
+    /// Reads the schedule in an IANA time zone such as `Europe/Paris`, daylight
+    /// saving time included. Without it, the schedule is read in UTC.
+    pub fn timezone(mut self, timezone: impl Into<String>) -> Self {
+        self.timezone = Some(timezone.into());
         self
     }
 
@@ -781,6 +821,16 @@ impl Cron {
 
     pub fn shops_json(&self) -> Value {
         self.shops.clone().unwrap_or_default().to_json()
+    }
+
+    /// Whether a shop may see this cron, its input and its shops.
+    pub fn is_visible_to(&self, shop: &str) -> bool {
+        self.shops.clone().unwrap_or_default().is_visible_to(shop)
+    }
+
+    /// The shops of the cron as a shop sees them: only itself among those named.
+    pub fn shops_json_for(&self, shop: &str) -> Value {
+        self.shops.clone().unwrap_or_default().to_json_for(shop)
     }
 }
 
@@ -827,7 +877,8 @@ pub struct ShopifyConfig {
     pub apps: Option<IndexMap<String, ShopifyAppConfig>>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// `Debug` does not show `api_secret`.
+#[derive(Clone, PartialEq, Eq)]
 pub enum ShopifyAppConfig {
     Toml {
         /// Shopify app TOML path, relative to the project root. OpenShop reads client_id and app URL from it.
@@ -844,6 +895,34 @@ pub enum ShopifyAppConfig {
         /// Public app URL used for OAuth redirects.
         app_url: Option<String>,
     },
+}
+
+impl std::fmt::Debug for ShopifyAppConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        use crate::runtime::redact::redacted;
+        match self {
+            Self::Toml {
+                toml,
+                api_secret,
+                app_url,
+            } => f
+                .debug_struct("Toml")
+                .field("toml", toml)
+                .field("api_secret", &redacted(api_secret))
+                .field("app_url", app_url)
+                .finish(),
+            Self::Keys {
+                api_key,
+                api_secret,
+                app_url,
+            } => f
+                .debug_struct("Keys")
+                .field("api_key", api_key)
+                .field("api_secret", &redacted(api_secret))
+                .field("app_url", app_url)
+                .finish(),
+        }
+    }
 }
 
 impl ShopifyAppConfig {
@@ -2056,3 +2135,6 @@ impl WorkerConfig {
 
 pub const ACTIVE_RUN_STATUSES: [&str; 3] = ["pending", "running", "sleeping"];
 pub const ALL_RUN_STATUSES: [&str; 6] = ["pending", "running", "sleeping", "completed", "failed", "canceled"];
+
+#[cfg(test)]
+mod tests;

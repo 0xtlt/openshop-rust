@@ -47,14 +47,17 @@ in the address as `range=1h`, `24h`, `7d`, or `30d`.
 | `/ops/runs` | The runs of every shop over the period, the latest first, under a chart of them. Filters: `status`, `flow`, a part of the `shop` domain, and `q`, a part of the error. |
 | `/ops/runs/:id` | A run: its shop, status, attempts, timestamps, duration, error and input, then its step attempts with their output, and its first 500 log lines with their payload. |
 | `/ops/logs` | The lines the flows of every shop wrote over the period, the latest first, under a chart of them and of the errors among them. Filters: `level`, `flow`, a part of the `shop` domain, and `q`, a part of the message. A line leads to its run. |
-| `/ops/shops` | The installations, `installed`, `uninstalled`, or `pending` when the shop started the installation without finishing it, with the runs and the failures of the period. The shops with the most failures come first. Filters: `state`, and `q`, a part of the domain. |
+| `/ops/shops` | The installations, `installed`, `uninstalled`, or `pending` when its row has no token and is not uninstalled (an installation an earlier version started without finishing: `/auth` writes no row any more), with the runs and the failures of the period. The shops with the most failures come first. Filters: `state`, and `q`, a part of the domain. |
 | `/ops/shops/:shop` | A shop: its runs over the period, its installation and scopes, whether it saved each provider and how the last check went, the crons it turned off, and its 10 latest runs. |
 | `/ops/flows` | The flows of the application, and those that ran without being registered any more: runs, failures, failure rate, mean duration, and latest run over the period. A flow leads to its runs. |
 | `/ops/crons` | The crons of the application: flow, schedule, the shops they run for, the next run, and how many shops turned each off. |
 | `/ops/login` | The sign-in form. |
 
 Lists show 100 rows; `Older` at their end leads to the next ones, with
-`before`, an RFC 3339 timestamp, in the address. A filter in force is shown
+`before`, the timestamp and the id of the last row shown (`<RFC 3339>_<id>`),
+in the address: rows created at the same instant are neither skipped nor shown
+twice. A `before` with the timestamp alone is still read, and then leaves out
+every row of that instant. A filter in force is shown
 as a chip that removes it. A row of a table is a link wherever it is clicked:
 to the run, the shop, or the runs of the flow it is about.
 
@@ -76,7 +79,12 @@ theme, and on a narrow screen show each row of a table as a card.
 
 Counting over a period reads the runs and the log lines of that period. On a
 large history, prefer a short period: the longest ones take the time it takes
-to read them.
+to read them. The log lines are read through the indexes of the
+[framework schema](database.md#framework-tables) on their time and their
+level, and a statement of the dashboard is cancelled after 10 seconds: a page
+that cannot be computed in that time answers with an error and does not hold
+the database. Set [`log_retention`](configuration.md#settings) to keep the
+table, and so the pages, small.
 
 ## Session
 
@@ -84,8 +92,8 @@ to read them.
 | --- | --- |
 | Any path under `/ops` without a session | `303` to `/ops/login`. |
 | `POST /ops/login` with the password, as the form field `password` | `303` to `/ops`, with the session cookie. |
-| `POST /ops/login` with another password | `401` and the form, after a delay. |
-| `POST /ops/login` while another attempt is being checked | `429` and the form. The password was not looked at. |
+| `POST /ops/login` with another password | `401` and the form. |
+| `POST /ops/login` from a client that attempted a moment ago | `429`, the form, and `Retry-After`. The password was not looked at. |
 | `POST /ops/login` or `POST /ops/logout` sent by a page of another site (`Sec-Fetch-Site`) | `403`. |
 | `POST /ops/logout` | `303` to `/ops/login`; the browser forgets the cookie. |
 
@@ -97,14 +105,24 @@ The signing key is derived from the password, and from `ENCRYPTION_KEY` when
 it is set, so that changing either closes every session. Signing out removes
 the cookie from one browser; the session itself stays valid until it expires.
 
-Passwords are compared in constant time. One attempt is checked at a time, and
-a wrong one is answered after a delay that doubles with each failure, from
-250 ms to 8 seconds, until a successful sign-in. Guessing stays slow whatever
-the number of connections. While someone keeps guessing, signing in is refused
-for everyone; a session that is already open keeps working.
+Passwords are compared in constant time. Each client may attempt once, then
+again after a delay that doubles with each failure, from 250 ms to 8 seconds,
+until a successful sign-in; an attempt made sooner is answered `429` at once and
+not looked at, even with the right password. Guessing stays slow whatever the
+number of connections, and the delays of the clients are independent: one that
+keeps guessing is the only one that cannot sign in, and nobody waits for it.
+A session that is already open keeps working.
+
+A client is the address of the peer of the connection (a `/64` for IPv6). Behind
+a reverse proxy that is the proxy, unless it is on a private network, a loopback
+or a link-local address and sends `X-Forwarded-For`: the last address of that
+header, the one the proxy added, is the client then. A peer on a public address
+is never believed about that header. If your proxy does not set it, every
+visitor counts as one client and one of them guessing keeps the others out for
+a few seconds at a time.
 
 Each sign-in and each wrong password writes a line to the
-[runtime logger](logging.md), without the password.
+[runtime logger](logging.md), with the client address and without the password.
 
 ## Response headers
 

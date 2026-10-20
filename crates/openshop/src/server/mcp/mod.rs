@@ -5,13 +5,14 @@ pub mod core;
 pub mod registry;
 pub mod schema;
 pub mod tokens;
+mod verifier;
 
 pub use crate::types::{McpAuditStatus, McpCapabilityType};
 
 use std::panic::AssertUnwindSafe;
 use std::time::{Duration, Instant};
 
-use anyhow::{Result, anyhow};
+use anyhow::Result;
 use axum::body::Body;
 use axum::extract::{Request, State};
 use axum::http::header::AUTHORIZATION;
@@ -26,7 +27,9 @@ use self::registry::{McpRegistry, has_all_permissions};
 use self::schema::validate_mcp_tool_arguments;
 use crate::app::OpenShop;
 use crate::engine::step::error_message;
+use crate::server::client::request_client_ip;
 use crate::server::connectors::Connectors;
+use crate::server::http::{client_error, public_error};
 use crate::server::shop_domain::normalize_shop_domain;
 use crate::shopify::client::ShopifyClient;
 use crate::types::{JsonMap, McpContext};
@@ -172,8 +175,11 @@ where
     let guarded = AssertUnwindSafe(async { run(signal).await }).catch_unwind();
     match tokio::time::timeout(MAX_MCP_EXECUTION, guarded).await {
         Ok(Ok(result)) => result,
-        Ok(Err(_)) => Err(anyhow!("{label} panicked")),
-        Err(_) => Err(anyhow!("{label} timed out after {}ms", MAX_MCP_EXECUTION.as_millis())),
+        Ok(Err(_)) => Err(public_error(format!("{label} panicked"))),
+        Err(_) => Err(public_error(format!(
+            "{label} timed out after {}ms",
+            MAX_MCP_EXECUTION.as_millis()
+        ))),
     }
 }
 
@@ -300,10 +306,11 @@ async fn dispatch(call: McpCall<'_>, method: &str, active: &mut ActiveAudit) -> 
                     Err(error) => return Ok(json_rpc_error(id, -32602, &error, ok)),
                 };
             if name == "openshop.admin.graphql" {
-                active.target_shop = input
-                    .get("shop")
-                    .and_then(Value::as_str)
-                    .and_then(normalize_shop_domain);
+                // The shop the call asked for, so a refusal shows where it aimed.
+                active.target_shop = match input.get("shop").and_then(Value::as_str) {
+                    Some(requested) => normalize_shop_domain(requested),
+                    None => Some(token.shop.clone()),
+                };
             }
 
             let run = tool.definition.run.clone();
@@ -394,6 +401,7 @@ async fn dispatch(call: McpCall<'_>, method: &str, active: &mut ActiveAudit) -> 
 }
 
 pub(crate) async fn handle(State(app): State<OpenShop>, request: Request) -> Response {
+    let client = request_client_ip(&request);
     let authorization = request
         .headers()
         .get(AUTHORIZATION)
@@ -402,7 +410,19 @@ pub(crate) async fn handle(State(app): State<OpenShop>, request: Request) -> Res
 
     let token = match resolve_mcp_bearer_token(&app, authorization.as_deref()).await {
         Ok(McpAuthResult::Ok(token)) => token,
-        Ok(McpAuthResult::Rejected { status, error, .. }) => return plain_error(status, error),
+        Ok(McpAuthResult::Rejected { status, error, token_id }) => {
+            // The token id names a token, never its secret.
+            crate::runtime::logger::warn_with(
+                "[openshop] MCP token refused",
+                json!({
+                    "tokenId": token_id,
+                    "reason": error,
+                    "status": status,
+                    "client": client.map(|address| address.to_string()),
+                }),
+            );
+            return plain_error(status, error);
+        }
         Err(error) => {
             crate::runtime::logger::error_with(
                 "[openshop] MCP authentication failed",
@@ -455,7 +475,9 @@ pub(crate) async fn handle(State(app): State<OpenShop>, request: Request) -> Res
     match dispatch(call, &method, &mut active).await {
         Ok(response) => response,
         Err(error) => {
-            let message = error_message(&error);
+            // What the caller did wrong is told as it is; a database or network
+            // failure is logged under an id, and only the id goes out.
+            let message = client_error(&format!("MCP {method} failed"), &error).message;
             let _ = audit(
                 &app,
                 AuditEntry {

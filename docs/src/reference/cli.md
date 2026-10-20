@@ -13,7 +13,7 @@ An OpenShop app has two command lines:
 | `openshop init [<dir>]` | — | Scaffold a new project from a template. |
 | `openshop init-ui` | — | Scaffold a custom admin page with its view. |
 | `openshop dev [cargo args]` | `cargo run [cargo args] -- dev`, restarted on changes | Start the development server. The admin UI reloads by itself. |
-| `openshop codegen [--api-version=YYYY-MM] [--out=<file>]` | — | Download the Shopify Admin GraphQL schema of another API version for [`graphql!`](graphql.md#schema-and-api-version). |
+| `openshop codegen [--api-version=YYYY-MM] [--out=<file>]` | — | Download the Shopify Admin GraphQL schema of another API version for [`graphql!`](graphql.md#schema-and-api-version). Gives up when the endpoint does not connect in 15 seconds or the download takes more than 120. |
 | `openshop build [args]` | `openshop build-ui`, then `cargo build --release [args]` | Build the app for production. |
 | `openshop build-ui` | `trunk build --release` on the crate of the bundle | Build the admin UI bundle of an app whose admin pages have a view, into `dist/`. |
 | `openshop start [args]` | `cargo run --release -- start [args]` | Start the production web process. |
@@ -21,13 +21,15 @@ An OpenShop app has two command lines:
 | `openshop migrate [args]` | `cargo run -- migrate [args]` | Apply, generate, check, or inspect migrations. |
 | `openshop test [args]` | `cargo test [args]` | Run the app's tests. |
 
-Any other command prints the usage text. When `cargo` fails, `openshop` prints
-the error and exits with status `1`.
+An unknown command fails with status `2` and the usage text (see the end of
+this page). When `cargo` fails, `openshop` prints the error and exits with
+status `1`.
 
-Install the CLI from the repository:
+Install the CLI from the repository. `--locked` builds it with the versions of
+the dependencies the repository tested:
 
 ```bash
-cargo install --git https://github.com/0xtlt/openshop-rust openshop-cli
+cargo install --locked --git https://github.com/0xtlt/openshop-rust openshop-cli
 ```
 
 The CLI is a convenience. Every command except `init`, `init-ui`, `codegen`,
@@ -55,7 +57,9 @@ a script or CI, it needs both, and fails with the list of templates.
 
 The target must be an empty or nonexistent directory. `init` derives the Cargo
 package name from the directory name, pins the `openshop` dependency to the
-Git tag of the CLI's own version (`tag = "v<version>"`), and writes the
+Git commit the CLI was built from (`rev = "<commit>"`; a CLI built without git
+pins the tag `v<version>` of its version instead, and says that the tag has to
+exist), and writes the
 migrations of the template in `migrations/`: the framework schema, and the
 tables of its models. It does not update an existing app. See the
 [first-app tutorial](../tutorials/first-app.md) for the full setup and
@@ -65,13 +69,29 @@ tables of its models. It does not update an existing app. See the
 | --- | --- |
 | `<dir>` | Target directory, relative to the current directory. Asked for in a terminal; elsewhere the command fails with `Usage: openshop init [<dir>] [--template=<name>]`. |
 | `--template=<name>`, `--template <name>`, `-t <name>` | `minimal`, `custom` or `public`. Asked for in a terminal; elsewhere the command fails with ``[openshop] Name a template: openshop init <dir> --template=<name>`` and the list. An unknown name fails with `[openshop] Unknown template: <name>`. |
-| `--openshop-path=<dir>` | Make the generated `Cargo.toml` depend on a local checkout of the `openshop` crate (`path = "…"`) instead of the tagged Git repository. The directory must exist. |
+| `--openshop-rev=<commit>` | Make the generated `Cargo.toml` depend on this commit of the Git repository (`rev = "…"`) instead of the commit the CLI was built from. |
+| `--openshop-tag=<tag>` | Depend on this tag of the Git repository (`tag = "…"`). |
+| `--openshop-branch=<name>` | Depend on this branch of the Git repository (`branch = "…"`). |
+| `--openshop-path=<dir>` | Depend on a local checkout of the `openshop` crate (`path = "…"`). The directory must exist. |
+
+At most one of the four `--openshop-*` arguments; a second one fails with
+``[openshop] Name one source for `openshop` ``. The commit the CLI was built from
+is the one `cargo install --git` took; for a CLI built from a local checkout,
+make sure it is pushed, or pass `--openshop-path`. The `Dockerfile` of a project
+with admin views installs the CLI of the `rev`, `tag` or `branch` of the
+manifest, so it follows any of them.
 
 A non-empty target fails with
 `[openshop] Target directory is not empty: <path>`, before any question about
 the template. The `custom` and `public` templates have admin pages with a
 view, compiled to WebAssembly: install the toolchain once with
 `rustup target add wasm32-unknown-unknown` and `cargo install trunk`.
+
+If `init` fails after it started writing, it removes the files it wrote and the
+directories it made, nothing else: a directory it shares with another `init`
+stays if that one wrote in it. A
+directory that already had something in it is refused before anything is
+written.
 
 ### Scaffold a custom admin page
 
@@ -125,17 +145,18 @@ the current directory.
 | Command | Input or flags | Behavior |
 | --- | --- | --- |
 | `dev` | Process environment and `.env` | Loads `.env`, pushes the framework schema and registered models, then runs the API, the admin UI, a worker, and the cron scheduler in one process. Refused in production mode. |
-| `start` | Process environment | Serves the API and the admin UI and starts cron dispatch. No worker, no schema changes. |
-| `worker` | `--concurrency=N` | Executes queued runs. No HTTP server, no cron dispatch, no schema changes. |
+| `start` | Process environment | Serves the API and the admin UI and starts cron dispatch. No worker, no schema changes. Refuses to start while `migrations/` holds a migration the database has not applied, or does not cover the framework schema. |
+| `worker` | `--concurrency=N` | Executes queued runs. No HTTP server, no cron dispatch, no schema changes. Refuses to start in the same cases as `start`. |
 | `migrate` | Committed `migrations/` directory | Applies pending SQL files in file-name order. |
-| `migrate generate` | `--name=<name>`, `--allow-generate-in-production` | Writes the framework schema your project does not cover yet, and the statements that bring your tables in line with the registered models since the last generation; with `--name` and nothing else to write, writes an empty migration for your own changes. Updates `migrations/schema.snapshot.json`. Does not connect to the database. Blocked in production by default. See [Generated model migrations](database.md#generated-model-migrations). |
+| `migrate generate` | `--name=<name>`, `--manual-done`, `--allow-destructive`, `--allow-generate-in-production` | Writes the framework schema your project does not cover yet, and the statements that bring your tables in line with the registered models since the last generation; with `--name` and nothing else to write, writes an empty migration for your own changes. Updates `migrations/schema.snapshot.json`. Does not connect to the database. Refuses a migration that drops a table or a column, or converts a column in a way that can lose values, unless `--allow-destructive` is given. Blocked in production by default. See [Generated model migrations](database.md#generated-model-migrations). |
 | `migrate check` | `migrations/` directory | Fails when the committed migrations do not cover the framework schema, or when the models changed since the last generated migration. Does not connect to the database. |
 | `migrate status` | Database and `migrations/` directory | Prints the migrations folder and the applied and pending migrations. |
 
-Any other first argument, or none, prints the usage text and exits with status
-`0`. An unknown `migrate` subcommand fails with
-`[openshop] Unknown migrate command: <name>`. A failing command prints its
-error and exits with a non-zero status.
+No command, `help`, `--help` and `-h` print the usage text and exit with status
+`0`. Any other first argument fails with `[openshop] Unknown command: <name>`
+and the usage text on stderr, with status `2`. An unknown `migrate` subcommand
+fails with `[openshop] Unknown migrate command: <name>`. A failing command
+prints its error and exits with a non-zero status.
 
 Details:
 
