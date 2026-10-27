@@ -21,11 +21,11 @@ use crate::{
 use gloo_timers::callback::Timeout;
 use leptos::{prelude::*, task::spawn_local};
 use leptos_router::hooks::use_params_map;
-use log_query::{LevelCounts, count_levels, logs_url, note_logs, page_url, parse_levels, toggle_level};
+use log_query::{logs_url, note_logs, page_url, parse_levels, toggle_level};
 use logs_section::LogsSection;
 use output::{OutputModal, build_step_rows, step_row};
 use run_action_modals::{ActionFuture, RunActionModals};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 /// Loads the run. It is polled: a failure is logged and kept in `load_error` for the page to
 /// show, and the next poll tries again.
@@ -74,7 +74,7 @@ pub fn FlowRun() -> impl IntoView {
     let query = RwSignal::new(initial_params.get("q").unwrap_or_default().to_string());
     let levels = RwSignal::new(parse_levels(initial_params.get("levels")));
     let show_help = RwSignal::new(false);
-    let level_counts = RwSignal::new(LevelCounts::default());
+    let level_counts = RwSignal::new(HashMap::<String, u64>::new());
     let new_log_ids = RwSignal::new(HashSet::<String>::new());
     let known_log_ids = StoredValue::new(HashSet::<String>::new());
     let initial_load = StoredValue::new(true);
@@ -135,7 +135,7 @@ pub fn FlowRun() -> impl IntoView {
                             new_log_ids.set(fresh);
                             Timeout::new(5_000, move || new_log_ids.set(HashSet::new())).forget();
                         }
-                        set_if_changed(level_counts, count_levels(&data.level_counts));
+                        set_if_changed(level_counts, data.level_counts);
                         set_if_changed(has_more_logs, data.next.is_some());
                         set_if_changed(filtered_logs, data.logs);
                         set_if_changed(total_logs, data.total);

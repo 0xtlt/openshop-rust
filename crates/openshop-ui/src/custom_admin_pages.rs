@@ -4,21 +4,17 @@ use crate::{
     components::page::{Deferred, Page},
     fetch::api_json,
     pages::disabled::Disabled,
-    url::decode_uri_component,
 };
 use leptos::{prelude::*, task::spawn_local};
 use leptos_router::hooks::use_location;
 use openshop_shared::{
-    ADMIN_HOME_PATH, CustomAdminPagesResponse, custom_admin_route_shape_key, is_custom_admin_page_pattern,
-    match_custom_admin_path, rpc::encode_uri_component,
+    ADMIN_HOME_PATH, CustomAdminPagesResponse, custom_admin_route_params, match_custom_admin_path,
+    rpc::encode_uri_component, sort_custom_admin_routes,
 };
 use serde::Deserialize;
-use std::{
-    cmp::Ordering,
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering as AtomicOrdering},
-    },
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
 };
 
 /// Values of the dynamic segments of a custom page route, e.g. `id` for `/reviews/:id`.
@@ -78,88 +74,18 @@ type PageView = Arc<dyn Fn(RouteParams) -> AnyView + Send + Sync>;
 /// A custom admin page: a route pattern and the view rendered for it.
 #[derive(Clone)]
 pub struct CustomAdminPage {
-    id: String,
     route_pattern: String,
     view: PageView,
 }
 
 impl CustomAdminPage {
     /// Declares a page for a pattern such as `/reviews` or `/reviews/:id`.
-    ///
-    /// The id defaults to the pattern written as a folder path (`reviews/[id]`).
     pub fn new<Marker>(route_pattern: &str, view: impl CustomPageView<Marker>) -> Self {
         Self {
-            id: default_page_id(route_pattern),
             route_pattern: route_pattern.to_string(),
             view: Arc::new(move |params| view.render(params)),
         }
     }
-
-    /// Overrides the stable id of the page.
-    pub fn with_id(mut self, id: impl Into<String>) -> Self {
-        self.id = id.into();
-        self
-    }
-
-    pub fn id(&self) -> &str {
-        &self.id
-    }
-
-    pub fn route_pattern(&self) -> &str {
-        &self.route_pattern
-    }
-}
-
-fn pattern_segments(pattern: &str) -> impl Iterator<Item = &str> {
-    pattern.split('/').filter(|segment| !segment.is_empty())
-}
-
-fn default_page_id(route_pattern: &str) -> String {
-    pattern_segments(route_pattern)
-        .map(|segment| match segment.strip_prefix(':') {
-            Some(name) => format!("[{name}]"),
-            None => segment.to_string(),
-        })
-        .collect::<Vec<_>>()
-        .join("/")
-}
-
-/// Static segments sort before dynamic ones so `/reviews/new` wins over `/reviews/:id`.
-fn compare_patterns(left: &str, right: &str) -> Ordering {
-    let mut left = left.split('/');
-    let mut right = right.split('/');
-    loop {
-        match (left.next(), right.next()) {
-            (None, None) => return Ordering::Equal,
-            (None, Some(_)) => return Ordering::Less,
-            (Some(_), None) => return Ordering::Greater,
-            (Some(left), Some(right)) if left == right => {}
-            (Some(left), Some(right)) => {
-                return match (left.starts_with(':'), right.starts_with(':')) {
-                    (true, false) => Ordering::Greater,
-                    (false, true) => Ordering::Less,
-                    _ => left.cmp(right),
-                };
-            }
-        }
-    }
-}
-
-fn match_route(pattern: &str, pathname: &str) -> Option<RouteParams> {
-    let pattern: Vec<&str> = pattern_segments(pattern).collect();
-    let path: Vec<&str> = pattern_segments(pathname).collect();
-    if pattern.len() != path.len() {
-        return None;
-    }
-    let mut params = Vec::new();
-    for (pattern, segment) in pattern.into_iter().zip(path) {
-        match pattern.strip_prefix(':') {
-            Some(name) => params.push((name.to_string(), decode_uri_component(segment))),
-            None if pattern == segment => {}
-            None => return None,
-        }
-    }
-    Some(RouteParams(params))
 }
 
 /// The custom pages compiled into this bundle, most specific route first.
@@ -167,28 +93,14 @@ fn match_route(pattern: &str, pathname: &str) -> Option<RouteParams> {
 pub struct CustomAdminPages(Arc<[CustomAdminPage]>);
 
 impl CustomAdminPages {
+    /// Sorts the pages, most specific route first. Their routes are the ones the
+    /// server checked when it started.
+    ///
     /// # Panics
     ///
-    /// Panics when a route is reserved or malformed, or when two routes have the same shape.
+    /// Panics when two routes have the same shape.
     pub fn new(mut pages: Vec<CustomAdminPage>) -> Self {
-        pages.sort_by(|left, right| compare_patterns(&left.route_pattern, &right.route_pattern));
-        for (index, page) in pages.iter().enumerate() {
-            assert!(
-                is_custom_admin_page_pattern(&page.route_pattern),
-                "[openshop] Custom admin page path \"{}\" is reserved or invalid",
-                page.route_pattern
-            );
-            let shape = custom_admin_route_shape_key(&page.route_pattern);
-            if let Some(existing) = pages[..index]
-                .iter()
-                .find(|other| custom_admin_route_shape_key(&other.route_pattern) == shape)
-            {
-                panic!(
-                    "[openshop] Custom admin page routes \"{}\" and \"{}\" have the same route shape",
-                    existing.route_pattern, page.route_pattern
-                );
-            }
-        }
+        sort_custom_admin_routes(&mut pages, |page| &page.route_pattern).unwrap_or_else(|error| panic!("{error}"));
         Self(pages.into())
     }
 
@@ -201,11 +113,22 @@ impl CustomAdminPages {
         self.0.iter().any(|page| page.route_pattern == ADMIN_HOME_PATH)
     }
 
-    fn find(&self, pathname: &str) -> Option<(usize, RouteParams)> {
+    /// Whether a page of the bundle is at `pathname`.
+    fn contains(&self, pathname: &str) -> bool {
         self.0
             .iter()
-            .enumerate()
-            .find_map(|(index, page)| Some((index, match_route(&page.route_pattern, pathname)?)))
+            .any(|page| match_custom_admin_path(&page.route_pattern, pathname))
+    }
+
+    /// The page at `pathname`, and the values of its dynamic segments. `None`
+    /// as well when a value is not a valid escape, which the server refuses.
+    fn find(&self, pathname: &str) -> Option<(usize, RouteParams)> {
+        self.0.iter().enumerate().find_map(|(index, page)| {
+            Some((
+                index,
+                RouteParams(custom_admin_route_params(&page.route_pattern, pathname)?),
+            ))
+        })
     }
 }
 
@@ -300,7 +223,7 @@ enum Gate {
 pub fn CustomAdminPageGate(children: ChildrenFn) -> impl IntoView {
     let pages = expect_context::<CustomAdminPages>();
     let pathname = use_location().pathname;
-    let is_custom = Memo::new(move |_| pages.find(&pathname.get()).is_some());
+    let is_custom = Memo::new(move |_| pages.contains(&pathname.get()));
     let route_access = RwSignal::new(None::<(String, bool)>);
 
     Effect::new(move |_| {
@@ -311,12 +234,12 @@ pub fn CustomAdminPageGate(children: ChildrenFn) -> impl IntoView {
         let active = Arc::new(AtomicBool::new(true));
         on_cleanup({
             let active = Arc::clone(&active);
-            move || active.store(false, AtomicOrdering::Relaxed)
+            move || active.store(false, Ordering::Relaxed)
         });
         spawn_local(async move {
             let url = format!("/api/pages/custom/access?path={}", encode_uri_component(&path));
             let allowed = api_json::<RouteAccess>(&url).await.is_ok_and(|access| access.allowed);
-            if active.load(AtomicOrdering::Relaxed) {
+            if active.load(Ordering::Relaxed) {
                 route_access.set(Some((path, allowed)));
             }
         });
@@ -370,22 +293,16 @@ mod tests {
     }
 
     #[test]
-    fn derives_ids_from_route_patterns() {
-        assert_eq!(page("/reviews").id(), "reviews");
-        assert_eq!(page("/reviews/:id").id(), "reviews/[id]");
-        assert_eq!(page("/reviews/:id").with_id("review-details").id(), "review-details");
-    }
-
-    #[test]
-    fn extracts_decoded_route_params() {
-        let params = match_route("/reviews/:id/:tab", "/reviews/gid%3A%2F%2Fx%2F1/notes/").unwrap();
+    fn reads_decoded_route_params() {
+        let pages = CustomAdminPages::new(vec![page("/reviews/:id/:tab")]);
+        let (_, params) = pages.find("/reviews/gid%3A%2F%2Fx%2F1/notes/").unwrap();
         assert_eq!(params.get("id"), Some("gid://x/1"));
         assert_eq!(params.get("tab"), Some("notes"));
         assert_eq!(params.get("other"), None);
         assert_eq!(params.iter().count(), 2);
-        assert_eq!(match_route("/reviews", "/reviews"), Some(RouteParams::default()));
-        assert_eq!(match_route("/reviews/:id", "/reviews"), None);
-        assert_eq!(match_route("/reviews/:id", "/orders/1"), None);
+        // The server refuses a value that is not a valid escape: the gate asks it.
+        assert!(pages.contains("/reviews/%zz/notes"));
+        assert!(pages.find("/reviews/%zz/notes").is_none());
     }
 
     #[test]
@@ -406,13 +323,6 @@ mod tests {
         assert_eq!(pages.find("/").map(|(index, _)| index), Some(0));
         assert_eq!(pages.find("/reviews").map(|(index, _)| index), Some(1));
         assert!(!CustomAdminPages::new(vec![page("/reviews")]).has_home());
-        assert_eq!(page("/").id(), "");
-    }
-
-    #[test]
-    #[should_panic(expected = "is reserved or invalid")]
-    fn rejects_reserved_routes() {
-        CustomAdminPages::new(vec![page("/flows/custom")]);
     }
 
     #[test]

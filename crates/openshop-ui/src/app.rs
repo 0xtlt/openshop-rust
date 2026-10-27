@@ -2,7 +2,7 @@ use crate::{
     admin_pages::{AdminPageGate, AdminPagesContext, use_admin_pages},
     custom_admin_pages::{
         CustomAdminPage, CustomAdminPageGate, CustomAdminPageOutlet, CustomAdminPages, CustomAdminPagesContext,
-        CustomPageView, use_custom_admin_pages, use_custom_home,
+        use_custom_admin_pages, use_custom_home,
     },
     dom::{self, every, hold_until_cleanup, listen},
     fetch::{ApiError, api_json},
@@ -23,9 +23,7 @@ use leptos_router::{
     location::{BrowserUrl, LocationProvider},
     path,
 };
-use openshop_shared::{
-    AdminPageMode, CustomAdminPagesResponse, ResolvedAdminPages, resolve_admin_pages, same_admin_pages,
-};
+use openshop_shared::{AdminPageMode, CustomAdminPagesResponse, ResolvedAdminPages, resolve_admin_pages};
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
@@ -35,63 +33,20 @@ use web_sys::{Element, Event, HtmlElement, VisibilityState};
 
 const PAGES_REFRESH_MS: u32 = 10_000;
 
-/// The embedded admin UI, optionally extended with custom admin pages.
+/// Mounts the admin UI into `<div id="root">`: the built-in screens, and the
+/// custom admin `pages` compiled into the bundle.
 ///
-/// ```no_run
-/// use leptos::prelude::*;
-/// use openshop_ui::{App, RouteParams};
+/// # Panics
 ///
-/// #[component]
-/// fn Reviews() -> impl IntoView {
-///     view! { <s-page heading="Reviews"></s-page> }
-/// }
-///
-/// fn review(params: RouteParams) -> impl IntoView {
-///     let heading = format!("Review {}", params.get("id").unwrap_or_default());
-///     view! { <s-page heading=heading></s-page> }
-/// }
-///
-/// App::new().page("/reviews", Reviews).page("/reviews/:id", review).mount();
-/// ```
-#[derive(Clone, Default)]
-pub struct App {
-    pages: Vec<CustomAdminPage>,
-}
-
-impl App {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Registers a custom admin page for a route pattern such as `/reviews` or `/reviews/:id`.
-    ///
-    /// `view` is a function without arguments (for instance a `#[component]` without props), or
-    /// one taking the [`RouteParams`](crate::RouteParams) of the dynamic segments. The server
-    /// decides who may open the page and which navigation entries point to it.
-    pub fn page<Marker>(self, route_pattern: &str, view: impl CustomPageView<Marker>) -> Self {
-        self.custom_page(CustomAdminPage::new(route_pattern, view))
-    }
-
-    /// Registers a custom admin page built with [`CustomAdminPage`], e.g. to set its id.
-    pub fn custom_page(mut self, page: CustomAdminPage) -> Self {
-        self.pages.push(page);
-        self
-    }
-
-    /// Mounts the UI into `<div id="root">`.
-    ///
-    /// # Panics
-    ///
-    /// Panics when a custom page route is reserved or malformed, when two custom pages have
-    /// the same route shape, or when the document has no `#root` element.
-    pub fn mount(self) {
-        console_error_panic_hook::set_once();
-        let custom_pages = CustomAdminPages::new(self.pages);
-        let root: HtmlElement = dom::element_by_id("root")
-            .expect("index.html must contain <div id=\"root\">")
-            .unchecked_into();
-        mount_to(root, move || view! { <Root custom_pages /> }).forget();
-    }
+/// Panics when two custom pages have the same route shape, or when the document
+/// has no `#root` element.
+pub fn mount(pages: impl IntoIterator<Item = CustomAdminPage>) {
+    console_error_panic_hook::set_once();
+    let custom_pages = CustomAdminPages::new(pages.into_iter().collect());
+    let root: HtmlElement = dom::element_by_id("root")
+        .expect("index.html must contain <div id=\"root\">")
+        .unchecked_into();
+    mount_to(root, move || view! { <Root custom_pages /> }).forget();
 }
 
 async fn load_custom_admin_pages() -> Result<CustomAdminPagesResponse, ApiError> {
@@ -224,11 +179,13 @@ fn AuthGate(children: ChildrenFn) -> impl IntoView {
         status.set(AuthStatus::Ready);
     });
 
-    Effect::new(move |_| {
+    // The pages are loaded again on every navigation, on a timer, and when the
+    // app comes back into view: not right after the load above, though.
+    Effect::new(move |was_ready: Option<bool>| {
         location.pathname.track();
         location.search.track();
         if status.get() != AuthStatus::Ready {
-            return;
+            return false;
         }
         let active = Arc::new(AtomicBool::new(true));
         on_cleanup({
@@ -247,7 +204,7 @@ fn AuthGate(children: ChildrenFn) -> impl IntoView {
                 // A refresh that fails keeps what is shown: the next one tries again.
                 match data {
                     Ok(data) => {
-                        if pages.try_with_untracked(|current| !same_admin_pages(current, &data)) == Some(true) {
+                        if pages.try_with_untracked(|current| *current != data) == Some(true) {
                             pages.set(data);
                         }
                     }
@@ -264,7 +221,9 @@ fn AuthGate(children: ChildrenFn) -> impl IntoView {
             });
         };
 
-        refresh();
+        if was_ready == Some(true) {
+            refresh();
+        }
         every(PAGES_REFRESH_MS, refresh.clone());
         let document = document();
         hold_until_cleanup(listen(&document, "visibilitychange", {
@@ -276,6 +235,7 @@ fn AuthGate(children: ChildrenFn) -> impl IntoView {
             }
         }));
         hold_until_cleanup(listen(&window(), "focus", move |_| refresh()));
+        true
     });
 
     move || {

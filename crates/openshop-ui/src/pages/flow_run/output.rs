@@ -1,14 +1,15 @@
 use crate::{
-    dom::{self, element_by_id, hide_modal, show_modal},
+    components::json_modal::{JsonModal, json_modal_document, show_json_modal},
+    dom::{self, element_by_id},
     format::{format_size, parse_timestamp},
     json,
     types::{StepResult, status_tone},
 };
-use leptos::{prelude::*, task::spawn_local};
+use leptos::prelude::*;
 use std::collections::HashMap;
 
 const OUTPUT_MODAL_ID: &str = "output-modal";
-const OUTPUT_PRE_ID: &str = "output-modal-pre";
+const OUTPUT_SIZE_ID: &str = "output-modal-size";
 const MAX_OUTPUT_CHARS: usize = 2000;
 
 /// A step with its position label: `2` for the second distinct step, `2.3` for its third attempt.
@@ -47,9 +48,9 @@ pub fn build_step_rows(steps: &[StepResult]) -> Vec<StepRowData> {
 }
 
 /// Shortens long outputs for display; lengths are UTF-16 units like JavaScript strings.
-fn preview(full: &str) -> (String, bool) {
+fn preview(full: &str) -> String {
     if full.encode_utf16().count() <= MAX_OUTPUT_CHARS {
-        return (full.to_string(), false);
+        return full.to_string();
     }
     let mut units = 0;
     let end = full
@@ -59,37 +60,26 @@ fn preview(full: &str) -> (String, bool) {
             units > MAX_OUTPUT_CHARS
         })
         .map_or(full.len(), |(index, _)| index);
-    (format!("{}\n…", &full[..end]), true)
+    format!("{}\n…", &full[..end])
 }
 
 fn show_output(step: &StepResult) {
     let Some(output) = &step.output else { return };
-    if element_by_id(OUTPUT_MODAL_ID).is_none() {
+    let Some(modal) = element_by_id(OUTPUT_MODAL_ID) else {
         return;
+    };
+    let full = json::pretty(output);
+    // What the download is named after.
+    let _ = modal.set_attribute("data-step-name", &step.step_name);
+    if let Some(size) = element_by_id(OUTPUT_SIZE_ID) {
+        size.set_text_content(Some(&format_size(full.len())));
     }
-    if let Some(pre) = element_by_id(OUTPUT_PRE_ID) {
-        let full = json::pretty(output);
-        let (shown, truncated) = preview(&full);
-        let size = format_size(full.len());
-        pre.set_text_content(Some(&shown));
-        let _ = pre.set_attribute("data-full", &full);
-        let _ = pre.set_attribute("data-step-name", &step.step_name);
-        let _ = pre.set_attribute("data-truncated", &truncated.to_string());
-        let _ = pre.set_attribute("data-size", &size);
-        if let Some(size_element) = element_by_id("output-modal-size") {
-            size_element.set_text_content(Some(&size));
-        }
-    }
-    if let Some(title) = element_by_id("output-modal-title") {
-        let _ = title.set_attribute("title", &format!("Output — {}", step.step_name));
-    }
-    show_modal(OUTPUT_MODAL_ID);
-}
-
-fn stored_output() -> Option<(String, Option<String>)> {
-    let pre = element_by_id(OUTPUT_PRE_ID)?;
-    let full = pre.get_attribute("data-full").filter(|full| !full.is_empty())?;
-    Some((full, pre.get_attribute("data-step-name")))
+    show_json_modal(
+        OUTPUT_MODAL_ID,
+        &format!("Output — {}", step.step_name),
+        &preview(&full),
+        &full,
+    );
 }
 
 pub fn step_row(row: StepRowData) -> impl IntoView {
@@ -129,44 +119,21 @@ pub fn step_row(row: StepRowData) -> impl IntoView {
 
 #[component]
 pub fn OutputModal() -> impl IntoView {
-    let copy = |_| {
-        if let Some((full, _)) = stored_output() {
-            spawn_local(async move {
-                let _ = dom::copy_text(&full).await;
-            });
-        }
-    };
     let download = |_| {
-        if let Some((full, step_name)) = stored_output() {
+        if let Some(full) = json_modal_document(OUTPUT_MODAL_ID) {
+            let step_name = element_by_id(OUTPUT_MODAL_ID).and_then(|modal| modal.get_attribute("data-step-name"));
             let filename = format!("{}.json", step_name.as_deref().unwrap_or("output"));
             dom::download_text(&full, "application/json", &filename);
         }
     };
 
     view! {
-        <ui-modal id=OUTPUT_MODAL_ID>
-            <div style="padding:16px">
-                <div style="display:flex;gap:6px;margin-bottom:8px">
-                    <s-button variant="secondary" on:click=copy>
-                        "Copy"
-                    </s-button>
-                    <s-button variant="secondary" on:click=download>
-                        "Download"
-                    </s-button>
-                    <span
-                        id="output-modal-size"
-                        style="color:#8c9196;font-size:12px;align-self:center;margin-left:auto"
-                    ></span>
-                </div>
-                <pre
-                    id=OUTPUT_PRE_ID
-                    style="font-family:ui-monospace, SFMono-Regular, Menlo, monospace;font-size:12px;line-height:1.5;background:#fafafa;border-radius:6px;padding:8px 12px;overflow:auto;max-height:60vh;white-space:pre-wrap;word-break:break-word;margin:0;border:1px solid #e3e3e3"
-                ></pre>
-            </div>
-            <ui-title-bar id="output-modal-title" title="Output">
-                <button on:click=|_| hide_modal(OUTPUT_MODAL_ID)>"Close"</button>
-            </ui-title-bar>
-        </ui-modal>
+        <JsonModal id=OUTPUT_MODAL_ID title="Output">
+            <s-button variant="secondary" on:click=download>
+                "Download"
+            </s-button>
+            <span id=OUTPUT_SIZE_ID style="color:#8c9196;font-size:12px;align-self:center;margin-left:auto"></span>
+        </JsonModal>
     }
 }
 
@@ -223,13 +190,11 @@ mod tests {
 
     #[test]
     fn truncates_long_outputs_for_display() {
-        assert_eq!(preview("{}"), ("{}".to_string(), false));
+        assert_eq!(preview("{}"), "{}");
         let exact = "x".repeat(MAX_OUTPUT_CHARS);
-        assert_eq!(preview(&exact), (exact.clone(), false));
-        let (shown, truncated) = preview(&format!("{exact}yz"));
-        assert!(truncated);
-        assert_eq!(shown, format!("{exact}\n…"));
-        let (emoji, _) = preview(&"😀".repeat(MAX_OUTPUT_CHARS));
+        assert_eq!(preview(&exact), exact);
+        assert_eq!(preview(&format!("{exact}yz")), format!("{exact}\n…"));
+        let emoji = preview(&"😀".repeat(MAX_OUTPUT_CHARS));
         assert_eq!(
             emoji.chars().filter(|character| *character == '😀').count(),
             MAX_OUTPUT_CHARS / 2

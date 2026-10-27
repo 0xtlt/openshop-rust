@@ -45,7 +45,7 @@ pub fn FunctionList() -> impl IntoView {
                         <s-stack gap="base">
                             <s-heading>"No functions configured"</s-heading>
                             <s-paragraph>
-                                "Define Shopify Functions in your openshop.config.ts to manage discount, cart transform, and other function instances from here."
+                                "Declare Shopify Functions with #[function] and list them in functions: of app! to manage discount, cart transform, and other function instances from here."
                             </s-paragraph>
                         </s-stack>
                     </s-box>

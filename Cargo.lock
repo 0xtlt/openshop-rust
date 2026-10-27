@@ -2430,6 +2430,7 @@ name = "openshop-shared"
 version = "0.0.12-beta.0"
 dependencies = [
  "serde",
+ "serde_json",
 ]
 
 [[package]]

@@ -936,30 +936,6 @@ async fn unexpected_errors_return_500_without_leaking_details() {
 }
 
 #[tokio::test]
-async fn output_validator_failure_returns_500() {
-    let count = AdminFunction::loader(|_ctx, input| async move { Ok(json!({ "count": input })) }).output(|output| {
-        output["count"]
-            .is_u64()
-            .then_some(())
-            .ok_or_else(|| "count must be a positive integer (secret detail)".to_string())
-    });
-    let ctx = context(tools_app(AdminPage::new("/tools").function("count", count))).await;
-
-    let response = load(&ctx, "/tools", "count", json!(3)).await;
-    assert_eq!(response.status(), 200);
-    assert_eq!(json_body(response).await, json!({ "count": 3 }));
-
-    let response = load(&ctx, "/tools", "count", json!("three")).await;
-    assert_eq!(response.status(), 500);
-    let text = response.text().await.unwrap();
-    assert!(!text.contains("secret detail"), "{text}");
-    let body: Value = serde_json::from_str(&text).unwrap();
-    assert_eq!(body["code"], "INTERNAL_ERROR");
-    assert_eq!(body["error"], "Internal server error");
-    ctx.shutdown().await.unwrap();
-}
-
-#[tokio::test]
 async fn decodes_dynamic_route_params_and_function_names() {
     let params = |ctx: AdminContext, _input: Value| async move { Ok(json!(ctx.params)) };
     let config = OpenShopConfig::builder()

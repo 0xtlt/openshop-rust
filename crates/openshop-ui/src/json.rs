@@ -2,6 +2,8 @@
 
 use serde_json::Value;
 
+pub use openshop_shared::json::js_string;
+
 /// `JSON.stringify(value, null, 2)`.
 pub fn pretty(value: &Value) -> String {
     serde_json::to_string_pretty(value).unwrap_or_default()
@@ -10,31 +12,6 @@ pub fn pretty(value: &Value) -> String {
 /// `JSON.stringify(value)`.
 pub fn compact(value: &Value) -> String {
     serde_json::to_string(value).unwrap_or_default()
-}
-
-fn number_string(number: &serde_json::Number) -> String {
-    match number.as_f64() {
-        Some(float) if number.is_f64() && float.fract() == 0.0 && float.abs() < 1e21 => {
-            format!("{float:.0}")
-        }
-        _ => number.to_string(),
-    }
-}
-
-/// `String(value)` for a parsed JSON value.
-pub fn js_string(value: &Value) -> String {
-    match value {
-        Value::Null => "null".to_string(),
-        Value::Bool(flag) => flag.to_string(),
-        Value::Number(number) => number_string(number),
-        Value::String(text) => text.clone(),
-        Value::Array(items) => items
-            .iter()
-            .map(|item| if item.is_null() { String::new() } else { js_string(item) })
-            .collect::<Vec<_>>()
-            .join(","),
-        Value::Object(_) => "[object Object]".to_string(),
-    }
 }
 
 /// `String(value ?? '')`.
@@ -101,16 +78,9 @@ mod tests {
 
     #[test]
     fn coerces_values_to_strings() {
-        assert_eq!(js_string(&json!("text")), "text");
-        assert_eq!(js_string(&json!(42)), "42");
-        assert_eq!(js_string(&json!(1.5)), "1.5");
-        assert_eq!(js_string(&json!(2.0)), "2");
-        assert_eq!(js_string(&json!(true)), "true");
-        assert_eq!(js_string(&json!(null)), "null");
-        assert_eq!(js_string(&json!([1, null, "a"])), "1,,a");
-        assert_eq!(js_string(&json!({ "a": 1 })), "[object Object]");
         assert_eq!(js_string_or_empty(&json!(null)), "");
         assert_eq!(js_string_or_empty(&json!(false)), "false");
+        assert_eq!(js_string_or_empty(&json!(2.0)), "2");
     }
 
     #[test]
