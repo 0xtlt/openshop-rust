@@ -146,7 +146,7 @@ async fn complete(ctx: &TestContext, run_id: Uuid, shop: &str) {
     let result = run_flow(&ctx.app, RunFlowOptions::new(run_id, "test-flow", shop))
         .await
         .unwrap();
-    assert_eq!(result.status(), "completed");
+    assert_eq!(result, openshop::RunOutcome::Completed);
 }
 
 async fn find_run(ctx: &TestContext, run_id: Uuid) -> Option<FlowRun> {

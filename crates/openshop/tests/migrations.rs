@@ -6,11 +6,11 @@ mod common;
 use std::path::{Path, PathBuf};
 
 use common::{TEST_SHOP, TempProject, create_config, empty_database, noop_flow, test_env};
-use openshop::db::Table;
 use openshop::db::migrate::{
     FRAMEWORK_MIGRATIONS, MigrationStatus, assert_migrated, check_migrations, generate_migrations,
     get_client_migration_status, migrate_schema, push_schema,
 };
+use openshop::db::{ColumnDef, Table};
 use openshop::testing::{MockTransport, TestDb};
 use openshop::{DispatchOptions, OpenShop, PgPool};
 
@@ -608,8 +608,12 @@ async fn generate_refuses_to_run_in_production() {
 #[tokio::test]
 async fn push_schema_creates_framework_and_model_tables() {
     let db = empty_database().await;
-    let reviews = Table::conventional("reviews")
-        .column("rating", "integer NOT NULL")
+    let reviews = Table::new("reviews")
+        .with_column(ColumnDef::id())
+        .with_column(ColumnDef::shop())
+        .with_column(ColumnDef::created_at())
+        .with_column(ColumnDef::updated_at())
+        .with_column(ColumnDef::new("rating", "integer"))
         .unique_index("reviews_shop_rating_unique", &["shop", "rating"]);
 
     let error = push_schema(&db.pool, std::slice::from_ref(&reviews), true)

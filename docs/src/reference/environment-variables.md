@@ -43,8 +43,6 @@ Notes:
   see [Connection](database.md#connection).
 - The `DATABASE_URL` fallback applies to `dev`, `start`, `worker`, `migrate`,
   and `migrate status`, when the variable is unset or empty.
-  `OpenShop::connect` and `openshop::db::connect` have no fallback and fail
-  with `[openshop] DATABASE_URL not set`.
 - `RUST_LOG` is read when the command starts. `dev` loads `.env` first, so the
   variable can be set there for development. See [Logging](logging.md).
 - `OPS_PASSWORD` is not in this table: OpenShop does not read it. It is the

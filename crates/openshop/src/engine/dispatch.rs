@@ -1,7 +1,7 @@
 //! Queueing a flow run.
 
 use anyhow::{Result, bail};
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Utc};
 use serde::Serialize;
 use serde_json::Value;
 use sqlx::{PgConnection, PgPool};
@@ -9,6 +9,7 @@ use uuid::Uuid;
 
 use super::backoff::resolve_retry_policy;
 use super::errors::{FlowConcurrencyError, InvalidFlowInput, UnknownFlowError};
+use super::scheduler::MAX_TICK_LATENESS_MINUTES;
 use crate::app::OpenShopConfig;
 use crate::runtime::time::millis;
 use crate::server::shopify_apps::DEFAULT_SHOPIFY_APP_HANDLE;
@@ -145,26 +146,16 @@ pub async fn dispatch_flow(db: &PgPool, config: &OpenShopConfig, options: Dispat
 pub(crate) struct CronTick<'a> {
     pub cron_key: &'a str,
     pub scheduled_at: DateTime<Utc>,
-    /// An occurrence older than this, by the clock of the database, is not claimed.
-    pub max_lateness: Duration,
 }
 
-/// Queues the run of a cron occurrence, unless a process already did. The
-/// claim of the occurrence and the run are written in one transaction, so a
-/// run that is refused leaves the occurrence free. `None` when it was taken, or
-/// is too late to be claimed: the freshness is decided by the claim itself,
-/// after any wait for the lock, since the claims of older occurrences may have
-/// been removed by now.
-pub(crate) async fn dispatch_cron_tick(
-    db: &PgPool,
-    config: &OpenShopConfig,
-    options: DispatchOptions,
-    tick: &CronTick<'_>,
-) -> Result<Option<QueuedRun>> {
-    queue_run(db, config, options, Some(tick)).await
-}
-
-async fn queue_run(
+/// Queues a run, or with a `tick`, the run of a cron occurrence unless a
+/// process already did. The claim of the occurrence and the run are written in
+/// one transaction, so a run that is refused leaves the occurrence free. `None`
+/// when the occurrence was taken, or is older than
+/// [`MAX_TICK_LATENESS_MINUTES`] by the clock of the database: the freshness is
+/// decided by the claim itself, after any wait for the lock, since the claims
+/// of older occurrences may have been removed by now.
+pub(crate) async fn queue_run(
     db: &PgPool,
     config: &OpenShopConfig,
     options: DispatchOptions,
@@ -203,14 +194,14 @@ async fn queue_run(
         let claimed = sqlx::query(
             "INSERT INTO cron_ticks (app_handle, shop, cron_key, scheduled_at) \
              SELECT $1, $2, $3, $4::timestamptz \
-             WHERE $4::timestamptz >= clock_timestamp() - make_interval(secs => $5) \
+             WHERE $4::timestamptz >= clock_timestamp() - make_interval(mins => $5) \
              ON CONFLICT DO NOTHING",
         )
         .bind(&shopify_app)
         .bind(&shop)
         .bind(tick.cron_key)
         .bind(tick.scheduled_at)
-        .bind(tick.max_lateness.num_milliseconds() as f64 / 1000.0)
+        .bind(MAX_TICK_LATENESS_MINUTES as i32)
         .execute(&mut *tx)
         .await?;
         if claimed.rows_affected() == 0 {

@@ -13,6 +13,8 @@ use sentry::protocol::{Context, Event, Map, Request, Value};
 use sentry::{ClientOptions, Hub, Integration};
 use uuid::Uuid;
 
+use crate::runtime::redact::is_secret_name;
+
 /// The integration of the framework, part of every client it starts.
 pub(super) struct Reports;
 
@@ -106,26 +108,8 @@ fn scrub_context(context: &mut Context) {
 
 const REDACTED: &str = "[redacted]";
 
-/// Whether the name of a header or of a variable says that its value is a secret.
-fn is_secret_name(name: &str) -> bool {
-    let name = name.to_ascii_lowercase();
-    [
-        "authorization",
-        "cookie",
-        "token",
-        "secret",
-        "password",
-        "api-key",
-        "api_key",
-        "apikey",
-        "hmac",
-        "signature",
-    ]
-    .iter()
-    .any(|word| name.contains(word))
-}
-
-/// The value of a header named like a secret is removed, the others are scrubbed.
+/// The value of a header or a variable named like a secret is removed, the
+/// others are scrubbed.
 fn scrub_headers(headers: &mut Map<String, String>) {
     for (name, value) in headers.iter_mut() {
         if is_secret_name(name) {
@@ -149,13 +133,7 @@ fn scrub_request(request: &mut Request) {
     request.cookies = request.cookies.take().map(|_| REDACTED.to_string());
     request.data = request.data.take().map(|_| REDACTED.to_string());
     scrub_headers(&mut request.headers);
-    for (name, value) in request.env.iter_mut() {
-        if is_secret_name(name) {
-            *value = REDACTED.to_string();
-        } else {
-            scrub(value);
-        }
-    }
+    scrub_headers(&mut request.env);
 }
 
 /// Whether a client is bound to the hub and still sends.

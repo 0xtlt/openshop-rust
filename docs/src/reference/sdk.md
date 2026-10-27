@@ -168,8 +168,7 @@ The attributes are built on definitions that can be created by hand:
 `::liquid()` and `::html()`, `Route::public()` and
 `Route::authenticated(auth)`, `Webhook::new(run)`,
 `McpTool::new(description, run)`,
-`McpResource::new(name, read)`, `AdminPage::new(path)`, and
-`Table::conventional(table)`. They are in `openshop::builder`, with
+`McpResource::new(name, read)` and `AdminPage::new(path)`. They are in `openshop::builder`, with
 `OpenShopBuilder`. `OpenShopConfig::builder()` collects them, along with
 declared blocks, and `build()` validates the whole. Use it for tests and for
 blocks built at run time. See [Builder methods](configuration.md#builder-methods).
@@ -256,11 +255,10 @@ carries one as `ctx.app`.
 
 | Constructor | Behavior |
 | --- | --- |
-| `OpenShop::connect(config).await` | Connects to `DATABASE_URL` and reads settings from the environment. |
 | `OpenShop::new(config, db, env)` | Uses an existing `PgPool` and `RuntimeEnv`. |
 | `OpenShop::with_transport(config, db, env, transport)` | Same, with another `shopify_api` `Transport` for every exchange with Shopify, such as `testing::MockTransport`. It must not follow redirections: every call carries a secret, a token or a code, and a `3xx` is returned as the answer, as the default `ReqwestTransport` does. |
 
-All three validate the configuration and resolve the Shopify apps, and fail
+Both validate the configuration and resolve the Shopify apps, and fail
 when either is invalid. `APP.main()` and `APP.run()` create the handle for
 you.
 
@@ -507,13 +505,8 @@ List it in the `models` of `app!`, then read and write through
 `Review::of(&ctx)`, the rows of the shop of a context. `ctx` is any context
 that belongs to a shop. `Review::for_shop(&ctx.db, &ctx.shop)` gives the same
 rows with the database and the shop given. The derive implements the `Model`
-trait, and `Review::table()` returns the `Table` the struct describes.
-
-`Table` describes a table without a struct, with its columns as SQL
-definitions: `Table::conventional(table)` starts with `id`, `shop`,
-`created_at` and `updated_at`, `Table::new(table)` without any column, and
-`.column("product_id", "text NOT NULL")` adds one. It is registered with
-`.model(…)` on the builder. See [App models](database.md#app-models).
+trait, and `Review::table()` returns the `Table` the struct describes. See
+[App models](database.md#app-models).
 
 ## Runtime logging
 
@@ -567,11 +560,13 @@ use std::future::Future;
 use openshop::prelude::*;
 use openshop::server::listen;
 use openshop::engine::{Scheduler, Worker};
+use openshop::runtime::RuntimeEnv;
 use openshop::server::ServerOptions;
 use openshop::{OpenShop, OpenShopConfig};
 
 async fn serve(config: OpenShopConfig, shutdown: impl Future<Output = ()>) -> Result<()> {
-    let app = OpenShop::connect(config).await?;
+    let db = openshop::db::connect_to(&std::env::var("DATABASE_URL")?).await?;
+    let app = OpenShop::new(config, db, RuntimeEnv::from_env())?;
 
     let server = listen(&app, 3000, ServerOptions::production()).await?;
     let worker = Worker::new(app.clone(), WorkerConfig::new());

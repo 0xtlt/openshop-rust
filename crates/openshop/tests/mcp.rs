@@ -334,7 +334,7 @@ async fn logged_run(ctx: &TestContext, app_handle: &str, shop: &str) -> Uuid {
     )
     .await
     .unwrap();
-    assert_eq!(result.status(), "completed");
+    assert_eq!(result, openshop::RunOutcome::Completed);
     dispatched.run_id
 }
 
