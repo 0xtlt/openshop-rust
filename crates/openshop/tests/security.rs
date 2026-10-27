@@ -1,21 +1,17 @@
-//! Isolation between shops and between Shopify apps, injection attempts and
-//! session-token edge cases of the Admin API.
+//! What a session of the Admin API cannot reach or override: the data of
+//! another shop, injection attempts and session-token edge cases. The routes
+//! scoped to the session's shop and app are tried one by one in `api.rs`.
 
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use chrono::Utc;
 use hmac::{Hmac, Mac};
-use openshop::builder::{Field, Flow, OpenShopBuilder, Provider};
+use openshop::builder::{Field, Flow, Provider};
 use openshop::db::schema::FlowRun;
-use openshop::engine::{RunFlowOptions, run_flow};
 use openshop::testing::{
-    TestContext, TestOptions, proxy_signature, session_token, sign_query, sign_session_token, sign_webhook_body,
-    to_query_string,
+    TestContext, TestOptions, proxy_signature, sign_query, sign_session_token, sign_webhook_body, to_query_string,
 };
-use openshop::{
-    Concurrency, Cron, DispatchOptions, FlowContext, JsonMap, OpenShopConfig, ShopifyAppConfig, ShopifyConfig, Value,
-    json,
-};
+use openshop::{Concurrency, Cron, DispatchOptions, FlowContext, OpenShopConfig, Value, json};
 use reqwest::{Method, RequestBuilder, Response};
 use sha2::Sha256;
 use uuid::Uuid;
@@ -24,8 +20,6 @@ const SECRET: &str = "test-secret";
 const API_KEY: &str = "test-app";
 const SHOP_A: &str = "shop-a.myshopify.com";
 const SHOP_B: &str = "shop-b.myshopify.com";
-const MULTI_APP_SHOP: &str = "same-shop.myshopify.com";
-const CRON_KEY: &str = "test-flow:*/5 * * * *";
 const ENCRYPTION_KEY: &str = "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2";
 
 fn simple_flow() -> Flow {
@@ -36,47 +30,15 @@ fn simple_flow() -> Flow {
     .concurrency(Concurrency::Allow)
 }
 
-fn warehouse() -> Provider {
-    Provider::new("warehouse")
-        .field("endpoint", Field::text("Endpoint"))
-        .field("apiKey", Field::password("API key"))
-}
-
-fn builder() -> OpenShopBuilder {
-    OpenShopConfig::builder().flow(simple_flow())
-}
-
-/// One flow, a cron for it and a provider whose check only passes for shop A's credentials.
+/// One flow, a cron for it and a provider with a secret field.
 fn config() -> OpenShopConfig {
-    let provider = warehouse().checker(|config: JsonMap| async move {
-        Ok(config.get("endpoint") == Some(&json!("https://shop-a.test"))
-            && config.get("apiKey") == Some(&json!("secret-a")))
-    });
-    builder()
+    let warehouse = Provider::new("warehouse")
+        .field("endpoint", Field::text("Endpoint"))
+        .field("apiKey", Field::password("API key"));
+    OpenShopConfig::builder()
+        .flow(simple_flow())
         .cron(Cron::new("*/5 * * * *", "test-flow"))
-        .provider(provider)
-        .build()
-        .unwrap()
-}
-
-fn multi_config() -> OpenShopConfig {
-    let apps = [("clientA", "client-a"), ("clientB", "client-b")]
-        .into_iter()
-        .map(|(handle, slug)| {
-            let app = ShopifyAppConfig::Keys {
-                api_key: format!("{slug}-key"),
-                api_secret: format!("{slug}-secret"),
-                app_url: Some(format!("https://{slug}.example.test")),
-            };
-            (handle.to_string(), app)
-        })
-        .collect();
-    builder()
-        .shopify(ShopifyConfig {
-            scopes: Some("read_products".to_string()),
-            apps: Some(apps),
-        })
-        .provider(warehouse())
+        .provider(warehouse)
         .build()
         .unwrap()
 }
@@ -98,14 +60,6 @@ async fn get_as(ctx: &TestContext, shop: &str, path: &str) -> Response {
 
 async fn post_as(ctx: &TestContext, shop: &str, path: &str) -> Response {
     request_as(ctx, shop, Method::POST, path).send().await.unwrap()
-}
-
-/// A request authenticated for one of the apps of [`multi_config`], `client-a` or `client-b`.
-fn request_as_app(ctx: &TestContext, slug: &str, method: Method, path: &str) -> RequestBuilder {
-    let token = session_token(MULTI_APP_SHOP, &format!("{slug}-secret"), &format!("{slug}-key"), "123");
-    ctx.http
-        .request(method, format!("{}{path}", ctx.url))
-        .bearer_auth(token)
 }
 
 async fn json_body(response: Response) -> Value {
@@ -133,22 +87,6 @@ async fn dispatch(ctx: &TestContext, shop: &str) -> Uuid {
         .run_id
 }
 
-async fn dispatch_for_app(ctx: &TestContext, handle: &str) -> Uuid {
-    ctx.app
-        .dispatch_flow(DispatchOptions::new("test-flow", MULTI_APP_SHOP).shopify_app(handle))
-        .await
-        .unwrap()
-        .run_id
-}
-
-/// Runs a dispatched flow to completion, like a worker would.
-async fn complete(ctx: &TestContext, run_id: Uuid, shop: &str) {
-    let result = run_flow(&ctx.app, RunFlowOptions::new(run_id, "test-flow", shop))
-        .await
-        .unwrap();
-    assert_eq!(result, openshop::RunOutcome::Completed);
-}
-
 async fn find_run(ctx: &TestContext, run_id: Uuid) -> Option<FlowRun> {
     sqlx::query_as("SELECT * FROM flow_runs WHERE id = $1")
         .bind(run_id)
@@ -157,40 +95,7 @@ async fn find_run(ctx: &TestContext, run_id: Uuid) -> Option<FlowRun> {
         .unwrap()
 }
 
-async fn save_warehouse(request: RequestBuilder, endpoint: &str, api_key: &str) {
-    let response = request
-        .json(&json!({ "config": { "endpoint": endpoint, "apiKey": api_key } }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(response.status(), 200);
-}
-
 // ─── Cross-shop isolation ────────────────────────────────────────────
-
-#[openshop::test(context())]
-async fn shop_a_cannot_see_shop_b_runs_in_api_runs(ctx: &TestContext) {
-    let run_a = dispatch(ctx, SHOP_A).await;
-    let run_b = dispatch(ctx, SHOP_B).await;
-
-    let runs_a = json_body(get_as(ctx, SHOP_A, "/api/runs").await).await;
-    assert_eq!(ids(&runs_a), [run_a.to_string()]);
-    assert_eq!(runs_a[0]["shop"], SHOP_A);
-
-    let runs_b = json_body(get_as(ctx, SHOP_B, "/api/runs").await).await;
-    assert_eq!(ids(&runs_b), [run_b.to_string()]);
-    assert_eq!(runs_b[0]["shop"], SHOP_B);
-}
-
-#[openshop::test(context())]
-async fn shop_a_cannot_see_shop_b_runs_in_api_flow_runs(ctx: &TestContext) {
-    let run_a = dispatch(ctx, SHOP_A).await;
-    dispatch(ctx, SHOP_B).await;
-
-    let runs_a = json_body(get_as(ctx, SHOP_A, "/api/flows/test-flow/runs").await).await;
-    assert_eq!(ids(&runs_a), [run_a.to_string()]);
-    assert_eq!(runs_a[0]["shop"], SHOP_A);
-}
 
 #[openshop::test(context())]
 async fn session_shop_cannot_be_overridden_by_the_request(ctx: &TestContext) {
@@ -223,153 +128,6 @@ async fn session_shop_cannot_be_overridden_by_the_request(ctx: &TestContext) {
             .len(),
         1
     );
-}
-
-#[openshop::test(context())]
-async fn shop_a_cannot_access_shop_b_run_detail_idor(ctx: &TestContext) {
-    let run_b = dispatch(ctx, SHOP_B).await;
-
-    assert_run_not_found(get_as(ctx, SHOP_A, &format!("/api/runs/{run_b}")).await).await;
-
-    let own = get_as(ctx, SHOP_B, &format!("/api/runs/{run_b}")).await;
-    assert_eq!(own.status(), 200);
-    assert_eq!(json_body(own).await["id"], run_b.to_string());
-}
-
-#[openshop::test(context())]
-async fn shop_a_cannot_access_shop_b_logs_idor(ctx: &TestContext) {
-    let run_b = dispatch(ctx, SHOP_B).await;
-    complete(ctx, run_b, SHOP_B).await;
-    let path = format!("/api/runs/{run_b}/logs?levels=info,warn,error");
-
-    assert_run_not_found(get_as(ctx, SHOP_A, &path).await).await;
-
-    let own = get_as(ctx, SHOP_B, &path).await;
-    assert_eq!(own.status(), 200);
-    let logs = json_body(own).await;
-    assert!(
-        logs["logs"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|log| log["message"] == "executed")
-    );
-}
-
-#[openshop::test(context())]
-async fn shop_a_cannot_export_shop_b_logs_idor(ctx: &TestContext) {
-    let run_b = dispatch(ctx, SHOP_B).await;
-    complete(ctx, run_b, SHOP_B).await;
-    let path = format!("/api/runs/{run_b}/logs/export?format=json&levels=info");
-
-    assert_run_not_found(get_as(ctx, SHOP_A, &path).await).await;
-
-    let own = get_as(ctx, SHOP_B, &path).await;
-    assert_eq!(own.status(), 200);
-    assert!(own.text().await.unwrap().contains("executed"));
-}
-
-#[openshop::test(context())]
-async fn shop_a_cannot_cancel_shop_b_run_idor(ctx: &TestContext) {
-    let run_b = dispatch(ctx, SHOP_B).await;
-
-    assert_run_not_found(post_as(ctx, SHOP_A, &format!("/api/runs/{run_b}/cancel")).await).await;
-    assert_eq!(find_run(ctx, run_b).await.unwrap().status, "pending");
-
-    let own = post_as(ctx, SHOP_B, &format!("/api/runs/{run_b}/cancel")).await;
-    assert_eq!(own.status(), 200);
-    assert_eq!(find_run(ctx, run_b).await.unwrap().status, "canceled");
-}
-
-#[openshop::test(context())]
-async fn shop_a_cannot_retry_shop_b_run_idor(ctx: &TestContext) {
-    let run_b = dispatch(ctx, SHOP_B).await;
-    complete(ctx, run_b, SHOP_B).await;
-
-    for mode in ["", "?mode=reset"] {
-        let response = post_as(ctx, SHOP_A, &format!("/api/runs/{run_b}/retry{mode}")).await;
-        assert_run_not_found(response).await;
-    }
-    assert_eq!(find_run(ctx, run_b).await.unwrap().status, "completed");
-
-    let own = post_as(ctx, SHOP_B, &format!("/api/runs/{run_b}/retry")).await;
-    assert_eq!(own.status(), 200);
-    assert_eq!(find_run(ctx, run_b).await.unwrap().status, "pending");
-}
-
-#[openshop::test(context())]
-async fn shop_a_cannot_delete_shop_b_run_idor(ctx: &TestContext) {
-    let run_b = dispatch(ctx, SHOP_B).await;
-    complete(ctx, run_b, SHOP_B).await;
-
-    let response = request_as(ctx, SHOP_A, Method::DELETE, &format!("/api/runs/{run_b}"))
-        .send()
-        .await
-        .unwrap();
-    assert_run_not_found(response).await;
-
-    let run = find_run(ctx, run_b).await.expect("run still exists");
-    assert_eq!(run.id, run_b);
-    assert_eq!(run.shop, SHOP_B);
-    let (logs,): (i64,) = sqlx::query_as("SELECT count(*) FROM logs WHERE flow_run_id = $1")
-        .bind(run_b.to_string())
-        .fetch_one(&ctx.db)
-        .await
-        .unwrap();
-    assert!(logs > 0);
-}
-
-#[openshop::test(context())]
-async fn shop_a_bulk_delete_skips_shop_b_run_ids_idor(ctx: &TestContext) {
-    let run_a = dispatch(ctx, SHOP_A).await;
-    let run_b = dispatch(ctx, SHOP_B).await;
-    complete(ctx, run_a, SHOP_A).await;
-    complete(ctx, run_b, SHOP_B).await;
-
-    let response = request_as(ctx, SHOP_A, Method::POST, "/api/runs/bulk-delete")
-        .json(&json!({ "ids": [run_a, run_b] }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(response.status(), 200);
-    assert_eq!(json_body(response).await, json!({ "deleted": 1, "skipped": 1 }));
-
-    assert!(find_run(ctx, run_a).await.is_none());
-    assert_eq!(find_run(ctx, run_b).await.expect("run still exists").shop, SHOP_B);
-
-    // Only foreign ids: nothing is deleted.
-    let response = request_as(ctx, SHOP_A, Method::POST, "/api/runs/bulk-delete")
-        .json(&json!({ "ids": [run_b] }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(json_body(response).await, json!({ "deleted": 0, "skipped": 1 }));
-    assert!(find_run(ctx, run_b).await.is_some());
-}
-
-#[openshop::test(context())]
-async fn shop_a_cron_overrides_do_not_affect_shop_b(ctx: &TestContext) {
-    let enabled_for = async |shop: &str| {
-        let crons = json_body(get_as(ctx, shop, "/api/crons").await).await;
-        let cron = crons
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|cron| cron["key"] == CRON_KEY)
-            .expect("configured cron")
-            .clone();
-        cron["enabled"].as_bool().unwrap()
-    };
-
-    let response = request_as(ctx, SHOP_A, Method::POST, "/api/crons/toggle")
-        .json(&json!({ "key": CRON_KEY, "enabled": false }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(response.status(), 200);
-
-    assert!(!enabled_for(SHOP_A).await);
-    assert!(enabled_for(SHOP_B).await);
 }
 
 #[openshop::test(context())]
@@ -455,175 +213,6 @@ async fn access_tokens_are_never_returned_by_api_responses() {
         }
     }
     ctx.shutdown().await.unwrap();
-}
-
-#[openshop::test(context())]
-async fn provider_configs_are_isolated_by_shop_and_do_not_leak_secrets(ctx: &TestContext) {
-    let put = |shop| request_as(ctx, shop, Method::PUT, "/api/providers/warehouse");
-    save_warehouse(put(SHOP_A), "https://shop-a.test", "secret-a").await;
-    save_warehouse(put(SHOP_B), "https://shop-b.test", "secret-b").await;
-
-    for (shop, endpoint) in [(SHOP_A, "https://shop-a.test"), (SHOP_B, "https://shop-b.test")] {
-        let body = get_as(ctx, shop, "/api/providers").await.text().await.unwrap();
-        assert!(!body.contains("secret-"), "{body}");
-        assert!(!body.contains("shop-a.test") || shop == SHOP_A, "{body}");
-        assert!(!body.contains("shop-b.test") || shop == SHOP_B, "{body}");
-
-        let providers: Value = serde_json::from_str(&body).unwrap();
-        let provider = &providers[0];
-        assert_eq!(provider["name"], "warehouse");
-        assert_eq!(provider["config"], json!({ "endpoint": endpoint }));
-        assert_eq!(provider["fields"]["apiKey"]["hasValue"], true);
-        assert_eq!(provider["configured"], true);
-    }
-}
-
-#[openshop::test(context())]
-async fn provider_check_uses_only_the_current_shop_config(ctx: &TestContext) {
-    let put = |shop| request_as(ctx, shop, Method::PUT, "/api/providers/warehouse");
-    save_warehouse(put(SHOP_A), "https://shop-a.test", "secret-a").await;
-    save_warehouse(put(SHOP_B), "https://shop-b.test", "secret-b").await;
-
-    let check_a = post_as(ctx, SHOP_A, "/api/providers/warehouse/check").await;
-    let check_b = post_as(ctx, SHOP_B, "/api/providers/warehouse/check").await;
-    assert_eq!(check_a.status(), 200);
-    assert_eq!(check_b.status(), 200);
-    assert_eq!(json_body(check_a).await, json!({ "ok": true }));
-    assert_eq!(json_body(check_b).await, json!({ "ok": false }));
-
-    let rows: Vec<(String, Option<bool>)> =
-        sqlx::query_as("SELECT shop, last_check_ok FROM provider_configs ORDER BY shop")
-            .fetch_all(&ctx.db)
-            .await
-            .unwrap();
-    assert_eq!(
-        rows,
-        [(SHOP_A.to_string(), Some(true)), (SHOP_B.to_string(), Some(false))]
-    );
-}
-
-// ─── Cross-app isolation ─────────────────────────────────────────────
-
-#[openshop::test(TestContext::new(multi_config()))]
-async fn same_shop_runs_are_isolated_by_shopify_app(ctx: &TestContext) {
-    let run_a = dispatch_for_app(ctx, "clientA").await;
-    let run_b = dispatch_for_app(ctx, "clientB").await;
-
-    let list_a = request_as_app(ctx, "client-a", Method::GET, "/api/runs")
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(list_a.status(), 200);
-    let runs_a = json_body(list_a).await;
-    assert_eq!(ids(&runs_a), [run_a.to_string()]);
-    assert_eq!(runs_a[0]["appHandle"], "clientA");
-
-    let detail_b_from_a = request_as_app(ctx, "client-a", Method::GET, &format!("/api/runs/{run_b}"))
-        .send()
-        .await
-        .unwrap();
-    assert_run_not_found(detail_b_from_a).await;
-    for (method, path) in [
-        (Method::POST, format!("/api/runs/{run_b}/cancel")),
-        (Method::POST, format!("/api/runs/{run_b}/retry")),
-        (Method::DELETE, format!("/api/runs/{run_b}")),
-        (Method::GET, format!("/api/runs/{run_b}/logs")),
-    ] {
-        let response = request_as_app(ctx, "client-a", method, &path).send().await.unwrap();
-        assert_run_not_found(response).await;
-    }
-    assert_eq!(find_run(ctx, run_b).await.unwrap().status, "pending");
-
-    let list_b = request_as_app(ctx, "client-b", Method::GET, "/api/runs")
-        .send()
-        .await
-        .unwrap();
-    let runs_b = json_body(list_b).await;
-    assert_eq!(ids(&runs_b), [run_b.to_string()]);
-    assert_eq!(runs_b[0]["appHandle"], "clientB");
-}
-
-#[openshop::test(TestContext::new(multi_config()))]
-async fn same_shop_provider_configs_are_isolated_by_shopify_app(ctx: &TestContext) {
-    let put = |slug| request_as_app(ctx, slug, Method::PUT, "/api/providers/warehouse");
-    save_warehouse(put("client-a"), "https://client-a.test", "secret-a").await;
-    save_warehouse(put("client-b"), "https://client-b.test", "secret-b").await;
-
-    for (slug, endpoint) in [
-        ("client-a", "https://client-a.test"),
-        ("client-b", "https://client-b.test"),
-    ] {
-        let response = request_as_app(ctx, slug, Method::GET, "/api/providers")
-            .send()
-            .await
-            .unwrap();
-        let providers = json_body(response).await;
-        assert_eq!(providers[0]["config"], json!({ "endpoint": endpoint }));
-    }
-
-    let rows: Vec<(String, String)> =
-        sqlx::query_as("SELECT app_handle, shop FROM provider_configs ORDER BY app_handle")
-            .fetch_all(&ctx.db)
-            .await
-            .unwrap();
-    assert_eq!(
-        rows,
-        [
-            ("clientA".to_string(), MULTI_APP_SHOP.to_string()),
-            ("clientB".to_string(), MULTI_APP_SHOP.to_string()),
-        ]
-    );
-}
-
-// ─── Cross-origin requests ───────────────────────────────────────────
-
-#[openshop::test(context())]
-async fn cors_never_allows_foreign_origins_or_replaces_the_session_token(ctx: &TestContext) {
-    let allowed_origin = |response: &Response| {
-        response
-            .headers()
-            .get("access-control-allow-origin")
-            .map(|value| value.to_str().unwrap().to_string())
-    };
-    let preflight = async |origin: &str| {
-        ctx.http
-            .request(Method::OPTIONS, format!("{}/api/runs", ctx.url))
-            .header("origin", origin)
-            .header("access-control-request-method", "GET")
-            .header("access-control-request-headers", "authorization")
-            .send()
-            .await
-            .unwrap()
-    };
-
-    for origin in [
-        "https://evil.example.com",
-        "https://shop-a.myshopify.com.evil.com",
-        "http://shop-a.myshopify.com",
-        "https://admin.shopify.com.evil.com",
-        "null",
-    ] {
-        assert_eq!(allowed_origin(&preflight(origin).await), None, "{origin}");
-        let response = request_as(ctx, SHOP_A, Method::GET, "/api/runs")
-            .header("origin", origin)
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(allowed_origin(&response), None, "{origin}");
-    }
-
-    for origin in ["https://admin.shopify.com", "https://shop-a.myshopify.com"] {
-        assert_eq!(allowed_origin(&preflight(origin).await).as_deref(), Some(origin));
-        // An allowed origin is not an authenticated one.
-        let response = ctx
-            .http
-            .get(format!("{}/api/runs", ctx.url))
-            .header("origin", origin)
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(response.status(), 401, "{origin}");
-    }
 }
 
 // ─── SQL injection ───────────────────────────────────────────────────

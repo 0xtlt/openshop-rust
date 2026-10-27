@@ -679,18 +679,12 @@ async fn get_auth_callback_rejects_tampered_parameters(ctx: &TestContext) {
 }
 
 #[openshop::test(single_app())]
-async fn get_auth_callback_rejects_valid_hmac_with_invalid_shop_domain(ctx: &TestContext) {
-    let path = callback_path("evil.example.com", "c", "s", SECRET);
-    assert_error(get(ctx, &path).await, 400, "Invalid shop parameter").await;
-    assert!(ctx.transport.requests().is_empty());
-}
-
-#[openshop::test(single_app())]
 async fn get_auth_callback_rejects_shop_domain_normalization_attacks(ctx: &TestContext) {
     seed_installation(ctx, "default", "x.myshopify.com", None, None).await;
     grant_access_token(ctx, "must-not-be-stored");
 
     for shop in [
+        "evil.example.com",
         "evil.com/x.myshopify.com",
         "https://evil.com/x.myshopify.com",
         "x.myshopify.com@evil.com",
@@ -1218,7 +1212,11 @@ async fn api_without_a_bearer_session_token_returns_401(ctx: &TestContext) {
         assert_error(response, 401, "Unauthorized: missing session token").await;
     }
     // Shopify also passes the token as `id_token` on page loads; the API only reads the header.
-    let response = get(ctx, &format!("/api/flows?id_token={token}&session={token}")).await;
+    let response = get(
+        ctx,
+        &format!("/api/flows?id_token={token}&session={token}&token={token}"),
+    )
+    .await;
     assert_error(response, 401, "Unauthorized: missing session token").await;
 
     assert!(ctx.transport.requests().is_empty());
@@ -1238,16 +1236,6 @@ async fn api_with_a_valid_session_token_is_scoped_to_its_shop_and_app(ctx: &Test
         .await
         .unwrap();
     assert_eq!((app_handle.as_str(), shop.as_str()), ("default", SHOP));
-}
-
-#[openshop::test(single_app())]
-async fn unknown_api_paths_require_a_session_token_before_returning_404(ctx: &TestContext) {
-    for path in ["/api", "/api/", "/api/unknown", "/api/installations/active"] {
-        assert_error(get(ctx, path).await, 401, "Unauthorized: missing session token").await;
-        let response = ctx.get(path).send().await.unwrap();
-        assert_eq!(response.status(), 404, "{path}");
-        assert_eq!(response.text().await.unwrap(), "404 Not Found", "{path}");
-    }
 }
 
 #[openshop::test(single_app())]

@@ -13,7 +13,7 @@ use openshop::engine::abort::register_abort;
 use openshop::engine::{RunFlowOptions, run_flow};
 use openshop::runtime::time::to_iso;
 use openshop::server::{ServerOptions, UiSource};
-use openshop::testing::{TestContext, TestOptions, session_token, sign_session_token};
+use openshop::testing::{TestContext, TestOptions, session_token};
 use openshop::{
     Concurrency, Cron, DispatchOptions, FlowCanceledError, FlowContext, IndexMap, OpenShopConfig, PgPool, RetryPolicy,
     RunOutcome, ShopifyAppConfig, ShopifyConfig, Value, anyhow, json, validators,
@@ -1361,80 +1361,6 @@ async fn post_runs_bulk_delete_validates_its_body(ctx: &TestContext) {
 // ─── Auth ────────────────────────────────────────────────────────────
 
 #[openshop::test(api_context())]
-async fn request_without_token_returns_401(ctx: &TestContext) {
-    let (status, body) = send(anonymous(ctx, Method::GET, "/api/flows")).await;
-    assert_eq!(status, StatusCode::UNAUTHORIZED);
-    assert_eq!(body, error("Unauthorized: missing session token"));
-
-    let (status, body) = send(anonymous(ctx, Method::GET, "/api/flows").header("Authorization", "Basic abc")).await;
-    assert_eq!(status, StatusCode::UNAUTHORIZED);
-    assert_eq!(body, error("Unauthorized: missing session token"));
-
-    // The session token is only read from the Authorization header.
-    let path = format!("/api/flows?shop={}&token={}", ctx.shop, ctx.session_token());
-    let (status, _) = send(anonymous(ctx, Method::GET, &path)).await;
-    assert_eq!(status, StatusCode::UNAUTHORIZED);
-}
-
-#[openshop::test(api_context())]
-async fn request_with_invalid_token_returns_401(ctx: &TestContext) {
-    let (status, body) = send(request_as(ctx, "invalid.token.here", Method::GET, "/api/flows")).await;
-    assert_eq!(status, StatusCode::UNAUTHORIZED);
-    assert_eq!(body, error("Unauthorized: missing token audience"));
-
-    let (status, _) = send(request_as(ctx, "garbage", Method::GET, "/api/flows")).await;
-    assert_eq!(status, StatusCode::UNAUTHORIZED);
-}
-
-#[openshop::test(api_context())]
-async fn request_with_forged_or_expired_token_returns_401(ctx: &TestContext) {
-    let now = Utc::now().timestamp();
-    let claims = |shop: &str, exp: i64| {
-        json!({
-            "iss": format!("https://{shop}/admin"),
-            "dest": format!("https://{shop}"),
-            "aud": ctx.api_key,
-            "sub": "1",
-            "exp": exp,
-            "nbf": now - 10,
-            "iat": now,
-            "jti": "jti",
-            "sid": "sid",
-        })
-    };
-    let mut mismatched = claims(&ctx.shop, now + 60);
-    mismatched["iss"] = json!(format!("https://{OTHER_SHOP}/admin"));
-
-    let cases = [
-        (
-            session_token(&ctx.shop, "wrong-secret", &ctx.api_key, "1"),
-            "Unauthorized: invalid session token",
-        ),
-        (
-            session_token(&ctx.shop, &ctx.secret, "another-app", "1"),
-            "Unauthorized: invalid session token",
-        ),
-        (
-            sign_session_token(&claims(&ctx.shop, now - 30), &ctx.secret),
-            "Unauthorized: invalid session token",
-        ),
-        (
-            sign_session_token(&claims("evil.example.com", now + 60), &ctx.secret),
-            "Unauthorized: invalid session token",
-        ),
-        (
-            sign_session_token(&mismatched, &ctx.secret),
-            "Unauthorized: invalid session token",
-        ),
-    ];
-    for (token, message) in cases {
-        let (status, body) = send(request_as(ctx, &token, Method::GET, "/api/flows")).await;
-        assert_eq!(status, StatusCode::UNAUTHORIZED, "{message}");
-        assert_eq!(body, error(message));
-    }
-}
-
-#[openshop::test(api_context())]
 async fn unknown_api_paths_require_a_session_then_return_404(ctx: &TestContext) {
     let cases = [
         (Method::GET, "/api"),
@@ -1445,6 +1371,7 @@ async fn unknown_api_paths_require_a_session_then_return_404(ctx: &TestContext) 
         (Method::POST, "/api/runs"),
         (Method::PUT, "/api/crons/toggle"),
         (Method::PATCH, "/api/providers/warehouse"),
+        (Method::GET, "/api/installations/active"),
     ];
     for (method, path) in cases {
         let (status, body) = send(anonymous(ctx, method.clone(), path)).await;
@@ -1455,86 +1382,6 @@ async fn unknown_api_paths_require_a_session_then_return_404(ctx: &TestContext) 
         assert_eq!(status, StatusCode::NOT_FOUND, "{method} {path}");
         assert_eq!(body, "404 Not Found", "{method} {path}");
     }
-}
-
-#[tokio::test]
-async fn session_token_exchange_installs_the_shop_once() {
-    let ctx = TestContext::with_options(
-        api_config(),
-        TestOptions {
-            encryption_key: Some(ENCRYPTION_KEY.to_string()),
-            ..Default::default()
-        },
-    )
-    .await
-    .unwrap();
-
-    // A failed exchange does not block the request. The client credentials
-    // grant is asked after it, and fails too.
-    let (status, _) = send(ctx.get("/api/flows")).await;
-    assert_eq!(status, StatusCode::OK);
-    let grant_types: Vec<Value> = ctx
-        .transport
-        .requests()
-        .iter()
-        .map(|request| request.body["grant_type"].clone())
-        .collect();
-    assert_eq!(
-        grant_types,
-        [
-            json!("urn:ietf:params:oauth:grant-type:token-exchange"),
-            json!("client_credentials")
-        ]
-    );
-    ctx.transport.clear();
-
-    // A failed exchange is not tried again for thirty seconds.
-    tokio::time::pause();
-    tokio::time::advance(std::time::Duration::from_secs(31)).await;
-    tokio::time::resume();
-    ctx.transport
-        .respond_json(json!({ "access_token": "shpat_offline", "scope": "read_products" }));
-    let token = ctx.session_token();
-    let (status, _) = send(request_as(&ctx, &token, Method::GET, "/api/flows")).await;
-    assert_eq!(status, StatusCode::OK);
-
-    let requests = ctx.transport.requests();
-    assert_eq!(requests.len(), 1);
-    assert_eq!(
-        requests[0].url,
-        format!("https://{}/admin/oauth/access_token", ctx.shop)
-    );
-    assert_eq!(
-        requests[0].body,
-        json!({
-            "client_id": ctx.api_key,
-            "client_secret": ctx.secret,
-            "grant_type": "urn:ietf:params:oauth:grant-type:token-exchange",
-            "subject_token": token,
-            "subject_token_type": "urn:ietf:params:oauth:token-type:id_token",
-            "requested_token_type": "urn:shopify:params:oauth:token-type:offline-access-token",
-            "expiring": "0",
-        })
-    );
-
-    let (app_handle, stored, scopes): (String, String, String) =
-        sqlx::query_as("SELECT app_handle, access_token, scopes FROM installations WHERE shop = $1")
-            .bind(&ctx.shop)
-            .fetch_one(&ctx.db)
-            .await
-            .unwrap();
-    assert_eq!(app_handle, "default");
-    assert_eq!(scopes, "read_products");
-    assert!(stored.starts_with("enc:aes-256-gcm:"), "{stored}");
-    assert_eq!(
-        ctx.app.crypto().decrypt_string(Some(&stored)).unwrap().as_deref(),
-        Some("shpat_offline")
-    );
-
-    let (status, _) = send(ctx.get("/api/flows")).await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(ctx.transport.requests().len(), 1);
-    ctx.shutdown().await.unwrap();
 }
 
 // ─── Logs ────────────────────────────────────────────────────────────
@@ -2954,16 +2801,6 @@ async fn an_unexpected_failure_has_an_id_in_a_header_and_in_the_log(ctx: &TestCo
     assert!(line.contains("flow_runs"), "{line}");
 }
 
-// ─── Health ──────────────────────────────────────────────────────────
-
-#[openshop::test(api_context())]
-async fn get_health_returns_ok(ctx: &TestContext) {
-    let (status, data) = send(anonymous(ctx, Method::GET, "/health")).await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(data["status"], "ok");
-    assert_iso_millis(&data["timestamp"]);
-}
-
 // ─── Shopify functions list ──────────────────────────────────────────
 
 #[tokio::test]
@@ -3023,6 +2860,7 @@ async fn sessions_cannot_reach_runs_and_logs_of_another_shop(ctx: &TestContext) 
         (Method::GET, format!("/api/runs/{run_id}")),
         (Method::GET, format!("/api/runs/{run_id}/logs")),
         (Method::GET, format!("/api/runs/{run_id}/logs/export?format=csv")),
+        (Method::GET, format!("/api/runs/{run_id}/logs/export?format=json")),
         (Method::POST, format!("/api/runs/{run_id}/retry")),
         (Method::POST, format!("/api/runs/{run_id}/retry?mode=reset")),
         (Method::DELETE, format!("/api/runs/{run_id}")),
@@ -3033,11 +2871,13 @@ async fn sessions_cannot_reach_runs_and_logs_of_another_shop(ctx: &TestContext) 
         assert_eq!(body, error("Run not found"), "{method} {path}");
     }
 
-    let (status, body) =
-        send(as_intruder(Method::POST, "/api/runs/bulk-delete".to_string()).json(&json!({ "ids": [run_id, active] })))
-            .await;
+    // In a batch, only the runs of the session's shop are deleted.
+    let finished = seed_run_for(&ctx.db, "default", OTHER_SHOP, "test-flow", "completed", base).await;
+    let batch = json!({ "ids": [run_id, active, finished] });
+    let (status, body) = send(as_intruder(Method::POST, "/api/runs/bulk-delete".to_string()).json(&batch)).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(body, json!({ "deleted": 0, "skipped": 2 }));
+    assert_eq!(body, json!({ "deleted": 1, "skipped": 2 }));
+    assert!(find_run(&ctx.db, finished).await.is_none());
 
     assert_eq!(run_status(&ctx.db, run_id).await, "completed");
     assert_eq!(run_status(&ctx.db, active).await, "pending");
@@ -3247,6 +3087,9 @@ async fn sessions_cannot_reach_data_of_another_shopify_app() {
     assert_eq!(providers[0]["config"], json!({}));
     let (_, crons) = send(as_b(Method::GET, "/api/crons")).await;
     assert_eq!(crons[0]["enabled"], true);
+    let own_config = json!({ "config": { "endpoint": "https://client-b.test", "apiKey": "secret-b" } });
+    let (status, _) = send(as_b(Method::PUT, "/api/providers/warehouse").json(&own_config)).await;
+    assert_eq!(status, StatusCode::OK);
 
     // The same flow may run concurrently for the other app.
     let (status, other) = send(as_b(Method::POST, "/api/flows/test-flow/run")).await;
@@ -3262,8 +3105,14 @@ async fn sessions_cannot_reach_data_of_another_shopify_app() {
     assert_eq!(strings(&logs["logs"], "message"), ["private line"]);
     let (_, providers) = send(as_a(Method::GET, "/api/providers")).await;
     assert_eq!(providers[0]["configured"], true);
+    assert_eq!(providers[0]["config"], json!({ "endpoint": "https://warehouse.test" }));
     let (_, crons) = send(as_a(Method::GET, "/api/crons")).await;
     assert_eq!(crons[0]["enabled"], false);
+    let handles: Vec<(String,)> = sqlx::query_as("SELECT app_handle FROM provider_configs ORDER BY app_handle")
+        .fetch_all(&ctx.db)
+        .await
+        .unwrap();
+    assert_eq!(handles, [("clientA".to_string(),), ("clientB".to_string(),)]);
     ctx.shutdown().await.unwrap();
 }
 
@@ -3325,6 +3174,8 @@ async fn cors_omits_headers_for_unknown_origins(ctx: &TestContext) {
     for origin in [
         "https://evil.example.com",
         "https://admin.shopify.com.evil.example.com",
+        "https://admin.shopify.com.evil.com",
+        "https://some-shop.myshopify.com.evil.com",
         "http://some-shop.myshopify.com",
         "https://app.example.com",
         "null",
@@ -3332,6 +3183,14 @@ async fn cors_omits_headers_for_unknown_origins(ctx: &TestContext) {
         let response = ctx.get("/api/flows").header(ORIGIN, origin).send().await.unwrap();
         assert_eq!(response.status(), StatusCode::OK, "{origin}");
         assert_eq!(allowed_origin(&response), None, "{origin}");
+        let preflight = anonymous(ctx, Method::OPTIONS, "/api/flows")
+            .header(ORIGIN, origin)
+            .header(ACCESS_CONTROL_REQUEST_METHOD, "GET")
+            .header(ACCESS_CONTROL_REQUEST_HEADERS, "authorization")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(allowed_origin(&preflight), None, "{origin}");
     }
 
     // CORS is scoped to the API.

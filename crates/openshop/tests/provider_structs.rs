@@ -408,6 +408,18 @@ async fn flows_call_the_provider_and_tests_fake_it() {
         .await
         .unwrap();
     assert_eq!(output, json!({ "batches": 7 }));
+
+    // A fake without a configured result returns `null`, which is not a receipt.
+    ctx.reset_fakes();
+    let result = ctx.run_flow("pushOrders", json!({})).await.unwrap();
+    assert!(
+        matches!(
+            result,
+            RunOutcome::Failed { ref error, .. }
+                if error.starts_with("Invalid result from \"warehouse.push\": invalid type: null")
+        ),
+        "{result:?}"
+    );
     ctx.shutdown().await.unwrap();
 }
 

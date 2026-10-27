@@ -4,9 +4,9 @@
 mod common;
 
 use common::{noop_flow, shop_connectors as connectors};
-use openshop::builder::{Field, Flow, Provider, ProviderCall};
+use openshop::builder::{Field, Provider, ProviderCall};
 use openshop::testing::TestContext;
-use openshop::{OpenShopConfig, RunOutcome, Value, json, validators};
+use openshop::{OpenShopConfig, Value, json, validators};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Deserialize)]
@@ -209,56 +209,6 @@ async fn the_typed_checker_receives_the_stored_configuration(ctx: &TestContext) 
     }
 }
 
-#[tokio::test]
-async fn flows_invoke_typed_calls_through_the_fakes() {
-    let flow = Flow::new("pushOrders", |ctx| async move {
-        let receipt = ctx.connectors.invoke(PUSH, &orders()).await?;
-        ctx.step
-            .run("record", || async { Ok(json!({ "accepted": receipt.accepted })) })
-            .await?;
-        Ok(())
-    });
-    let config = OpenShopConfig::builder()
-        .provider(warehouse())
-        .flow(flow)
-        .build()
-        .unwrap();
-    let ctx = TestContext::new(config).await.unwrap();
-
-    let push = ctx.fakes.for_call(PUSH);
-    push.returns(PushReceipt {
-        endpoint: "fake".to_string(),
-        authorized: true,
-        batch_size: 1,
-        accepted: 2,
-        total: 42,
-    });
-    assert_eq!(
-        ctx.run_flow("pushOrders", json!({})).await.unwrap(),
-        RunOutcome::Completed
-    );
-    assert_eq!(push.call_count(), 1);
-    assert_eq!(push.last_call().unwrap().args, orders());
-    let (output,): (Value,) = sqlx::query_as("SELECT output FROM step_results WHERE step_name = 'record'")
-        .fetch_one(&ctx.db)
-        .await
-        .unwrap();
-    assert_eq!(output, json!({ "accepted": 2 }));
-
-    // A fake without a configured result returns `null`, which is not a receipt.
-    ctx.reset_fakes();
-    let result = ctx.run_flow("pushOrders", json!({})).await.unwrap();
-    assert!(
-        matches!(
-            result,
-            RunOutcome::Failed { ref error, .. }
-                if error.starts_with("Invalid result from \"warehouse.push\": invalid type: null")
-        ),
-        "{result:?}"
-    );
-    ctx.shutdown().await.unwrap();
-}
-
 #[test]
 fn a_call_must_name_the_key_its_provider_is_registered_under() {
     let error = OpenShopConfig::builder()
@@ -278,16 +228,6 @@ fn a_call_must_name_the_key_its_provider_is_registered_under() {
         .build()
         .unwrap();
     assert_eq!(config.providers["warehouse"].name, "Main warehouse");
-}
-
-#[test]
-fn calls_are_plain_constants() {
-    let copy = PUSH;
-    assert_eq!((copy.provider(), copy.method()), ("warehouse", "push"));
-    assert_eq!(
-        format!("{PUSH:?}"),
-        "ProviderCall { provider: \"warehouse\", method: \"push\" }"
-    );
 }
 
 // ─── Builder ─────────────────────────────────────────────────────────

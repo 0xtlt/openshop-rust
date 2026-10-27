@@ -489,20 +489,13 @@ async fn get_robots_txt_disallows_all_crawlers() {
 }
 
 #[tokio::test]
-async fn get_root_without_a_valid_shopify_launch_does_not_serve_the_app_shell() {
-    let ui = UiDir::new();
-    let ctx = ui_context(&ui).await;
-
-    assert_unauthorized_ui(&get(&ctx, "/").await);
-    ctx.shutdown().await.unwrap();
-}
-
-#[tokio::test]
-async fn get_unknown_path_without_a_valid_shopify_launch_does_not_serve_spa_fallback() {
+async fn without_a_valid_shopify_launch_neither_the_app_shell_nor_the_spa_fallback_is_served() {
     let ui = UiDir::new();
     let ctx = ui_context(&ui).await;
 
     for path in [
+        "/",
+        "/runs/550e8400-e29b-41d4-a716-446655440000",
         "/admin/deep/route",
         "/flows",
         "/flows/",
@@ -512,15 +505,6 @@ async fn get_unknown_path_without_a_valid_shopify_launch_does_not_serve_spa_fall
     ] {
         assert_unauthorized_ui(&get(&ctx, path).await);
     }
-    ctx.shutdown().await.unwrap();
-}
-
-#[tokio::test]
-async fn get_run_deep_link_without_a_valid_shopify_launch_does_not_serve_spa_fallback() {
-    let ui = UiDir::new();
-    let ctx = ui_context(&ui).await;
-
-    assert_unauthorized_ui(&get(&ctx, "/runs/550e8400-e29b-41d4-a716-446655440000").await);
     ctx.shutdown().await.unwrap();
 }
 

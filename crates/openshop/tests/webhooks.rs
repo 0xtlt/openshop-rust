@@ -125,17 +125,6 @@ async fn flow_runs(ctx: &TestContext) -> Vec<FlowRun> {
 }
 
 #[tokio::test]
-async fn post_webhooks_with_invalid_hmac_returns_401() {
-    let recorder = Recorder::default();
-    let ctx = TestContext::new(orders_create_config(&recorder)).await.unwrap();
-
-    let response = post_webhook(&ctx, "orders/create", "test.myshopify.com", "{}", "invalid").await;
-    assert_error(response, 401, "Invalid webhook HMAC").await;
-    assert_eq!(recorder.count(), 0);
-    ctx.shutdown().await.unwrap();
-}
-
-#[tokio::test]
 async fn post_webhooks_rejects_missing_forged_or_mismatched_signatures() {
     let recorder = Recorder::default();
     let ctx = TestContext::new(orders_create_config(&recorder)).await.unwrap();
@@ -155,6 +144,7 @@ async fn post_webhooks_rejects_missing_forged_or_mismatched_signatures() {
 
     for hmac in [
         String::new(),
+        "invalid".to_string(),
         sign_webhook_body(body, "another-secret"),
         sign_webhook_body(body, ""),
         // Signature of another payload.
