@@ -2,6 +2,59 @@
 
 ## Unreleased
 
+- Less code to build, run and keep up: what nothing used, what was written
+  twice and what a dependency already does is gone (about 2,600 lines of Rust,
+  and the three copies of the Admin schema in `templates/`, now links to
+  `crates/openshop/graphql/admin.schema.json`). Breaking changes:
+  - A table is the `Table` of a `#[derive(Model)]` struct: `Table::column(name,
+    "sql")`, `Table::conventional` and `without_shop`/`created_at`/`updated_at`
+    are gone, and with them the changes `migrate generate` could only leave as a
+    `-- TODO` line and `migrate generate --manual-done`. A database without
+    `migrations/schema.snapshot.json` is no longer adopted from its tables: its
+    first `generate` writes `CREATE TABLE IF NOT EXISTS` for every model.
+  - `openshop::testing` keeps `TestContext` and the fakes an application uses:
+    `Factory`, `TestContext::create`/`cleanup`/`is_installed`,
+    `TestOptions::live_shopify` and `#[openshop::test]` on a `&mut TestContext`
+    are gone, and a fake method only `returns`, `rejects`, `reset`s and lists
+    its calls (`on_call_returns`, `on_call_rejects` and `implementation` are
+    gone).
+  - `validators::range(Some(min), Some(max))` replaces `number_range`;
+    `validators::string` and `number` are gone.
+  - `OpenShopConfig` has no `providers`, `flows`, `flow_as` or `with`: blocks
+    are listed in `app!`. `cli::run` and `run_with_args` take a function that
+    returns the config (`ConfigSource` is gone). The `schema` feature is gone,
+    `schemars` is always there.
+  - `ReqwestTransport::new()` returns a `Result`, and `OpenShop::new` fails
+    when the HTTP client cannot be built, where it fell back to a client that
+    follows redirections and has no timeout. `default_transport`,
+    `OpenShop::connect` and `db::connect` (which read `DATABASE_URL` inside the
+    framework) are gone.
+  - Also gone: `UiSource::assets` (write `UiSource::Assets(lookup)`),
+    `ServerOptions::production`/`development`/`ui`, the `ShopSession`
+    re-export, `InstallationRow`, `CronOverride`, `AdminFunction::output`,
+    `Proxy::json`/`liquid`/`html`, `Connector::has`/`method_names`/`call_as`,
+    `App::test`, `ShopifyClient::graphql_as` and `FieldType::ALL`. A `Cron`'s
+    `shops` is a `CronShops`, `Global` by default, not an `Option`.
+    `openshop::admin::AdminFunctionKind` and `openshop::ui::AdminFunctionKind`
+    are one type, from `openshop-shared`.
+
+  Behaviour changes: a disabled MCP endpoint answers `403` before it reads a
+  token, where it looked the token up and checked it first, and
+  `serverInfo.version` is the version of the crate instead of `0.1.1`. A log
+  export asked as `?format=xml` is named `.json`, what it holds. On `/ops`, a
+  `before` with the time alone shows the first page. Sentry hides the headers
+  and variables named like `code` or `key` too, the one list of secret names
+  being the union of the two there were. Numbers in log search and in the admin
+  UI are written as JavaScript writes them (`1e+21`). A stored token whose
+  Shopify app is no longer configured fails with the unknown-app error instead
+  of being sent. The admin UI loads its pages once at start, not twice, and
+  sends no `Authorization` header without a session token. `openshop-cli`
+  depends on `serde_json` instead of the framework, so `cargo install` builds a
+  fraction of the crates; `openshop dev` names the last change when it
+  restarts once more for changes made during a restart. The templates no longer
+  print a failed flow themselves (the runner logs it), and `docker compose` no
+  longer creates the unused `openshop_test` database.
+
 - Shopify is reached through `shopify_api` 1.0.0-rc.2 instead of a client of
   OpenShop's own. Breaking changes:
   - `graphql!` is `shopify_api`'s, wrapped as `openshop::graphql!` and in the
@@ -144,11 +197,6 @@
   database has not applied, or does not cover the framework schema, with
   `Not starting: … Run `migrate` first.`. Without a `migrations/` folder they
   start as before.
-- `migrate generate` no longer records in the snapshot a change it can only
-  leave as a `-- TODO` line (the primary key or the constraints of a column): the
-  snapshot keeps the previous state, `migrate check` fails, and a second
-  `generate` does not write the line again. Once the migrations write the change,
-  `migrate generate --manual-done` records the models.
 - `APP.main()` loads `.env` for `dev` before it starts the async runtime,
   instead of calling `set_var` from inside it. `cli::env::load_env_file` returns
   the number of variables it set; a `main` with its own runtime that calls
@@ -185,7 +233,7 @@
   first 50; the cart transform listing makes one request for the functions of
   the app and one for the cart transforms. On `/ops`, `Older` cuts a page on
   the time and the id of the last row, so rows created at the same instant are
-  no longer skipped; an old `before` with the time alone still works. The
+  no longer skipped. The
   percent-decoder of the custom admin pages and the one of the static assets
   are one (`openshop_shared::rpc::decode_uri_component`): `%+1` is no longer
   read as `%01`. Assets of the admin UI have a strong `ETag` and answer `304`
@@ -429,12 +477,6 @@
   gives the URL the harness uses. Without PostgreSQL, a test fails within ten
   seconds saying so (`mise run db:up`, or `TEST_DATABASE_URL`) instead of
   hanging.
-- `FakeMethod::call` takes its place in the record when the call starts: two
-  calls running at once each get their own index for `on_call_returns` and
-  `on_call_rejects`, and `calls()` lists them in the order they started in
-  (it listed them in the order they finished, the second one taking the rule
-  of the first). A call is recorded as soon as it starts, with its result
-  filled in when it ends; a `reset()` in the meantime forgets it.
 - `docker-compose.yml` publishes PostgreSQL on `127.0.0.1:5432` only, not on
   every interface of the machine.
 - The workspace declares its lints (`[workspace.lints]`: `unsafe_code` and
@@ -643,9 +685,7 @@
   `Installation::installed(&db)` across shops, `StepResult::of_run` and
   `LogRow::of_run` for a run. These records are never written, and
   `Installation` does not read the access token. `Record` is the part of
-  `Model` that reads: `TABLE` and `COLUMNS` moved to it, and
-  `openshop::db::schema::Installation`, the whole row, is now
-  `InstallationRow`.
+  `Model` that reads: `TABLE` and `COLUMNS` moved to it.
 - A custom admin page is written in one place. The view of a page is the
   function marked `#[view]` in its `#[admin_page]` block, next to the loaders
   and the actions it calls, and no longer lives in a separate `ui/` crate. It
@@ -737,7 +777,7 @@
   are what running and dispatching a flow return, and `DispatchOptions` what
   `dispatch_flow` takes. Constructors are associated functions:
   `AdminFunction::loader`, `action`, `typed_loader` and `typed_action`,
-  `Table::conventional`, `Factory::new`, `FakeProviders::new`,
+  `FakeProviders::new`,
   `ShopifyClient::new`; `AdminPage::access` and `AdminFunction::authorize`
   take the function itself. The process logger is `openshop::logger()` and
   `set_logger`, the server is `openshop::server::router` and `listen`, and the
