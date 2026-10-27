@@ -5,7 +5,7 @@ use quote::quote;
 use syn::{DeriveInput, Expr, Ident, LitStr};
 
 use crate::provider::{Form, form};
-use crate::util::{Argument, Arguments, lower_initial, plain_name, set_once, text};
+use crate::util::{Argument, Arguments, declared, lower_initial, plain_name, set_once, text};
 
 /// The option naming the type of a function, and the variant of `FunctionType`.
 const TYPES: [(&str, &str); 6] = [
@@ -66,7 +66,6 @@ fn combines_with(list: TokenStream) -> syn::Result<TokenStream> {
 }
 
 pub fn derive(input: DeriveInput) -> syn::Result<TokenStream> {
-    let krate = quote!(::openshop);
     let name = &input.ident;
     let Form { definitions, construct } = form(&input, "FunctionConfig", "function configuration")?;
 
@@ -122,10 +121,10 @@ pub fn derive(input: DeriveInput) -> syn::Result<TokenStream> {
         Some(Expr::Lit(syn::ExprLit {
             lit: syn::Lit::Str(title),
             ..
-        })) => Some(quote!(#krate::builder::FunctionOwner::new(#title))),
+        })) => Some(quote!(::openshop::builder::FunctionOwner::new(#title))),
         Some(title) => Some(quote! {
-            #krate::builder::FunctionOwner::dynamic_title(|config: &#krate::JsonMap| {
-                match <Self as #krate::FunctionConfig>::from_config(::core::clone::Clone::clone(config)) {
+            ::openshop::builder::FunctionOwner::dynamic_title(|config: &::openshop::JsonMap| {
+                match <Self as ::openshop::FunctionConfig>::from_config(::core::clone::Clone::clone(config)) {
                     ::core::result::Result::Ok(config) => (#title)(&config),
                     ::core::result::Result::Err(_) => ::std::string::String::from(#fallback),
                 }
@@ -144,15 +143,25 @@ pub fn derive(input: DeriveInput) -> syn::Result<TokenStream> {
         }
     };
     let label = label.map(|label| quote!(.label(#label)));
+    let declared = declared(
+        name,
+        "Function",
+        quote! {
+            app.function(
+                <Self as ::openshop::FunctionConfig>::NAME,
+                <Self as ::openshop::FunctionConfig>::definition(),
+            )
+        },
+    );
 
     Ok(quote! {
-        impl #krate::FunctionConfig for #name {
+        impl ::openshop::FunctionConfig for #name {
             const NAME: &'static str = #key;
 
-            fn definition() -> #krate::builder::Function {
-                let mut fields = #krate::builder::Fields::new();
+            fn definition() -> ::openshop::builder::Function {
+                let mut fields = ::openshop::builder::Fields::new();
                 #(#definitions)*
-                let mut function = #krate::builder::Function::new(#krate::builder::FunctionType::#function_type, #handle)
+                let mut function = ::openshop::builder::Function::new(::openshop::builder::FunctionType::#function_type, #handle)
                     #label
                     #(#definition_options)*
                     #owner;
@@ -160,21 +169,12 @@ pub fn derive(input: DeriveInput) -> syn::Result<TokenStream> {
                 function
             }
 
-            fn from_config(mut config: #krate::JsonMap) -> ::core::result::Result<Self, ::std::string::String> {
+            fn from_config(mut config: ::openshop::JsonMap) -> ::core::result::Result<Self, ::std::string::String> {
                 ::core::result::Result::Ok(#construct)
             }
         }
 
-        impl #krate::declare::Declared for #name {
-            type Kind = #krate::declare::kind::Function;
-
-            fn register(app: #krate::builder::OpenShopBuilder) -> #krate::builder::OpenShopBuilder {
-                app.function(
-                    <Self as #krate::FunctionConfig>::NAME,
-                    <Self as #krate::FunctionConfig>::definition(),
-                )
-            }
-        }
+        #declared
     })
 }
 

@@ -1,11 +1,40 @@
 //! Helpers shared by the macros.
 
 use proc_macro2::{Ident, Span, TokenStream};
+use quote::{ToTokens, format_ident, quote};
 use syn::ext::IdentExt;
 use syn::meta::ParseNestedMeta;
 use syn::parse::{Parse, ParseStream};
 use syn::spanned::Spanned;
-use syn::{Attribute, Expr, LitStr, Token};
+use syn::{Attribute, Expr, ImplItem, ItemImpl, LitStr, Token};
+
+/// `ty` declared as a block of `kind` (`Flow`, `Provider`…), which an
+/// application that lists it registers with `register`, an expression of the
+/// builder `app`.
+pub fn declared(ty: impl ToTokens, kind: &str, register: TokenStream) -> TokenStream {
+    let kind = format_ident!("{kind}");
+    quote! {
+        impl ::openshop::declare::Declared for #ty {
+            type Kind = ::openshop::declare::kind::#kind;
+
+            fn register(app: ::openshop::builder::OpenShopBuilder) -> ::openshop::builder::OpenShopBuilder {
+                #register
+            }
+        }
+    }
+}
+
+/// The names of the functions and of the constants an `impl` block declares.
+pub fn own_names(item: &ItemImpl) -> Vec<&Ident> {
+    item.items
+        .iter()
+        .filter_map(|implemented| match implemented {
+            ImplItem::Fn(function) => Some(&function.sig.ident),
+            ImplItem::Const(constant) => Some(&constant.ident),
+            _ => None,
+        })
+        .collect()
+}
 
 /// Sets an option of an attribute with what `parse` reads, refusing a second value.
 pub fn set<T>(
