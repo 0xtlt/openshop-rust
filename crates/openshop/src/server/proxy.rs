@@ -17,9 +17,9 @@ use indexmap::IndexMap;
 use serde_json::{Value, json};
 
 use super::file_routes::{resolve_route_paths, to_router_path};
-use super::hmac::{proxy_shop, verify_proxy_signature};
+use super::hmac::{proxy_params_are_unambiguous, proxy_shop};
 use super::http::{json_error, not_found, parse_query};
-use super::jwt::{customer_id_from_jwt_sub, is_staff_subject, read_jwt_audience, verify_session_token};
+use super::jwt::{customer_id_from_jwt_sub, is_staff_subject, read_jwt_audience, subject};
 use super::shopify_apps::ResolvedShopifyApp;
 use crate::app::OpenShop;
 use crate::declare::InvalidInput;
@@ -45,11 +45,11 @@ fn signed_customer_id(value: Option<&String>) -> Option<String> {
 
 fn resolve_proxy_auth(
     app: &OpenShop,
+    raw_query: &str,
     query: &IndexMap<String, String>,
     pairs: &[(String, String)],
     headers: &IndexMap<String, String>,
     modes: &[ProxyAuthKind],
-    now: i64,
 ) -> Result<ResolvedProxyAuth, &'static str> {
     let authorization = headers.get("authorization").map(String::as_str).unwrap_or_default();
     if let Some(token) = authorization.strip_prefix("Bearer ") {
@@ -61,29 +61,31 @@ fn resolve_proxy_auth(
         };
         let invalid = "Unauthorized: invalid or expired session token";
         let shopify_app = app.apps().by_api_key(&audience).map_err(|_| invalid)?;
-        let verified =
-            verify_session_token(token, &shopify_app.api_secret, &shopify_app.api_key).map_err(|_| invalid)?;
+        let verified = app
+            .apps()
+            .oauth(shopify_app)
+            .verify_extension_session_token(token)
+            .map_err(|_| invalid)?;
         // The session token of a staff user opens the admin, not the storefront:
         // only the tokens of customer account and checkout extensions do here.
-        if is_staff_subject(&verified.payload.sub) {
+        let sub = subject(verified.claims());
+        if is_staff_subject(sub) {
             return Err("Unauthorized: session token was issued to a staff user");
         }
         return Ok(ResolvedProxyAuth {
             kind: ProxyAuthKind::CustomerAccountJwt,
             shopify_app: shopify_app.clone(),
-            shop: verified.shop,
-            customer_id: customer_id_from_jwt_sub(&verified.payload.sub),
+            shop: verified.shop().to_string(),
+            customer_id: customer_id_from_jwt_sub(sub),
         });
     }
 
     if modes.contains(&ProxyAuthKind::AppProxyHmac) {
-        let matches: Vec<&ResolvedShopifyApp> = app
-            .apps()
-            .all()
-            .iter()
-            .filter(|shopify_app| verify_proxy_signature(pairs, &shopify_app.api_secret, now))
-            .collect();
-        let [shopify_app] = matches[..] else {
+        // Who the request is for must read one way only, before its signature counts.
+        if !proxy_params_are_unambiguous(pairs) {
+            return Err("Invalid proxy signature");
+        }
+        let Ok((shopify_app, _)) = app.apps().by_proxy_signature(raw_query) else {
             return Err("Invalid proxy signature");
         };
         let Some(shop) = proxy_shop(pairs) else {
@@ -158,8 +160,7 @@ async fn handle(
     let pairs: Vec<(String, String)> = url::form_urlencoded::parse(uri.query().unwrap_or_default().as_bytes())
         .map(|(key, value)| (key.into_owned(), value.into_owned()))
         .collect();
-    let now = chrono::Utc::now().timestamp();
-    let auth = match resolve_proxy_auth(&app, &query, &pairs, &headers, route.auth_modes, now) {
+    let auth = match resolve_proxy_auth(&app, uri.query().unwrap_or_default(), &query, &pairs, &headers, route.auth_modes) {
         Ok(auth) => auth,
         Err(error) => return json_error(StatusCode::UNAUTHORIZED, error),
     };

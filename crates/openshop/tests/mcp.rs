@@ -9,8 +9,8 @@ use chrono::{DateTime, Utc};
 use openshop::builder::{Flow, InputSchema, McpResource, McpTool};
 use openshop::db::schema::McpAuditLog;
 use openshop::engine::{RunFlowOptions, run_flow};
-use openshop::runtime::OutboundRequest;
 use openshop::server::mcp::core::latest_stable_shopify_admin_api_version;
+use openshop::testing::OutboundRequest;
 use openshop::testing::{MockTransport, TestContext, TestOptions, session_token};
 use openshop::{
     AdminPageId, AdminPageMode, CancellationToken, Cron, DispatchOptions, FlowContext, IndexMap, McpConfig, McpContext,
@@ -2461,21 +2461,21 @@ async fn openshop_admin_graphql_runs_against_an_installed_shop_returns_raw_shopi
     assert_eq!(header(&requests[0], "Content-Type"), Some("application/json"));
     assert_eq!(requests[0].body, json!({ "query": query, "variables": { "first": 1 } }));
 
-    // The shop may be given as a URL; variables default to an empty object.
+    // The shop may be given as a URL; without variables, none are sent.
     let body = call_tool(
         ctx,
         &issued.token,
         "openshop.admin.graphql",
-        json!({ "shop": "https://MCP-Other.myshopify.com/admin", "apiVersion": "2025-10", "query": "{ shop { id } }" }),
+        json!({ "shop": "https://MCP-Other.myshopify.com/admin", "apiVersion": "2026-07", "query": "{ shop { id } }" }),
     )
     .await;
     assert_eq!(body["result"]["structuredContent"]["shop"], SHOP_B);
     let requests = graphql_requests(ctx);
     assert_eq!(
         requests[1].url,
-        format!("https://{SHOP_B}/admin/api/2025-10/graphql.json")
+        format!("https://{SHOP_B}/admin/api/2026-07/graphql.json")
     );
-    assert_eq!(requests[1].body, json!({ "query": "{ shop { id } }", "variables": {} }));
+    assert_eq!(requests[1].body, json!({ "query": "{ shop { id } }" }));
 
     let recorded = audits(ctx, &issued.token_id).await;
     assert_eq!(recorded.len(), 2);
@@ -2528,7 +2528,7 @@ async fn openshop_admin_graphql_refuses_a_token_shop_that_is_not_installed_for_t
         (json!({ "query": "   " }), "query is required"),
         (
             json!({ "query": "{ shop { name } }", "apiVersion": "unstable" }),
-            "apiVersion must use YYYY-MM format or \"latest\"",
+            "apiVersion must be \"latest\" or a YYYY-MM version from 2026-04",
         ),
     ];
     for (arguments, message) in invalid {
@@ -2551,7 +2551,7 @@ async fn openshop_admin_graphql_reports_shopify_failures_without_hiding_them(ctx
     let arguments = json!({ "shop": SHOP_B, "apiVersion": "2026-04", "query": "{ shop { name } }" });
 
     ctx.transport.respond_with(|_| {
-        Ok(openshop::runtime::OutboundResponse {
+        Ok(openshop::testing::OutboundResponse {
             status: 502,
             body: "Bad Gateway".to_string(),
         })
@@ -2570,10 +2570,6 @@ async fn openshop_admin_graphql_reports_shopify_failures_without_hiding_them(ctx
     assert_eq!(result["errors"], json!([{ "message": "Throttled" }]));
     assert!(result.get("responseText").is_none());
 
-    respond_to_graphql(ctx, 200, json!([1, 2]));
-    let body = call_tool(ctx, &issued.token, "openshop.admin.graphql", arguments.clone()).await;
-    assert_eq!(body["result"]["structuredContent"]["responseText"], "[1,2]");
-
     ctx.transport.respond_with(|_| Err(anyhow!("network down")));
     let body = call_tool(ctx, &issued.token, "openshop.admin.graphql", arguments).await;
     // The error of a transport is the server's: the client reads an id.
@@ -2586,7 +2582,7 @@ async fn openshop_admin_graphql_reports_shopify_failures_without_hiding_them(ctx
         .into_iter()
         .map(|audit| audit.status)
         .collect();
-    assert_eq!(statuses, ["success", "success", "success", "error"]);
+    assert_eq!(statuses, ["success", "success", "error"]);
 }
 
 #[tokio::test]

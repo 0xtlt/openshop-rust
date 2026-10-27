@@ -3,7 +3,6 @@ resolver = "3"
 members = [
   "crates/openshop",
   "crates/openshop-shared",
-  "crates/openshop-graphql",
   "crates/openshop-macros",
   "crates/openshop-cli",
   "templates/minimal",
@@ -26,7 +25,6 @@ authors = ["Thomas Tastet"]
 [workspace.dependencies]
 openshop = { path = "crates/openshop", version = "0.0.12-beta.0" }
 openshop-shared = { path = "crates/openshop-shared", version = "0.0.12-beta.0" }
-openshop-graphql = { path = "crates/openshop-graphql", version = "0.0.12-beta.0" }
 openshop-macros = { path = "crates/openshop-macros", version = "0.0.12-beta.0" }
 
 aes-gcm = "0.10"
@@ -60,6 +58,10 @@ serde_json = { version = "1", features = ["preserve_order"] }
 serde_path_to_error = "0.1"
 serde_urlencoded = "0.7"
 sha2 = "0.10"
+# The Shopify Admin API: the GraphQL client and `graphql!`, tokens, OAuth,
+# session tokens, app proxies and webhooks. Without its HTTP client: its
+# requests go through the `reqwest` of the workspace (`ReqwestTransport`).
+shopify_api = { version = "=1.0.0-rc.1", default-features = false, features = ["oauth", "webhooks"] }
 sqlx = { version = "0.8", default-features = false, features = ["chrono", "derive", "json", "postgres", "runtime-tokio", "tls-rustls-ring-webpki", "uuid"] }
 subtle = "2"
 syn = { version = "2", features = ["full"] }

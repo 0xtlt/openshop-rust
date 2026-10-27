@@ -269,7 +269,7 @@ const ORDERS: &str = "query { orders(first: 10) { nodes { id name } } }";
 async fn fetch_orders(ctx: &FlowContext) -> Result<Value> {
     ctx.step
         .run_with("fetch-orders", StepOptions::timeout(Duration::from_secs(10)), async || {
-            ctx.shopify.graphql(ORDERS, None).await
+            ctx.shopify.graphql(ORDERS, ()).await
         })
         .await
 }

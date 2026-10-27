@@ -1,6 +1,7 @@
 //! Embeds the templates of `openshop init`, from `templates/` at the root of
 //! the repository: `$OUT_DIR/templates.rs` lists the files a project gets from
-//! each, with their content. It also sets `OPENSHOP_GIT_COMMIT`, the commit of
+//! each, with their content, and the Admin schema of `graphql!` every project
+//! gets. It also sets `OPENSHOP_GIT_COMMIT`, the commit of
 //! the repository the CLI is built from, when there is one.
 
 use std::fmt::Write;
@@ -115,7 +116,15 @@ fn main() {
     let mut files = Vec::new();
     files_in(&shared, &mut files);
     files.sort();
-    code += &slice("SHARED", &shared, &files);
+    // The schema `graphql!` checks the operations of a project against: the
+    // one of the version every template pins, written once.
+    let schema = templates.join("minimal/graphql/admin.schema.json");
+    println!("cargo::rerun-if-changed={}", schema.display());
+    let entry = format!(
+        "    (\"graphql/admin.schema.json\", include_str!({:?})),\n];\n",
+        schema.display().to_string()
+    );
+    code += &slice("SHARED", &shared, &files).replace("];\n", &entry);
 
     if let Some(commit) = templates.parent().and_then(commit) {
         println!("cargo::rustc-env=OPENSHOP_GIT_COMMIT={commit}");

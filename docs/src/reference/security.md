@@ -74,7 +74,8 @@ request.
 `[redacted]` for `api_secret` and `shopify_api_secret` (`ShopifyAppConfig`,
 `RuntimeEnv`, the resolved app), `encryption_key`, the access token and the
 nonce of an installation, the configuration of a provider, MCP tokens and their
-hashes, and the secret headers and body fields of an `OutboundRequest`. A
+hashes, and the secret headers and body fields of a request `MockTransport`
+records (`OutboundRequest`), as `shopify_api` does for the requests it sends. A
 failed MCP or session token is logged with the reason and the id of the token,
 never the token.
 

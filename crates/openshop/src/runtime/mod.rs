@@ -13,4 +13,4 @@ pub use flow_logger::FlowLogger;
 pub use logger::{RuntimeLogger, logger, set_logger};
 #[cfg(feature = "sentry")]
 pub use report::{SentryConfig, SentryGuard};
-pub use transport::{FORM_CONTENT_TYPE, HttpTransport, OutboundRequest, OutboundResponse, ReqwestTransport};
+pub use transport::{HttpRequest, HttpResponse, Method, ReqwestTransport, Transport, TransportError, default_transport};

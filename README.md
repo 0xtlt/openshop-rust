@@ -127,6 +127,10 @@ The binary understands `dev`, `start`, `worker [--concurrency=N]` and
   public routes, Shopify Functions and MCP capabilities of the application,
   each declared where it is written, and sets its schedules. Shopify OAuth and
   the embedded admin are handled by the framework.
+- **Shopify** is reached through [`shopify_api`](https://docs.rs/shopify_api):
+  `ctx.shopify` runs its operations, checked against Shopify's schema at
+  compile time, with the token of the installation, and its verification of
+  session tokens, launches, app proxies and webhooks guards the routes.
 - **The admin** shows a shop its flows, runs, logs and providers, or only the
   pages you wrote for it. An optional dashboard under `/ops`, behind a
   password, shows the operator every shop.
@@ -172,10 +176,9 @@ robust; they are listed in [Differences](docs/src/reference/differences.md).
 | --- | --- |
 | `crates/openshop` | The framework: engine, server, MCP, testing harness, embedded UI assets |
 | `crates/openshop-shared` | Types and rules shared by the server and the WebAssembly UI |
-| `crates/openshop-graphql` | Shopify's Admin schema, and the checks and code generation behind `graphql!` |
-| `crates/openshop-macros` | The macros: `app!`, the attributes and derives that declare building blocks, and `graphql!` |
+| `crates/openshop-macros` | The macros: `app!`, and the attributes and derives that declare building blocks |
 | `crates/openshop-ui` | The admin UI (Leptos, built with trunk into `crates/openshop/ui-dist`) |
-| `crates/openshop-cli` | The `openshop` command: `init`, `init-ui`, `dev`, `build`, `build-ui` and `codegen` |
+| `crates/openshop-cli` | The `openshop` command: `init`, `init-ui`, `dev`, `build` and `build-ui` |
 | `templates/minimal` | The template of `openshop init --template=minimal`: one provider and one flow |
 | `templates/custom` | The template of a custom app: every building block, with the built-in admin open to the merchant and a custom admin page |
 | `templates/public` | The template of a public app: an admin made of its own pages for the merchants, the operator dashboard for whoever runs it |

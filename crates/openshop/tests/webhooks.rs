@@ -184,7 +184,7 @@ async fn post_webhooks_with_unknown_topic_returns_200_without_invoking_handler()
 
     assert_ok(deliver(&ctx, "products/update", "test.myshopify.com", r#"{"id":1}"#).await).await;
     // The body is only parsed for a registered topic.
-    assert_ok(deliver(&ctx, "products/update", "test.myshopify.com", "not json").await).await;
+    assert_ok(deliver(&ctx, "products/update", "test.myshopify.com", "{not json").await).await;
     assert_ok(deliver(&ctx, "", "test.myshopify.com", r#"{"id":1}"#).await).await;
 
     assert_eq!(recorder.count(), 0);
@@ -271,15 +271,20 @@ async fn post_webhooks_with_invalid_json_returns_400() {
     let recorder = Recorder::default();
     let ctx = TestContext::new(orders_create_config(&recorder)).await.unwrap();
 
-    for body in ["not json", "", "{\"id\":", "{'id':1}"] {
+    for body in ["{\"id\":", "{'id':1}", "{not json"] {
         let response = deliver(&ctx, "orders/create", "test.myshopify.com", body).await;
         assert_error(response, 400, "Invalid JSON body").await;
     }
+    // Only a JSON object verifies: the secret also signs launches, app proxy
+    // requests and session tokens, none of which starts with `{`.
+    for body in ["not json", "", "[1,2]", " {\"id\":1}"] {
+        let response = deliver(&ctx, "orders/create", "test.myshopify.com", body).await;
+        assert_error(response, 401, "Invalid webhook HMAC").await;
+    }
     assert_eq!(recorder.count(), 0);
 
-    // Any JSON value is a payload.
-    assert_ok(deliver(&ctx, "orders/create", "test.myshopify.com", "[1,2]").await).await;
-    assert_eq!(recorder.deliveries()[0].payload, json!([1, 2]));
+    assert_ok(deliver(&ctx, "orders/create", "test.myshopify.com", r#"{"id":1}"#).await).await;
+    assert_eq!(recorder.deliveries()[0].payload, json!({ "id": 1 }));
     ctx.shutdown().await.unwrap();
 }
 

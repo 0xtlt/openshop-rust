@@ -1416,7 +1416,7 @@ async fn request_with_forged_or_expired_token_returns_401(ctx: &TestContext) {
             "Unauthorized: invalid session token",
         ),
         (
-            sign_session_token(&claims(&ctx.shop, now - 5), &ctx.secret),
+            sign_session_token(&claims(&ctx.shop, now - 30), &ctx.secret),
             "Unauthorized: invalid session token",
         ),
         (
@@ -1514,6 +1514,7 @@ async fn session_token_exchange_installs_the_shop_once() {
             "subject_token": token,
             "subject_token_type": "urn:ietf:params:oauth:token-type:id_token",
             "requested_token_type": "urn:shopify:params:oauth:token-type:offline-access-token",
+            "expiring": "0",
         })
     );
 

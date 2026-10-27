@@ -204,8 +204,9 @@ The generated `.gitignore` excludes `target/`, `.env`, `.shopify/`, and `dist/`.
 Nothing is generated at build time: `graphql!` types Shopify operations while
 the crate compiles, without writing files. The generated files are the SQL
 migrations written by `openshop init` and `migrate generate`, to review and
-commit with `migrations/schema.snapshot.json`, and `graphql/admin.schema.json` when `openshop codegen` downloaded the
-schema of [another API version](graphql.md#schema-and-api-version).
+commit with `migrations/schema.snapshot.json`, and `graphql/admin.schema.json`,
+the schema [`graphql!`](graphql.md#setup) checks operations against, which
+the first build downloads.
 
 ## Modules
 

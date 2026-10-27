@@ -233,7 +233,7 @@ pub(crate) async fn is_installed_shop(
         return Ok(false);
     };
 
-    match app.client_credentials().grant(app, shopify_app, shop, grant, None).await {
+    match app.client_credentials().grant(app, shopify_app, shop, grant).await {
         Ok(granted) => Ok(granted.is_some()),
         Err(error) => {
             logger::warn(format!("{error:#}"));

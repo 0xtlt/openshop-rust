@@ -5,14 +5,15 @@ use axum::http::StatusCode;
 use axum::http::header::AUTHORIZATION;
 use axum::middleware::Next;
 use axum::response::Response;
-use serde_json::{Value, json};
+use serde_json::json;
+use shopify_api::oauth::{RequestedToken, SessionToken};
 
 use super::http::{header, json_error};
-use super::jwt::{is_staff_subject, read_jwt_audience, verify_session_token};
+use super::jwt::{is_staff_subject, read_jwt_audience};
 use super::shopify_apps::ResolvedShopifyApp;
 use crate::admin::AdminActor;
 use crate::app::OpenShop;
-use crate::runtime::{OutboundRequest, logger, report};
+use crate::runtime::{logger, report};
 use crate::shopify::client::ShopifyClient;
 use crate::shopify::client_credentials::Grant;
 use crate::shopify::token_exchange::TIMEOUT;
@@ -49,7 +50,7 @@ pub(crate) async fn shop_middleware(State(app): State<OpenShop>, mut request: Re
         return json_error(StatusCode::UNAUTHORIZED, "Unauthorized: missing token audience");
     };
     let verified = app.apps().by_api_key(&audience).and_then(|shopify_app| {
-        let verified = verify_session_token(&session_token, &shopify_app.api_secret, &shopify_app.api_key)?;
+        let verified = app.apps().oauth(shopify_app).verify_session_token(&session_token)?;
         Ok((shopify_app.clone(), verified))
     });
     let (shopify_app, verified) = match verified {
@@ -67,25 +68,27 @@ pub(crate) async fn shop_middleware(State(app): State<OpenShop>, mut request: Re
 
     // Checkout and customer account extensions get tokens signed with the same secret,
     // for a customer or an anonymous buyer. The Admin API is for staff sessions only.
-    if !is_staff_subject(&verified.payload.sub) {
+    let staff = verified.user_id().unwrap_or_default().to_string();
+    if !is_staff_subject(&staff) {
         return json_error(
             StatusCode::UNAUTHORIZED,
             "Unauthorized: session token was not issued to a staff user",
         );
     }
 
+    let shop = verified.shop().to_string();
     report::describe(|request| {
-        request.shop(&verified.shop, &shopify_app.handle);
+        request.shop(&shop, &shopify_app.handle);
     });
     // Installation is best-effort: a failed token exchange must not block the request.
-    let _ = ensure_installation(&app, &shopify_app, &verified.shop, &session_token).await;
+    let _ = ensure_installation(&app, &shopify_app, &shop, &verified).await;
 
     request.extensions_mut().insert(ShopSession {
-        shop: verified.shop,
+        shop,
         shopify_app: shopify_app.handle,
         actor: AdminActor {
-            id: verified.payload.sub,
-            session_id: verified.payload.sid,
+            id: staff,
+            session_id: verified.session_id().unwrap_or_default().to_string(),
         },
     });
     next.run(request).await
@@ -106,7 +109,7 @@ async fn ensure_installation(
     app: &OpenShop,
     shopify_app: &ResolvedShopifyApp,
     shop: &str,
-    session_token: &str,
+    session: &SessionToken,
 ) -> anyhow::Result<()> {
     let existing = stored_token(app, shopify_app, shop).await?;
     if let Some(stored) = existing.as_ref().filter(|token| !token.is_empty()) {
@@ -128,7 +131,7 @@ async fn ensure_installation(
         return Ok(());
     }
 
-    match exchange_once(app, shopify_app, shop, session_token, &existing).await {
+    match exchange_once(app, shopify_app, shop, session, &existing).await {
         Ok(Exchange::Done) => return Ok(()),
         // Shopify does not answer: the grant would wait for it as well.
         Ok(Exchange::TimedOut) => return Ok(()),
@@ -138,7 +141,7 @@ async fn ensure_installation(
         return Ok(());
     };
     let credentials = app.client_credentials();
-    match credentials.grant(app, &shopify_app.handle, shop, &grant, None).await {
+    match credentials.grant(app, &shopify_app.handle, shop, &grant).await {
         // The exchange was just refused: the next session does not try it again for this token.
         Ok(Some(token)) => {
             credentials.exchange_due(&shopify_app.handle, shop, &token);
@@ -177,7 +180,7 @@ async fn exchange_once(
     app: &OpenShop,
     shopify_app: &ResolvedShopifyApp,
     shop: &str,
-    session_token: &str,
+    session: &SessionToken,
     seen: &Option<String>,
 ) -> anyhow::Result<Exchange> {
     let exchanges = &app.client_credentials().exchanges;
@@ -193,7 +196,7 @@ async fn exchange_once(
         return Ok(Exchange::Done);
     }
 
-    let exchanged = tokio::time::timeout(TIMEOUT, exchange_token(app, shopify_app, shop, session_token)).await;
+    let exchanged = tokio::time::timeout(TIMEOUT, exchange_token(app, shopify_app, shop, session)).await;
     let outcome = match exchanged {
         Ok(Ok(true)) => return Ok(Exchange::Done),
         Ok(Ok(false)) => Exchange::Failed,
@@ -220,33 +223,19 @@ async fn exchange_token(
     app: &OpenShop,
     shopify_app: &ResolvedShopifyApp,
     shop: &str,
-    session_token: &str,
+    session: &SessionToken,
 ) -> anyhow::Result<bool> {
-    let response = app
-        .transport()
-        .post_json(OutboundRequest {
-            url: format!("https://{shop}/admin/oauth/access_token"),
-            headers: vec![("Content-Type".to_string(), "application/json".to_string())],
-            body: json!({
-                "client_id": shopify_app.api_key,
-                "client_secret": shopify_app.api_secret,
-                "grant_type": "urn:ietf:params:oauth:grant-type:token-exchange",
-                "subject_token": session_token,
-                "subject_token_type": "urn:ietf:params:oauth:token-type:id_token",
-                "requested_token_type": "urn:shopify:params:oauth:token-type:offline-access-token",
-            }),
-        })
-        .await?;
-    if !response.ok() {
-        return Ok(false);
-    }
-
-    let data = response.json()?;
-    let Some(access_token) = data.get("access_token").and_then(Value::as_str) else {
-        return Ok(false);
+    let token = match app
+        .apps()
+        .oauth(shopify_app)
+        .exchange_session_token(session, RequestedToken::Offline)
+        .await
+    {
+        Ok(token) => token,
+        Err(shopify_api::Error::Auth { .. }) => return Ok(false),
+        Err(error) => return Err(error.into()),
     };
-    let access_token = app.crypto().encrypt_string(access_token)?;
-    let scopes = data.get("scope").and_then(Value::as_str);
+    let access_token = app.crypto().encrypt_string(&token.access_token)?;
 
     sqlx::query(
         "INSERT INTO installations (app_handle, shop, access_token, scopes) VALUES ($1, $2, $3, $4) \
@@ -256,9 +245,10 @@ async fn exchange_token(
     .bind(&shopify_app.handle)
     .bind(shop)
     .bind(access_token)
-    .bind(scopes)
+    .bind(token.scope.as_deref())
     .execute(app.db())
     .await?;
+    app.client_credentials().forget(&shopify_app.handle, shop);
 
     logger::info(format!("[openshop] Token exchange successful for {shop}"));
     Ok(true)

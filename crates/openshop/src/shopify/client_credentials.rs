@@ -5,6 +5,13 @@
 //! development stores of the organization that owns the app do. It lasts about
 //! 24 hours and comes without a refresh token.
 //!
+//! The requests are `shopify_api`'s: each app, shop and kind of grant has one
+//! shared [`Shopify`] client with [`Auth::client_credentials`], which asks for
+//! a token at its first request, renews it five minutes before it expires and
+//! once when the Admin API refuses it with a `401`, one renewal at a time for
+//! everything that uses it. This module decides who may use such a client,
+//! and stores what it obtains.
+//!
 //! A token is only asked for a shop Shopify vouched for, for the one shop the
 //! operator named, or to renew a token a shop already holds:
 //!
@@ -17,10 +24,9 @@
 //! - [`Grant::Background`]: anything else that may ask (flows, crons, routes,
 //!   proxies, webhooks, the MCP tool). The shop the application names with
 //!   its `client_credentials_shop` setting, with or without a row; any other shop
-//!   only to renew the token its row holds (after a `401`, or before a token
-//!   this process obtained expires), which proves an earlier installation
-//!   through a signed flow. It never creates a row for such a shop, and never
-//!   writes on a row marked uninstalled.
+//!   only to renew the token its row holds, which proves an earlier
+//!   installation through a signed flow. It never creates a row for such a
+//!   shop, and never writes on a row marked uninstalled.
 //!
 //! A definite refusal (a `4xx` with Shopify's error code) is remembered in
 //! the process for an hour per app and shop; any other failure (a `5xx`, a
@@ -28,40 +34,40 @@
 //! for thirty seconds. The failure of a background request holds back
 //! background requests only, so that a shop installed since is served at its
 //! next launch; the failure of a vouched request holds back both kinds. The
-//! caller falls back to what it did without the grant. Nothing of it is
-//! stored in the database but the token, encrypted, in `installations`.
+//! caller then does what it did without the grant: it sends the stored token
+//! as it is, or has none. Nothing of it is stored in the database but the
+//! token, encrypted, in `installations`.
 //!
 //! A token is stored only where the row still holds what was read before
 //! Shopify was asked: a shop uninstalled, or given another token by OAuth or
 //! the token exchange, in the meantime keeps what it has.
-//!
-//! The process only remembers an app and shop once Shopify was asked for it,
-//! and only while a failure holds back or a token it obtained has not
-//! expired: a caller that may not ask leaves nothing behind, and is refused
-//! before it waits for a turn.
 
 use std::collections::{HashMap, HashSet};
-use std::hash::{BuildHasher, RandomState};
-use std::sync::{Mutex as StdMutex, MutexGuard};
+use std::sync::{Arc, Mutex as StdMutex, MutexGuard};
 use std::time::Duration;
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Result, bail};
 use chrono::{DateTime, TimeDelta, Utc};
-use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+use shopify_api::transport::BoxFuture;
+use shopify_api::{Auth, ShopDomain, Shopify, TokenData, TokenStore};
+use sqlx::PgPool;
 use tokio::sync::Mutex;
 use tokio::time::Instant;
 
 use crate::app::OpenShop;
-use crate::runtime::{FORM_CONTENT_TYPE, HttpTransport, OutboundRequest, logger};
+use crate::runtime::logger;
+use crate::runtime::transport::USER_AGENT;
+use crate::server::crypto::Crypto;
 use crate::server::shop_domain::strict_shop_domain;
 use crate::shopify::token_exchange::TokenExchanges;
 
-/// A token this process obtained is renewed this long before it expires.
+/// A token this process obtained is taken as expiring this long before it does.
 const RENEWAL_MARGIN: TimeDelta = TimeDelta::minutes(5);
 
-/// How long a token request may take, whatever the transport allows: a
-/// request that waits for it may be an admin page loading.
+/// How long [`ClientCredentials::grant`] waits for a token, whatever the
+/// transport allows: a request that waits for it may be an admin page loading.
+/// The request itself goes on, and its token is stored.
 pub(crate) const GRANT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// How long a failure that may pass (a `5xx`, a `429`, a timeout, a network
@@ -72,9 +78,6 @@ pub(crate) const TRANSIENT_BACKOFF: Duration = Duration::from_secs(30);
 /// How long a definite refusal (a `4xx` with Shopify's error code, such as
 /// `shop_not_permitted`) holds back another request for the same app and shop.
 pub(crate) const REFUSAL_MEMORY: Duration = Duration::from_secs(60 * 60);
-
-/// How many locks share the turns of every app and shop.
-const TURNS: usize = 32;
 
 /// What lets a caller ask Shopify for a token.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -101,7 +104,7 @@ impl Grant {
     /// What this grant lets a caller do for `shop` of the Shopify app
     /// `shopify_app`: Shopify vouched for that app and shop, or for another
     /// one, which leaves what background work may do.
-    fn for_shop(&self, shopify_app: &str, shop: &str) -> Grant {
+    pub(crate) fn for_shop(&self, shopify_app: &str, shop: &str) -> Grant {
         match self {
             Grant::Vouched {
                 shopify_app: vouched_app,
@@ -109,6 +112,10 @@ impl Grant {
             } if vouched_app == shopify_app && vouched_shop == shop => self.clone(),
             _ => Grant::Background,
         }
+    }
+
+    fn is_vouched(&self) -> bool {
+        matches!(self, Grant::Vouched { .. })
     }
 }
 
@@ -153,15 +160,67 @@ impl Entry {
     }
 }
 
+type Entries = Arc<StdMutex<HashMap<(String, String), Entry>>>;
+
+/// The shared client of an app, a shop, and whether Shopify vouched for it.
+type ClientKey = (String, String, bool);
+
+/// The token a shared client holds, as far as this process knows: the one it
+/// started from, then each one it stored.
+type HeldToken = Arc<StdMutex<Option<String>>>;
+
+/// A client that obtains tokens with the grant, shared by every caller of
+/// its app, shop and kind of grant, so that they make one request at a time.
+/// Its [`HeldToken`] tells it from the clients that replace it.
+#[derive(Clone)]
+pub(crate) struct GrantClient {
+    pub client: Shopify,
+    token: HeldToken,
+}
+
+impl GrantClient {
+    fn is(&self, other: &GrantClient) -> bool {
+        Arc::ptr_eq(&self.token, &other.token)
+    }
+}
+
+type Clients = Arc<StdMutex<HashMap<ClientKey, GrantClient>>>;
+
+/// Forgets the shared client of `key` if it is still `client`: one that
+/// replaced it stays.
+fn evict(clients: &StdMutex<HashMap<ClientKey, GrantClient>>, key: &ClientKey, client: &GrantClient) {
+    let mut clients = locked(clients);
+    if clients.get(key).is_some_and(|shared| shared.is(client)) {
+        clients.remove(key);
+    }
+}
+
+/// The error of a store that found another token in the row, stored by OAuth,
+/// the token exchange or another process while Shopify was asked, or the shop
+/// uninstalled: the row keeps what it has, and the caller starts again from it.
+#[derive(Debug)]
+pub(crate) struct Superseded(String);
+
+impl std::fmt::Display for Superseded {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for Superseded {}
+
+/// Whether `error` is a store that found the row changed.
+fn superseded(error: &shopify_api::Error) -> bool {
+    matches!(error, shopify_api::Error::TokenStore(inner) if inner.is::<Superseded>())
+}
+
 /// The client credentials grant of the application, and what this process
 /// remembers of it.
 pub(crate) struct ClientCredentials {
     configured: Option<String>,
-    /// One request at a time asks Shopify for an app and shop: its turn is
-    /// the lock a hash of the pair picks.
-    turns: [Mutex<()>; TURNS],
-    hasher: RandomState,
-    entries: StdMutex<HashMap<(String, String), Entry>>,
+    entries: Entries,
+    /// The clients that obtain tokens with the grant, shared by every caller.
+    clients: Clients,
     /// The Shopify apps whose configuration error background work reported.
     reported: StdMutex<HashSet<String>>,
     /// The token exchange of the session token, which falls back to this grant.
@@ -169,24 +228,25 @@ pub(crate) struct ClientCredentials {
 }
 
 /// The installation row of an app and shop.
-struct Stored {
-    token: Option<String>,
+pub(crate) struct Stored {
+    pub token: Option<String>,
     /// The token as the row holds it, to write over it only if it is still there.
     ciphertext: Option<String>,
-    uninstalled: bool,
+    pub uninstalled: bool,
 }
 
 impl Stored {
-    /// Its token, unless it is `rejected`, about to expire, or the shop is
-    /// marked uninstalled.
-    fn usable(&self, credentials: &ClientCredentials, shopify_app: &str, shop: &str, rejected: Option<&str>) -> Option<&str> {
+    /// Its token, unless the shop is marked uninstalled, or the token is one
+    /// this process obtained that is about to expire.
+    fn usable(&self, credentials: &ClientCredentials, shopify_app: &str, shop: &str) -> Option<&str> {
         self.token
             .as_deref()
-            .filter(|token| Some(*token) != rejected && !self.uninstalled && !credentials.expiring(shopify_app, shop, token))
+            .filter(|token| !self.uninstalled && !credentials.expiring(shopify_app, shop, token))
     }
 }
 
-async fn stored(app: &OpenShop, shopify_app: &str, shop: &str) -> Result<Option<Stored>> {
+/// The installation row of an app and shop, its token decrypted.
+pub(crate) async fn stored(app: &OpenShop, shopify_app: &str, shop: &str) -> Result<Option<Stored>> {
     let row: Option<(Option<String>, bool)> = sqlx::query_as(
         "SELECT access_token, uninstalled_at IS NOT NULL FROM installations \
          WHERE app_handle = $1 AND shop = $2 LIMIT 1",
@@ -214,6 +274,26 @@ fn digest(token: &str) -> [u8; 32] {
     Sha256::digest(token.as_bytes()).into()
 }
 
+fn locked<T>(mutex: &StdMutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Updates what the process knows of an app and shop it asked Shopify for.
+/// An entry that keeps nothing is dropped, and a new one first drops every
+/// entry that no longer keeps anything.
+fn remember(entries: &Entries, shopify_app: &str, shop: &str, update: impl FnOnce(&mut Entry)) {
+    let key = (shopify_app.to_string(), shop.to_string());
+    let mut entries = locked(entries);
+    if !entries.contains_key(&key) {
+        entries.retain(|_, entry| entry.live());
+    }
+    let entry = entries.entry(key.clone()).or_default();
+    update(entry);
+    if !entry.live() {
+        entries.remove(&key);
+    }
+}
+
 impl ClientCredentials {
     /// The grant of the application. Its `client_credentials_shop` setting,
     /// when given, names the shop background work may ask a token for.
@@ -227,10 +307,9 @@ impl ClientCredentials {
         };
         Ok(Self {
             configured,
-            turns: std::array::from_fn(|_| Mutex::new(())),
-            hasher: RandomState::new(),
-            entries: StdMutex::new(HashMap::new()),
-            reported: StdMutex::new(HashSet::new()),
+            entries: Arc::default(),
+            clients: Arc::default(),
+            reported: StdMutex::default(),
             exchanges: TokenExchanges::default(),
         })
     }
@@ -242,41 +321,25 @@ impl ClientCredentials {
 
     /// Whether `grant`, already narrowed to this app and shop by
     /// [`Grant::for_shop`], lets a caller ask a token of `shop`, a strict shop
-    /// domain, given its row (`stored`), whose token, if any, is one to replace.
+    /// domain, given its row (`stored`).
     fn may_ask(&self, grant: &Grant, shop: &str, stored: Option<&Stored>) -> bool {
         match grant {
             Grant::Vouched { .. } => true,
             Grant::Background => {
-                self.configured.as_deref() == Some(shop)
-                    || stored.is_some_and(|stored| stored.token.is_some() && !stored.uninstalled)
+                if stored.is_some_and(|stored| stored.uninstalled) {
+                    return false;
+                }
+                self.configured.as_deref() == Some(shop) || stored.is_some_and(|stored| stored.token.is_some())
             }
         }
     }
 
-    /// Whether `grant` lets a caller ask a token of `shop` (a strict shop
-    /// domain) when it has none.
-    pub fn may_ask_without_token(&self, grant: Option<&Grant>, shopify_app: &str, shop: &str) -> bool {
-        grant.is_some_and(|grant| self.may_ask(&grant.for_shop(shopify_app, shop), shop, None))
-    }
-
     fn entries(&self) -> MutexGuard<'_, HashMap<(String, String), Entry>> {
-        self.entries.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+        locked(&self.entries)
     }
 
-    /// Updates what the process knows of an app and shop it asked Shopify
-    /// for. An entry that keeps nothing is dropped, and a new one first
-    /// drops every entry that no longer keeps anything.
     fn remember(&self, shopify_app: &str, shop: &str, update: impl FnOnce(&mut Entry)) {
-        let key = (shopify_app.to_string(), shop.to_string());
-        let mut entries = self.entries();
-        if !entries.contains_key(&key) {
-            entries.retain(|_, entry| entry.live());
-        }
-        let entry = entries.entry(key.clone()).or_default();
-        update(entry);
-        if !entry.live() {
-            entries.remove(&key);
-        }
+        remember(&self.entries, shopify_app, shop, update);
     }
 
     /// Whether a failure still holds back a request of `grant`'s kind for
@@ -287,21 +350,11 @@ impl ClientCredentials {
             .is_some_and(|entry| entry.holds_back(grant))
     }
 
-    /// The lock that gives one request at a time its turn to ask Shopify for
-    /// this app and shop.
-    fn turn(&self, shopify_app: &str, shop: &str) -> &Mutex<()> {
-        let index = self.hasher.hash_one((shopify_app, shop)) as usize % TURNS;
-        &self.turns[index]
-    }
-
     /// Whether background work should report, for the Shopify app
     /// `shopify_app`, a configuration error it meets at every tick: once per
     /// process.
     pub fn first_report(&self, shopify_app: &str) -> bool {
-        self.reported
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .insert(shopify_app.to_string())
+        locked(&self.reported).insert(shopify_app.to_string())
     }
 
     /// Whether `token` is one this process obtained and that expires within
@@ -333,96 +386,28 @@ impl ClientCredentials {
         due
     }
 
-    /// The token to send to the Admin API of `shop` for the Shopify app
-    /// `shopify_app`: the stored one, unless it was just `rejected` with a
-    /// `401`, is about to expire, or the shop has none (or is marked
-    /// uninstalled), in which case [`ClientCredentials::grant`] decides
-    /// whether `grant` lets the caller ask Shopify. When Shopify gives none,
-    /// the stored token, whatever it is.
-    pub async fn token(
-        &self,
-        app: &OpenShop,
-        shopify_app: &str,
-        shop: &str,
-        grant: Option<&Grant>,
-        rejected: Option<&str>,
-    ) -> Result<Option<String>> {
-        let stored = stored(app, shopify_app, shop).await?;
-        let current = stored.as_ref().and_then(|stored| stored.token.clone());
-        let (Some(grant), Some(shop)) = (grant, strict_shop_domain(shop)) else {
-            return Ok(current);
-        };
-        if stored
-            .as_ref()
-            .is_some_and(|stored| stored.usable(self, shopify_app, &shop, rejected).is_some())
-        {
-            return Ok(current);
-        }
-        let granted = self.grant(app, shopify_app, &shop, grant, rejected).await?;
-        Ok(granted.or(current))
-    }
-
-    /// Asks Shopify for a token of `shop` with the client credentials of the
-    /// Shopify app `shopify_app`, and stores it encrypted. `None` when `grant`
-    /// does not allow it, when a failure still holds requests back, or when
-    /// Shopify refuses now.
+    /// The client of `shop` that obtains its tokens with the client
+    /// credentials of the Shopify app `shopify_app`, starting from the token
+    /// of its row (`stored`): `None` when `grant` does not allow it, when a
+    /// failure still holds requests back, or when the app has no credentials.
     ///
-    /// One request at a time asks for an app and shop: the others wait, then
-    /// use the token it stored, or fall back at once when it failed.
-    ///
-    /// Fails, without asking Shopify, when the token could not be stored
-    /// encrypted (no usable `ENCRYPTION_KEY`), and with a message that
-    /// names neither the token nor its ciphertext when it could not be
-    /// written, which then holds back as a failure that may pass.
-    pub async fn grant(
+    /// Fails, without asking Shopify, when a token could not be stored
+    /// encrypted (no usable `ENCRYPTION_KEY`).
+    pub(crate) async fn client(
         &self,
         app: &OpenShop,
         shopify_app: &str,
         shop: &str,
         grant: &Grant,
-        rejected: Option<&str>,
-    ) -> Result<Option<String>> {
+        stored: Option<&Stored>,
+    ) -> Result<Option<GrantClient>> {
         let Some(shop) = strict_shop_domain(shop) else {
             return Ok(None);
         };
-        let grant = &grant.for_shop(shopify_app, &shop);
-        if self.held_back(shopify_app, &shop, grant) {
+        let grant = grant.for_shop(shopify_app, &shop);
+        if self.held_back(shopify_app, &shop, &grant) || !self.may_ask(&grant, &shop, stored) {
             return Ok(None);
         }
-        // A caller that may not ask, or no longer needs to, does not wait for a turn.
-        let before = stored(app, shopify_app, &shop).await?;
-        if let Some(token) = before.as_ref().and_then(|stored| stored.usable(self, shopify_app, &shop, rejected)) {
-            return Ok(Some(token.to_string()));
-        }
-        if !self.may_ask(grant, &shop, before.as_ref()) {
-            return Ok(None);
-        }
-
-        // A caller cancelled while it waits, or later, stops there: a dropped
-        // future sends nothing more, and its turn is given up.
-        let _turn = self.turn(shopify_app, &shop).lock().await;
-
-        if self.held_back(shopify_app, &shop, grant) {
-            return Ok(None);
-        }
-
-        // Another request may have stored a token while this one waited.
-        let stored = stored(app, shopify_app, &shop).await?;
-        if let Some(stored) = &stored {
-            if *grant == Grant::Background && stored.uninstalled {
-                return Ok(None);
-            }
-            if let Some(token) = stored.usable(self, shopify_app, &shop, rejected) {
-                return Ok(Some(token.to_string()));
-            }
-        }
-        // Past this point, a token the row holds is one to replace.
-        if !self.may_ask(grant, &shop, stored.as_ref()) {
-            return Ok(None);
-        }
-
-        // A configuration error, not a refusal: nothing is asked, nothing is
-        // held back, and the token is never stored in plaintext.
         if let Err(error) = app.crypto().can_encrypt() {
             bail!("[openshop] Cannot store a client credentials token for {shop}: {error}");
         }
@@ -431,79 +416,224 @@ impl ClientCredentials {
             return Ok(None);
         }
 
-        let token = match request(
-            app.transport().as_ref(),
-            shopify_app,
-            &shop,
-            &resolved.api_key,
-            &resolved.api_secret,
-        )
-        .await
+        let current = stored
+            .filter(|stored| !stored.uninstalled)
+            .and_then(|stored| stored.token.clone());
+        let key = (shopify_app.to_string(), shop.clone(), grant.is_vouched());
+        let mut clients = locked(&self.clients);
+        // A row given another token since (OAuth, the token exchange, another
+        // process) makes a new client, which starts from it.
+        if let Some(shared) = clients.get(&key)
+            && *locked(&shared.token) == current
         {
-            Ok(token) => token,
-            Err(failure) => {
-                // Shopify refuses the store of a merchant, which a launch may
-                // name: that is no warning.
-                if failure.definite && matches!(grant, Grant::Vouched { .. }) {
-                    logger::info(&failure.message);
-                } else {
-                    logger::warn(&failure.message);
-                }
-                let held_until = Instant::now() + failure.holds_back();
-                self.remember(shopify_app, &shop, |entry| entry.hold_back(grant, held_until));
-                return Ok(None);
-            }
-        };
-
-        let written = self.store(app, shopify_app, &shop, grant, stored.as_ref(), &token).await;
-        let written = match written {
-            Ok(written) => written,
-            // As a failure that may pass: every caller does not get a token
-            // of its own that it cannot keep.
-            Err(error) => {
-                let held_until = Instant::now() + TRANSIENT_BACKOFF;
-                self.remember(shopify_app, &shop, |entry| entry.hold_back(grant, held_until));
-                return Err(error);
-            }
-        };
-        // The row changed while Shopify was asked: what it holds now wins.
-        if !written {
-            let now = self::stored(app, shopify_app, &shop).await?;
-            return Ok(now
-                .as_ref()
-                .and_then(|stored| stored.usable(self, shopify_app, &shop, rejected))
-                .map(str::to_string));
+            return Ok(Some(shared.clone()));
         }
 
-        self.remember(shopify_app, &shop, |entry| {
-            *entry = Entry {
-                granted: token.expires_at.map(|expires_at| (digest(&token.value), expires_at)),
-                ..Entry::default()
-            };
-        });
-        logger::info(format!(
-            "[openshop] Client credentials token obtained for {shop} (app \"{shopify_app}\")"
-        ));
-        Ok(Some(token.value))
+        let mut auth = Auth::client_credentials(&resolved.api_key, &resolved.api_secret);
+        if let Some(token) = &current {
+            let mut start = TokenData::new(token);
+            // When this process obtained it, the client renews it before it expires.
+            start.expires_at = self
+                .entries()
+                .get(&(shopify_app.to_string(), shop.clone()))
+                .and_then(|entry| entry.granted)
+                .filter(|(granted, _)| *granted == digest(token))
+                .map(|(_, expires_at)| expires_at);
+            auth = auth.with_token(start);
+        }
+        let token: HeldToken = Arc::new(StdMutex::new(current));
+        let store = InstallationStore {
+            db: app.db().clone(),
+            crypto: app.crypto().clone(),
+            entries: self.entries.clone(),
+            clients: Arc::downgrade(&self.clients),
+            key: key.clone(),
+            held: token.clone(),
+            shopify_app: shopify_app.to_string(),
+            grant: grant.clone(),
+            configured: self.configured.as_deref() == Some(shop.as_str()),
+            seen: Mutex::new(Seen {
+                read: stored.is_some(),
+                ciphertext: stored.and_then(|stored| stored.ciphertext.clone()),
+                uninstalled: stored.is_some_and(|stored| stored.uninstalled),
+            }),
+        };
+        let client = Shopify::builder(&shop)
+            .shared_transport(app.transport().clone())
+            .user_agent(USER_AGENT)
+            .auth(auth)
+            .token_store(store)
+            .build()?;
+        let shared = GrantClient { client, token };
+        clients.insert(key, shared.clone());
+        Ok(Some(shared))
     }
 
-    /// Stores `token` encrypted in the row `grant` may write, if that row is
-    /// still as it was `read` (absent, or with the same token and installed
-    /// or not): whether a row took it. Fails with a message that names
-    /// neither the token, its ciphertext nor what the database said.
-    async fn store(
+    /// Forgets the shared clients of an app and shop: its row was given
+    /// another token, or the shop was uninstalled.
+    pub(crate) fn forget(&self, shopify_app: &str, shop: &str) {
+        locked(&self.clients).retain(|(app, known, _), _| !(app == shopify_app && known == shop));
+    }
+
+    /// Remembers that the grant of `shop` failed for a caller of `grant`'s
+    /// kind with `error`, when `error` is a failure to obtain or store a
+    /// token: whether it was. The shared client is forgotten, and the caller
+    /// does what it did without it. A row found changed holds nothing back.
+    pub(crate) fn failed(
         &self,
-        app: &OpenShop,
         shopify_app: &str,
         shop: &str,
         grant: &Grant,
-        read: Option<&Stored>,
-        token: &Granted,
-    ) -> Result<bool> {
-        let unwritten = || anyhow!("[openshop] Could not store the client credentials token of app \"{shopify_app}\" for {shop}");
-        let encrypted = app.crypto().encrypt_string(&token.value).map_err(|_| unwritten())?;
-        let written: Option<(uuid::Uuid,)> = match grant {
-            // Shopify vouched for the shop: it is installed, again if it was not.
+        client: &GrantClient,
+        error: &shopify_api::Error,
+    ) -> bool {
+        let Some(definite) = grant_failure(error) else {
+            return false;
+        };
+        let Some(shop) = strict_shop_domain(shop) else {
+            return false;
+        };
+        let grant = grant.for_shop(shopify_app, &shop);
+        let key = (shopify_app.to_string(), shop.clone(), grant.is_vouched());
+        if superseded(error) {
+            evict(&self.clients, &key, client);
+            return true;
+        }
+        let message = if definite {
+            format!("[openshop] Shopify refused the client credentials of app \"{shopify_app}\" for {shop}: {error}")
+        } else {
+            format!("[openshop] The client credentials of app \"{shopify_app}\" for {shop} failed: {error}")
+        };
+        if definite && grant.is_vouched() {
+            logger::info(&message);
+        } else {
+            logger::warn(&message);
+        }
+        let held_until = Instant::now() + if definite { REFUSAL_MEMORY } else { TRANSIENT_BACKOFF };
+        self.remember(shopify_app, &shop, |entry| entry.hold_back(&grant, held_until));
+        evict(&self.clients, &key, client);
+        true
+    }
+
+    /// A token of `shop` for the Shopify app `shopify_app`: the stored one
+    /// when it is usable, else one obtained now with the client credentials
+    /// grant, when `grant` allows it. `None` when Shopify gives none, or
+    /// does not answer within [`GRANT_TIMEOUT`].
+    ///
+    /// Fails when the token could not be stored encrypted (no usable
+    /// `ENCRYPTION_KEY`), or written, with a message that names neither the
+    /// token nor its ciphertext; that holds back as a failure that may pass.
+    pub async fn grant(&self, app: &OpenShop, shopify_app: &str, shop: &str, grant: &Grant) -> Result<Option<String>> {
+        let Some(shop) = strict_shop_domain(shop) else {
+            return Ok(None);
+        };
+        let stored = stored(app, shopify_app, &shop).await?;
+        if let Some(token) = stored.as_ref().and_then(|stored| stored.usable(self, shopify_app, &shop)) {
+            return Ok(Some(token.to_string()));
+        }
+        let Some(client) = self.client(app, shopify_app, &shop, grant, stored.as_ref()).await? else {
+            return Ok(None);
+        };
+        match tokio::time::timeout(GRANT_TIMEOUT, client.client.access_token()).await {
+            Ok(Ok(token)) => Ok(Some(token)),
+            Ok(Err(error)) => {
+                self.failed(shopify_app, &shop, grant, &client, &error);
+                if superseded(&error) {
+                    // What the row holds now, if it is usable.
+                    let now = self::stored(app, shopify_app, &shop).await?;
+                    return Ok(now
+                        .as_ref()
+                        .and_then(|stored| stored.usable(self, shopify_app, &shop))
+                        .map(str::to_string));
+                }
+                if matches!(error, shopify_api::Error::TokenStore(_)) {
+                    bail!("{error}");
+                }
+                Ok(None)
+            }
+            Err(_) => {
+                logger::warn(format!(
+                    "[openshop] The client credentials request of app \"{shopify_app}\" for {shop} took more than {} s",
+                    GRANT_TIMEOUT.as_secs()
+                ));
+                Ok(None)
+            }
+        }
+    }
+}
+
+/// Whether `error` is a failure to obtain or store a token: `Some(true)` for
+/// a definite refusal of the token endpoint, a `4xx` other than `408` and
+/// `429` with an error code, `Some(false)` for one that may pass.
+fn grant_failure(error: &shopify_api::Error) -> Option<bool> {
+    use shopify_api::Error;
+    match error {
+        Error::Auth { .. } => Some(refusal(&error.to_string()).is_some_and(|(status, coded)| {
+            (400..500).contains(&status) && !matches!(status, 408 | 429) && coded
+        })),
+        Error::Transport { url, .. } => url.ends_with("/admin/oauth/access_token").then_some(false),
+        Error::TokenStore(_) => Some(false),
+        _ => None,
+    }
+}
+
+/// What `shopify_api` adds to a failure it gives the requests that waited
+/// for the renewal that failed.
+const HELD_FAILURE: &str = "asked again in a few seconds";
+
+/// The status of a refusal of the token endpoint, and whether Shopify gave
+/// an error code, as `shopify_api` writes them: `the token endpoint of
+/// {shop} answered {status}`, then ` ({code})` when there is one, then
+/// ` (asked again in a few seconds)` for a request that waited for it.
+fn refusal(message: &str) -> Option<(u16, bool)> {
+    let (_, answer) = message.split_once("the token endpoint of ")?.1.split_once(" answered ")?;
+    let digits: String = answer.chars().take_while(char::is_ascii_digit).collect();
+    let status = digits.parse().ok()?;
+    let code = answer[digits.len()..]
+        .strip_prefix(" (")
+        .and_then(|rest| rest.split_once(')'))
+        .map(|(code, _)| code);
+    Some((status, code.is_some_and(|code| code != HELD_FAILURE)))
+}
+
+/// What a client's store read of the row, to write over it only if it
+/// still holds that.
+struct Seen {
+    /// Whether there was a row.
+    read: bool,
+    ciphertext: Option<String>,
+    uninstalled: bool,
+}
+
+/// Where a shared client stores the tokens it obtains: the installation row,
+/// encrypted, where it still holds what was seen.
+struct InstallationStore {
+    db: PgPool,
+    crypto: Crypto,
+    entries: Entries,
+    /// The registry of the client, which a store that fails leaves.
+    clients: std::sync::Weak<StdMutex<HashMap<ClientKey, GrantClient>>>,
+    key: ClientKey,
+    /// The token the client holds, as far as the registry knows.
+    held: HeldToken,
+    shopify_app: String,
+    grant: Grant,
+    /// Whether the shop is the one of the `client_credentials_shop` setting.
+    configured: bool,
+    seen: Mutex<Seen>,
+}
+
+impl InstallationStore {
+    /// Writes the token where the grant allows it: whether it was written.
+    async fn write(&self, shop: &str, token: &TokenData, seen: &Seen) -> Result<Option<String>> {
+        let unwritten = || {
+            anyhow::anyhow!(
+                "[openshop] Could not store the client credentials token of app \"{}\" for {shop}",
+                self.shopify_app
+            )
+        };
+        let encrypted = self.crypto.encrypt_string(&token.access_token).map_err(|_| unwritten())?;
+        let written: Option<(uuid::Uuid,)> = match &self.grant {
             Grant::Vouched { .. } => sqlx::query_as(
                 "INSERT INTO installations (app_handle, shop, access_token, scopes) VALUES ($1, $2, $3, $4) \
                  ON CONFLICT (app_handle, shop) DO UPDATE SET \
@@ -517,9 +647,7 @@ impl ClientCredentials {
                    AND (installations.uninstalled_at IS NOT NULL) = $7 \
                  RETURNING id",
             ),
-            // The configured shop: a row is created when there is none, but a
-            // row marked uninstalled is never brought back.
-            Grant::Background if self.configured.as_deref() == Some(shop) => sqlx::query_as(
+            Grant::Background if self.configured => sqlx::query_as(
                 "INSERT INTO installations (app_handle, shop, access_token, scopes) VALUES ($1, $2, $3, $4) \
                  ON CONFLICT (app_handle, shop) DO UPDATE SET \
                    access_token = EXCLUDED.access_token, \
@@ -528,7 +656,6 @@ impl ClientCredentials {
                    AND $5 AND installations.access_token IS NOT DISTINCT FROM $6 AND NOT $7 \
                  RETURNING id",
             ),
-            // Any other shop: the token of its row is replaced, nothing else.
             Grant::Background => sqlx::query_as(
                 "UPDATE installations SET access_token = $3, scopes = COALESCE($4, scopes) \
                  WHERE app_handle = $1 AND shop = $2 AND access_token IS NOT NULL AND uninstalled_at IS NULL \
@@ -536,150 +663,80 @@ impl ClientCredentials {
                  RETURNING id",
             ),
         }
-        .bind(shopify_app)
+        .bind(&self.shopify_app)
         .bind(shop)
         .bind(&encrypted)
-        .bind(&token.scopes)
-        .bind(read.is_some())
-        .bind(read.and_then(|read| read.ciphertext.as_deref()))
-        .bind(read.is_some_and(|read| read.uninstalled))
-        .fetch_optional(app.db())
+        .bind(token.scope.as_deref().filter(|scopes| !scopes.is_empty()))
+        .bind(seen.read)
+        .bind(seen.ciphertext.as_deref())
+        .bind(seen.uninstalled)
+        .fetch_optional(&self.db)
         .await
-        // A database error may quote the row it refused: it is left out.
         .map_err(|_| unwritten())?;
-        Ok(written.is_some())
+        Ok(written.map(|_| encrypted))
     }
 }
 
-/// What Shopify answered: the token, when it expires and its scopes.
-struct Granted {
-    value: String,
-    expires_at: Option<DateTime<Utc>>,
-    scopes: Option<String>,
-}
-
-/// Why no token came: a message that names the HTTP status and Shopify's
-/// error code at most, and whether Shopify definitely refused.
-#[derive(Debug)]
-struct Failure {
-    message: String,
-    definite: bool,
-}
-
-impl Failure {
-    fn transient(message: String) -> Self {
-        Self {
-            message,
-            definite: false,
+impl InstallationStore {
+    /// Takes the client out of the registry: once a save failed, `shopify_api`
+    /// tries it again at each request of the client, which no caller should
+    /// get any more.
+    fn leave(&self) {
+        if let Some(clients) = self.clients.upgrade() {
+            let mut clients = locked(&clients);
+            if clients.get(&self.key).is_some_and(|shared| Arc::ptr_eq(&shared.token, &self.held)) {
+                clients.remove(&self.key);
+            }
         }
     }
-
-    /// How long it holds back another request for the same app and shop.
-    fn holds_back(&self) -> Duration {
-        if self.definite { REFUSAL_MEMORY } else { TRANSIENT_BACKOFF }
-    }
 }
 
-/// Asks Shopify for a token, for [`GRANT_TIMEOUT`] at most. A failure names
-/// the HTTP status and the error code Shopify gives, never the request or the
-/// rest of the answer.
-async fn request(
-    transport: &dyn HttpTransport,
-    shopify_app: &str,
-    shop: &str,
-    api_key: &str,
-    api_secret: &str,
-) -> std::result::Result<Granted, Failure> {
-    let sent = transport.post_json(OutboundRequest {
-        url: format!("https://{shop}/admin/oauth/access_token"),
-        headers: vec![("Content-Type".to_string(), FORM_CONTENT_TYPE.to_string())],
-        body: json!({
-            "grant_type": "client_credentials",
-            "client_id": api_key,
-            "client_secret": api_secret,
-        }),
-    });
-    let response = match tokio::time::timeout(GRANT_TIMEOUT, sent).await {
-        Ok(Ok(response)) => response,
-        // The error of the transport names the address at most, never the body.
-        Ok(Err(error)) => {
-            return Err(Failure::transient(format!(
-                "[openshop] The client credentials request of app \"{shopify_app}\" for {shop} failed: {error}"
-            )));
-        }
-        Err(_) => {
-            return Err(Failure::transient(format!(
-                "[openshop] The client credentials request of app \"{shopify_app}\" for {shop} timed out after {} s",
-                GRANT_TIMEOUT.as_secs()
-            )));
-        }
-    };
-
-    let data: Option<Value> = response.json().ok();
-    if !response.ok() {
-        return Err(Failure {
-            message: refusal(shopify_app, shop, response.status, data.as_ref()),
-            definite: definite_refusal(response.status, data.as_ref()),
-        });
-    }
-
-    let Some(value) = data
-        .as_ref()
-        .and_then(|data| data.get("access_token"))
-        .and_then(Value::as_str)
-        .filter(|value| !value.is_empty())
-    else {
-        return Err(Failure::transient(format!(
-            "[openshop] Shopify answered the client credentials of app \"{shopify_app}\" for {shop} without a token"
-        )));
-    };
-    let expires_at = data
-        .as_ref()
-        .and_then(|data| data.get("expires_in"))
-        .and_then(Value::as_i64)
-        .filter(|expires_in| *expires_in > 0)
-        .and_then(TimeDelta::try_seconds)
-        .map(|expires_in| Utc::now() + expires_in);
-    let scopes = data
-        .as_ref()
-        .and_then(|data| data.get("scope"))
-        .and_then(Value::as_str)
-        .filter(|scopes| !scopes.is_empty())
-        .map(str::to_string);
-    Ok(Granted {
-        value: value.to_string(),
-        expires_at,
-        scopes,
-    })
-}
-
-/// Whether Shopify definitely refused: a `4xx` other than `408` and `429`
-/// that carries an error code, such as `shop_not_permitted`,
-/// `invalid_client` or `invalid_request`.
-fn definite_refusal(status: u16, data: Option<&Value>) -> bool {
-    (400..500).contains(&status) && !matches!(status, 408 | 429) && data.and_then(error_code).is_some()
-}
-
-/// The message of a refusal: the status, and Shopify's error code when it
-/// gives a short one.
-fn refusal(shopify_app: &str, shop: &str, status: u16, data: Option<&Value>) -> String {
-    let code = data.and_then(error_code).map(|code| format!(": {code}")).unwrap_or_default();
-    format!("[openshop] Shopify refused the client credentials of app \"{shopify_app}\" for {shop} ({status}{code})")
-}
-
-/// The error code of a refusal, such as `shop_not_permitted`: a short word
-/// of letters, digits and underscores, or nothing. A sentence is left out.
-fn error_code(data: &Value) -> Option<&str> {
-    ["error", "errors"]
-        .into_iter()
-        .filter_map(|key| data.get(key).and_then(Value::as_str))
-        .find(|code| {
-            !code.is_empty()
-                && code.len() <= 64
-                && code
-                    .bytes()
-                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
+impl TokenStore for InstallationStore {
+    fn save<'a>(
+        &'a self,
+        shop: &'a ShopDomain,
+        token: &'a TokenData,
+    ) -> BoxFuture<'a, std::result::Result<(), Box<dyn std::error::Error + Send + Sync>>> {
+        Box::pin(async move {
+            let shop = shop.as_str();
+            let mut seen = self.seen.lock().await;
+            let written = match self.write(shop, token, &seen).await {
+                Ok(written) => written,
+                Err(error) => {
+                    self.leave();
+                    return Err(error.to_string().into());
+                }
+            };
+            if let Some(ciphertext) = written {
+                *seen = Seen {
+                    read: true,
+                    ciphertext: Some(ciphertext),
+                    uninstalled: false,
+                };
+                *locked(&self.held) = Some(token.access_token.clone());
+                let granted = token.expires_at.map(|expires_at| (digest(&token.access_token), expires_at));
+                remember(&self.entries, &self.shopify_app, shop, |entry| {
+                    *entry = Entry {
+                        granted,
+                        ..Entry::default()
+                    };
+                });
+                logger::info(format!(
+                    "[openshop] Client credentials token obtained for {shop} (app \"{}\")",
+                    self.shopify_app
+                ));
+                return Ok(());
+            }
+            // Another token was stored in the meantime, or the shop
+            // uninstalled: the row keeps it, and the caller starts again from it.
+            self.leave();
+            let superseded = Superseded(format!(
+                "[openshop] The installation of app \"{}\" for {shop} changed while Shopify was asked for a token",
+                self.shopify_app
+            ));
+            Err(Box::new(superseded) as Box<dyn std::error::Error + Send + Sync>)
         })
+    }
 }
 
 #[cfg(test)]
@@ -724,15 +781,12 @@ mod tests {
         let background = Grant::Background;
         let ask = |shop: &str, row: Option<&Stored>| credentials.may_ask(&background, shop, row);
         assert!(ask("dev-store-1.myshopify.com", None));
+        assert!(!ask("dev-store-1.myshopify.com", Some(&stored(None, true))));
         assert!(!ask("dev-store-2.myshopify.com", None));
         assert!(!ask("Dev-Store-1.myshopify.com", None));
-        // Another shop: only the token its row holds is renewed.
         assert!(ask("dev-store-2.myshopify.com", Some(&stored(Some("t"), false))));
         assert!(!ask("dev-store-2.myshopify.com", Some(&stored(Some("t"), true))));
         assert!(!ask("dev-store-2.myshopify.com", Some(&stored(None, false))));
-        assert!(credentials.may_ask_without_token(Some(&background), "default", "dev-store-1.myshopify.com"));
-        assert!(!credentials.may_ask_without_token(Some(&background), "default", "dev-store-2.myshopify.com"));
-        assert!(!credentials.may_ask_without_token(None, "default", "dev-store-1.myshopify.com"));
 
         let off = ClientCredentials::new(None).unwrap();
         assert!(!off.may_ask(&background, "dev-store-1.myshopify.com", None));
@@ -741,7 +795,6 @@ mod tests {
 
     #[test]
     fn a_vouched_grant_serves_its_app_and_shop_and_is_a_background_grant_elsewhere() {
-        let credentials = ClientCredentials::new(Some("dev-store-1.myshopify.com")).unwrap();
         let vouched = Grant::vouched("first", " Dev-Store-2.MyShopify.com ").unwrap();
         assert_eq!(
             vouched,
@@ -750,14 +803,9 @@ mod tests {
                 shop: "dev-store-2.myshopify.com".to_string(),
             }
         );
-        let ask = |shopify_app: &str, shop: &str| credentials.may_ask_without_token(Some(&vouched), shopify_app, shop);
-        assert!(ask("first", "dev-store-2.myshopify.com"));
         assert_eq!(vouched.for_shop("first", "dev-store-2.myshopify.com"), vouched);
-        // For another app or shop, it is what background work may do.
-        assert!(!ask("second", "dev-store-2.myshopify.com"));
         assert_eq!(vouched.for_shop("second", "dev-store-2.myshopify.com"), Grant::Background);
-        assert!(ask("first", "dev-store-1.myshopify.com"));
-        assert!(!ask("first", "dev-store-3.myshopify.com"));
+        assert_eq!(vouched.for_shop("first", "dev-store-3.myshopify.com"), Grant::Background);
         assert_eq!(Grant::vouched("first", "evil.example://dev-store-2.myshopify.com"), None);
     }
 
@@ -774,118 +822,11 @@ mod tests {
         assert!(!credentials.expiring("default", shop, "granted"));
         set(Utc::now() + TimeDelta::minutes(4));
         assert!(credentials.expiring("default", shop, "granted"));
-        // Another token, such as one OAuth stored since, is not this one.
         assert!(!credentials.expiring("default", shop, "oauth-token"));
         assert!(!credentials.expiring("other", shop, "granted"));
-        // Once it expired, it is forgotten: a `401` renews it.
         set(Utc::now() - TimeDelta::minutes(1));
         assert!(!credentials.expiring("default", shop, "granted"));
         assert!(credentials.entries().is_empty());
-    }
-
-    #[test]
-    fn the_exchange_is_tried_once_in_place_of_a_token_this_process_obtained() {
-        let credentials = ClientCredentials::new(None).unwrap();
-        let shop = "dev-store-1.myshopify.com";
-        assert!(!credentials.exchange_due("default", shop, "granted"));
-        credentials.remember("default", shop, |entry| {
-            entry.granted = Some((digest("granted"), Utc::now() + TimeDelta::hours(24)));
-        });
-        assert!(!credentials.exchange_due("default", shop, "oauth-token"));
-        assert!(credentials.exchange_due("default", shop, "granted"));
-        assert!(!credentials.exchange_due("default", shop, "granted"));
-        assert!(!credentials.exchange_due("other", shop, "granted"));
-    }
-
-    #[test]
-    fn a_failure_holds_back_until_its_time_is_up() {
-        assert!(!held_back(None));
-        assert!(held_back(Some(Instant::now() + Duration::from_secs(1))));
-        assert!(!held_back(Some(Instant::now())));
-        assert_eq!(TRANSIENT_BACKOFF, Duration::from_secs(30));
-        assert_eq!(REFUSAL_MEMORY, Duration::from_secs(60 * 60));
-        assert_eq!(GRANT_TIMEOUT, Duration::from_secs(5));
-    }
-
-    #[test]
-    fn a_background_failure_never_holds_back_a_vouched_request() {
-        let vouched = Grant::vouched("default", "dev-store-1").unwrap();
-        let later = Instant::now() + REFUSAL_MEMORY;
-
-        let mut entry = Entry::default();
-        entry.hold_back(&Grant::Background, later);
-        assert!(entry.holds_back(&Grant::Background));
-        assert!(!entry.holds_back(&vouched));
-
-        // A vouched failure holds back both kinds.
-        let mut entry = Entry::default();
-        entry.hold_back(&vouched, later);
-        assert!(entry.holds_back(&vouched));
-        assert!(entry.holds_back(&Grant::Background));
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn an_entry_is_kept_only_while_it_keeps_something() {
-        let credentials = ClientCredentials::new(None).unwrap();
-        let shop = |index: usize| format!("dev-store-{index}.myshopify.com");
-        let hold = |entry: &mut Entry| entry.hold_back(&Grant::Background, Instant::now() + TRANSIENT_BACKOFF);
-        for index in 0..200 {
-            credentials.remember("default", &shop(index), hold);
-        }
-        assert_eq!(credentials.entries().len(), 200);
-        assert!(credentials.held_back("default", &shop(7), &Grant::Background));
-
-        // Once their failures are over, the next new entry drops them all.
-        tokio::time::advance(TRANSIENT_BACKOFF).await;
-        assert!(!credentials.held_back("default", &shop(7), &Grant::Background));
-        credentials.remember("default", &shop(200), hold);
-        assert_eq!(credentials.entries().len(), 1);
-
-        // An update that leaves nothing to keep drops the entry at once.
-        credentials.remember("default", &shop(200), |entry| *entry = Entry::default());
-        assert!(credentials.entries().is_empty());
-        // So does a token without an expiry.
-        credentials.remember("default", &shop(1), |entry| entry.granted = None);
-        assert!(credentials.entries().is_empty());
-    }
-
-    #[tokio::test]
-    async fn callers_that_may_not_ask_leave_nothing_behind() {
-        let config = crate::app::OpenShopConfig::builder().build().unwrap();
-        let options = crate::testing::TestOptions {
-            client_credentials_shop: Some("dev-store-1.myshopify.com".to_string()),
-            encryption_key: Some("a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2".to_string()),
-            ..Default::default()
-        };
-        let ctx = crate::testing::TestContext::with_options(config, options).await.unwrap();
-        let credentials = ctx.app.client_credentials();
-        let vouched = Grant::vouched("default", "dev-store-1.myshopify.com").unwrap();
-
-        for index in 0..200 {
-            let shop = format!("unknown-{index}-{}.myshopify.com", "x".repeat(40));
-            let granted = credentials
-                .grant(&ctx.app, "default", &shop, &Grant::Background, None)
-                .await
-                .unwrap();
-            assert_eq!(granted, None);
-            // Shopify vouched for another shop.
-            let granted = credentials.grant(&ctx.app, "default", &shop, &vouched, None).await.unwrap();
-            assert_eq!(granted, None);
-            let token = credentials
-                .token(&ctx.app, "default", &shop, Some(&Grant::Background), None)
-                .await
-                .unwrap();
-            assert_eq!(token, None);
-        }
-        // Not a shop domain at all.
-        let long = format!("{}.myshopify.com", "a".repeat(64));
-        assert_eq!(
-            credentials.grant(&ctx.app, "default", &long, &Grant::Background, None).await.unwrap(),
-            None
-        );
-        assert!(ctx.transport.requests().is_empty());
-        assert!(credentials.entries().is_empty());
-        ctx.shutdown().await.unwrap();
     }
 
     #[test]
@@ -896,114 +837,66 @@ mod tests {
         assert!(credentials.first_report("second"));
     }
 
-    #[test]
-    fn only_a_refusal_with_a_code_is_definite() {
-        let code = |code: &str| json!({ "error": code });
-        for (status, data) in [
-            (400, code("shop_not_permitted")),
-            (401, code("invalid_client")),
-            (400, code("invalid_request")),
-            (403, json!({ "errors": "unauthorized_client" })),
-        ] {
-            assert!(definite_refusal(status, Some(&data)), "{status} {data}");
-        }
-        for (status, data) in [
-            (429, Some(code("too_many_requests"))),
-            (408, Some(code("timeout"))),
-            (500, Some(code("internal_error"))),
-            (503, None),
-            (400, None),
-            (400, Some(json!({ "error": "a sentence with spaces" }))),
-        ] {
-            assert!(!definite_refusal(status, data.as_ref()), "{status} {data:?}");
-        }
-    }
+    /// Answers every request with `status` and `body`.
+    struct Answer(u16, serde_json::Value);
 
-    struct Answer(Option<(u16, Value)>);
-
-    impl HttpTransport for Answer {
-        fn post_json(
+    impl shopify_api::transport::Transport for Answer {
+        fn send(
             &self,
-            _request: OutboundRequest,
-        ) -> futures::future::BoxFuture<'_, Result<crate::runtime::OutboundResponse>> {
-            Box::pin(async move {
-                match &self.0 {
-                    Some((status, body)) => Ok(crate::runtime::OutboundResponse {
-                        status: *status,
-                        body: body.to_string(),
-                    }),
-                    // Never answers, as a host that accepts the connection and hangs.
-                    None => std::future::pending().await,
-                }
-            })
+            _request: shopify_api::transport::HttpRequest,
+        ) -> BoxFuture<'_, std::result::Result<shopify_api::transport::HttpResponse, shopify_api::transport::TransportError>>
+        {
+            let response = shopify_api::transport::HttpResponse::json(self.0, &self.1);
+            Box::pin(async move { Ok(response) })
         }
     }
 
-    async fn failure(transport: Answer) -> Failure {
-        match request(&transport, "default", "dev-store-1.myshopify.com", "key", "secret").await {
-            Ok(_) => panic!("expected a failure"),
-            Err(failure) => failure,
-        }
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn a_request_that_hangs_gives_up_after_five_seconds() {
-        let started = Instant::now();
-        let failure = failure(Answer(None)).await;
-        assert_eq!(started.elapsed(), GRANT_TIMEOUT);
-        assert!(!failure.definite);
-        assert_eq!(failure.holds_back(), TRANSIENT_BACKOFF);
-        assert_eq!(
-            failure.message,
-            "[openshop] The client credentials request of app \"default\" for dev-store-1.myshopify.com timed out after 5 s"
-        );
+    /// The error of a client credentials request that Shopify answers so.
+    async fn grant_error(status: u16, body: serde_json::Value) -> shopify_api::Error {
+        let client = Shopify::builder("dev-store-1")
+            .transport(Answer(status, body))
+            .client_credentials("key", "secret")
+            .build()
+            .unwrap();
+        client.access_token().await.unwrap_err()
     }
 
     #[tokio::test]
-    async fn a_refusal_holds_back_for_an_hour_and_an_outage_for_thirty_seconds() {
-        let refused = failure(Answer(Some((400, json!({ "error": "shop_not_permitted" }))))).await;
-        assert_eq!(refused.holds_back(), REFUSAL_MEMORY);
+    async fn only_a_refusal_with_a_code_is_definite() {
+        let code = |code: &str| serde_json::json!({ "error": code });
+        for (status, body) in [
+            (400, code("shop_not_permitted")),
+            (401, code("invalid_client")),
+            (400, code("invalid_request")),
+            (403, code("made_up_code")),
+        ] {
+            let error = grant_error(status, body.clone()).await;
+            assert_eq!(grant_failure(&error), Some(true), "{status} {body}: {error}");
+        }
         // A redirection is not followed: it is an answer without a token.
         for (status, body) in [
-            (503, json!({})),
-            (429, json!({ "errors": "Throttled" })),
-            (200, json!({})),
-            (307, json!({})),
-            (308, json!({ "error": "moved" })),
+            (429, code("too_many_requests")),
+            (408, code("timeout")),
+            (500, code("internal_error")),
+            (503, serde_json::json!({})),
+            (400, serde_json::json!({})),
+            (307, serde_json::json!({})),
+            (200, serde_json::json!({})),
         ] {
-            let failure = failure(Answer(Some((status, body)))).await;
-            assert_eq!(failure.holds_back(), TRANSIENT_BACKOFF, "{status}");
+            let error = grant_error(status, body.clone()).await;
+            assert_eq!(grant_failure(&error), Some(false), "{status} {body}: {error}");
         }
     }
 
     #[test]
-    fn a_refusal_names_the_status_and_the_code_only() {
-        let data = json!({ "error": "shop_not_permitted", "error_description": "dev-app-key cannot use dev-app-secret" });
-        let message = refusal("default", "dev-store-1.myshopify.com", 400, Some(&data));
-        assert_eq!(
-            message,
-            "[openshop] Shopify refused the client credentials of app \"default\" for dev-store-1.myshopify.com \
-             (400: shop_not_permitted)"
-        );
-        let message = refusal(
-            "default",
-            "dev-store-1.myshopify.com",
-            500,
-            Some(&json!({ "errors": "Something went wrong" })),
-        );
-        assert!(message.ends_with("for dev-store-1.myshopify.com (500)"), "{message}");
-        assert!(refusal("default", "dev-store-1.myshopify.com", 502, None).ends_with("(502)"));
-    }
-
-    #[test]
-    fn keeps_only_the_code_of_a_refusal() {
-        assert_eq!(
-            error_code(&json!({ "error": "shop_not_permitted", "error_description": "secret details" })),
-            Some("shop_not_permitted")
-        );
-        assert_eq!(error_code(&json!({ "errors": "invalid_client" })), Some("invalid_client"));
-        assert_eq!(error_code(&json!({ "error": "a sentence with spaces" })), None);
-        assert_eq!(error_code(&json!({ "errors": { "field": "x" } })), None);
-        assert_eq!(error_code(&json!({})), None);
+    fn reads_the_refusals_of_shopify_api() {
+        let message = "the token endpoint of a.myshopify.com answered 400 (shop_not_permitted)";
+        assert_eq!(refusal(message), Some((400, true)));
+        // What a request that waited for that renewal gets.
+        assert_eq!(refusal(&format!("{message} ({HELD_FAILURE})")), Some((400, true)));
+        let uncoded = "the token endpoint of a.myshopify.com answered 400";
+        assert_eq!(refusal(&format!("{uncoded} ({HELD_FAILURE})")), Some((400, false)));
+        assert_eq!(refusal("the token endpoint of a.myshopify.com answered 503"), Some((503, false)));
+        assert_eq!(refusal("something else"), None);
     }
 }

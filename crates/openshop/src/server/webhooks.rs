@@ -153,21 +153,20 @@ pub fn normalize_topic(topic: &str) -> String {
 
 async fn handle(State(app): State<OpenShop>, headers: HeaderMap, body: Bytes) -> Response {
     let config = app.config();
-    let read = |name: &str| header(&headers, name).unwrap_or_default().to_string();
-    let hmac = read("x-shopify-hmac-sha256");
-    let topic = read("x-shopify-topic");
-    let shop = read("x-shopify-shop-domain");
-    let api_version = read("x-shopify-api-version");
-
     if !app.apps().has_configured_secret() {
         return json_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "SHOPIFY_API_SECRET is not configured",
         );
     }
-    let Ok(shopify_app) = app.apps().by_webhook_hmac(&body, &hmac) else {
+    let Ok((shopify_app, webhook)) = app.apps().by_webhook(&headers, &body) else {
         return json_error(StatusCode::UNAUTHORIZED, "Invalid webhook HMAC");
     };
+    let read = |name: &str| header(&headers, name).unwrap_or_default().to_string();
+    let hmac = read("x-shopify-hmac-sha256");
+    let shop = read("x-shopify-shop-domain");
+    let topic = webhook.topic().to_string();
+    let api_version = webhook.api_version().unwrap_or_default().to_string();
 
     let ok = || json_response(StatusCode::OK, json!({ "ok": true }));
     let Some(handler) = config
@@ -193,8 +192,9 @@ async fn handle(State(app): State<OpenShop>, headers: HeaderMap, body: Bytes) ->
     });
 
     // A delivery Shopify sends again is acknowledged, not run again.
-    let delivery_id = header(&headers, "x-shopify-webhook-id")
-        .or_else(|| header(&headers, "x-shopify-event-id"))
+    let delivery_id = webhook
+        .webhook_id()
+        .or_else(|| webhook.event_id())
         .filter(|id| !id.is_empty());
     let claim = match delivery_id.map(|id| (id, app.webhook_deliveries().claim(&shopify_app.handle, &topic, id, &hmac))) {
         Some((id, Claim::Done)) => {

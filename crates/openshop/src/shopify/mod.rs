@@ -1,9 +1,8 @@
-//! Shopify Admin API access.
+//! Shopify Admin API access, through `shopify_api`.
 
 pub mod client;
 pub(crate) mod client_credentials;
-pub mod operation;
 pub(crate) mod token_exchange;
 
-pub use client::{SHOPIFY_API_VERSION, ShopifyClient, is_api_version};
-pub use operation::{GraphqlOperation, IntoVariable};
+pub use client::ShopifyClient;
+pub use shopify_api::{ApiVersion, IntoVariable, Operation, Page};

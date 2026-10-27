@@ -32,12 +32,16 @@ OpenShop rejects missing, invalid, expired, or wrong-audience tokens with
 `401`. API handlers read the verified shop and app identity from the token;
 client-supplied `shop` query parameters do not replace that identity.
 
-A session token is accepted when:
+A session token is accepted when `shopify_api` verifies it
+(`ShopifyApp::verify_session_token`), and its subject is a staff user:
 
 - it is an HS256 JWT signed with the secret of the app named by its `aud`
   claim;
-- `exp` is in the future and `nbf` is at most 60 seconds ahead;
-- `dest` and `iss` are the same `*.myshopify.com` shop;
+- `exp` has not passed and `nbf`, when given, has, with ten seconds of clock
+  skew either way;
+- `dest` is exactly the origin of a `*.myshopify.com` shop
+  (`https://<shop>.myshopify.com`), and `iss` exactly its admin
+  (`https://<shop>.myshopify.com/admin`);
 - `sub` identifies a staff user. Tokens issued to checkout or customer account
   extensions, whose `sub` is empty or a customer
   (`gid://shopify/Customer/…`), are rejected even though they are signed with
@@ -145,9 +149,8 @@ then renders the app instead of redirecting to `/auth`, which Shopify refuses
 to frame. A token obtained this way also brings back a shop marked
 uninstalled, since Shopify vouched for it, and sets its `installed_at` as OAuth
 does. A signed launch query older than 90 seconds, or one dated in the future
-by more, is still accepted as before, from the stored token alone: it never
-asks for a token and never brings a shop back, so that a launch URL replayed
-later starts nothing.
+by more, does not verify (`shopify_api`'s `ShopifyApp::verify_query`): it is
+answered `401`, so that a launch URL replayed later starts nothing.
 
 The client of an admin handler (`/api` functions, custom admin pages, and
 `testing::admin_context` in tests) carries the same right, for the shop and
@@ -276,13 +279,13 @@ the installation as uninstalled and deletes its access token. See
 
 In production (`start`), the page that hosts the admin UI is only served to a
 launch from Shopify admin: the request must carry a `shop` parameter and a
-query `hmac` that matches exactly one configured app. Otherwise the server
-answers `401` with a page that says the app opens from Shopify admin, and
-shows nothing of the application. A valid launch for a shop without an
-active installation first asks Shopify for a token with the
-[client credentials grant](#client-credentials-grant) when its `timestamp` is
-within 90 seconds, and is redirected to `/auth` when Shopify refuses it or the
-launch is older.
+query `hmac` that matches exactly one configured app, and a `timestamp`
+within 90 seconds of the server clock. Otherwise the server answers `401` with
+a page that says the app opens from Shopify admin, and shows nothing of the
+application. A valid launch for a shop without an active installation first
+asks Shopify for a token with the
+[client credentials grant](#client-credentials-grant), and is redirected to
+`/auth` when Shopify refuses it.
 
 In development (`dev`), the signature is not checked. A request is still
 refused with `403`, and the same page, unless it comes from a local host, is
@@ -304,11 +307,16 @@ the signed query parameters. In proxy handlers, trust `ctx.shop`,
 parse yourself. A secret that is empty or only whitespace never verifies a
 signature.
 
+The signatures are verified by `shopify_api`: `ShopifyApp::verify_query` for a
+launch or an OAuth callback, `ShopifyApp::verify_app_proxy` for an app proxy
+request, `Webhook::verify` for a webhook, whose body must be a JSON object (its
+first byte `{`), as Shopify sends them.
+
 Shopify signs the query parameters only, not the path, the method or the body:
 the same signed query is valid for any proxy route and method for as long as it
 is accepted. OpenShop therefore also checks the query itself:
 
-- `timestamp` must be present and within five minutes of the server clock,
+- `timestamp` must be present and within 90 seconds of the server clock,
   before or after it. A signed URL that was kept, or captured, stops working
   after that.
 - Shopify joins the `key=value` pairs without separator, so the same signature

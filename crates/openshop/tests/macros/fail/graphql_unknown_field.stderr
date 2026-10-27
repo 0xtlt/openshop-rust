@@ -1,6 +1,0 @@
-error: Type `Shop` has no field `nam` (did you mean `name`?) (line 1, column 10)
-       (checked against the Shopify Admin API 2026-04)
- --> tests/macros/fail/graphql_unknown_field.rs:4:22
-  |
-4 |     let _ = graphql!("{ shop { nam } }");
-  |                      ^^^^^^^^^^^^^^^^^^

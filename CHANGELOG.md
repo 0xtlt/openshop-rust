@@ -2,6 +2,45 @@
 
 ## Unreleased
 
+- Shopify is reached through `shopify_api` 1.0.0-rc.1 instead of a client of
+  OpenShop's own. Breaking changes:
+  - `graphql!` is `shopify_api`'s, re-exported as `openshop::graphql!` and in
+    the prelude. The crate that writes an operation depends on `shopify_api`,
+    names its Admin API version in `[package.metadata.shopify_api]`
+    `api-version` (the templates say `2026-10`), and commits the schema the
+    first build downloads into `graphql/admin.schema.json`. Input objects are
+    literals checked field by field, or `shopify_api::input!`. The
+    `openshop-graphql` crate, `openshop codegen`, `OPENSHOP_GRAPHQL_SCHEMA`,
+    `GraphqlOperation`, `SHOPIFY_API_VERSION` and `is_api_version` are gone.
+  - `ShopifyClient` runs on a `shopify_api::Shopify` client: throttled
+    requests wait and go again, a query is retried after a server error, and
+    `api()` gives that client for pagination, bulk operations and webhook
+    subscriptions. `graphql(query, variables)` takes anything that serializes
+    to an object, `()` for none; `with_api_version` takes an `ApiVersion`.
+    Its errors are `shopify_api::Error` (`Http`, `Graphql`, `Decode`).
+  - The client credentials grant, the token exchange of the session token and
+    the OAuth code exchange are `shopify_api`'s requests. OpenShop still
+    decides which shop may get a token and stores it in `installations` as
+    before; one shared client per app and shop makes concurrent callers ask
+    Shopify once.
+  - Session tokens, launches, OAuth callbacks, app proxy requests and
+    webhooks are verified by `shopify_api`, which is stricter: ten seconds of
+    clock skew on a session token (was 60 on `nbf`), `dest` and `iss` written
+    exactly as Shopify does, a launch or an app proxy request of the last 90
+    seconds (a stale launch was served from the stored token; proxies had five
+    minutes), and only a webhook whose body is a JSON object. The uninstall
+    webhook needs its payload and its shop header to name the same shop. The
+    checks OpenShop made beyond the signature of an app proxy request stay.
+  - `OpenShop::with_transport` takes a `shopify_api` `Transport`.
+    `ReqwestTransport` implements it on the `reqwest` of the workspace, so
+    `shopify_api` brings no HTTP client or TLS of its own; it still follows no
+    redirection and reads no answer over 10 MiB whole, and streams the results
+    of a bulk operation. `MockTransport` implements it too; `OutboundRequest`,
+    `OutboundResponse` and `FORM_CONTENT_TYPE` moved to `openshop::testing`.
+  - Operations go to the Admin API 2026-10, the version of the schema, where
+    they went to 2026-04. The MCP tool `openshop.admin.graphql` takes a version
+    from 2026-04, the oldest `shopify_api` calls.
+
 - CI checks three things it did not. The committed admin UI bundle
   (`crates/openshop/ui-dist`) is compared with its sources: `mise run ui:build`
   (now `crates/openshop-ui/build-dist.sh`) writes the hash of what the bundle is

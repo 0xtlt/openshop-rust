@@ -13,6 +13,10 @@ homepage.workspace = true
 authors.workspace = true
 include = ["src/**", "migrations/**", "ui-dist/**", "build.rs", "Cargo.toml"]
 
+# The schema the tests' `graphql!` operations are checked against.
+[package.metadata.shopify_api]
+api-version = "2026-10"
+
 [features]
 default = ["embedded-ui", "schema", "sentry"]
 # Embed the prebuilt WebAssembly admin UI (`ui-dist/`) in the binary.
@@ -23,7 +27,7 @@ schema = ["dep:schemars"]
 # of `app!`. An event is named after the route its request matched.
 sentry = ["dep:sentry", "axum/matched-path"]
 # Test harness: isolated databases, fake providers, signed requests.
-testing = []
+testing = ["shopify_api/testing"]
 # The views of custom admin pages, written next to their loaders and actions
 # and compiled to WebAssembly: `#[view]` in an `#[admin_page]` block.
 ui = ["dep:openshop-ui"]
@@ -61,6 +65,7 @@ sentry = { workspace = true, optional = true }
 serde_path_to_error.workspace = true
 serde_urlencoded.workspace = true
 sha2.workspace = true
+shopify_api.workspace = true
 sqlx.workspace = true
 subtle.workspace = true
 tokio.workspace = true
@@ -74,7 +79,6 @@ uuid.workspace = true
 
 [dev-dependencies]
 openshop = { path = ".", features = ["testing", "ui"] }
-openshop-graphql.workspace = true
 # The views of `tests/admin_views.rs`.
 leptos = "0.8"
 # The transport that keeps events, for `tests/sentry.rs`.

@@ -192,15 +192,15 @@ async fn get_with_invalid_proxy_signature_returns_401(ctx: &TestContext) {
 async fn a_signed_query_is_only_good_for_a_few_minutes(ctx: &TestContext) {
     let params = [("shop", "test.myshopify.com"), ("logged_in_customer_id", "42")];
 
-    // A little skew on either side is tolerated.
-    for timestamp in [now() - 120, now() + 120] {
+    // A little skew on either side is tolerated: 90 seconds.
+    for timestamp in [now() - 60, now() + 60] {
         let query = signed_query_at(&params, &ctx.secret, timestamp);
         let response = get(ctx, &format!("/proxy/ping?{query}")).send().await.unwrap();
         assert_eq!(response.status(), 200, "{timestamp}");
     }
 
     // A signed URL that was kept, or one that is not due yet, is no credential.
-    for timestamp in [now() - 3600, now() - 600, now() + 600, 1_700_000_000] {
+    for timestamp in [now() - 3600, now() - 120, now() + 120, 1_700_000_000] {
         let query = signed_query_at(&params, &ctx.secret, timestamp);
         let response = get(ctx, &format!("/proxy/ping?{query}")).send().await.unwrap();
         assert_error(response, 401, "Invalid proxy signature").await;

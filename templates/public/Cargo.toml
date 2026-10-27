@@ -7,9 +7,16 @@ rust-version.workspace = true
 license.workspace = true
 publish = false
 
+# The Admin API version `graphql!` checks the operations against and sends
+# them to. The first build downloads its schema into `graphql/admin.schema.json`.
+[package.metadata.shopify_api]
+api-version = "2026-10"
+
 [dependencies]
 openshop = { workspace = true, features = ["ui"] }
 serde.workspace = true
+# What `graphql!` generates names this crate.
+shopify_api.workspace = true
 # The views of the admin pages.
 leptos = "0.8"
 

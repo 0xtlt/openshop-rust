@@ -1,6 +1,0 @@
-error: a string is given for the default value of `$first`, of type `Int` (line 1, column 7)
-       (checked against the Shopify Admin API 2026-04)
- --> tests/macros/fail/graphql_default_of_the_wrong_type.rs:4:22
-  |
-4 |     let _ = graphql!("query($first: Int = \"ten\") { products(first: $first) { nodes { title } } }");
-  |                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

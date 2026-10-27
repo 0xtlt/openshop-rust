@@ -12,14 +12,14 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use chrono::Utc;
 use rand::Rng;
-use serde_json::{Value, json};
+use serde_json::json;
+use shopify_api::ShopDomain;
+use shopify_api::oauth::AuthorizationRequest;
 
 use super::hmac::{constant_time_eq, hmac_sha256};
-use super::http::{ApiResult, header, json_error, json_response, parse_query};
+use super::http::{ApiResult, json_error, json_response, parse_query};
 use super::shop_domain::normalize_shop_domain;
 use crate::app::OpenShop;
-use crate::runtime::OutboundRequest;
-use openshop_shared::rpc::encode_uri_component;
 
 /// A 302 redirect.
 pub(crate) fn redirect(location: &str) -> Response {
@@ -102,7 +102,7 @@ async fn start(State(app): State<OpenShop>, headers: HeaderMap, RawQuery(raw): R
     let Some(raw_shop) = query.get("shop").filter(|shop| !shop.is_empty()) else {
         return Ok(json_error(StatusCode::BAD_REQUEST, "Missing shop parameter"));
     };
-    let Some(shop) = normalize_shop_domain(raw_shop) else {
+    let Some(shop) = normalize_shop_domain(raw_shop).and_then(|shop| ShopDomain::new(&shop).ok()) else {
         return Ok(json_error(StatusCode::BAD_REQUEST, "Invalid shop parameter"));
     };
     let shopify_app = match app.apps().by_handle(query.get("app").map(String::as_str)) {
@@ -122,16 +122,12 @@ async fn start(State(app): State<OpenShop>, headers: HeaderMap, RawQuery(raw): R
     let browser = browser_id(&headers).unwrap_or_else(random_hex);
     let expiry = Utc::now().timestamp() + STATE_TTL;
     let nonce = random_hex();
-    let signature = sign_state(&shopify_app.api_secret, &shopify_app.handle, &shop, expiry, &nonce, &browser);
+    let signature = sign_state(&shopify_app.api_secret, &shopify_app.handle, shop.as_str(), expiry, &nonce, &browser);
     let state = format!("{expiry}.{nonce}.{signature}");
 
-    let redirect_uri = format!("{}/auth/callback", shopify_app.app_url);
-    let auth_url = format!(
-        "https://{shop}/admin/oauth/authorize?client_id={}&scope={}&redirect_uri={}&state={state}",
-        shopify_app.api_key,
-        shopify_app.scopes,
-        encode_uri_component(&redirect_uri),
-    );
+    let request = AuthorizationRequest::new(format!("{}/auth/callback", shopify_app.app_url), state)
+        .scopes(shopify_app.scopes.split(',').map(str::trim).filter(|scope| !scope.is_empty()));
+    let auth_url = app.apps().oauth(shopify_app).authorization_url(&shop, &request);
     let mut response = redirect(&auth_url);
     let secure = shopify_app.app_url.starts_with("https://");
     if let Ok(value) = HeaderValue::from_str(&cookie(&browser, STATE_TTL, secure)) {
@@ -143,13 +139,13 @@ async fn start(State(app): State<OpenShop>, headers: HeaderMap, RawQuery(raw): R
 async fn callback(State(app): State<OpenShop>, headers: HeaderMap, RawQuery(raw): RawQuery) -> ApiResult {
     let query = parse_query(raw.as_deref());
     let param = |name: &str| query.get(name).filter(|value| !value.is_empty());
-    let (Some(raw_shop), Some(code), Some(state)) = (param("shop"), param("code"), param("state")) else {
+    let (Some(raw_shop), Some(_), Some(state)) = (param("shop"), param("code"), param("state")) else {
         return Ok(json_error(StatusCode::BAD_REQUEST, "Missing required parameters"));
     };
     let Some(shop) = normalize_shop_domain(raw_shop) else {
         return Ok(json_error(StatusCode::BAD_REQUEST, "Invalid shop parameter"));
     };
-    let Ok(shopify_app) = app.apps().by_signed_query(&query) else {
+    let Ok((shopify_app, callback)) = app.apps().by_signed_query(raw.as_deref().unwrap_or_default()) else {
         return Ok(json_error(StatusCode::UNAUTHORIZED, "Invalid HMAC"));
     };
 
@@ -159,30 +155,17 @@ async fn callback(State(app): State<OpenShop>, headers: HeaderMap, RawQuery(raw)
         return Ok(json_error(StatusCode::UNAUTHORIZED, "Invalid state/nonce"));
     }
 
-    let token_response = app
-        .transport()
-        .post_json(OutboundRequest {
-            url: format!("https://{shop}/admin/oauth/access_token"),
-            headers: vec![("Content-Type".to_string(), "application/json".to_string())],
-            body: json!({
-                "client_id": shopify_app.api_key,
-                "client_secret": shopify_app.api_secret,
-                "code": code,
-            }),
-        })
-        .await?;
-    if !token_response.ok() {
-        return Ok(json_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Token exchange failed: {}", token_response.body),
-        ));
-    }
-
-    let token_data = token_response.json()?;
-    let access_token = token_data
-        .get("access_token")
-        .and_then(Value::as_str)
-        .ok_or_else(|| anyhow::anyhow!("Token exchange response has no access_token"))?;
+    let token = match app.apps().oauth(shopify_app).exchange_code(&callback).await {
+        Ok(token) => token,
+        // What Shopify answered; a request that did not reach it is the server's error.
+        Err(error @ shopify_api::Error::Auth { .. }) => {
+            return Ok(json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Token exchange failed: {error}"),
+            ));
+        }
+        Err(error) => return Err(error.into()),
+    };
 
     sqlx::query(
         "INSERT INTO installations (app_handle, shop, access_token, scopes) VALUES ($1, $2, $3, $4) \
@@ -192,10 +175,11 @@ async fn callback(State(app): State<OpenShop>, headers: HeaderMap, RawQuery(raw)
     )
     .bind(&shopify_app.handle)
     .bind(&shop)
-    .bind(app.crypto().encrypt_string(access_token)?)
-    .bind(token_data.get("scope").and_then(Value::as_str))
+    .bind(app.crypto().encrypt_string(&token.access_token)?)
+    .bind(token.scope.as_deref())
     .execute(app.db())
     .await?;
+    app.client_credentials().forget(&shopify_app.handle, &shop);
 
     // The cookie stays: it only names the browser, and the other
     // installations it started may still be pending.
@@ -203,27 +187,22 @@ async fn callback(State(app): State<OpenShop>, headers: HeaderMap, RawQuery(raw)
 }
 
 async fn app_uninstalled(State(app): State<OpenShop>, headers: HeaderMap, body: Bytes) -> ApiResult {
-    let hmac = header(&headers, "x-shopify-hmac-sha256").unwrap_or_default();
-    let Ok(shopify_app) = app.apps().by_webhook_hmac(&body, hmac) else {
+    let Ok((shopify_app, webhook)) = app.apps().by_webhook(&headers, &body) else {
         return Ok(json_error(StatusCode::UNAUTHORIZED, "Invalid webhook HMAC"));
     };
 
-    let data: Value = serde_json::from_slice(&body)?;
-    // The body is covered by the HMAC; the header is not, so it is only a fallback.
-    let shop_domain = data
-        .get("myshopify_domain")
-        .and_then(Value::as_str)
-        .or_else(|| header(&headers, "x-shopify-shop-domain"))
-        .and_then(normalize_shop_domain);
-
-    if let Some(shop_domain) = shop_domain {
+    // The body is covered by the signature, the shop header is not: the shop
+    // is the one both name.
+    if webhook.verify_payload_shop().is_ok() {
+        let shop_domain = webhook.shop().to_string();
         sqlx::query(
             "UPDATE installations SET uninstalled_at = now(), access_token = NULL WHERE app_handle = $1 AND shop = $2",
         )
         .bind(&shopify_app.handle)
-        .bind(shop_domain)
+        .bind(&shop_domain)
         .execute(app.db())
         .await?;
+        app.client_credentials().forget(&shopify_app.handle, &shop_domain);
     }
 
     Ok(json_response(StatusCode::OK, json!({ "ok": true })))

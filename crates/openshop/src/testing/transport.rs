@@ -4,15 +4,105 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::Result;
-use futures::future::BoxFuture;
 use serde_json::Value;
+use shopify_api::transport::{BoxFuture, HttpRequest, HttpResponse, Method, Transport, TransportError};
 
-use crate::runtime::{HttpTransport, OutboundRequest, OutboundResponse};
+/// The `Content-Type` of a request whose body is a URL-encoded form, such as
+/// the client credentials request.
+pub const FORM_CONTENT_TYPE: &str = "application/x-www-form-urlencoded";
+
+/// A request sent to Shopify, as [`MockTransport`] records it. `body` is the
+/// JSON of the request, or, for a URL-encoded form, an object of strings, one
+/// per field; `Null` without a body. `Debug` hides the headers and the body
+/// fields that hold a secret: an access token, a client secret, an
+/// authorization code.
+#[derive(Clone, PartialEq)]
+pub struct OutboundRequest {
+    pub method: &'static str,
+    pub url: String,
+    pub headers: Vec<(String, String)>,
+    pub body: Value,
+}
+
+impl OutboundRequest {
+    fn of(request: &HttpRequest) -> Self {
+        let form = request
+            .header("content-type")
+            .and_then(|value| value.split(';').next())
+            .is_some_and(|media_type| media_type.trim().eq_ignore_ascii_case(FORM_CONTENT_TYPE));
+        let body = if request.body.is_empty() {
+            Value::Null
+        } else if form {
+            Value::Object(
+                request
+                    .form()
+                    .into_iter()
+                    .map(|(name, value)| (name, Value::String(value)))
+                    .collect(),
+            )
+        } else {
+            request
+                .json()
+                .unwrap_or_else(|| Value::String(String::from_utf8_lossy(&request.body).into_owned()))
+        };
+        Self {
+            method: match request.method {
+                Method::Get => "GET",
+                _ => "POST",
+            },
+            url: request.url.clone(),
+            headers: request.headers.clone(),
+            body,
+        }
+    }
+
+    /// The first value of a header, whatever the case of its name.
+    pub fn header(&self, name: &str) -> Option<&str> {
+        self.headers
+            .iter()
+            .find(|(given, _)| given.eq_ignore_ascii_case(name))
+            .map(|(_, value)| value.as_str())
+    }
+}
+
+impl std::fmt::Debug for OutboundRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        use crate::runtime::redact::{is_secret_name, redacted_json};
+        let headers: Vec<(&str, &str)> = self
+            .headers
+            .iter()
+            .map(|(name, value)| {
+                let shown = if is_secret_name(name) { "[redacted]" } else { value.as_str() };
+                (name.as_str(), shown)
+            })
+            .collect();
+        f.debug_struct("OutboundRequest")
+            .field("method", &self.method)
+            .field("url", &self.url)
+            .field("headers", &headers)
+            .field("body", &redacted_json(&self.body))
+            .finish()
+    }
+}
+
+/// What [`MockTransport`] answers: a status and a body.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutboundResponse {
+    pub status: u16,
+    pub body: String,
+}
+
+impl OutboundResponse {
+    pub fn ok(&self) -> bool {
+        (200..300).contains(&self.status)
+    }
+}
 
 type Responder = Arc<dyn Fn(&OutboundRequest) -> Result<OutboundResponse> + Send + Sync>;
 
 /// Records every outbound request and answers with the configured responder.
-/// Without a responder every request gets a 404.
+/// Without a responder every request gets a 404. A responder that fails is a
+/// request that did not reach Shopify.
 pub struct MockTransport {
     responder: Mutex<Responder>,
     requests: Mutex<Vec<OutboundRequest>>,
@@ -84,13 +174,14 @@ impl MockTransport {
     }
 }
 
-impl HttpTransport for MockTransport {
-    fn post_json(&self, request: OutboundRequest) -> BoxFuture<'_, Result<OutboundResponse>> {
+impl Transport for MockTransport {
+    fn send(&self, request: HttpRequest) -> BoxFuture<'_, std::result::Result<HttpResponse, TransportError>> {
         let responder = self
             .responder
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone();
+        let request = OutboundRequest::of(&request);
         self.requests
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -100,7 +191,11 @@ impl HttpTransport for MockTransport {
             if !delay.is_zero() {
                 tokio::time::sleep(delay).await;
             }
-            responder(&request)
+            match responder(&request) {
+                Ok(response) => Ok(HttpResponse::new(response.status, response.body.into_bytes())
+                    .with_header("Content-Type", "application/json")),
+                Err(error) => Err(TransportError::new(format!("{error:#}"))),
+            }
         })
     }
 }

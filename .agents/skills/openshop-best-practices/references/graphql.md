@@ -2,9 +2,12 @@
 
 Use this reference for Shopify Admin GraphQL operations in OpenShop app and framework code.
 
-Write an operation known in advance with `graphql!`: it is checked against
+Write an operation known in advance with `graphql!`, the macro of
+`shopify_api` that `openshop` re-exports: it is checked against
 Shopify's Admin schema when the crate compiles, and its variables and its
-result are typed. `graphql()` and `graphql_as()` take any string and check
+result are typed. The crate that writes one depends on `shopify_api` and pins
+its version in `[package.metadata.shopify_api] api-version`; the first build
+downloads `graphql/admin.schema.json`, which is committed. `graphql()` and `graphql_as()` take any string and check
 nothing at compile time; keep them for operations built at run time, and
 follow the rules of the later sections for those.
 
@@ -37,10 +40,12 @@ pub async fn product_title(shopify: &ShopifyClient, id: &str) -> Result<String> 
 - Variables follow the operation as `name = value`. Required ones are mandatory; nullable ones and those with a default can be left out.
 - The result mirrors the selection: snake-case fields, `Option` for nullable fields and for fields under a fragment on another type, `Vec` for lists, `String` for IDs, enum values and Shopify's string-encoded scalars, `i64` for `Int`.
 - The result types derive `Serialize` and `Deserialize`: return them from `ctx.step.run()` directly.
-- The types of an inline operation have no name. To return them from a function, share an operation, or build typed input objects, use the module form: `graphql! { pub mod get_product = "…"; }`, then `get_product::Data`, `get_product::Variables` and `get_product::operation(variables)`.
+- The types of an inline operation have no name. To return them from a function or share an operation, use the module form: `graphql! { pub mod get_product = "…"; }`, then `get_product::Data`, and `get_product::Variables { … }` or `get_product::operation()`, which `execute` takes.
+- Write input objects as literals checked field by field (`product = { id: id, title: title, vendor?: maybe_vendor }`), or build them ahead with `shopify_api::input!(ProductUpdateInput { … })`. Reference: https://docs.rs/shopify_api/latest/shopify_api/macro.graphql.html.
 - Do not work around a compile error by switching to `graphql()`: fix the operation. The error names the field, argument or variable and the API version it was checked against.
-- The bundled schema is the one of `SHOPIFY_API_VERSION`. A client created for another version needs `openshop codegen --api-version=<version>` and the resulting `graphql/admin.schema.json` committed.
-- A test still scripts the answer with `MockTransport`. An answer that leaves out a non-null field fails with `Shopify's answer does not match the operation at …`.
+- Operations go to the version of the schema they were checked against. To move to another version, change `api-version` and commit the schema the next build downloads. `ShopifyClient::with_api_version(ApiVersion)` pins a client to a version.
+- For pagination, bulk operations or webhook subscriptions, use `ctx.shopify.api().await?`, the `shopify_api::Shopify` client of the shop.
+- A test still scripts the answer with `MockTransport`. An answer that leaves out a non-null field fails with a `shopify_api::Error::Decode` that names the path of the mismatch.
 
 Reference: `docs/src/reference/graphql.md`.
 
@@ -68,7 +73,7 @@ const GET_PRODUCT: &str = "#graphql
 ";
 
 pub async fn product_title(shopify: &ShopifyClient, id: &str) -> Result<String> {
-    let data: Value = shopify.graphql(GET_PRODUCT, Some(json!({ "id": id }))).await?;
+    let data: Value = shopify.graphql(GET_PRODUCT, json!({ "id": id })).await?;
     let title = data
         .pointer("/product/title")
         .and_then(Value::as_str)
@@ -77,7 +82,7 @@ pub async fn product_title(shopify: &ShopifyClient, id: &str) -> Result<String> 
 }
 ```
 
-- `graphql(query, variables)` returns the `data` object of the response as a `serde_json::Value`. Pass `None` when the operation has no variables.
+- `graphql(query, variables)` returns the `data` object of the response as a `serde_json::Value`. Pass `()` when the operation has no variables.
 - Start a query kept in a `const` with a `#graphql` comment line. Keep it for consistency.
 - A named operation (`query GetProduct`) lets a test recognize the request by its name.
 - The client is `ctx.shopify` in every context that belongs to a shop: a flow, a webhook, a proxy handler, an admin loader or action, an MCP tool or resource. In a server route, it is the `shopify` of what `ctx.for_shop("…").await?` returns. Creating a client reads nothing: the access token is read at the first request.
@@ -108,7 +113,7 @@ pub struct Product {
 
 pub async fn get_product(shopify: &ShopifyClient, id: &str) -> Result<Product> {
     let data: GetProductData = shopify
-        .graphql_as(GET_PRODUCT, Some(json!({ "id": id })))
+        .graphql_as(GET_PRODUCT, json!({ "id": id }))
         .await?;
     data.product.ok_or_else(|| anyhow!("Product {id} not found"))
 }
@@ -134,7 +139,7 @@ variables, and nullable results.
 If a response does not have the expected shape:
 - Compare the selection set in the `const` with the response type or the pointers used.
 - Check nullability in the Admin API schema for the API version in use.
-- Read the error: `graphql()` fails with `[openshop] GraphQL errors: …` when Shopify returns `errors`, with `[openshop] Shopify GraphQL error (<status>): …` for a non-2xx response, and with `[openshop] No access token found for app "…" and shop "…". Is the app installed?` when the shop has no stored token.
+- Read the error: `graphql()` fails with `GraphQL errors: …` when Shopify returns `errors`, with `Shopify answered <status> to …` for a non-2xx response (both a `shopify_api::Error`, which `downcast_ref` reads), and with `[openshop] No access token found for app "…" and shop "…". Is the app installed?` when the shop has no stored token.
 - Fix the query or the type instead of adding a fallback value that masks the mismatch.
 
 ## Acceptable Narrowing
@@ -207,8 +212,7 @@ async fn reads_a_product(ctx: &TestContext) {
 ## Framework Code
 
 When changing GraphQL support in `crates/openshop`:
-- `graphql!` is `crates/openshop-macros`; the schema format, the checks and the generated types are `crates/openshop-graphql`, tested against the bundled schema in `crates/openshop-graphql/tests/analyze.rs` and end to end in `crates/openshop/tests/graphql_typed.rs`. When `SHOPIFY_API_VERSION` changes, download the bundled schema again with `openshop codegen --api-version=<version> --out=crates/openshop-graphql/schema/admin-<version>.schema.json` and update the path in `schema.rs`.
-- The client lives in `crates/openshop/src/shopify/client.rs`. `SHOPIFY_API_VERSION` is the default Admin API version; `ShopifyClient::new(app, shop, shopify_app).with_api_version(version)` selects another one.
-- Send every Shopify request through the `HttpTransport` trait (`crates/openshop/src/runtime/transport.rs`) so tests can replace it with `MockTransport`.
-- The error messages of `graphql()` are the same as in the TypeScript implementation. Keep them, or document the change in `docs/src/reference/differences.md`.
+- `graphql!` is `shopify_api`'s; OpenShop only re-exports it. `crates/openshop/tests/graphql_typed.rs` checks it end to end against `crates/openshop/graphql/admin.schema.json`, the schema of the version in `[package.metadata.shopify_api]` of `crates/openshop/Cargo.toml`.
+- The client lives in `crates/openshop/src/shopify/client.rs`: a `ShopifyClient` resolves, at its first request, a `shopify_api::Shopify` client with the stored token, or the shared client of the client credentials grant (`crates/openshop/src/shopify/client_credentials.rs`), which stores what it obtains in `installations`.
+- Do not write a request to Shopify by hand: use `shopify_api` (the client, `oauth::ShopifyApp`, `webhooks::Webhook`). Its requests go through the `Transport` of the application (`crates/openshop/src/runtime/transport.rs`), which tests replace with `MockTransport`.
 - Update `docs/src` and the templates (`templates/minimal`, `templates/custom`, `templates/public`) when user-facing usage changes.

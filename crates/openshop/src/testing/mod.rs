@@ -20,22 +20,18 @@ pub use db::{TestDb, test_database_url};
 pub(crate) use db::connect;
 pub use factory::{Factory, FactoryScope};
 pub use fake::{FakeCall, FakeMethod, FakeProviders, TypedCall, TypedFake};
-pub use transport::MockTransport;
+pub use transport::{FORM_CONTENT_TYPE, MockTransport, OutboundRequest, OutboundResponse};
 
 pub use crate::admin::invoke_admin_function;
-pub use crate::server::hmac::proxy_signature;
 pub use crate::server::jwt::sign_session_token;
 
 /// The runtime `#[openshop::test]` runs a test on.
 #[doc(hidden)]
 pub use tokio;
 
-use base64::Engine;
-use base64::engine::general_purpose::STANDARD;
 use indexmap::IndexMap;
 use serde_json::json;
-
-use crate::server::hmac::hmac_sha256;
+use shopify_api::oauth::ShopifyApp;
 
 /// What a `#[openshop::test]` function can return: nothing, or a `Result`
 /// whose error fails the test.
@@ -77,24 +73,33 @@ pub fn session_token(shop: &str, secret: &str, api_key: &str, sub: &str) -> Stri
 
 /// The `X-Shopify-Hmac-Sha256` header value for a webhook body.
 pub fn sign_webhook_body(body: impl AsRef<[u8]>, secret: &str) -> String {
-    STANDARD.encode(hmac_sha256(secret, body.as_ref()))
+    shopify_api::webhooks::sign(secret, body.as_ref())
 }
 
-/// Adds the `hmac` parameter Shopify appends to OAuth and app-launch URLs.
+/// Adds the `hmac` parameter Shopify appends to OAuth and app-launch URLs,
+/// and the `timestamp` of now when `params` has none: a signed query is
+/// taken for 90 seconds.
 pub fn sign_query(params: &[(&str, &str)], secret: &str) -> IndexMap<String, String> {
     let mut query: IndexMap<String, String> = params
         .iter()
         .map(|(key, value)| (key.to_string(), value.to_string()))
         .collect();
-    let mut keys: Vec<&String> = query.keys().collect();
-    keys.sort();
-    let message = keys
-        .into_iter()
-        .map(|key| format!("{key}={}", query[key]))
-        .collect::<Vec<_>>()
-        .join("&");
-    query.insert("hmac".to_string(), hex::encode(hmac_sha256(secret, message.as_bytes())));
     query
+        .entry("timestamp".to_string())
+        .or_insert_with(|| chrono::Utc::now().timestamp().to_string());
+    let hmac = ShopifyApp::new("", secret)
+        .sign_query(&to_query_string(&query))
+        .expect("a query string");
+    query.insert("hmac".to_string(), hmac);
+    query
+}
+
+/// The `signature` Shopify gives an app proxy request with the parameters of
+/// `query`.
+pub fn proxy_signature(query: &IndexMap<String, String>, secret: &str) -> String {
+    ShopifyApp::new("", secret)
+        .sign_app_proxy(&to_query_string(query))
+        .expect("a query string")
 }
 
 /// Serializes a query map for a URL.
