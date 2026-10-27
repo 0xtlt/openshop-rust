@@ -9,16 +9,18 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow, bail};
-use openshop::serde_json::Value;
 use proc_macro2::{Spacing, TokenStream, TokenTree};
+use serde_json::Value;
 use syn::visit::{self, Visit};
 use syn::{ImplItem, Item, ItemImpl, ItemUse, Meta, UseTree};
 use tokio::process::{Child, Command};
 
+use crate::init::toml_string;
 use crate::metadata;
 
-/// The shell of the admin UI, as the server expects it.
-const INDEX_HTML: &str = include_str!("../templates/ui/index.html");
+/// The shell of the admin UI, as the server expects it: the one of the
+/// framework's own bundle.
+const INDEX_HTML: &str = include_str!("../../openshop-ui/index.html");
 
 /// What the bundle is compiled with, whatever its pages name.
 const ALWAYS: [&str; 2] = ["openshop", "leptos"];
@@ -292,10 +294,6 @@ struct Project {
     workspace_root: PathBuf,
     /// The crates on disk the project is compiled with, by their directory.
     local_crates: Vec<PathBuf>,
-}
-
-fn toml_string(value: &str) -> String {
-    format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
 /// `git = …` and the tag, branch or rev of a git source as `cargo metadata`
@@ -582,7 +580,7 @@ pub async fn build(cwd: &Path) -> Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use openshop::serde_json::json;
+    use serde_json::json;
 
     /// A project in an empty directory, removed when the test ends.
     struct Sources(PathBuf);
@@ -863,11 +861,5 @@ mod tests {
             "{trunk}"
         );
         assert!(file("index.html").contains("<meta name=\"shopify-api-key\" content=\"\" />"));
-    }
-
-    #[test]
-    fn the_shell_is_the_one_of_the_framework() {
-        let framework = Path::new(env!("CARGO_MANIFEST_DIR")).join("../openshop-ui/index.html");
-        assert_eq!(std::fs::read_to_string(framework).unwrap(), INDEX_HTML);
     }
 }

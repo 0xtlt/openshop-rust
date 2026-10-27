@@ -5,7 +5,6 @@ mod bundle;
 mod dev;
 mod init;
 mod metadata;
-mod restart;
 
 use std::process::ExitCode;
 
@@ -45,8 +44,9 @@ const USAGE: &str = "
     openshop test
     openshop build && openshop start
 
-  Everything except `init`, `init-ui`, `dev` and `build-ui` runs the
-  application binary through cargo in the current project.
+  `worker`, `migrate` and `start` run the application binary through
+  cargo in the current project; `test` and `build` run `cargo test` and
+  `cargo build --release` there.
 ";
 
 /// Runs cargo in the current directory and forwards its exit status.
