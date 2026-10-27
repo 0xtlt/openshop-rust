@@ -36,7 +36,7 @@ pub async fn start_prod(config: OpenShopConfig) -> Result<()> {
         app.config().providers.len()
     );
 
-    let server = listen(&app, port, ServerOptions::production().ui(ui)).await?;
+    let server = listen(&app, port, ServerOptions { ui, dev: false }).await?;
     let mut scheduler = Scheduler::start(&app)?;
     println!("[openshop] Production server running on http://localhost:{port}");
 

@@ -126,7 +126,7 @@ mod tests {
     #[test]
     fn debug_never_shows_the_secrets_of_a_configuration() {
         use crate::server::mcp::tokens::{create_mcp_token, parse_mcp_token};
-        use crate::server::shopify_apps::{ResolvedShopifyApp, ShopifyAppSource};
+        use crate::server::shopify_apps::ResolvedShopifyApp;
         use crate::types::ShopifyAppConfig;
 
         let keys = ShopifyAppConfig::Keys {
@@ -161,8 +161,7 @@ mod tests {
             api_secret: "api-secret-value".into(),
             app_url: "https://app.example.com".into(),
             scopes: "read_products".into(),
-            source: ShopifyAppSource::Env,
-            toml: None,
+            oauth: shopify_api::oauth::ShopifyApp::new("public-key", "api-secret-value"),
         };
         let shown = format!("{resolved:?} {:?}", [&resolved]);
         assert_hidden(&shown);

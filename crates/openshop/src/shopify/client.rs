@@ -123,8 +123,7 @@ impl ShopifyClient {
         let resolved = match (granted, stored.and_then(|stored| stored.token)) {
             (Some(granted), _) => granted,
             (None, Some(token)) => {
-                let apps = self.app.apps();
-                let oauth = apps.oauth(apps.by_handle(Some(&self.shopify_app))?);
+                let oauth = &self.app.apps().by_handle(Some(&self.shopify_app))?.oauth;
                 Resolved::Stored(oauth.builder(&ShopDomain::new(&shop)?).access_token(token).build()?)
             }
             (None, None) => Resolved::None,

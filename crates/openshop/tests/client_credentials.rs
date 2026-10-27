@@ -14,8 +14,8 @@ use futures::StreamExt;
 use openshop::builder::{AdminPage, Flow, Route, Webhook};
 use openshop::engine::Scheduler;
 use openshop::runtime::{RuntimeLogger, logger};
-use openshop::server::ServerOptions;
 use openshop::server::http::parse_query;
+use openshop::server::{ServerOptions, UiSource};
 use openshop::testing::{
     AdminTestOptions, MockTransport, TestContext, TestOptions, admin_context, sign_query, sign_webhook_body,
     to_query_string,
@@ -204,7 +204,10 @@ fn options(client_credentials_shop: Option<&str>) -> TestOptions {
         secret: SECRET.to_string(),
         encryption_key: Some(ENCRYPTION_KEY.to_string()),
         client_credentials_shop: client_credentials_shop.map(str::to_string),
-        server: ServerOptions::production(),
+        server: ServerOptions {
+            ui: UiSource::Embedded,
+            dev: false,
+        },
         ..Default::default()
     }
 }

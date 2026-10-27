@@ -16,7 +16,7 @@ use std::sync::{Arc, LazyLock, Mutex, PoisonError};
 use axum::body::Bytes;
 use axum::extract::{Request, State};
 use axum::http::header::{
-    CACHE_CONTROL, CONTENT_SECURITY_POLICY, CONTENT_TYPE, ETAG, HeaderName, IF_NONE_MATCH, REFERER, VARY,
+    CACHE_CONTROL, CONTENT_SECURITY_POLICY, CONTENT_TYPE, ETAG, IF_NONE_MATCH, REFERER, VARY, X_CONTENT_TYPE_OPTIONS,
 };
 use axum::http::{HeaderMap, HeaderValue, Method, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -26,18 +26,15 @@ use sha2::{Digest, Sha256};
 use super::auth::redirect;
 use super::compression;
 use super::connectors::is_installed_shop;
-use super::http::{header, not_found, parse_query};
-use super::polaris;
+use super::ServerOptions;
+use super::http::{escape, header, not_found, parse_query};
 use super::reload::Served;
 use super::shop_domain::normalize_shop_domain;
 use super::shopify_apps::DEFAULT_SHOPIFY_APP_HANDLE;
-use super::{ROBOTS_HEADER, ServerOptions};
 use crate::app::OpenShop;
 use crate::shopify::client_credentials::Grant;
 use shopify_api::oauth::SignedQuery;
 use openshop_shared::rpc::{decode_uri_component, encode_uri_component};
-
-const X_CONTENT_TYPE_OPTIONS: HeaderName = HeaderName::from_static("x-content-type-options");
 
 /// What a launch whose query verified vouches for: its shop, written as a
 /// shop domain, for the app that signed it. `shopify_api` verifies only a
@@ -47,26 +44,8 @@ fn launch_grant(query: &SignedQuery, shopify_app: &str, shop: &str) -> Option<Gr
     matches!(&grant, Grant::Vouched { shop: vouched, .. } if vouched == shop).then_some(grant)
 }
 
-/// Looks up an asset of a UI bundle compiled into the application binary.
-#[derive(Clone, Copy)]
-pub struct UiAssets(pub fn(&str) -> Option<Cow<'static, [u8]>>);
-
-impl PartialEq for UiAssets {
-    fn eq(&self, other: &Self) -> bool {
-        std::ptr::fn_addr_eq(self.0, other.0)
-    }
-}
-
-impl Eq for UiAssets {}
-
-impl std::fmt::Debug for UiAssets {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("UiAssets(..)")
-    }
-}
-
 /// Where the admin UI assets come from.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default)]
 pub enum UiSource {
     /// API only: no UI is served.
     #[default]
@@ -75,8 +54,10 @@ pub enum UiSource {
     Embedded,
     /// A directory with a custom bundle (for apps that add their own admin pages).
     Dir(PathBuf),
-    /// A custom bundle compiled into the application, e.g. with `rust-embed`.
-    Assets(UiAssets),
+    /// A custom bundle compiled into the application, e.g. with `rust-embed`:
+    /// a lookup function taking the asset path (`index.html`, `app-1a2b3c.js`)
+    /// and returning its bytes.
+    Assets(fn(&str) -> Option<Cow<'static, [u8]>>),
 }
 
 #[cfg(feature = "embedded-ui")]
@@ -85,14 +66,8 @@ pub enum UiSource {
 struct EmbeddedUi;
 
 impl UiSource {
-    /// A bundle served by a lookup function taking the asset path (`index.html`,
-    /// `app-1a2b3c.js`) and returning its bytes.
-    pub fn assets(lookup: fn(&str) -> Option<Cow<'static, [u8]>>) -> Self {
-        Self::Assets(UiAssets(lookup))
-    }
-
     pub fn is_enabled(&self) -> bool {
-        *self != Self::None
+        !matches!(self, Self::None)
     }
 
     /// The asset at `path` (relative, no leading slash). A directory is read
@@ -111,7 +86,7 @@ impl UiSource {
             Self::Embedded => EmbeddedUi::get(path).map(|file| file.data),
             #[cfg(not(feature = "embedded-ui"))]
             Self::Embedded => None,
-            Self::Assets(assets) => (assets.0)(path),
+            Self::Assets(lookup) => lookup(path),
             Self::Dir(directory) => {
                 // Joining a rooted or drive-prefixed path would replace the directory.
                 let relative = Path::new(path);
@@ -163,17 +138,9 @@ static APP_BRIDGE_SCRIPT: LazyLock<Regex> = LazyLock::new(|| {
         .expect("valid regex")
 });
 
-fn escape_attribute(value: &str) -> String {
-    value
-        .replace('&', "&amp;")
-        .replace('"', "&quot;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-}
-
 /// Injects the Shopify API key App Bridge needs to start.
 pub fn inject_api_key(html: &str, api_key: &str) -> String {
-    let api_key = escape_attribute(api_key);
+    let api_key = escape(api_key);
     let html = API_KEY_META.replace(html, |_: &regex::Captures<'_>| {
         format!(r#"<meta name="shopify-api-key" content="{api_key}" />"#)
     });
@@ -194,9 +161,29 @@ fn decode_asset_path(path: &str) -> Option<String> {
     Some(segments?.join("/"))
 }
 
-/// Polaris, no form, and nothing else. The page can be framed: a shop whose
-/// launch is refused reads it inside Shopify admin.
-const WELCOME_POLICY: &str = polaris::content_security_policy!("form-action 'none'; base-uri 'none'");
+/// Shopify's Polaris web components, for the page the server renders itself in
+/// the style of the admin. Outside Shopify admin they need no App Bridge.
+const POLARIS_SCRIPT: &str = "https://cdn.shopify.com/shopifycloud/polaris.js";
+
+/// Keeps the page readable while Polaris is not loaded, or when Shopify's CDN
+/// cannot be reached.
+const POLARIS_FALLBACK_STYLE: &str = "
+body { margin: 0; font-family: system-ui, -apple-system, 'Segoe UI', sans-serif; }
+s-page:not(:defined), s-section:not(:defined), s-stack:not(:defined), s-heading:not(:defined),
+s-paragraph:not(:defined) { display: block; margin: 8px 16px; }
+s-heading:not(:defined) { font-weight: 600; }
+";
+
+/// The Polaris script, what it loads from Shopify's CDN, each under its own
+/// path (the styles and the files of its font, its icons), no form, and
+/// nothing else. The page can be framed: a shop whose launch is refused reads
+/// it inside Shopify admin.
+const WELCOME_POLICY: &str = "default-src 'none'; \
+    script-src https://cdn.shopify.com/shopifycloud/polaris.js; \
+    style-src 'unsafe-inline' https://cdn.shopify.com/static/fonts/; \
+    font-src https://cdn.shopify.com/static/fonts/; \
+    connect-src https://cdn.shopify.com/shopifycloud/; \
+    form-action 'none'; base-uri 'none'";
 
 /// What a visitor is told when the admin is not opened for a shop: where the
 /// app opens from. It shows nothing of the application.
@@ -210,8 +197,8 @@ fn open_from_shopify_admin(status: StatusCode) -> Response {
          <s-heading>Open this app from Shopify admin</s-heading>\
          <s-paragraph>This app works inside Shopify admin. Open it from the Apps section of your store.</s-paragraph>\
          </s-stack></s-section></s-page></body></html>",
-        polaris::FALLBACK_STYLE,
-        polaris::SCRIPT,
+        POLARIS_FALLBACK_STYLE,
+        POLARIS_SCRIPT,
     );
     (
         status,
@@ -219,7 +206,6 @@ fn open_from_shopify_admin(status: StatusCode) -> Response {
             (CONTENT_TYPE.as_str(), "text/html; charset=utf-8"),
             (CACHE_CONTROL.as_str(), "no-store"),
             (CONTENT_SECURITY_POLICY.as_str(), WELCOME_POLICY),
-            ("x-robots-tag", ROBOTS_HEADER),
         ],
         html,
     )
@@ -432,12 +418,11 @@ mod tests {
 
     #[tokio::test]
     async fn serves_assets_from_a_lookup_function() {
-        let source = UiSource::assets(|path| (path == "index.html").then(|| Cow::Borrowed(b"<html>".as_slice())));
+        let source = UiSource::Assets(|path| (path == "index.html").then(|| Cow::Borrowed(b"<html>".as_slice())));
         assert!(source.is_enabled());
         assert_eq!(source.read("index.html").await.as_deref(), Some(b"<html>".as_slice()));
         assert!(source.read("missing.js").await.is_none());
         assert!(source.read("../index.html").await.is_none());
-        assert_eq!(source, source.clone());
     }
 
     #[test]

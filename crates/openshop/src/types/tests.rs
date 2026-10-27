@@ -583,13 +583,7 @@ fn each_method_keeps_the_authentication_it_was_declared_under() {
 // ─── MCP ────────────────────────────────────────────────────────────
 
 #[test]
-fn mcp_enums_are_named_as_they_serialize() {
-    for status in [McpAuditStatus::Success, McpAuditStatus::Denied, McpAuditStatus::Error] {
-        assert_eq!(serde_json::to_value(status).unwrap(), json!(status.as_str()));
-    }
-    for kind in [McpCapabilityType::Tool, McpCapabilityType::Resource] {
-        assert_eq!(serde_json::to_value(kind).unwrap(), json!(kind.as_str()));
-    }
+fn mcp_risk_levels_serialize_in_lowercase() {
     assert_eq!(serde_json::to_value(McpRiskLevel::High).unwrap(), json!("high"));
 }
 

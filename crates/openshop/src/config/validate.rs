@@ -239,7 +239,7 @@ pub fn validate_openshop_config(config: &OpenShopConfig) -> Result<()> {
     let closed = ADMIN_PAGE_IDS
         .into_iter()
         .all(|id| builtin_pages.get(id) == AdminPageMode::Disabled);
-    let serves_no_ui = config.admin_ui == Some(UiSource::None);
+    let serves_no_ui = matches!(config.admin_ui, Some(UiSource::None));
     if closed && !serves_no_ui && !admin_pages.iter().any(|page| page.route_pattern == ADMIN_HOME_PATH) {
         fail!(
             "builtinPages disables every built-in page of the admin: declare its home, a page at `/` (`#[admin_page(\"/\")]`)"

@@ -18,6 +18,7 @@ use shopify_api::oauth::AuthorizationRequest;
 
 use super::hmac::{constant_time_eq, hmac_sha256};
 use super::http::{ApiResult, json_error, json_response, parse_query};
+use super::shop::store_access_token;
 use super::shop_domain::normalize_shop_domain;
 use crate::app::OpenShop;
 
@@ -127,7 +128,7 @@ async fn start(State(app): State<OpenShop>, headers: HeaderMap, RawQuery(raw): R
 
     let request = AuthorizationRequest::new(format!("{}/auth/callback", shopify_app.app_url), state)
         .scopes(shopify_app.scopes.split(',').map(str::trim).filter(|scope| !scope.is_empty()));
-    let auth_url = app.apps().oauth(shopify_app).authorization_url(&shop, &request);
+    let auth_url = shopify_app.oauth.authorization_url(&shop, &request);
     let mut response = redirect(&auth_url);
     let secure = shopify_app.app_url.starts_with("https://");
     if let Ok(value) = HeaderValue::from_str(&cookie(&browser, STATE_TTL, secure)) {
@@ -155,7 +156,7 @@ async fn callback(State(app): State<OpenShop>, headers: HeaderMap, RawQuery(raw)
         return Ok(json_error(StatusCode::UNAUTHORIZED, "Invalid state/nonce"));
     }
 
-    let token = match app.apps().oauth(shopify_app).exchange_code(&callback).await {
+    let token = match shopify_app.oauth.exchange_code(&callback).await {
         Ok(token) => token,
         // What Shopify answered; a request that did not reach it is the server's error.
         Err(error @ shopify_api::Error::Auth { .. }) => {
@@ -167,19 +168,7 @@ async fn callback(State(app): State<OpenShop>, headers: HeaderMap, RawQuery(raw)
         Err(error) => return Err(error.into()),
     };
 
-    sqlx::query(
-        "INSERT INTO installations (app_handle, shop, access_token, scopes) VALUES ($1, $2, $3, $4) \
-         ON CONFLICT (app_handle, shop) DO UPDATE SET \
-           access_token = EXCLUDED.access_token, scopes = EXCLUDED.scopes, nonce = NULL, \
-           installed_at = now(), uninstalled_at = NULL",
-    )
-    .bind(&shopify_app.handle)
-    .bind(&shop)
-    .bind(app.crypto().encrypt_string(&token.access_token)?)
-    .bind(token.scope.as_deref())
-    .execute(app.db())
-    .await?;
-    app.client_credentials().forget(&shopify_app.handle, &shop);
+    store_access_token(&app, &shopify_app.handle, &shop, &token, true).await?;
 
     // The cookie stays: it only names the browser, and the other
     // installations it started may still be pending.

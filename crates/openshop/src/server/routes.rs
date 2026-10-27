@@ -1,6 +1,5 @@
 //! Public server routes under `/routes`, each with an explicit authentication contract.
 
-use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 
 use axum::Router;
@@ -10,22 +9,17 @@ use axum::http::header::ALLOW;
 use axum::http::{HeaderMap, Method, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use axum::routing::any;
-use futures::FutureExt;
 use indexmap::IndexMap;
 use serde_json::{Value, json};
 
-use super::file_routes::{resolve_route_paths, to_router_path};
-use super::http::json_error;
+use super::file_routes::mount_routes;
+use super::http::{catch_panic, json_error, report_failure};
 use crate::app::OpenShop;
 use crate::declare::InvalidInput;
-use crate::engine::step::error_message;
-use crate::runtime::report::{self, Panicked};
-use crate::runtime::logger;
+use crate::runtime::report;
 use crate::types::{
     Route, RouteAuth, RouteAuthContext, RouteAuthOutcome, RouteAuthValue, RouteContext, RouteMethod, RouteRequest,
 };
-
-pub use super::connectors::resolve_shop_context;
 
 fn internal_error() -> Response {
     json_error(StatusCode::INTERNAL_SERVER_ERROR, "Internal server route error")
@@ -86,19 +80,14 @@ async fn handle(
             db: app.db().clone(),
             app: app.clone(),
         };
-        match AssertUnwindSafe(authenticate(context)).catch_unwind().await {
-            Ok(Ok(RouteAuthOutcome::Authenticated(value))) => auth = value,
-            Ok(Ok(RouteAuthOutcome::Unauthorized)) => return json_error(StatusCode::UNAUTHORIZED, "Unauthorized"),
-            Ok(Ok(RouteAuthOutcome::Response(response))) => return response,
-            outcome => {
-                let error = match outcome {
-                    Ok(Err(error)) => error,
-                    _ => Panicked::error("authentication panicked"),
-                };
-                report::error(&error);
-                logger::error_with(
+        match catch_panic("authentication", authenticate(context)).await {
+            Ok(RouteAuthOutcome::Authenticated(value)) => auth = value,
+            Ok(RouteAuthOutcome::Unauthorized) => return json_error(StatusCode::UNAUTHORIZED, "Unauthorized"),
+            Ok(RouteAuthOutcome::Response(response)) => return response,
+            Err(error) => {
+                report_failure(
                     format!("[openshop] Server route authentication error for {method_name} {route_path}"),
-                    json!({ "error": error_message(&error) }),
+                    &error,
                 );
                 return internal_error();
             }
@@ -112,26 +101,19 @@ async fn handle(
         db: app.db().clone(),
         app,
     };
-    match AssertUnwindSafe(handler(context)).catch_unwind().await {
-        Ok(Ok(response)) => response,
+    match catch_panic("handler", handler(context)).await {
+        Ok(response) => response,
         // The handler refused its input.
-        Ok(Err(error)) if error.is::<InvalidInput>() => json_error(StatusCode::UNPROCESSABLE_ENTITY, error.to_string()),
-        outcome => {
-            let error = match outcome {
-                Ok(Err(error)) => error,
-                _ => Panicked::error("handler panicked"),
-            };
-            report::error(&error);
-            logger::error_with(
-                format!("[openshop] Server route error for {method_name} {route_path}"),
-                json!({ "error": error_message(&error) }),
-            );
+        Err(error) if error.is::<InvalidInput>() => json_error(StatusCode::UNPROCESSABLE_ENTITY, error.to_string()),
+        Err(error) => {
+            report_failure(format!("[openshop] Server route error for {method_name} {route_path}"), &error);
             internal_error()
         }
     }
 }
 
-/// Fails when a route declares no HTTP method.
+/// Fails when a route declares no HTTP method. The configuration is checked
+/// with it when the application starts.
 pub fn assert_route_definition(route: &Route, route_path: &str) -> anyhow::Result<()> {
     if route.handlers.is_empty() {
         anyhow::bail!("[openshop] Invalid server route {route_path}: define at least one HTTP method");
@@ -140,17 +122,12 @@ pub fn assert_route_definition(route: &Route, route_path: &str) -> anyhow::Resul
 }
 
 pub fn create_server_routes(app: &OpenShop, log: bool) -> anyhow::Result<Router<OpenShop>> {
-    let mut router = Router::new();
     let definitions = &app.config().routes;
-    let routes = resolve_route_paths("server", definitions.keys().map(String::as_str))?;
-
-    for (route_path, key) in &routes {
-        let route = definitions[*key].clone();
-        assert_route_definition(&route, route_path)?;
+    mount_routes("Server", "/routes", definitions.keys().map(String::as_str), log, |route_path, key| {
+        let route = definitions[key].clone();
         let allowed = route.allowed_methods().join(", ");
-
         let registered = Arc::new(RegisteredRoute {
-            path: route_path.clone(),
+            path: route_path.to_string(),
             definition: route,
         });
         let handler = any(
@@ -161,19 +138,6 @@ pub fn create_server_routes(app: &OpenShop, log: bool) -> anyhow::Result<Router<
                   headers: HeaderMap,
                   body: Bytes| { handle(registered.clone(), app, method, uri, params, headers, body) },
         );
-
-        let full_path = format!("/routes{}", to_router_path(route_path));
-        router = router.route(full_path.trim_end_matches('/'), handler.clone());
-        if route_path == "/" {
-            router = router.route("/routes/", handler);
-        }
-        if log {
-            logger::info(format!("[openshop] Server route: {route_path} ({allowed})"));
-        }
-    }
-
-    if log && !routes.is_empty() {
-        logger::info(format!("[openshop] {} server route(s) registered", routes.len()));
-    }
-    Ok(router)
+        (handler, allowed)
+    })
 }

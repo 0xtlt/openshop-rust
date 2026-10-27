@@ -5,7 +5,7 @@ mod common;
 
 use common::noop_flow;
 use openshop::builder::{Field, OpenShopBuilder, Provider};
-use openshop::server::ServerOptions;
+use openshop::server::{ServerOptions, UiSource};
 use openshop::testing::{TestContext, TestOptions};
 use openshop::{Cron, OpenShopConfig, PgPool, Uuid};
 use reqwest::{Method, Response, StatusCode};
@@ -117,7 +117,13 @@ async fn without_a_password_the_dashboard_does_not_exist() {
     assert_eq!(builder().build().unwrap().ops_password, None);
 
     // With or without an admin UI, `/ops` is not a page of it either.
-    for server in [ServerOptions::default(), ServerOptions::production()] {
+    for server in [
+        ServerOptions::default(),
+        ServerOptions {
+            ui: UiSource::Embedded,
+            dev: false,
+        },
+    ] {
         let options = TestOptions {
             server,
             ..Default::default()
@@ -261,7 +267,14 @@ async fn the_session_cookie_is_secure_unless_the_server_is_reached_over_plain_ht
         (Some("https://app.example.com"), ServerOptions::default(), true),
         (None, ServerOptions::default(), true),
         (Some("http://localhost:3000"), ServerOptions::default(), false),
-        (Some("https://app.example.com"), ServerOptions::development(), false),
+        (
+            Some("https://app.example.com"),
+            ServerOptions {
+                ui: UiSource::Embedded,
+                dev: true,
+            },
+            false,
+        ),
     ] {
         let options = TestOptions {
             host: host.map(str::to_string),
@@ -437,7 +450,10 @@ async fn runs_and_log_lines_are_filtered_over_a_period(ctx: &TestContext) {
     // A search is text: neither markup nor a pattern.
     let markup = page(ctx, "/ops/runs?q=%22%3E%3Cb%3E", &cookie).await;
     assert_has(&markup, &["No run matches.", "value=\"&quot;&gt;&lt;b&gt;\""]);
-    for none in ["/ops/runs?q=%25", "/ops/runs?before=2000-01-01T00:00:00Z"] {
+    for none in [
+        "/ops/runs?q=%25",
+        "/ops/runs?before=2000-01-01T00:00:00Z_00000000-0000-0000-0000-000000000000",
+    ] {
         assert!(page(ctx, none, &cookie).await.contains("No run matches."), "{none}");
     }
     // An unknown status or period is none.
@@ -677,21 +693,6 @@ async fn pages_walk_rows_created_at_the_same_instant_without_skipping_any(ctx: &
         assert_eq!(rows, expected, "{start}: rows shown");
         assert_eq!(seen.len(), expected, "{start}: distinct rows");
     }
-}
-
-#[openshop::test(context(with_dashboard()))]
-async fn an_address_without_the_id_of_a_row_still_cuts_a_page_on_the_time(ctx: &TestContext) {
-    let completed = run(&ctx.db, SHOP, "completed", None).await;
-    let cookie = sign_in(ctx).await;
-    let completed = completed.to_string();
-
-    let before_it = page(ctx, "/ops/runs?before=2000-01-01T00:00:00Z", &cookie).await;
-    assert!(before_it.contains("No run matches."), "{before_it}");
-    let after_it = page(ctx, "/ops/runs?before=2999-01-01T00:00:00Z", &cookie).await;
-    assert!(after_it.contains(&completed), "{after_it}");
-    // An id that is not one is no cursor: the first page.
-    let broken = page(ctx, "/ops/runs?before=2000-01-01T00:00:00Z_nope", &cookie).await;
-    assert!(broken.contains(&completed), "{broken}");
 }
 
 #[openshop::test(context(with_dashboard()))]

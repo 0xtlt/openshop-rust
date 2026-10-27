@@ -6,6 +6,7 @@ use axum::http::header::AUTHORIZATION;
 use axum::middleware::Next;
 use axum::response::Response;
 use serde_json::json;
+use shopify_api::TokenData;
 use shopify_api::oauth::{RequestedToken, SessionToken};
 
 use super::http::{header, json_error};
@@ -50,7 +51,7 @@ pub(crate) async fn shop_middleware(State(app): State<OpenShop>, mut request: Re
         return json_error(StatusCode::UNAUTHORIZED, "Unauthorized: missing token audience");
     };
     let verified = app.apps().by_api_key(&audience).and_then(|shopify_app| {
-        let verified = app.apps().oauth(shopify_app).verify_session_token(&session_token)?;
+        let verified = shopify_app.oauth.verify_session_token(&session_token)?;
         Ok((shopify_app.clone(), verified))
     });
     let (shopify_app, verified) = match verified {
@@ -152,6 +153,32 @@ async fn ensure_installation(
     Ok(())
 }
 
+/// Stores the offline access token Shopify gave a shop, and drops the token
+/// of the client credentials grant held for it. An installation by OAuth
+/// (`reinstall`) starts again: its nonce is spent and `installed_at` is now.
+pub(crate) async fn store_access_token(
+    app: &OpenShop,
+    shopify_app: &str,
+    shop: &str,
+    token: &TokenData,
+    reinstall: bool,
+) -> anyhow::Result<()> {
+    let restart = if reinstall { ", nonce = NULL, installed_at = now()" } else { "" };
+    sqlx::query(&format!(
+        "INSERT INTO installations (app_handle, shop, access_token, scopes) VALUES ($1, $2, $3, $4) \
+         ON CONFLICT (app_handle, shop) DO UPDATE SET \
+           access_token = EXCLUDED.access_token, scopes = EXCLUDED.scopes, uninstalled_at = NULL{restart}"
+    ))
+    .bind(shopify_app)
+    .bind(shop)
+    .bind(app.crypto().encrypt_string(&token.access_token)?)
+    .bind(token.scope.as_deref())
+    .execute(app.db())
+    .await?;
+    app.client_credentials().forget(shopify_app, shop);
+    Ok(())
+}
+
 /// The access token of the row as it is stored, if the row has one.
 async fn stored_token(app: &OpenShop, shopify_app: &ResolvedShopifyApp, shop: &str) -> anyhow::Result<Option<String>> {
     let row: Option<(Option<String>,)> =
@@ -225,9 +252,8 @@ async fn exchange_token(
     shop: &str,
     session: &SessionToken,
 ) -> anyhow::Result<bool> {
-    let token = match app
-        .apps()
-        .oauth(shopify_app)
+    let token = match shopify_app
+        .oauth
         .exchange_session_token(session, RequestedToken::Offline)
         .await
     {
@@ -235,20 +261,7 @@ async fn exchange_token(
         Err(shopify_api::Error::Auth { .. }) => return Ok(false),
         Err(error) => return Err(error.into()),
     };
-    let access_token = app.crypto().encrypt_string(&token.access_token)?;
-
-    sqlx::query(
-        "INSERT INTO installations (app_handle, shop, access_token, scopes) VALUES ($1, $2, $3, $4) \
-         ON CONFLICT (app_handle, shop) DO UPDATE SET \
-           access_token = EXCLUDED.access_token, scopes = EXCLUDED.scopes, uninstalled_at = NULL",
-    )
-    .bind(&shopify_app.handle)
-    .bind(shop)
-    .bind(access_token)
-    .bind(token.scope.as_deref())
-    .execute(app.db())
-    .await?;
-    app.client_credentials().forget(&shopify_app.handle, shop);
+    store_access_token(app, &shopify_app.handle, shop, &token, false).await?;
 
     logger::info(format!("[openshop] Token exchange successful for {shop}"));
     Ok(true)

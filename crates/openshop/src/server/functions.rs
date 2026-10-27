@@ -13,12 +13,12 @@ use axum::routing::{get, put};
 use regex::Regex;
 use serde_json::{Value, json};
 
-use super::function_config::validate_function_config;
 use super::function_mutations::{
     METAFIELD_NAMESPACE, build_create_mutation, build_delete_mutation, build_update_mutation, extract_errors,
     extract_payload, get_mutations, has_user_error_code, resolve_title, user_error_messages,
 };
 use super::http::{ApiResult, json_error, json_object_body, json_response, parse_query};
+use super::provider_config::parse_provider_config;
 use super::shop::ShopSession;
 use crate::app::{OpenShop, OpenShopConfig};
 use crate::runtime::logger;
@@ -218,10 +218,7 @@ async fn list_functions(State(app): State<OpenShop>) -> Response {
             }
             item.insert(
                 "supportsUpdate".into(),
-                Value::Bool(!matches!(
-                    definition.function_type,
-                    FunctionType::CartTransform | FunctionType::FulfillmentConstraints
-                )),
+                Value::Bool(get_mutations(definition, None).update.is_some()),
             );
             item.insert(
                 "singleton".into(),
@@ -250,15 +247,7 @@ async fn list_instances(
     let Some((definition, label)) = find_function(app.config(), &handle) else {
         return Ok(json_error(StatusCode::NOT_FOUND, "Function not found"));
     };
-    let Some(mutations) = get_mutations(definition, None) else {
-        return Ok(json_error(
-            StatusCode::BAD_REQUEST,
-            format!(
-                "Function type \"{}\" has no GraphQL API",
-                definition.function_type.as_str()
-            ),
-        ));
-    };
+    let mutations = get_mutations(definition, None);
     let shopify = session.shopify_client(&app);
 
     if definition.function_type == FunctionType::CartTransform {
@@ -355,18 +344,8 @@ async fn create_instance(
     let Some((definition, label)) = find_function(app.config(), &handle) else {
         return Ok(json_error(StatusCode::NOT_FOUND, "Function not found"));
     };
-    if get_mutations(definition, None).is_none() {
-        return Ok(json_error(
-            StatusCode::BAD_REQUEST,
-            format!(
-                "Function type \"{}\" has no GraphQL API",
-                definition.function_type.as_str()
-            ),
-        ));
-    }
-
     let body = json_object_body(&body);
-    let function_config = match validate_function_config(&definition.config, body.get("config")) {
+    let function_config = match parse_provider_config(&definition.config, None, body.get("config"), &JsonMap::new()) {
         Ok(config) => config,
         Err(error) => return Ok(json_error(StatusCode::BAD_REQUEST, error)),
     };
@@ -384,12 +363,7 @@ async fn create_instance(
     }
 
     let title = resolve_title(definition.owner.as_ref(), &function_config);
-    let Some(request) = build_create_mutation(definition, &handle, mode, &title, &function_config, &body) else {
-        return Ok(json_error(
-            StatusCode::BAD_REQUEST,
-            format!("Unsupported function type: {}", definition.function_type.as_str()),
-        ));
-    };
+    let request = build_create_mutation(definition, &handle, mode, &title, &function_config, &body);
 
     let result = shopify.graphql(&request.mutation, Some(request.variables)).await?;
     let errors = extract_errors(&result);
@@ -409,10 +383,6 @@ async fn create_instance(
     ))
 }
 
-fn definition_by_handle<'a>(config: &'a OpenShopConfig, handle: &str) -> Option<&'a Function> {
-    config.functions.values().find(|definition| definition.handle == handle)
-}
-
 /// Update a function instance
 async fn update_instance(
     State(app): State<OpenShop>,
@@ -420,16 +390,13 @@ async fn update_instance(
     Path((handle, id)): Path<(String, String)>,
     body: Bytes,
 ) -> ApiResult {
-    let Some(definition) = definition_by_handle(app.config(), &handle) else {
+    let Some((definition, _)) = find_function(app.config(), &handle) else {
         return Ok(json_error(StatusCode::NOT_FOUND, "Function not found"));
     };
 
     let body = json_object_body(&body);
     let mode = discount_mode_from_body(&body, definition.first_mode());
-    if get_mutations(definition, Some(mode))
-        .and_then(|mutations| mutations.update)
-        .is_none()
-    {
+    if get_mutations(definition, Some(mode)).update.is_none() {
         return Ok(json_error(
             StatusCode::BAD_REQUEST,
             format!(
@@ -439,22 +406,14 @@ async fn update_instance(
         ));
     }
 
-    let function_config = match validate_function_config(&definition.config, body.get("config")) {
+    let function_config = match parse_provider_config(&definition.config, None, body.get("config"), &JsonMap::new()) {
         Ok(config) => config,
         Err(error) => return Ok(json_error(StatusCode::BAD_REQUEST, error)),
     };
     let shopify = session.shopify_client(&app);
 
     let title = resolve_title(definition.owner.as_ref(), &function_config);
-    let Some(request) = build_update_mutation(definition, &handle, mode, &id, &title, &function_config, &body) else {
-        return Ok(json_error(
-            StatusCode::BAD_REQUEST,
-            format!(
-                "Unsupported function type for update: {}",
-                definition.function_type.as_str()
-            ),
-        ));
-    };
+    let request = build_update_mutation(definition, &handle, mode, &id, &title, &function_config, &body);
 
     let result = shopify.graphql(&request.mutation, Some(request.variables)).await?;
     let errors = extract_errors(&result);
@@ -471,7 +430,7 @@ async fn delete_instance(
     Path((handle, id)): Path<(String, String)>,
     RawQuery(raw_query): RawQuery,
 ) -> ApiResult {
-    let Some(definition) = definition_by_handle(app.config(), &handle) else {
+    let Some((definition, _)) = find_function(app.config(), &handle) else {
         return Ok(json_error(StatusCode::NOT_FOUND, "Function not found"));
     };
 
@@ -485,15 +444,7 @@ async fn delete_instance(
         ));
     }
     let mode = requested_mode.unwrap_or_else(|| definition.first_mode());
-    let Some(mutations) = get_mutations(definition, Some(mode)) else {
-        return Ok(json_error(
-            StatusCode::BAD_REQUEST,
-            format!(
-                "Function type \"{}\" has no GraphQL API",
-                definition.function_type.as_str()
-            ),
-        ));
-    };
+    let mutations = get_mutations(definition, Some(mode));
 
     let shopify = session.shopify_client(&app);
     let request = build_delete_mutation(mutations.delete, &id);

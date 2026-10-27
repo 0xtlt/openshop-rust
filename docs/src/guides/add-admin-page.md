@@ -174,7 +174,7 @@ struct AdminUi;
 
 static APP: App = app! {
     // ... providers, flows, pages and other settings ...
-    admin_ui: UiSource::assets(|path| AdminUi::get(path).map(|file| file.data)),
+    admin_ui: UiSource::Assets(|path| AdminUi::get(path).map(|file| file.data)),
 };
 ```
 

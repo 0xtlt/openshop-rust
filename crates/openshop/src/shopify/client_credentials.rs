@@ -439,9 +439,8 @@ impl ClientCredentials {
                 uninstalled: stored.is_some_and(|stored| stored.uninstalled),
             }),
         };
-        let client = app
-            .apps()
-            .oauth(resolved)
+        let client = resolved
+            .oauth
             .builder(&ShopDomain::new(&shop)?)
             .auth(auth)
             .token_store(store)

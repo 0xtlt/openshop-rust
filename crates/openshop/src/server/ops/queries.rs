@@ -19,12 +19,8 @@ const STATEMENT_TIMEOUT: &str = "10s";
 /// A transaction whose statements are bounded by [`STATEMENT_TIMEOUT`]. It only
 /// reads, and ends with a rollback when it is dropped.
 async fn bounded(db: &PgPool) -> Result<Transaction<'static, Postgres>> {
-    bounded_by(db, STATEMENT_TIMEOUT).await
-}
-
-async fn bounded_by(db: &PgPool, timeout: &str) -> Result<Transaction<'static, Postgres>> {
     let mut tx = db.begin().await?;
-    sqlx::query(&format!("SET LOCAL statement_timeout = '{timeout}'"))
+    sqlx::query(&format!("SET LOCAL statement_timeout = '{STATEMENT_TIMEOUT}'"))
         .execute(&mut *tx)
         .await?;
     Ok(tx)
@@ -110,60 +106,30 @@ type Sql = QueryBuilder<'static, Postgres>;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct Cursor {
     pub at: DateTime<Utc>,
-    /// Absent in an address made before pages were cut on the id too: the page
-    /// then stops before every row of that instant.
-    pub id: Option<Uuid>,
+    pub id: Uuid,
 }
 
 impl Cursor {
     pub(super) fn new(at: DateTime<Utc>, id: Uuid) -> Self {
-        Self { at, id: Some(id) }
+        Self { at, id }
     }
 
-    /// `2026-10-11T08:00:00.000000Z` or `2026-10-11T08:00:00.000000Z_<id>`.
+    /// `2026-10-11T08:00:00.000000Z_<id>`.
     pub(super) fn parse(value: &str) -> Option<Self> {
-        let (at, id) = match value.split_once('_') {
-            Some((at, id)) => (at, Some(Uuid::parse_str(id).ok()?)),
-            None => (value, None),
-        };
-        let at = DateTime::parse_from_rfc3339(at).ok()?.with_timezone(&Utc);
-        Some(Self { at, id })
+        let (at, id) = value.split_once('_')?;
+        Some(Self {
+            at: DateTime::parse_from_rfc3339(at).ok()?.with_timezone(&Utc),
+            id: Uuid::parse_str(id).ok()?,
+        })
     }
 
     pub(super) fn param(&self) -> String {
-        let at = self.at.to_rfc3339_opts(SecondsFormat::Micros, true);
-        match self.id {
-            Some(id) => format!("{at}_{id}"),
-            None => at,
-        }
+        format!("{}_{}", self.at.to_rfc3339_opts(SecondsFormat::Micros, true), self.id)
     }
 
     fn push(&self, query: &mut Sql, at: &str, id: &str) {
-        match self.id {
-            Some(cursor_id) => {
-                query.push(format!("({at}, {id}) < ("));
-                query.push_bind(self.at).push(", ").push_bind(cursor_id).push(")");
-            }
-            None => {
-                query.push(format!("{at} < ")).push_bind(self.at);
-            }
-        }
-    }
-}
-
-/// Appends ` WHERE` before the first condition and ` AND` before the others.
-struct Conditions {
-    any: bool,
-}
-
-impl Conditions {
-    fn new() -> Self {
-        Self { any: false }
-    }
-
-    fn next(&mut self, query: &mut Sql) {
-        query.push(if self.any { " AND " } else { " WHERE " });
-        self.any = true;
+        query.push(format!("({at}, {id}) < ("));
+        query.push_bind(self.at).push(", ").push_bind(self.id).push(")");
     }
 }
 
@@ -182,25 +148,22 @@ pub(super) struct RunFilter {
 
 impl RunFilter {
     fn push(&self, query: &mut Sql) {
-        let mut conditions = Conditions::new();
+        query.push(" WHERE true");
         if let Some(since) = self.since {
-            conditions.next(query);
-            query.push("created_at >= ").push_bind(since);
+            query.push(" AND created_at >= ").push_bind(since);
         }
         if let Some(before) = self.before {
-            conditions.next(query);
+            query.push(" AND ");
             before.push(query, "created_at", "id");
         }
         if let Some(status) = &self.status {
-            conditions.next(query);
-            query.push("status = ").push_bind(status.clone());
+            query.push(" AND status = ").push_bind(status.clone());
         }
         if let Some(flow) = &self.flow {
-            conditions.next(query);
-            query.push("flow_name = ").push_bind(flow.clone());
+            query.push(" AND flow_name = ").push_bind(flow.clone());
         }
         if let Some(shop) = &self.shop {
-            conditions.next(query);
+            query.push(" AND ");
             if self.exact_shop {
                 query.push("shop = ").push_bind(shop.clone());
             } else {
@@ -208,8 +171,7 @@ impl RunFilter {
             }
         }
         if let Some(text) = &self.text {
-            conditions.next(query);
-            query.push("error ILIKE ").push_bind(containing(text));
+            query.push(" AND error ILIKE ").push_bind(containing(text));
         }
     }
 }
@@ -292,30 +254,25 @@ pub(super) struct LogFilter {
 
 impl LogFilter {
     fn push(&self, query: &mut Sql) {
-        let mut conditions = Conditions::new();
+        query.push(" WHERE true");
         if let Some(since) = self.since {
-            conditions.next(query);
-            query.push("l.created_at >= ").push_bind(since);
+            query.push(" AND l.created_at >= ").push_bind(since);
         }
         if let Some(before) = self.before {
-            conditions.next(query);
+            query.push(" AND ");
             before.push(query, "l.created_at", "l.id");
         }
         if let Some(level) = &self.level {
-            conditions.next(query);
-            query.push("l.level = ").push_bind(level.clone());
+            query.push(" AND l.level = ").push_bind(level.clone());
         }
         if let Some(flow) = &self.flow {
-            conditions.next(query);
-            query.push("r.flow_name = ").push_bind(flow.clone());
+            query.push(" AND r.flow_name = ").push_bind(flow.clone());
         }
         if let Some(shop) = &self.shop {
-            conditions.next(query);
-            query.push("r.shop ILIKE ").push_bind(containing(shop));
+            query.push(" AND r.shop ILIKE ").push_bind(containing(shop));
         }
         if let Some(text) = &self.text {
-            conditions.next(query);
-            query.push("l.message ILIKE ").push_bind(containing(text));
+            query.push(" AND l.message ILIKE ").push_bind(containing(text));
         }
     }
 }
@@ -514,10 +471,9 @@ pub(super) async fn shops(
     );
     query
         .push_bind(since)
-        .push(" GROUP BY app_handle, shop) r ON r.app_handle = i.app_handle AND r.shop = i.shop");
-    let mut conditions = Conditions::new();
+        .push(" GROUP BY app_handle, shop) r ON r.app_handle = i.app_handle AND r.shop = i.shop WHERE true");
     if let Some(shop) = shop {
-        conditions.next(&mut query);
+        query.push(" AND ");
         if exact {
             query.push("i.shop = ").push_bind(shop.to_string());
         } else {
@@ -531,8 +487,7 @@ pub(super) async fn shops(
         _ => None,
     };
     if let Some(state) = state {
-        conditions.next(&mut query);
-        query.push(state);
+        query.push(" AND ").push(state);
     }
     query
         .push(" ORDER BY failed DESC, runs DESC, i.installed_at DESC, i.shop ASC LIMIT ")
@@ -658,15 +613,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_slow_statement_of_the_dashboard_is_cancelled() {
+    async fn the_statements_of_the_dashboard_are_bounded() {
         let db = TestDb::create().await.unwrap();
-        let mut tx = bounded_by(&db.pool, "100ms").await.unwrap();
-        let error = sqlx::query("SELECT pg_sleep(5)").execute(&mut *tx).await.unwrap_err();
-        // query_canceled
-        let code = error.as_database_error().and_then(|error| error.code());
-        assert_eq!(code.as_deref(), Some("57014"), "{error}");
-        drop(tx);
-
         let mut tx = bounded(&db.pool).await.unwrap();
         let (timeout,): (String,) = sqlx::query_as("SHOW statement_timeout")
             .fetch_one(&mut *tx)

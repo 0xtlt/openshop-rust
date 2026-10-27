@@ -1342,7 +1342,7 @@ impl RouteAuthContext {
     /// Resolves an installed shop, and gives what a context gives for it:
     /// its database, its Shopify client and its providers.
     pub async fn for_shop(&self, shop: impl Into<RouteShopInput>) -> Result<RouteShopContext> {
-        crate::server::routes::resolve_shop_context(&self.app, shop.into()).await
+        crate::server::connectors::resolve_shop_context(&self.app, shop.into()).await
     }
 }
 
@@ -1363,7 +1363,7 @@ impl<A> RouteContext<A> {
     /// Resolves an installed shop, and gives what a context gives for it:
     /// its database, its Shopify client and its providers.
     pub async fn for_shop(&self, shop: impl Into<RouteShopInput>) -> Result<RouteShopContext> {
-        crate::server::routes::resolve_shop_context(&self.app, shop.into()).await
+        crate::server::connectors::resolve_shop_context(&self.app, shop.into()).await
     }
 }
 
@@ -1574,44 +1574,10 @@ impl<A> Route<A> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub enum McpCapabilityType {
-    Tool,
-    Resource,
-}
-
-impl McpCapabilityType {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Tool => "tool",
-            Self::Resource => "resource",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
 pub enum McpRiskLevel {
     Low,
     Medium,
     High,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum McpAuditStatus {
-    Success,
-    Denied,
-    Error,
-}
-
-impl McpAuditStatus {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Success => "success",
-            Self::Denied => "denied",
-            Self::Error => "error",
-        }
-    }
 }
 
 /// A permission an MCP token can be granted, and that tools and resources

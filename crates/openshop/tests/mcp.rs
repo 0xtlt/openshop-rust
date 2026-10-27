@@ -1185,10 +1185,10 @@ async fn mcp_is_rejected_when_disabled_in_the_config() {
     assert_eq!(status, 403);
     assert_eq!(body, json!({ "error": "MCP is disabled" }));
 
-    // Authentication comes first.
+    // A disabled endpoint refuses before it looks at the token.
     let (status, body) = mcp_send(&ctx, None, "{}").await;
-    assert_eq!(status, 401);
-    assert_eq!(body, json!({ "error": "Unauthorized: missing MCP bearer token" }));
+    assert_eq!(status, 403);
+    assert_eq!(body, json!({ "error": "MCP is disabled" }));
     ctx.shutdown().await.unwrap();
 }
 
@@ -1346,7 +1346,7 @@ async fn initialize_describes_the_server(ctx: &TestContext) {
                     "tools": { "listChanged": false },
                     "resources": { "subscribe": false, "listChanged": false },
                 },
-                "serverInfo": { "name": "openshop", "version": "0.1.1" },
+                "serverInfo": { "name": "openshop", "version": env!("CARGO_PKG_VERSION") },
             },
         })
     );

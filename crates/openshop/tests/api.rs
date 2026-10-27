@@ -12,7 +12,7 @@ use openshop::db::schema::FlowRun;
 use openshop::engine::abort::register_abort;
 use openshop::engine::{RunFlowOptions, run_flow};
 use openshop::runtime::time::to_iso;
-use openshop::server::ServerOptions;
+use openshop::server::{ServerOptions, UiSource};
 use openshop::testing::{TestContext, TestOptions, session_token, sign_session_token};
 use openshop::{
     Concurrency, Cron, DispatchOptions, FlowCanceledError, FlowContext, IndexMap, OpenShopConfig, PgPool, RetryPolicy,
@@ -1937,7 +1937,7 @@ async fn get_run_logs_export_sanitizes_unknown_formats(ctx: &TestContext) {
     let (run_id, _) = seed_order_logs(ctx).await;
 
     for (format, extension) in [
-        ("xml", "xml"),
+        ("xml", "json"),
         ("../../etc/passwd", "json"),
         ("a\"b", "json"),
         ("", "json"),
@@ -3379,8 +3379,20 @@ async fn cors_is_only_enabled_without_ui_or_in_dev_mode() {
     let origin = "https://admin.shopify.com";
     for (server, expected) in [
         (ServerOptions::default(), Some(origin)),
-        (ServerOptions::production(), None),
-        (ServerOptions::development(), Some(origin)),
+        (
+            ServerOptions {
+                ui: UiSource::Embedded,
+                dev: false,
+            },
+            None,
+        ),
+        (
+            ServerOptions {
+                ui: UiSource::Embedded,
+                dev: true,
+            },
+            Some(origin),
+        ),
     ] {
         let ctx = TestContext::with_options(
             api_config(),

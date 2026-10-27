@@ -2,6 +2,7 @@ use axum::Router;
 use axum::body::Bytes;
 use axum::extract::{Extension, Path, RawQuery, State};
 use axum::http::StatusCode;
+use axum::response::Response;
 use axum::routing::{get, post};
 use chrono::{DateTime, Duration, Utc};
 use indexmap::IndexMap;
@@ -195,13 +196,8 @@ async fn export_run_logs(
         app.db().clone(),
         &run.id.to_string(),
         format,
-        RunLogOptions {
-            query: query.get("q").map(String::as_str).unwrap_or_default(),
-            levels: query.get("levels").map(String::as_str).unwrap_or("info,warn,error"),
-            include_context: false,
-            limit: MAX_LIMIT,
-            cursor: None,
-        },
+        query.get("q").map(String::as_str).unwrap_or_default(),
+        query.get("levels").map(String::as_str).unwrap_or("info,warn,error"),
     );
     match response {
         Ok(response) => Ok(response),
@@ -232,10 +228,7 @@ async fn run_flow(
         Ok(result) => Ok(json_response(StatusCode::ACCEPTED, json!(result))),
         Err(error) => {
             if let Some(conflict) = error.downcast_ref::<FlowConcurrencyError>() {
-                Ok(json_response(
-                    StatusCode::CONFLICT,
-                    json!({ "error": conflict.to_string(), "existingRunId": conflict.existing_run_id }),
-                ))
+                Ok(concurrency_conflict(conflict))
             } else if let Some(unknown) = error.downcast_ref::<UnknownFlowError>() {
                 Ok(json_error(
                     StatusCode::NOT_FOUND,
@@ -248,6 +241,14 @@ async fn run_flow(
             }
         }
     }
+}
+
+/// `409` for a flow that rejects concurrent runs, with the run that is active.
+fn concurrency_conflict(conflict: &FlowConcurrencyError) -> Response {
+    json_response(
+        StatusCode::CONFLICT,
+        json!({ "error": conflict.to_string(), "existingRunId": conflict.existing_run_id }),
+    )
 }
 
 /// The answer to a transition that matched no row: the run is gone (`404`), or
@@ -324,10 +325,7 @@ async fn retry_run(
         && let Err(error) = reject_when_active(&mut tx, &run.app_handle, &run.shop, &run.flow_name, Some(run.id)).await
     {
         return match error.downcast_ref::<FlowConcurrencyError>() {
-            Some(conflict) => Ok(json_response(
-                StatusCode::CONFLICT,
-                json!({ "error": conflict.to_string(), "existingRunId": conflict.existing_run_id }),
-            )),
+            Some(conflict) => Ok(concurrency_conflict(conflict)),
             None => Err(error.into()),
         };
     }

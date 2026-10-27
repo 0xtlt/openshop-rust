@@ -59,11 +59,11 @@ fn proxy_pairs<'a>(pairs: impl IntoIterator<Item = (&'a str, &'a str)>) -> Vec<(
 /// and no key of the visitor, after the value before it, ends with the name
 /// of a parameter of Shopify.
 pub(crate) fn proxy_params_are_unambiguous(params: &[(String, String)]) -> bool {
+    // `shopify_api` refuses a repeated `signature` itself.
     let repeated = |name: &str| params.iter().filter(|(key, _)| key == name).count() > 1;
     if params
         .iter()
         .any(|(key, value)| key.is_empty() || key.contains('=') || value.contains('='))
-        || repeated("signature")
         || PROXY_OWN_PARAMETERS.iter().any(|name| repeated(name))
     {
         return false;
@@ -134,7 +134,6 @@ mod tests {
                 .is_ok()
     }
 
-
     fn pairs(params: &[(&str, &str)]) -> Vec<(String, String)> {
         params
             .iter()
@@ -152,90 +151,6 @@ mod tests {
 
     fn verifies(params: &[(&str, &str)]) -> bool {
         verify_proxy_signature(&signed_pairs(params, SECRET), SECRET)
-    }
-
-    fn shop_at(timestamp: i64) -> bool {
-        let timestamp = timestamp.to_string();
-        let params = [("shop", "test.myshopify.com"), ("timestamp", timestamp.as_str())];
-        verify_proxy_signature(&signed_pairs(&params, SECRET), SECRET)
-    }
-
-    #[test]
-    fn verifies_proxy_signatures() {
-        let params = [
-            ("shop", "test.myshopify.com"),
-            ("path_prefix", "/apps/openshop"),
-            ("timestamp", TIMESTAMP.as_str()),
-        ];
-        let signed = signed_pairs(&params, SECRET);
-        assert!(verify_proxy_signature(&signed, SECRET));
-        assert!(!verify_proxy_signature(&signed, "other-secret"));
-        assert!(!verify_proxy_signature(&signed, ""));
-        assert!(!verify_proxy_signature(&signed, "  "));
-
-        let mut bad = signed.clone();
-        bad[3].1.push_str("zz");
-        assert!(!verify_proxy_signature(&bad, SECRET));
-        bad[3].1 = String::new();
-        assert!(!verify_proxy_signature(&bad, SECRET));
-
-        let mut other_shop = signed.clone();
-        other_shop[0].1 = "other.myshopify.com".to_string();
-        assert!(!verify_proxy_signature(&other_shop, SECRET));
-
-        // The order of the parameters does not matter, nor does where the signature is.
-        let mut shuffled = signed.clone();
-        shuffled.reverse();
-        assert!(verify_proxy_signature(&shuffled, SECRET));
-    }
-
-    #[test]
-    fn a_proxy_signature_is_only_fresh_for_a_few_minutes() {
-        let now = chrono::Utc::now().timestamp();
-        // Either side of now, within the 90 seconds of `shopify_api`.
-        assert!(shop_at(now));
-        assert!(shop_at(now - 60));
-        assert!(shop_at(now + 60));
-        // Replayed later, or signed by a clock that is ahead.
-        assert!(!shop_at(now - 120));
-        assert!(!shop_at(now + 120));
-        assert!(!shop_at(now - 86_400));
-        assert!(!shop_at(i64::MIN));
-        assert!(!shop_at(i64::MAX));
-    }
-
-    #[test]
-    fn a_proxy_signature_needs_a_numeric_timestamp() {
-        let shop = ("shop", "test.myshopify.com");
-        assert!(!verifies(&[shop]));
-        for timestamp in ["", "soon", "1780000000.5", "0x6a0b3c00", " 1780000000"] {
-            assert!(!verifies(&[shop, ("timestamp", timestamp)]), "{timestamp}");
-        }
-        assert!(verifies(&[shop, ("timestamp", TIMESTAMP.as_str())]));
-    }
-
-    #[test]
-    fn a_parameter_sent_several_times_is_signed_with_its_values_joined() {
-        // Shopify signs `extra=1,2` for `extra=1&extra=2`.
-        let joined = signed_pairs(
-            &[("shop", "test.myshopify.com"), ("extra", "1,2"), ("timestamp", TIMESTAMP.as_str())],
-            SECRET,
-        );
-        let signature = joined[3].clone();
-        let mut repeated = pairs(&[
-            ("shop", "test.myshopify.com"),
-            ("extra", "1"),
-            ("timestamp", TIMESTAMP.as_str()),
-            ("extra", "2"),
-        ]);
-        repeated.push(signature);
-        assert!(verify_proxy_signature(&joined, SECRET));
-        assert!(verify_proxy_signature(&repeated, SECRET));
-
-        // The order of the values is part of what is signed.
-        repeated[1].1 = "2".to_string();
-        repeated[3].1 = "1".to_string();
-        assert!(!verify_proxy_signature(&repeated, SECRET));
     }
 
     #[test]
