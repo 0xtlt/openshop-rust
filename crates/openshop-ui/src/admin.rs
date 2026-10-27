@@ -6,11 +6,13 @@
 
 use crate::{
     dom,
+    fetch::session_headers,
     http::{self, Method},
     shopify,
 };
 use leptos::{prelude::*, task::spawn_local};
 use leptos_router::hooks::use_location;
+pub use openshop_shared::AdminFunctionKind;
 use openshop_shared::build_admin_function_rpc_url;
 use send_wrapper::SendWrapper;
 use serde::{Serialize, de::DeserializeOwned};
@@ -26,21 +28,6 @@ use std::{
     },
 };
 use web_sys::{AbortController, AbortSignal};
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum AdminFunctionKind {
-    Loader,
-    Action,
-}
-
-impl AdminFunctionKind {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Loader => "loader",
-            Self::Action => "action",
-        }
-    }
-}
 
 /// Client-side handle to a loader or action registered on the server for a custom admin page.
 ///
@@ -179,10 +166,9 @@ struct Call<'a> {
 
 async fn call_admin_function<O: DeserializeOwned>(call: Call<'_>) -> Result<O, AdminRpcError> {
     let url = build_admin_function_rpc_url(call.kind.as_str(), call.name, call.pathname);
-    let mut headers = vec![("content-type".to_string(), "application/json".to_string())];
-    if let Some(token) = shopify::id_token().await.map_err(AdminRpcError::from_message)? {
-        headers.push(("authorization".to_string(), format!("Bearer {token}")));
-    }
+    // Unlike the requests of the built-in screens, a call needs its session.
+    let token = shopify::id_token().await.map_err(AdminRpcError::from_message)?;
+    let mut headers = session_headers(token, true);
     if let Some(key) = call.idempotency_key {
         headers.push(("idempotency-key".to_string(), key.to_string()));
     }

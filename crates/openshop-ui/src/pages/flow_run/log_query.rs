@@ -2,7 +2,7 @@
 
 use crate::{json, query::QueryParams, types::LogEntry};
 use serde_json::Value;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 pub const LOG_LEVELS: [&str; 3] = ["info", "warn", "error"];
 const DEFAULT_LEVELS_PARAM: &str = "info,warn,error";
@@ -65,34 +65,6 @@ pub fn export_url(run_id: &str, query: &str, levels: &[String], format: &str) ->
     params.set("levels", &levels.join(","));
     params.set("format", format);
     params.append_to(&format!("/api/runs/{run_id}/logs/export"))
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct LevelCounts {
-    pub info: usize,
-    pub warn: usize,
-    pub error: usize,
-}
-
-impl LevelCounts {
-    pub fn get(&self, level: &str) -> usize {
-        match level {
-            "info" => self.info,
-            "warn" => self.warn,
-            "error" => self.error,
-            _ => 0,
-        }
-    }
-}
-
-/// The counters of the levels, from the counts of the whole run the server sends.
-pub fn count_levels(counts: &HashMap<String, u64>) -> LevelCounts {
-    let count = |level: &str| counts.get(level).copied().unwrap_or(0) as usize;
-    LevelCounts {
-        info: count("info"),
-        warn: count("warn"),
-        error: count("error"),
-    }
 }
 
 /// Records the ids of `logs` and returns those not seen before. The first load only seeds
@@ -181,26 +153,6 @@ mod tests {
             export_url("abc", "order", &levels(&["warn", "info"]), "csv"),
             "/api/runs/abc/logs/export?q=order&levels=warn%2Cinfo&format=csv"
         );
-    }
-
-    #[test]
-    fn counts_logs_per_level() {
-        let sent = HashMap::from([
-            ("info".to_string(), 2),
-            ("error".to_string(), 1),
-            ("debug".to_string(), 4),
-        ]);
-        let counts = count_levels(&sent);
-        assert_eq!(
-            counts,
-            LevelCounts {
-                info: 2,
-                warn: 0,
-                error: 1
-            }
-        );
-        assert_eq!(counts.get("info"), 2);
-        assert_eq!(counts.get("debug"), 0);
     }
 
     #[test]

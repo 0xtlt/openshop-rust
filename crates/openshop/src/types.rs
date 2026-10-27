@@ -537,7 +537,7 @@ macro_rules! shop_scope {
     )+};
 }
 
-shop_scope!(FlowContext, WebhookContext, ProxyContext, RouteShopContext, McpContext);
+shop_scope!(FlowContext, WebhookContext, ProxyContext, RouteShopContext, McpContext, crate::admin::AdminContext);
 
 // ─── Flow ────────────────────────────────────────────────────────────
 

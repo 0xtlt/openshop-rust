@@ -337,6 +337,12 @@ A page has at most one view: `fn() -> impl IntoView`, or
 `fn(params: RouteParams) -> impl IntoView`. Components it is made of are
 ordinary Leptos `#[component]` functions, written outside the block.
 
+Polaris components are plain custom elements. Pass their props as attributes
+(`listSlot="primary"`, `disabled=move || busy.get()`), except the `value` and
+`checked` of form fields, which only follow the property: use `prop:value` /
+`prop:checked` together with `on:input` / `on:change`. Wrap attribute values
+that contain `>` in braces.
+
 With a view, the block gains a constant per loader and action, named after the
 function: `list_reviews` is `ReviewsPage::LIST_REVIEWS`. The constant is an
 `AdminFunctionRef<Input, Output>`: it carries the kind and the name of the
@@ -496,7 +502,7 @@ error is logged with a request ID and returned without details.
 | `404` | `NOT_FOUND` | The page, function, or kind does not exist. |
 | `422` | `INVALID_INPUT` | The input does not satisfy the function's schema. |
 | Your status | Your code | The handler returned an `AdminPublicError`. |
-| `500` | `INTERNAL_ERROR` | Any other handler error, a panic, an access rule that failed, or an output rejected by [`.output(…)`](#without-the-attribute). |
+| `500` | `INTERNAL_ERROR` | Any other handler error, a panic, or an access rule that failed. |
 
 Error bodies have the form
 `{ "error": "<message>", "code": "<code>", "requestId": "<id>" }`, plus
@@ -517,8 +523,7 @@ session token validation, policies, route params, and tenant isolation. See
 ## Without the attribute
 
 `#[admin_page]` is built on `AdminPage`, which can be used directly when the
-functions of a page are only known at run time, or need what the attribute
-does not state, such as an output validator:
+functions of a page are only known at run time:
 
 ```rust,ignore
 use openshop::prelude::*;
@@ -556,8 +561,8 @@ their page:
 
 `page.function(name, function)` registers an `AdminFunction`. The typed
 constructors need the `schema` cargo feature. An action always has an input
-schema. `AdminFunction` also has the builder methods `.input(schema)`,
-`.output(validate)`, and `.authorize(rule)`.
+schema. `AdminFunction` also has the builder methods `.input(schema)` and
+`.authorize(rule)`.
 
 A rule, for `.access(…)` and `.authorize(…)`, is an async function or a
 closure that takes the `AdminContext` and returns `Result<bool>`. It is passed

@@ -23,6 +23,6 @@ mod url;
 pub mod admin;
 pub mod shopify;
 
-pub use app::App;
+pub use app::mount;
 pub use custom_admin_pages::{CustomAdminPage, CustomPageView, RouteParams};
 pub use router::route as navigate;

@@ -1,4 +1,4 @@
-use super::log_query::{LOG_LEVELS, LevelCounts, export_url, payload_text};
+use super::log_query::{LOG_LEVELS, export_url, payload_text};
 use crate::{
     dom::{self, localized},
     fetch::api_download,
@@ -6,7 +6,7 @@ use crate::{
     types::LogEntry,
 };
 use leptos::{prelude::*, task::spawn_local};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 const LOG_STYLES: &str = "
             @keyframes logSlideIn {
@@ -48,7 +48,7 @@ pub fn LogsSection(
     run_id: Memo<Option<String>>,
     query: RwSignal<String>,
     levels: RwSignal<Vec<String>>,
-    level_counts: RwSignal<LevelCounts>,
+    level_counts: RwSignal<HashMap<String, u64>>,
     filtered_logs: RwSignal<Vec<LogEntry>>,
     logs_error: RwSignal<Option<String>>,
     total_logs: RwSignal<u64>,
@@ -152,7 +152,7 @@ pub fn LogsSection(
                             >
                                 {level.to_uppercase()}
                                 " ("
-                                {move || level_counts.get().get(level)}
+                                {move || level_counts.with(|counts| counts.get(level).copied().unwrap_or(0))}
                                 ")"
                             </s-button>
                         }

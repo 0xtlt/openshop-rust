@@ -165,7 +165,6 @@ pub struct ProviderSummary {
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct McpAuditLog {
-    pub id: String,
     #[serde(default)]
     pub capability_name: Option<String>,
     #[serde(default)]

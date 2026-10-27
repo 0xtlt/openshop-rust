@@ -1,5 +1,21 @@
 //! URL scheme for custom admin page loaders and actions.
 
+/// A loader, a read, or an action, a write.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum AdminFunctionKind {
+    Loader,
+    Action,
+}
+
+impl AdminFunctionKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Loader => "loader",
+            Self::Action => "action",
+        }
+    }
+}
+
 /// Percent-encodes like JavaScript's `encodeURIComponent`.
 pub fn encode_uri_component(value: &str) -> String {
     let mut encoded = String::with_capacity(value.len());
@@ -37,7 +53,7 @@ pub fn decode_uri_component(value: &str) -> Option<String> {
     String::from_utf8(decoded).ok()
 }
 
-/// `kind` is `"loader"` or `"action"`.
+/// `kind` is `"loader"` or `"action"`: [`AdminFunctionKind::as_str`].
 pub fn build_admin_function_rpc_url(kind: &str, name: &str, pathname: &str) -> String {
     // The home of the admin, `/`, has no segment of its own.
     let page = pathname.strip_suffix('/').unwrap_or(pathname);

@@ -1,3 +1,3 @@
 fn main() {
-    openshop_ui::App::new().mount();
+    openshop_ui::mount([]);
 }

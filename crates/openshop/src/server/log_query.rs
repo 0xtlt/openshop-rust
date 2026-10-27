@@ -16,6 +16,7 @@ use regex::{Captures, Regex, RegexBuilder};
 use serde_json::Value;
 
 use crate::runtime::time::parse_date;
+use openshop_shared::json::js_string;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LogFilterOp {
@@ -245,27 +246,6 @@ pub fn parse_log_query(query: &str) -> Result<ParsedLogQuery, InvalidLogQuery> {
     match refused {
         Some(invalid) => Err(invalid),
         None => Ok(parsed),
-    }
-}
-
-/// Stringifies like JavaScript's `String(value)`.
-fn js_string(value: &Value) -> String {
-    match value {
-        Value::Null => "null".to_string(),
-        Value::Bool(flag) => flag.to_string(),
-        Value::Number(number) => match number.as_f64() {
-            Some(float) if number.is_f64() && float.fract() == 0.0 && float.abs() < 1e21 => {
-                format!("{}", float as i64)
-            }
-            _ => number.to_string(),
-        },
-        Value::String(text) => text.clone(),
-        Value::Array(items) => items
-            .iter()
-            .map(|item| if item.is_null() { String::new() } else { js_string(item) })
-            .collect::<Vec<_>>()
-            .join(","),
-        Value::Object(_) => "[object Object]".to_string(),
     }
 }
 

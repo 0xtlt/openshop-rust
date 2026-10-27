@@ -1,7 +1,7 @@
 use crate::{
+    components::json_modal::{JsonModal, show_json_modal},
     components::page::Page,
     components::table_header::TableHeader,
-    dom::{self, element_by_id, hide_modal, show_modal},
     fetch::{api_json, api_request},
     http::Method,
     json,
@@ -11,7 +11,6 @@ use leptos::{prelude::*, task::spawn_local};
 use serde_json::{Value, json};
 
 const INPUT_MODAL_ID: &str = "cron-input-modal";
-const INPUT_PRE_ID: &str = "cron-input-pre";
 
 fn shops_label(shops: Option<&CronShops>) -> String {
     match shops {
@@ -22,19 +21,9 @@ fn shops_label(shops: Option<&CronShops>) -> String {
 }
 
 fn show_input(cron: &CronItem) {
-    if element_by_id(INPUT_MODAL_ID).is_none() {
-        return;
-    }
     let input = json::pretty(cron.input.as_ref().unwrap_or(&Value::Null));
-    if let Some(pre) = element_by_id(INPUT_PRE_ID) {
-        pre.set_text_content(Some(&input));
-        let _ = pre.set_attribute("data-full", &input);
-    }
-    if let Some(title) = element_by_id("cron-input-title") {
-        let name = cron.name.as_deref().unwrap_or(&cron.flow);
-        let _ = title.set_attribute("title", &format!("Input — {name}"));
-    }
-    show_modal(INPUT_MODAL_ID);
+    let name = cron.name.as_deref().unwrap_or(&cron.flow);
+    show_json_modal(INPUT_MODAL_ID, &format!("Input — {name}"), &input, &input);
 }
 
 #[component]
@@ -74,15 +63,6 @@ pub fn Crons() -> impl IntoView {
             }
             toggling.set(None);
         });
-    };
-
-    let copy_input = |_| {
-        let full = element_by_id(INPUT_PRE_ID).and_then(|pre| pre.get_attribute("data-full"));
-        if let Some(full) = full.filter(|full| !full.is_empty()) {
-            spawn_local(async move {
-                let _ = dom::copy_text(&full).await;
-            });
-        }
     };
 
     let row = move |cron: CronItem| {
@@ -145,22 +125,7 @@ pub fn Crons() -> impl IntoView {
     };
 
     view! {
-        <ui-modal id=INPUT_MODAL_ID>
-            <div style="padding:16px">
-                <div style="display:flex;gap:6px;margin-bottom:8px">
-                    <s-button variant="secondary" on:click=copy_input>
-                        "Copy"
-                    </s-button>
-                </div>
-                <pre
-                    id=INPUT_PRE_ID
-                    style="font-family:ui-monospace, SFMono-Regular, Menlo, monospace;font-size:12px;line-height:1.5;background:#fafafa;border-radius:6px;padding:8px 12px;overflow:auto;max-height:60vh;white-space:pre-wrap;word-break:break-word;margin:0;border:1px solid #e3e3e3"
-                ></pre>
-            </div>
-            <ui-title-bar id="cron-input-title" title="Input">
-                <button on:click=|_| hide_modal(INPUT_MODAL_ID)>"Close"</button>
-            </ui-title-bar>
-        </ui-modal>
+        <JsonModal id=INPUT_MODAL_ID title="Input" />
 
         <Page heading="Crons">
             {move || error.get().map(|error| view! { <s-banner tone="critical">{error}</s-banner> })}
