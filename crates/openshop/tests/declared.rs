@@ -487,8 +487,8 @@ fn a_block_is_registered_once() {
     );
     // While the methods of a path can come one at a time.
     let config = builder()
-        .proxy("/widgets", Proxy::json().get(|_ctx| async { Ok(Value::Null) }))
-        .proxy("/widgets", Proxy::json().post(|_ctx| async { Ok(Value::Null) }))
+        .proxy("/widgets", Proxy::default().get(|_ctx| async { Ok(Value::Null) }))
+        .proxy("/widgets", Proxy::default().post(|_ctx| async { Ok(Value::Null) }))
         .route(
             "/status",
             Route::public().get(|_ctx| async { Ok(response::text("up")) }),
@@ -499,7 +499,10 @@ fn a_block_is_registered_once() {
         )
         .build()
         .unwrap();
-    assert!(config.proxies["/widgets"].get.is_some() && config.proxies["/widgets"].post.is_some());
+    assert_eq!(
+        config.proxies["/widgets"].handlers.keys().copied().collect::<Vec<_>>(),
+        ["GET", "POST"]
+    );
     assert_eq!(
         config.routes["/status"].handlers.keys().copied().collect::<Vec<_>>(),
         ["GET", "POST"]
@@ -610,9 +613,9 @@ async fn proxy_functions_share_a_path_by_method() {
     assert_eq!((list_widgets::METHOD, list_widgets::PATH), ("GET", "/widgets"));
     assert_eq!((create_widget::METHOD, create_widget::PATH), ("POST", "/widgets"));
     let config = APP.config().unwrap();
-    assert_eq!(config.proxies["/widgets"].response_type, Some(ProxyResponseType::Json));
-    assert_eq!(config.proxies["/banner"].response_type, Some(ProxyResponseType::Liquid));
-    assert_eq!(config.proxies["/page"].response_type, Some(ProxyResponseType::Html));
+    assert_eq!(config.proxies["/widgets"].response_type, ProxyResponseType::Json);
+    assert_eq!(config.proxies["/banner"].response_type, ProxyResponseType::Liquid);
+    assert_eq!(config.proxies["/page"].response_type, ProxyResponseType::Html);
 
     let ctx = TestContext::new(config).await.unwrap();
     let proxy = ctx.proxy();

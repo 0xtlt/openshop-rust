@@ -45,7 +45,7 @@ mod tests {
             ),
             (
                 "percentage".to_string(),
-                Field::number("Discount percentage").validate(validators::number_range(0.0, 100.0)),
+                Field::number("Discount percentage").validate(validators::range(Some(0.0), Some(100.0))),
             ),
             (
                 "excludedTags".to_string(),

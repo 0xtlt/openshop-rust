@@ -8,7 +8,7 @@ use serde_json::{Value, json};
 use crate::app::OpenShop;
 use crate::server::http::json_response;
 use crate::server::shop::ShopSession;
-use crate::types::{Cron, JsonMap};
+use crate::types::{Cron, CronShops, JsonMap};
 
 /// A cron entry as configured; unset fields are omitted. The shops it names
 /// are only the one of the session.
@@ -22,8 +22,8 @@ fn cron_json(cron: &Cron, shop: &str) -> Value {
     if let Some(input) = &cron.input {
         entry.insert("input".into(), input.clone());
     }
-    if let Some(shops) = &cron.shops {
-        entry.insert("shops".into(), shops.to_json_for(shop));
+    if cron.shops != CronShops::Global {
+        entry.insert("shops".into(), cron.shops.to_json_for(shop));
     }
     Value::Object(entry)
 }

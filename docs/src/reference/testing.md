@@ -38,7 +38,7 @@ context down when the function returns.
 | Part | Contract |
 | --- | --- |
 | `#[openshop::test(APP)]` | Names the application under test: `APP`, or a path such as `my_app::APP`. It can also be an expression that starts a context: see below. |
-| `ctx: &TestContext` | The only argument. Take `&mut TestContext` to [create resources with a factory](#use-factories-and-automatic-cleanup). |
+| `ctx: &TestContext` | The only argument. |
 | Return type | Nothing, or a `Result` whose error fails the test. |
 | Other attributes of the test, such as `#[ignore]` | They go below `#[openshop::test]`. |
 
@@ -85,7 +85,7 @@ A context can also be started by hand:
 
 | Constructor | Configuration | Options |
 | --- | --- | --- |
-| `TestContext::for_app(&APP).await`, or `APP.test().await` | `APP.config()` | [`TestOptions::installed()`](#testoptions). What `#[openshop::test]` calls. |
+| `TestContext::for_app(&APP).await` | `APP.config()` | [`TestOptions::installed()`](#testoptions). What `#[openshop::test]` calls. |
 | `TestContext::new(config).await` | Given | `TestOptions::default()`: the shop is not installed. |
 | `TestContext::with_options(config, options).await` | Given | Given |
 
@@ -106,12 +106,11 @@ host is refused: set `TEST_DATABASE_URL` to the database the tests may use.
 Contexts are independent, so tests can run in parallel
 against one database.
 
-`shutdown()` destroys factory-created resources, closes the server, and drops
-the schema. `#[openshop::test]` calls it when the function returns. A context
-that is dropped without `shutdown()`, for example because an assertion panicked
-first, still drops its schema on a best-effort basis: the attempt is limited to
-a few seconds and gives up when the schema is locked. Factory-created resources
-are only destroyed by `shutdown()` or `cleanup()`.
+`shutdown()` closes the server and drops the schema. `#[openshop::test]` calls
+it when the function returns. A context that is dropped without `shutdown()`,
+for example because an assertion panicked first, still drops its schema on a
+best-effort basis: the attempt is limited to a few seconds and gives up when
+the schema is locked.
 
 The example imports the application from the app's library target. In a
 binary-only project, write the tests in a `#[cfg(test)]` module of
@@ -156,10 +155,10 @@ in a test that ends with `ctx.shutdown().await`.
 
 | Field | Default | Purpose |
 | --- | --- | --- |
-| `shop` | `test.myshopify.com` | Default shop for flows, proxy signatures, tokens, and factories. |
+| `shop` | `test.myshopify.com` | Default shop for flows, proxy signatures, and tokens. |
 | `secret` | `test-secret` | Shopify API secret of the single-app setup. Signs proxy requests and session tokens. |
 | `api_key` | `test-app` | Shopify API key of the single-app setup. Session-token audience. |
-| `access_token` | `None`; `test-access-token` with `TestOptions::installed()` | Inserts an installation so Shopify client calls and factories can run. |
+| `access_token` | `None`; `test-access-token` with `TestOptions::installed()` | Inserts an installation so Shopify client calls can run. |
 | `encryption_key` | `None` | `ENCRYPTION_KEY` of the application. |
 | `development` | `true` | A development environment: without an `encryption_key`, secrets are stored in plaintext. With `false` (or `production: true`) and no key, the context does not start. |
 | `client_credentials_shop` | `None` | The `client_credentials_shop` setting of the application, in place of the one its configuration gives: the shop background work may get a token for with the [client credentials grant](authentication.md#client-credentials-grant), from the mock transport. A token stored by `access_token` is used as it is. |
@@ -168,7 +167,6 @@ in a test that ends with `ctx.shutdown().await`.
 | `cwd` | A directory without Shopify TOML files | Project root used to resolve Shopify TOML files. |
 | `server` | `ServerOptions::default()` | API only: no admin UI is served. |
 | `transport` | A new `MockTransport` | Transport shared with other contexts or prepared in advance. |
-| `live_shopify` | `false` | Sends Shopify requests over the network instead of to the mock transport, for tests that create real resources with factories. |
 
 `TestOptions` implements `Default`; set the fields you need with struct update
 syntax. `TestOptions::installed()` is the default options with an
@@ -205,9 +203,8 @@ fn another_shop() -> TestOptions {
 | `request_as(method, path, shop, sub)` | Request authenticated as staff user `sub` of `shop`. |
 | `session_token()` / `session_token_for(shop, sub)` | A signed session token, valid for one minute. |
 | `authorization_header()` / `authorization_header_for(shop, sub)` | `Bearer <session token>`. |
-| `create(&factory, overrides)`, `cleanup()` | Factory resources; see below. |
 | `reset_fakes()` | Resets every provider fake. |
-| `shutdown()` | Cleans up and drops the schema. `#[openshop::test]` calls it. |
+| `shutdown()` | Closes the server and drops the schema. `#[openshop::test]` calls it. |
 
 ## Test a flow
 
@@ -318,8 +315,6 @@ fn configure(ctx: &TestContext) {
 
     push.returns(2);
     push.rejects("warehouse offline");
-    push.on_call_returns(0, 2);
-    push.on_call_rejects(1, "rate limited");
 
     println!("{} {}", push.called(), push.call_count());
     let last: Option<Vec<Order>> = push.last_call().map(|call| call.args);
@@ -332,17 +327,15 @@ fn configure(ctx: &TestContext) {
 
 | `TypedFake` | Contract |
 | --- | --- |
-| `returns(value)` | Answers every call without a more specific rule. `value` has the type the method returns. |
-| `rejects(error)` | Makes every call without a more specific rule fail. |
-| `on_call_returns(n, value)`, `on_call_rejects(n, error)` | The answer of the `n`-th call, zero-based. |
+| `returns(value)` | Answers every call with `value`, of the type the method returns. |
+| `rejects(error)` | Makes every call fail, whatever `returns` gave. |
 | `called()`, `call_count()` | Whether, and how many times, the method was called. |
 | `calls()`, `last_call()` | The recorded calls, oldest first, as `TypedCall`s: `args` has the type of the arguments of the method. A method with several arguments gives them as a tuple, one without argument as `()`. |
-| `reset()` | Forgets the recorded calls and every rule. |
-| `untyped()` | The `FakeMethod` behind it, to answer with something the method could not return, or to replace its body. |
+| `reset()` | Forgets the recorded calls, `returns` and `rejects`. |
 
 `ctx.fakes.method("warehouse", "push")` returns the same fake without the
-types, a `FakeMethod`. It takes any serializable value, records the arguments
-as JSON, and can replace the body of the method:
+types, a `FakeMethod`. It takes any serializable value and records the
+arguments as JSON:
 
 ```rust,ignore
 use openshop::prelude::*;
@@ -353,9 +346,6 @@ fn configure(ctx: &TestContext) {
 
     push.returns(json!({ "accepted": true }));
     push.rejects("warehouse offline");
-    push.on_call_returns(0, json!({ "accepted": true }));
-    push.on_call_rejects(1, "rate limited");
-    push.implementation(|args| async move { Ok(json!({ "accepted": args.is_array() })) });
 
     println!("{} {}", push.called(), push.call_count());
     println!("{:?} {:?}", push.calls(), push.last_call());
@@ -365,11 +355,10 @@ fn configure(ctx: &TestContext) {
 }
 ```
 
-A call is answered by the first rule that applies: the rule for that call
-index (zero-based), then the implementation, then `rejects`, then `returns`. A
-fake without any rule returns `null`. `ctx.fakes.for_call(…)` and
-`ctx.fakes.method(…)` panic for an unknown provider or method;
-`ctx.fakes.get(…)` returns an `Option` instead.
+A call fails with the error of `rejects` when there is one, and returns the
+value of `returns` otherwise; a fake given neither returns `null`.
+`ctx.fakes.for_call(…)` and `ctx.fakes.method(…)` panic for an unknown provider
+or method.
 
 Give the fake of a typed method a result with `returns(…)`:
 `Warehouse::on(..).push(..)` refuses the default `null` with
@@ -514,101 +503,6 @@ async fn delivers_a_webhook(ctx: &TestContext) {
 }
 ```
 
-## Use factories and automatic cleanup
-
-Factories create Shopify resources through the context's Shopify client and
-remember how to delete them:
-
-```rust,ignore
-use openshop::prelude::*;
-use openshop::testing::Factory;
-
-#[derive(Clone)]
-pub struct Customer {
-    pub id: String,
-    pub email: String,
-}
-
-const CREATE_CUSTOMER: &str = "#graphql
-  mutation CreateCustomer($input: CustomerInput!) {
-    customerCreate(input: $input) {
-      customer { id email }
-      userErrors { message }
-    }
-  }
-";
-
-const DELETE_CUSTOMER: &str = "#graphql
-  mutation DeleteCustomer($id: ID!) {
-    customerDelete(input: { id: $id }) {
-      deletedCustomerId
-      userErrors { message }
-    }
-  }
-";
-
-pub fn customer_factory() -> Factory<Customer> {
-    Factory::new(
-        |shopify, overrides: Value| async move {
-            let email = overrides["email"].as_str().unwrap_or("test@example.com").to_string();
-            let data = shopify
-                .graphql(CREATE_CUSTOMER, json!({ "input": { "email": email } }))
-                .await?;
-            if let Some(error) = data["customerCreate"]["userErrors"].get(0) {
-                bail!("{}", error["message"]);
-            }
-            let id = data["customerCreate"]["customer"]["id"].as_str().unwrap_or_default().to_string();
-            Ok(Customer { id, email })
-        },
-        |shopify, customer: Customer| async move {
-            shopify.graphql(DELETE_CUSTOMER, json!({ "id": customer.id })).await?;
-            Ok(())
-        },
-    )
-}
-```
-
-`Factory::new(create, destroy)` takes what creates a resource, from the
-client of the shop and the overrides of a test, and what destroys it
-afterwards.
-
-Create and track a resource, in a test that takes `&mut TestContext`:
-
-```rust,ignore
-use my_app::APP;
-use openshop::prelude::*;
-use openshop::testing::TestContext;
-
-#[openshop::test(APP)]
-async fn creates_a_customer(ctx: &mut TestContext) {
-    let customer = ctx
-        .create(&customer_factory(), json!({ "email": "flow-test@example.com" }))
-        .await
-        .unwrap();
-    assert!(!customer.email.is_empty());
-}
-```
-
-`ctx.cleanup()` destroys tracked resources in last-in, first-out order. Cleanup
-continues after a destroy error and logs the failure. `ctx.shutdown()` calls
-cleanup again safely before closing the server, and `#[openshop::test]` calls
-`shutdown()` when the function returns.
-
-Without an installation that has an access token, `ctx.create()` fails with
-`No Shopify client available. Is the test shop installed?`. The context of
-`#[openshop::test]` has one.
-
-By default a `TestContext` talks to its `MockTransport`, so its factories
-exercise your scripted responses, not a real shop. Set
-`TestOptions::live_shopify` to `true`, with the `shop` and `access_token` of a
-development shop, to create real resources, in a context started with
-`TestContext::with_options(…)`. Prefer a dedicated development
-shop and never run destructive factories against a production shop.
-
-For manual lifecycle control, `openshop::testing` also exports `FactoryScope`.
-Construct it with a `ShopifyClient`, call `scope.create(&factory, overrides)`,
-inspect `scope.size()`, and call `scope.cleanup()` in teardown.
-
 ## Query the database
 
 `ctx.db` is the `sqlx` pool of the context's schema:
@@ -698,5 +592,5 @@ test that starts its context by hand needs an async test attribute such as
 `#[tokio::test]`.
 
 The context does not start a worker or the scheduler, and it does not make real
-Shopify requests unless `live_shopify` is set. `shutdown()` closes the HTTP
-server, cleans up factory resources, and drops the context's schema.
+Shopify requests: they go to its `MockTransport`. `shutdown()` closes the HTTP
+server and drops the context's schema.

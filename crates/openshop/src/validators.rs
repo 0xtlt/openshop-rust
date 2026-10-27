@@ -14,20 +14,13 @@ pub(crate) fn describe(value: &Value) -> String {
     }
 }
 
-fn format_number(number: f64) -> String {
+/// A number as a merchant writes it: `3`, not `3.0`.
+pub(crate) fn format_number(number: f64) -> String {
     if number.fract() == 0.0 && number.abs() < 1e15 {
         format!("{}", number as i64)
     } else {
         number.to_string()
     }
-}
-
-/// Any string.
-pub fn string() -> Validator {
-    Box::new(|value| match value {
-        Value::String(_) => Ok(value.clone()),
-        other => Err(format!("must be a string (was {})", describe(other))),
-    })
 }
 
 /// A string with at least one character.
@@ -136,32 +129,6 @@ fn is_internal_ipv6(address: std::net::Ipv6Addr) -> bool {
         || (first == 0x2001 && segments[1] == 0)
 }
 
-/// Any finite number.
-pub fn number()-> Validator {
-    Box::new(|value| match value.as_f64() {
-        Some(number) if number.is_finite() => Ok(value.clone()),
-        _ => Err(format!("must be a number (was {})", describe(value))),
-    })
-}
-
-/// A number within `min..=max`.
-pub fn number_range(min: f64, max: f64) -> Validator {
-    Box::new(move |value| match value.as_f64() {
-        Some(number) if number < min => Err(format!(
-            "must be at least {} (was {})",
-            format_number(min),
-            format_number(number)
-        )),
-        Some(number) if number > max => Err(format!(
-            "must be at most {} (was {})",
-            format_number(max),
-            format_number(number)
-        )),
-        Some(_) => Ok(value.clone()),
-        None => Err(format!("must be a number (was {})", describe(value))),
-    })
-}
-
 /// A number no smaller than `min` and no larger than `max`, for the bounds
 /// that are given. What `#[field(range(min = 1, max = 1000))]` checks.
 pub fn range(min: Option<f64>, max: Option<f64>) -> Validator {
@@ -236,8 +203,6 @@ mod tests {
 
     #[test]
     fn validates_strings_and_urls() {
-        assert!(string()(&json!("x")).is_ok());
-        assert_eq!(string()(&json!(1)).unwrap_err(), "must be a string (was 1)");
         assert!(non_empty()(&json!("x")).is_ok());
         assert_eq!(non_empty()(&json!("")).unwrap_err(), "must be non-empty");
         assert!(url()(&json!("https://warehouse.example.com/api")).is_ok());
@@ -336,17 +301,6 @@ mod tests {
 
     #[test]
     fn validates_numbers() {
-        assert!(number()(&json!(1.5)).is_ok());
-        assert!(number()(&json!("1")).is_err());
-        assert!(number_range(1.0, 1000.0)(&json!(100)).is_ok());
-        assert_eq!(
-            number_range(1.0, 1000.0)(&json!(0)).unwrap_err(),
-            "must be at least 1 (was 0)"
-        );
-        assert_eq!(
-            number_range(1.0, 1000.0)(&json!(1001)).unwrap_err(),
-            "must be at most 1000 (was 1001)"
-        );
         assert!(integer()(&json!(-3)).is_ok());
         assert_eq!(integer()(&json!(2.5)).unwrap_err(), "must be an integer (was 2.5)");
         assert!(integer()(&json!("3")).is_err());

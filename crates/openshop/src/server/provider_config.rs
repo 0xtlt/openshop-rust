@@ -188,7 +188,7 @@ mod tests {
             .field("enabled", Field::checkbox("Enabled"))
             .field(
                 "retries",
-                Field::number("Retries").validate(validators::number_range(0.0, 10.0)),
+                Field::number("Retries").validate(validators::range(Some(0.0), Some(10.0))),
             )
     }
 

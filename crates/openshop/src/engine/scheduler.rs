@@ -127,7 +127,7 @@ async fn configured_targets(app: &OpenShop) -> Result<Vec<CronTarget>> {
 }
 
 async fn resolve_targets(app: &OpenShop, entry: &Cron) -> Result<Vec<CronTarget>> {
-    match entry.shops.clone().unwrap_or_default() {
+    match entry.shops.clone() {
         CronShops::Global => Ok(vec![default_target("__global__")]),
         CronShops::All => {
             let rows: Vec<(String, String)> =

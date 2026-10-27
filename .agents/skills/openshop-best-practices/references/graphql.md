@@ -7,7 +7,7 @@ Write an operation known in advance with `graphql!`, the macro of
 Shopify's Admin schema when the crate compiles, and its variables and its
 result are typed. The crate that writes one depends on `openshop` alone (the
 generated code names `openshop::shopify_api`) and pins its version in `[package.metadata.shopify_api] api-version`; the first build
-downloads `graphql/admin.schema.json`, which is committed. `graphql()` and `graphql_as()` take any string and check
+downloads `graphql/admin.schema.json`, which is committed. `graphql()` takes any string and checks
 nothing at compile time; keep them for operations built at run time, and
 follow the rules of the later sections for those.
 
@@ -51,7 +51,7 @@ Reference: `docs/src/reference/graphql.md`.
 
 ## Untyped Operations
 
-The rest of this page applies to `graphql()` and `graphql_as()`.
+The rest of this page applies to `graphql()`.
 
 ## Expected Pattern
 
@@ -91,7 +91,7 @@ pub async fn product_title(shopify: &ShopifyClient, id: &str) -> Result<String> 
 ## Prefer Typed Responses
 
 When more than one or two fields are read, describe the response with serde
-types and call `graphql_as::<T>()`. It deserializes the `data` object:
+types and deserialize the `data` object `graphql()` returns into them:
 
 ```rust
 use openshop::ShopifyClient;
@@ -112,9 +112,8 @@ pub struct Product {
 }
 
 pub async fn get_product(shopify: &ShopifyClient, id: &str) -> Result<Product> {
-    let data: GetProductData = shopify
-        .graphql_as(GET_PRODUCT, json!({ "id": id }))
-        .await?;
+    let data = shopify.graphql(GET_PRODUCT, json!({ "id": id })).await?;
+    let data: GetProductData = openshop::serde_json::from_value(data)?;
     data.product.ok_or_else(|| anyhow!("Product {id} not found"))
 }
 ```

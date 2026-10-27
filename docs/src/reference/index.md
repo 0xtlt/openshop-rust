@@ -19,7 +19,7 @@ contract. For a complete procedure, start with the [how-to guides](../guides/ind
 - [Database and migrations](database.md) — connection, models, framework tables, and schema ownership.
 - [Logging](logging.md) — structured logs, the log query syntax, and export.
 - [Errors](errors.md) — framework error types and failure contracts.
-- [Testing](testing.md) — test contexts, fakes, signed requests, and factories.
+- [Testing](testing.md) — test contexts, fakes, and signed requests.
 
 ## Shopify and HTTP
 

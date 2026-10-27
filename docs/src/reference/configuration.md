@@ -50,7 +50,6 @@ a value: the binary runs it, a test reads its configuration.
 | `APP.run().await` | `Result<()>`. Runs the command in a binary that has its own runtime. |
 | `APP.config()` | `Result<OpenShopConfig>`: the configuration, after [validation](#runtime-validation). |
 | `APP.builder()` | `Result<OpenShopBuilder>`: the builder holding the blocks and settings of the declaration, to add to them. It fails when a setting does. See [Builder methods](#builder-methods). |
-| `APP.test().await` | `Result<TestContext>`: the application started for a test, with its shop installed. Needs the `testing` feature. See [Testing](testing.md#context-lifecycle). |
 
 Nothing is evaluated before one of these is called, and each call starts over.
 `APP.main()` and `APP.run()` read the declaration after `dev` loaded `.env`,
@@ -98,9 +97,9 @@ Import the function where the application is declared.
 
 Every other entry is a setting, written `name: value`. The value is an
 expression, passed to the [builder method](#builder-methods) of that name when
-the configuration is built. It can fail with `?`, such as a value read from
-the environment (`shopify: shopify_apps()?`): the error is the one
-`APP.config()` and `APP.run()` return.
+the configuration is built. The application reads a secret from the
+environment itself: `ops_password: std::env::var("OPS_PASSWORD").ok()`. A value
+can fail with `?`: the error is the one `APP.config()` and `APP.run()` return.
 
 | Setting | Value | Default when absent |
 | --- | --- | --- |
@@ -150,20 +149,15 @@ fn minimal() -> Result<OpenShopConfig> {
 ```
 
 A binary runs such a configuration with `openshop::cli::run(extended)`, which
-accepts either a function returning `Result<OpenShopConfig>` or an already
-built `OpenShopConfig`. Prefer the function: `dev` then loads `.env` before the
-configuration is built.
+takes a function returning `Result<OpenShopConfig>`: `dev` loads `.env` before
+it builds the configuration.
 
 | Method | Argument | Default when not called |
 | --- | --- | --- |
 | `.add::<Block>()` | A declared block, as a type: `.add::<Warehouse>()`, `.add::<sync_orders>()` | — |
 | `.provider(provider)` | `Provider`, registered under `provider.name` | No providers |
 | `.provider_as(key, provider)` | Key and `Provider` | — |
-| `.providers(providers)` | Iterator of `Provider`, each registered under its own name | — |
 | `.flow(flow)` | `Flow`, registered under `flow.name` | No flows |
-| `.flow_as(key, flow)` | Key and `Flow` | — |
-| `.flows(flows)` | Iterator of `Flow`, each registered under its own name | — |
-| `.with(register)` | `FnOnce(OpenShopBuilder) -> OpenShopBuilder` | — |
 | `.shopify(config)` | `ShopifyConfig` | Single app resolved from env and Shopify TOML |
 | `.function(key, definition)` | Key and `Function` | No functions |
 | `.mcp(config)` | `McpConfig` | MCP enabled, with the core capabilities; no custom capabilities |
@@ -240,42 +234,36 @@ For multiple apps, define one entry per stable app handle:
 use openshop::prelude::*;
 use openshop::{IndexMap, ShopifyAppConfig, ShopifyConfig};
 
-fn env(name: &str) -> Result<String> {
-    std::env::var(name).with_context(|| format!("{name} is not set"))
-}
-
-fn shopify_apps() -> Result<ShopifyConfig> {
-    let mut apps = IndexMap::new();
-    apps.insert(
-        "retail".to_string(),
-        ShopifyAppConfig::Toml {
-            toml: "shopify.app.retail.toml".to_string(),
-            api_secret: env("SHOPIFY_RETAIL_API_SECRET")?,
-            app_url: None,
-        },
-    );
-    apps.insert(
-        "wholesale".to_string(),
-        ShopifyAppConfig::Keys {
-            api_key: env("SHOPIFY_WHOLESALE_API_KEY")?,
-            api_secret: env("SHOPIFY_WHOLESALE_API_SECRET")?,
-            app_url: std::env::var("SHOPIFY_WHOLESALE_APP_URL").ok(),
-        },
-    );
-
-    Ok(ShopifyConfig {
-        scopes: Some("read_products,read_orders".to_string()),
-        apps: Some(apps),
-    })
-}
-
 pub static APP: App = app! {
-    shopify: shopify_apps()?,
+    shopify: ShopifyConfig {
+        scopes: Some("read_products,read_orders".to_string()),
+        apps: Some(IndexMap::from([
+            (
+                "retail".to_string(),
+                ShopifyAppConfig::Toml {
+                    toml: "shopify.app.retail.toml".to_string(),
+                    api_secret: std::env::var("SHOPIFY_RETAIL_API_SECRET")
+                        .context("SHOPIFY_RETAIL_API_SECRET is not set")?,
+                    app_url: None,
+                },
+            ),
+            (
+                "wholesale".to_string(),
+                ShopifyAppConfig::Keys {
+                    api_key: std::env::var("SHOPIFY_WHOLESALE_API_KEY")
+                        .context("SHOPIFY_WHOLESALE_API_KEY is not set")?,
+                    api_secret: std::env::var("SHOPIFY_WHOLESALE_API_SECRET")
+                        .context("SHOPIFY_WHOLESALE_API_SECRET is not set")?,
+                    app_url: std::env::var("SHOPIFY_WHOLESALE_APP_URL").ok(),
+                },
+            ),
+        ])),
+    },
 };
 ```
 
-`shopify_apps()?` makes the declaration fail when a variable is not set:
-`APP.config()` and every command of `APP.run()` return the error, here
+A `?` makes the declaration fail when a variable is not set: `APP.config()`
+and every command of `APP.run()` return the error, here
 `SHOPIFY_RETAIL_API_SECRET is not set`.
 
 | Field | Type | Behavior |
@@ -301,33 +289,8 @@ for how variables you read yourself interact with `.env`.
 ## Split the registration
 
 A declaration has nothing to split: each block is declared in the module that
-writes it, and `app!` names it, imported or by path.
-
-On the builder, `.providers([…])` and `.flows([…])` register several
-definitions at once, each under its own name, and `.with(register)` hands the
-builder to a function, so that a module adds everything it holds:
-
-```rust,ignore
-use openshop::prelude::*;
-use openshop::builder::OpenShopBuilder;
-use openshop::OpenShopConfig;
-
-// src/reviews/mod.rs
-pub fn register(builder: OpenShopBuilder) -> OpenShopBuilder {
-    builder
-        .add::<moderate_reviews>()
-        .add::<list_reviews>()
-        .add::<ReviewsPage>()
-}
-
-// Where the configuration is built
-fn config() -> Result<OpenShopConfig> {
-    APP.builder()?.with(reviews::register).build()
-}
-```
-
-Registration order is kept, and a key registered twice is refused, as with the
-singular methods.
+writes it, and `app!` names it, imported or by path. Registration order is
+kept, and a key registered twice is refused.
 
 ## Flows
 
@@ -336,7 +299,7 @@ A flow listed in `flows` is registered under its name: the one given to
 constant `sync_orders::NAME`. That key is the name used by dispatch, crons,
 runs, and logs. `sync_orders::dispatch(&ctx, input)` queues a run of it for
 the shop of a context. On the builder, `.flow(flow)` uses the flow's own `name` as the
-key; `.flow_as(key, flow)` registers it under another one. The
+key. The
 [flow reference](flows.md) owns the definition options, context, checkpoint
 contract, and timeout behavior.
 

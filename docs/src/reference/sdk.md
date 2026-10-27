@@ -45,7 +45,7 @@ framework and its tests and can change without notice.
 | `openshop::runtime` | `RuntimeEnv`, the runtime logger, and `Transport`, what Shopify requests go through | [Logging](logging.md) |
 | `openshop::shopify` | `ShopifyClient`, the `shopify_api` types it takes: `ApiVersion`, `Operation`, `IntoVariable`, `Page`, and `input!` | [Typed GraphQL](graphql.md) |
 | `openshop::shopify_api` | The `shopify_api` crate, which the code of `graphql!` names: `Error`, `Shopify`… | [Typed GraphQL](graphql.md) |
-| `openshop::testing` | Contexts, provider fakes, factories, and signing helpers (cargo feature `testing`) | [Testing](testing.md) |
+| `openshop::testing` | Contexts, provider fakes, and signing helpers (cargo feature `testing`) | [Testing](testing.md) |
 
 `openshop::ui` (cargo feature `ui`) is what the view of a custom admin page
 uses: `use_loader`, `use_action`, and the App Bridge helpers. The modules of
@@ -68,7 +68,7 @@ an application use:
 | Macros | `graphql!`, `liquid!`, `json!` |
 | Modules | `validators`, `response` |
 
-`input` is part of it with the `schema` feature. `#[openshop::test]` is not:
+`#[openshop::test]` is not part of it:
 its name would hide `#[test]`, so it is written with its path. The samples of
 this documentation import the prelude, then name what it lacks, such as
 `use openshop::testing::TestContext;` or `use serde::Deserialize;`.
@@ -78,7 +78,6 @@ this documentation import the prelude, then name what it lacks, such as
 | Feature | Default | Effect |
 | --- | --- | --- |
 | `embedded-ui` | Yes | Embeds the prebuilt admin UI bundle in the binary. Without it, `UiSource::Embedded` serves nothing. |
-| `schema` | Yes | Enables `#[input]` and typed inputs, which derive validation from `schemars`: the input argument of a `#[flow]`, of an `#[mcp_tool]`, and of the loaders and actions of an `#[admin_page]`; underneath, `Flow::input::<T>()`, `InputSchema::of::<T>()`, `AdminFunction::typed_loader` and `AdminFunction::typed_action`. |
 | `sentry` | Yes | Compiles the [Sentry](sentry.md) integration: the `sentry` setting of `app!`, `SentryConfig`, and the SDK re-exported as `openshop::sentry`. Without it the Sentry SDK is not a dependency. |
 | `testing` | No | Compiles `openshop::testing` and `#[openshop::test]`. Enable it under `[dev-dependencies]`. |
 
@@ -98,7 +97,7 @@ app does not need to depend on them directly:
 | `CancellationToken` | `tokio_util` |
 | `chrono` | `chrono` |
 | `serde` | `serde` |
-| `JsonSchema`, `schemars` | `schemars` (feature `schema`) |
+| `JsonSchema`, `schemars` | `schemars` |
 | `sentry` | The Sentry SDK (feature `sentry`); see [Report from your own code](sentry.md#report-from-your-own-code) |
 
 [`#[input]`](flows.md#input) derives `Deserialize`, `Serialize` and
@@ -164,8 +163,8 @@ Crons are data: `Cron::new(schedule, flow)` — see
 
 The attributes are built on definitions that can be created by hand:
 `Flow::new(name, run)`, `Provider::new(name)`,
-`Function::new(function_type, handle)`, `Proxy::json()`,
-`::liquid()` and `::html()`, `Route::public()` and
+`Function::new(function_type, handle)`, `Proxy::new(response_type)` and
+`Proxy::default()`, `Route::public()` and
 `Route::authenticated(auth)`, `Webhook::new(run)`,
 `McpTool::new(description, run)`,
 `McpResource::new(name, read)` and `AdminPage::new(path)`. They are in `openshop::builder`, with
@@ -365,17 +364,6 @@ request. Every context that belongs to a shop has one as `ctx.shopify`.
 
 ```rust,ignore
 use openshop::prelude::*;
-use serde::Deserialize;
-
-#[derive(Deserialize)]
-struct ProductTitle {
-    product: Option<Product>,
-}
-
-#[derive(Deserialize)]
-struct Product {
-    title: String,
-}
 
 const PRODUCT_TITLE: &str = "#graphql
   query ProductTitle($id: ID!) {
@@ -387,17 +375,9 @@ const PRODUCT_TITLE: &str = "#graphql
 ";
 
 async fn product_title(ctx: &WebhookContext, id: &str) -> Result<Option<String>> {
-    // Untyped: the `data` object as a `serde_json::Value`.
+    // The `data` object as a `serde_json::Value`.
     let data = ctx.shopify.graphql(PRODUCT_TITLE, json!({ "id": id })).await?;
-    let untyped = data["product"]["title"].as_str().map(str::to_string);
-
-    // Typed: the `data` object deserialized into your own type.
-    let typed: ProductTitle = ctx
-        .shopify
-        .graphql_as(PRODUCT_TITLE, json!({ "id": id }))
-        .await?;
-
-    Ok(typed.product.map(|product| product.title).or(untyped))
+    Ok(data["product"]["title"].as_str().map(str::to_string))
 }
 ```
 
@@ -408,7 +388,6 @@ async fn product_title(ctx: &WebhookContext, id: &str) -> Result<Option<String>>
 | `ShopifyClient::new(&app, shop, shopify_app)` | Same, from an `&OpenShop`. |
 | `client.with_api_version(version)` | Sends every request to `version`, a `shopify_api::ApiVersion`, instead of the version each operation was checked against. |
 | `client.graphql(query, variables)` | `variables`: anything that serializes to an object, or `()` for none. Returns Shopify's `data` object as a `Value`. |
-| `client.graphql_as::<T>(query, variables)` | Same, deserialized into `T: DeserializeOwned`. |
 | `client.execute(graphql!(…))` | An operation checked against Shopify's schema at compile time, with typed variables and a typed result. See [Typed GraphQL](graphql.md). |
 | `client.api().await?` | The `shopify_api::Shopify` client of the shop: `paginate`, bulk operations, webhook subscriptions, `execute_response`. |
 | `client.shop`, `client.shopify_app` | Public fields. |
@@ -443,9 +422,8 @@ async fn product_title(ctx: &WebhookContext, id: &str) -> Result<Option<String>>
 Mutation-specific `userErrors` live inside `data` and are not raised
 automatically. Inspect them in application code.
 
-`graphql()` and `graphql_as()` take any string and are not checked when the
-crate compiles: a response that does not match the type passed to `graphql_as`
-is an error at run time. For an operation known in advance, use
+`graphql()` takes any string and is not checked when the crate compiles. For
+an operation known in advance, use
 [`graphql!`](graphql.md), which checks it against Shopify's schema and types
 its result.
 

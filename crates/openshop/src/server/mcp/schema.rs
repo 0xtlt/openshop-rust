@@ -8,6 +8,7 @@
 use serde_json::Value;
 
 use crate::types::JsonMap;
+use crate::validators::format_number;
 
 const JSON_TYPES: [&str; 7] = ["object", "array", "string", "number", "integer", "boolean", "null"];
 
@@ -47,14 +48,6 @@ fn same_primitive(left: &Value, right: &Value) -> bool {
         (Value::Number(left), Value::Number(right)) => left.as_f64() == right.as_f64(),
         (Value::Object(_) | Value::Array(_), _) => false,
         _ => left == right,
-    }
-}
-
-fn format_number(number: f64) -> String {
-    if number.fract() == 0.0 && number.abs() < 1e15 {
-        format!("{}", number as i64)
-    } else {
-        number.to_string()
     }
 }
 

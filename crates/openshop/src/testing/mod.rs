@@ -7,7 +7,6 @@
 mod admin;
 mod context;
 mod db;
-mod factory;
 mod fake;
 mod transport;
 
@@ -18,7 +17,6 @@ pub use context::{
 pub use db::{TestDb, test_database_url};
 #[cfg(test)]
 pub(crate) use db::connect;
-pub use factory::{Factory, FactoryScope};
 pub use fake::{FakeCall, FakeMethod, FakeProviders, TypedCall, TypedFake};
 pub use transport::{FORM_CONTENT_TYPE, MockTransport, OutboundRequest, OutboundResponse};
 

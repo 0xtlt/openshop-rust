@@ -108,7 +108,8 @@ fn orders() -> Vec<Order> {
 
 async fn context() -> TestContext {
     let config = OpenShopConfig::builder()
-        .providers([Warehouse::provider(), Clock::provider()])
+        .provider(Warehouse::provider())
+        .provider(Clock::provider())
         .flow(common::noop_flow("sync"))
         .build()
         .expect("valid config");

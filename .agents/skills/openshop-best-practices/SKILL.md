@@ -17,7 +17,7 @@ Before editing:
 
 ## Reference Routing
 
-- Read `references/graphql.md` before writing or changing Shopify GraphQL operations, `graphql!`, `ctx.shopify.graphql()` or `graphql_as()` calls, response types, or tests that mock Shopify.
+- Read `references/graphql.md` before writing or changing Shopify GraphQL operations, `graphql!`, `ctx.shopify.graphql()` calls, response types, or tests that mock Shopify.
 - Read `references/architecture.md` before changing engine, server, CLI, database, config, templates, providers, flows, webhooks, proxy routes, or UI boundaries.
 - Read `references/testing.md` before adding tests, changing test setup, or choosing validation commands.
 
@@ -29,7 +29,7 @@ Before editing:
 - Mark the input of a flow, of an MCP tool and of an admin loader or action with `#[input]`, above its `#[derive(..)]`. Its fields are camel case outside Rust. The payload of a webhook is not an input: derive `Deserialize` on it.
 - Write a step with an async closure, `ctx.step.run("name", async || { … })`, never `|| async { … }`. Log with the message first: `ctx.logger.info("…")`, `ctx.logger.info_with("…", json!({ … }))`, and the same for `warn` and `error`.
 - Use `ctx.shopify`, `ctx.connectors` and `ctx.db` in every context that belongs to a shop: a flow, a webhook, a proxy, an admin loader or action, an MCP tool or resource, and what `ctx.for_shop("…")` returns in a route. Pass the context itself to what needs a shop: `sync_orders::dispatch(&ctx, SyncOrdersInput { .. })`, `Review::of(&ctx)`.
-- Treat hand-indexed `serde_json::Value` as a last resort where a shape is known; prefer `graphql!` for Shopify operations, serde types, `graphql_as::<T>()`, `Struct::on(&ctx.connectors).method(&args)` for a provider, and a typed second argument for the input of a flow, of an admin loader or action and of an MCP tool, for the payload of a webhook, and for the query or the body of a proxy or a route.
+- Treat hand-indexed `serde_json::Value` as a last resort where a shape is known; prefer `graphql!` for Shopify operations, serde types, `Struct::on(&ctx.connectors).method(&args)` for a provider, and a typed second argument for the input of a flow, of an admin loader or action and of an MCP tool, for the payload of a webhook, and for the query or the body of a proxy or a route.
 - Keep Liquid in a `.liquid` file next to its handler and return `liquid!("file.liquid").assign("name", value)`. Never write Liquid in a Rust string, and never paste a value into a template with `format!`.
 - Test an application with `#[openshop::test(APP)]` on `async fn(ctx: &TestContext)`, and fake a provider method with `ctx.fakes.for_call(Warehouse::PUSH)`. See `references/testing.md`.
 - Return errors with `?` and `openshop::Result`; do not `unwrap()` or `expect()` values that come from Shopify, providers, requests, or the database. Engine errors are typed and recovered with `downcast_ref`.

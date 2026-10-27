@@ -35,7 +35,7 @@ fn functions_builder() -> OpenShopBuilder {
                 )
                 .field(
                     "percent",
-                    Field::number("Percent").validate(validators::number_range(0.0, f64::INFINITY)),
+                    Field::number("Percent").validate(validators::range(Some(0.0), None)),
                 ),
         )
         .function(

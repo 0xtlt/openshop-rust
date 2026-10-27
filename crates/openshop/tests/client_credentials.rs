@@ -1698,7 +1698,7 @@ async fn a_launch_whose_token_cannot_be_stored_is_sent_to_oauth() {
         encryption_key: Some("too-short".to_string()),
         ..options(None)
     };
-    let mut ctx = TestContext::with_options(config(&[]), options).await.unwrap();
+    let ctx = TestContext::with_options(config(&[]), options).await.unwrap();
     let _shopify = Shopify::install(&ctx);
 
     let reply = launch(&ctx, SHOP).await;
@@ -1708,7 +1708,7 @@ async fn a_launch_whose_token_cannot_be_stored_is_sent_to_oauth() {
         "/auth?shop=dev-store-1.myshopify.com"
     );
     assert!(grant_requests(&ctx).is_empty());
-    ctx.cleanup().await;
+    ctx.shutdown().await.unwrap();
 }
 
 #[openshop::test(unconfigured())]

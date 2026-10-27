@@ -241,13 +241,10 @@ pub fn create_proxy_routes(
 
     for (route_path, key) in &routes {
         let definition = &proxies[*key];
-        let response_type = definition.response_type.unwrap_or_default();
+        let response_type = definition.response_type;
         let mut method_router: MethodRouter<OpenShop> = MethodRouter::new().fallback(|| async { not_found() });
 
-        for (method, handler) in definition.handlers() {
-            let Some(handler) = handler else {
-                continue;
-            };
+        for (&method, handler) in &definition.handlers {
             let route = ProxyRoute {
                 route_path: route_path.clone(),
                 method,

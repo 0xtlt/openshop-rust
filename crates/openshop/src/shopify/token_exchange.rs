@@ -12,28 +12,32 @@
 //! - Shopify is asked for [`TIMEOUT`] at most.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex as StdMutex, MutexGuard};
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
 use tokio::sync::{Mutex, OwnedMutexGuard};
 use tokio::time::Instant;
 
-/// How long the request of the exchange may take, whatever the transport
-/// allows: a request waits for it, and the requests of the shop wait for it.
+use super::{AppShop, app_shop};
+use crate::locked;
+
+/// How long a request of a token, by the token exchange or by the client
+/// credentials grant, is waited for, whatever the transport allows: the
+/// request of an admin page may wait for it, and the requests of the shop for
+/// their turn.
 pub(crate) const TIMEOUT: Duration = Duration::from_secs(5);
 
-/// How long a failed exchange holds back another one for the same app and shop.
+/// How long a failure that may pass holds back another request of a token
+/// for the same app and shop.
 pub(crate) const HOLD_BACK: Duration = Duration::from_secs(30);
-
-type Key = (String, String);
 
 #[derive(Default)]
 pub(crate) struct TokenExchanges {
     /// The shops whose exchange is out, or waited for: the lock of a shop is
     /// dropped from the map once nobody holds or waits for it.
-    turns: StdMutex<HashMap<Key, Arc<Mutex<()>>>>,
+    turns: StdMutex<HashMap<AppShop, Arc<Mutex<()>>>>,
     /// Until when each app and shop that failed is held back.
-    held: StdMutex<HashMap<Key, Instant>>,
+    held: StdMutex<HashMap<AppShop, Instant>>,
 }
 
 /// The turn of an app and shop to ask Shopify; given up when dropped. It
@@ -41,24 +45,16 @@ pub(crate) struct TokenExchanges {
 /// while it waits still cleans up after itself.
 pub(crate) struct Turn<'a> {
     exchanges: &'a TokenExchanges,
-    key: Key,
+    key: AppShop,
     lock: Arc<Mutex<()>>,
     guard: Option<OwnedMutexGuard<()>>,
-}
-
-fn key(shopify_app: &str, shop: &str) -> Key {
-    (shopify_app.to_string(), shop.to_string())
-}
-
-fn locked<T>(mutex: &StdMutex<T>) -> MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 impl TokenExchanges {
     /// Whether a failure still holds back the exchange of this app and shop.
     pub fn held_back(&self, shopify_app: &str, shop: &str) -> bool {
         locked(&self.held)
-            .get(&key(shopify_app, shop))
+            .get(&app_shop(shopify_app, shop))
             .is_some_and(|held_until| Instant::now() < *held_until)
     }
 
@@ -68,12 +64,12 @@ impl TokenExchanges {
         let now = Instant::now();
         let mut held = locked(&self.held);
         held.retain(|_, held_until| now < *held_until);
-        held.insert(key(shopify_app, shop), now + HOLD_BACK);
+        held.insert(app_shop(shopify_app, shop), now + HOLD_BACK);
     }
 
     /// Waits for the turn of this app and shop.
     pub async fn turn(&self, shopify_app: &str, shop: &str) -> Turn<'_> {
-        let key = key(shopify_app, shop);
+        let key = app_shop(shopify_app, shop);
         let lock = locked(&self.turns).entry(key.clone()).or_default().clone();
         let mut turn = Turn {
             exchanges: self,
