@@ -1,0 +1,43 @@
+name: Install a release binary
+description: >-
+  Installs a binary from the `.tar.gz` archive of a GitHub release, after
+  checking the SHA-256 of the archive against the one given: a release asset
+  can be replaced, this fails when it is. A new version needs the digest of
+  its archive (`<asset>.sha256` of the release, or the `digest` of the asset
+  in the release API, confirmed by `sha256sum` of the download).
+inputs:
+  repository:
+    description: The repository of the release, `owner/name`.
+    required: true
+  tag:
+    description: The tag of the release.
+    required: true
+  asset:
+    description: The archive to download.
+    required: true
+  sha256:
+    description: The SHA-256 of the archive.
+    required: true
+  binary:
+    description: The path of the binary in the archive.
+    required: true
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        REPOSITORY: ${{ inputs.repository }}
+        TAG: ${{ inputs.tag }}
+        ASSET: ${{ inputs.asset }}
+        SHA256: ${{ inputs.sha256 }}
+        BINARY: ${{ inputs.binary }}
+      run: |
+        set -euo pipefail
+        dir="$(mktemp -d)"
+        gh release download "$TAG" --repo "$REPOSITORY" --pattern "$ASSET" --dir "$dir"
+        echo "$SHA256  $dir/$ASSET" | sha256sum --check -
+        tar -xzf "$dir/$ASSET" -C "$dir" "$BINARY"
+        mkdir -p "$HOME/.local/bin"
+        install "$dir/$BINARY" "$HOME/.local/bin/"
+        echo "$HOME/.local/bin" >> "$GITHUB_PATH"
