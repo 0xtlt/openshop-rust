@@ -568,32 +568,16 @@ impl ClientCredentials {
 fn grant_failure(error: &shopify_api::Error) -> Option<bool> {
     use shopify_api::Error;
     match error {
-        Error::Auth { .. } => Some(refusal(&error.to_string()).is_some_and(|(status, coded)| {
-            (400..500).contains(&status) && !matches!(status, 408 | 429) && coded
-        })),
+        Error::Auth { .. } => Some(
+            error
+                .token_endpoint_status()
+                .is_some_and(|status| (400..500).contains(&status) && !matches!(status, 408 | 429))
+                && error.oauth_code().is_some(),
+        ),
         Error::Transport { url, .. } => url.ends_with("/admin/oauth/access_token").then_some(false),
         Error::TokenStore(_) => Some(false),
         _ => None,
     }
-}
-
-/// What `shopify_api` adds to a failure it gives the requests that waited
-/// for the renewal that failed.
-const HELD_FAILURE: &str = "asked again in a few seconds";
-
-/// The status of a refusal of the token endpoint, and whether Shopify gave
-/// an error code, as `shopify_api` writes them: `the token endpoint of
-/// {shop} answered {status}`, then ` ({code})` when there is one, then
-/// ` (asked again in a few seconds)` for a request that waited for it.
-fn refusal(message: &str) -> Option<(u16, bool)> {
-    let (_, answer) = message.split_once("the token endpoint of ")?.1.split_once(" answered ")?;
-    let digits: String = answer.chars().take_while(char::is_ascii_digit).collect();
-    let status = digits.parse().ok()?;
-    let code = answer[digits.len()..]
-        .strip_prefix(" (")
-        .and_then(|rest| rest.split_once(')'))
-        .map(|(code, _)| code);
-    Some((status, code.is_some_and(|code| code != HELD_FAILURE)))
 }
 
 /// What a client's store read of the row, to write over it only if it
@@ -886,17 +870,5 @@ mod tests {
             let error = grant_error(status, body.clone()).await;
             assert_eq!(grant_failure(&error), Some(false), "{status} {body}: {error}");
         }
-    }
-
-    #[test]
-    fn reads_the_refusals_of_shopify_api() {
-        let message = "the token endpoint of a.myshopify.com answered 400 (shop_not_permitted)";
-        assert_eq!(refusal(message), Some((400, true)));
-        // What a request that waited for that renewal gets.
-        assert_eq!(refusal(&format!("{message} ({HELD_FAILURE})")), Some((400, true)));
-        let uncoded = "the token endpoint of a.myshopify.com answered 400";
-        assert_eq!(refusal(&format!("{uncoded} ({HELD_FAILURE})")), Some((400, false)));
-        assert_eq!(refusal("the token endpoint of a.myshopify.com answered 503"), Some((503, false)));
-        assert_eq!(refusal("something else"), None);
     }
 }

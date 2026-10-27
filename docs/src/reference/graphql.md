@@ -9,8 +9,9 @@ there is no generation step and no generated file.
 
 ## Setup
 
-The code `graphql!` generates names the `shopify_api` crate, so the crate that
-writes an operation depends on it, next to `openshop`. The templates of
+The crate that writes an operation depends on `openshop` alone: the code
+`graphql!` generates names `shopify_api` through `openshop::shopify_api`. It
+names its Admin API version in `Cargo.toml`, as the templates of
 `openshop init` do:
 
 ```toml
@@ -19,8 +20,10 @@ api-version = "2026-10"
 
 [dependencies]
 openshop = "…"
-shopify_api = "=1.0.0-rc.1"
 ```
+
+The dependency is named `openshop`: under another name, the generated code
+does not find it.
 
 `api-version` is the Admin API version the operations are checked against and
 sent to. The first build downloads the schema of that version into
@@ -84,10 +87,11 @@ ctx.shopify
     .await?;
 ```
 
-`shopify_api::input!` builds one ahead of the call, in a loop for instance:
+`openshop::shopify::input!` builds one ahead of the call, in a loop for
+instance:
 
 ```rust,ignore
-use shopify_api::input;
+use openshop::shopify::input;
 
 let metafields: Vec<_> = rows
     .iter()
@@ -137,7 +141,7 @@ renewed once where the client credentials grant may renew it (see
 `execute` fails when the shop has no access token, when Shopify answers a
 status other than 2xx, with a non-empty `errors` list, or with data that does
 not fit the operation. The error is a `shopify_api::Error`, which
-`error.downcast_ref::<shopify_api::Error>()` reads: `Http` with its status,
+`error.downcast_ref::<openshop::shopify_api::Error>()` reads: `Http` with its status,
 `Graphql` with Shopify's errors, `Decode` with the path of the first mismatch.
 
 Mutation-specific `userErrors` live inside `data` and are not raised

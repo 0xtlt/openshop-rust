@@ -124,7 +124,7 @@ is intentionally blocked, and so is the schema push of `dev`.
   Shopify scopes allow the operation.
 
 Both are a `shopify_api::Error` (`Http`, `Graphql`), which
-`error.downcast_ref::<shopify_api::Error>()` reads.
+`error.downcast_ref::<openshop::shopify_api::Error>()` reads.
 
 An operation written with `graphql!` is checked against the schema when the
 project compiles. One sent with `ctx.shopify.graphql()` is not: a field that is

@@ -1,13 +1,13 @@
-//! `graphql!`, `shopify_api`'s: operations checked against Shopify's schema at
+//! `graphql!`: operations checked against Shopify's schema at
 //! compile time, run by `ShopifyClient` with the token of the installation.
 
 mod common;
 
 use common::noop_flow;
 use openshop::builder::Flow;
+use openshop::shopify::input;
 use openshop::testing::{TestContext, TestOptions};
 use openshop::{OpenShopConfig, RunOutcome, ShopifyClient, Value, graphql, json};
-use shopify_api::input;
 
 /// A context whose shop is installed, so that it has a Shopify client.
 async fn context_with(config: OpenShopConfig) -> TestContext {
@@ -208,8 +208,8 @@ async fn an_answer_that_does_not_fit_the_operation_is_an_error(ctx: &TestContext
         .execute(graphql!("{ orders(first: 1) { nodes { id name } } }"))
         .await
         .unwrap_err();
-    let error = error.downcast::<shopify_api::Error>().unwrap();
-    assert!(matches!(error, shopify_api::Error::Decode { .. }), "{error}");
+    let error = error.downcast::<openshop::shopify_api::Error>().unwrap();
+    assert!(matches!(error, openshop::shopify_api::Error::Decode { .. }), "{error}");
     assert!(error.to_string().contains("orders.nodes[0]"), "{error}");
 
     ctx.transport
@@ -218,8 +218,8 @@ async fn an_answer_that_does_not_fit_the_operation_is_an_error(ctx: &TestContext
         .execute(graphql!("{ orders(first: 1) { nodes { id name } } }"))
         .await
         .unwrap_err();
-    let error = error.downcast::<shopify_api::Error>().unwrap();
-    assert!(matches!(error, shopify_api::Error::Graphql(_)), "{error}");
+    let error = error.downcast::<openshop::shopify_api::Error>().unwrap();
+    assert!(matches!(error, openshop::shopify_api::Error::Graphql(_)), "{error}");
     assert!(error.to_string().contains("Field 'x' doesn't exist"), "{error}");
 }
 

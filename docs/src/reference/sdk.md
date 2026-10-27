@@ -43,7 +43,8 @@ framework and its tests and can change without notice.
 | `openshop::server` | `router`, `listen`, and `serve`, to embed the HTTP server | [Server, worker, and scheduler](#server-worker-and-scheduler) |
 | `openshop::validators` | Ready-made field validators | [Providers](providers.md#validators) |
 | `openshop::runtime` | `RuntimeEnv`, the runtime logger, and `Transport`, what Shopify requests go through | [Logging](logging.md) |
-| `openshop::shopify` | `ShopifyClient`, and the `shopify_api` types it takes: `ApiVersion`, `Operation`, `IntoVariable`, `Page` | [Typed GraphQL](graphql.md) |
+| `openshop::shopify` | `ShopifyClient`, the `shopify_api` types it takes: `ApiVersion`, `Operation`, `IntoVariable`, `Page`, and `input!` | [Typed GraphQL](graphql.md) |
+| `openshop::shopify_api` | The `shopify_api` crate, which the code of `graphql!` names: `Error`, `Shopify`… | [Typed GraphQL](graphql.md) |
 | `openshop::testing` | Contexts, provider fakes, factories, and signing helpers (cargo feature `testing`) | [Testing](testing.md) |
 
 `openshop::ui` (cargo feature `ui`) is what the view of a custom admin page
@@ -438,7 +439,7 @@ async fn product_title(ctx: &WebhookContext, id: &str) -> Result<Option<String>>
   after a server error; a mutation never runs twice;
 - fails on non-2xx HTTP responses, and when the top-level GraphQL `errors`
   array is non-empty, with a `shopify_api::Error` (`Http`, `Graphql`) that
-  `error.downcast_ref::<shopify_api::Error>()` reads;
+  `error.downcast_ref::<openshop::shopify_api::Error>()` reads;
 - returns the contents of `data` otherwise. Do not read `data["data"]`.
 
 Mutation-specific `userErrors` live inside `data` and are not raised

@@ -15,8 +15,6 @@ api-version = "2026-10"
 [dependencies]
 openshop = { workspace = true, features = ["ui"] }
 serde.workspace = true
-# What `graphql!` generates names this crate.
-shopify_api.workspace = true
 # The views of the admin pages.
 leptos = "0.8"
 

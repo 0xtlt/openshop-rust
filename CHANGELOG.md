@@ -2,14 +2,15 @@
 
 ## Unreleased
 
-- Shopify is reached through `shopify_api` 1.0.0-rc.1 instead of a client of
+- Shopify is reached through `shopify_api` 1.0.0-rc.2 instead of a client of
   OpenShop's own. Breaking changes:
-  - `graphql!` is `shopify_api`'s, re-exported as `openshop::graphql!` and in
-    the prelude. The crate that writes an operation depends on `shopify_api`,
-    names its Admin API version in `[package.metadata.shopify_api]`
+  - `graphql!` is `shopify_api`'s, wrapped as `openshop::graphql!` and in the
+    prelude so that its code names `openshop::shopify_api`: an application
+    depends on `openshop` alone. The crate that writes an operation names its
+    Admin API version in `[package.metadata.shopify_api]`
     `api-version` (the templates say `2026-10`), and commits the schema the
     first build downloads into `graphql/admin.schema.json`. Input objects are
-    literals checked field by field, or `shopify_api::input!`. The
+    literals checked field by field, or `openshop::shopify::input!`. The
     `openshop-graphql` crate, `openshop codegen`, `OPENSHOP_GRAPHQL_SCHEMA`,
     `GraphqlOperation`, `SHOPIFY_API_VERSION` and `is_api_version` are gone.
   - `ShopifyClient` runs on a `shopify_api::Shopify` client: throttled

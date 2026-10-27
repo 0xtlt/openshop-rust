@@ -15,8 +15,6 @@ api-version = "2026-10"
 [dependencies]
 openshop.workspace = true
 serde.workspace = true
-# What `graphql!` generates names this crate.
-shopify_api.workspace = true
 
 [dev-dependencies]
 openshop = { workspace = true, features = ["testing"] }

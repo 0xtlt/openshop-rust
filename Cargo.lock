@@ -2440,7 +2440,6 @@ dependencies = [
  "openshop",
  "openshop-preview",
  "serde",
- "shopify_api",
 ]
 
 [[package]]
@@ -2449,7 +2448,6 @@ version = "0.0.12-beta.0"
 dependencies = [
  "openshop",
  "serde",
- "shopify_api",
 ]
 
 [[package]]
@@ -2460,7 +2458,6 @@ dependencies = [
  "openshop",
  "openshop-preview",
  "serde",
- "shopify_api",
 ]
 
 [[package]]
@@ -3589,9 +3586,9 @@ checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
 
 [[package]]
 name = "shopify_api"
-version = "1.0.0-rc.1"
+version = "1.0.0-rc.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c90e61bd6b262f65c295d9976fb589516beda39e4f33df42b8445ba128379557"
+checksum = "a4331fd856b68bbe80ea34d95d9759c79ddec530395bdb2a1f476e78774db760"
 dependencies = [
  "base64 0.23.1",
  "chrono",
@@ -3609,9 +3606,9 @@ dependencies = [
 
 [[package]]
 name = "shopify_api_graphql"
-version = "1.0.0-rc.1"
+version = "1.0.0-rc.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "789f1da9aeb2bc9dbc679e91b13415d63d559caeaf2e0c50c1556002a102ae8f"
+checksum = "95e28c864fa6a4e89c0ce500d7ef69f88b5dd726e77bb1c1fd0d47ab42ca8d8c"
 dependencies = [
  "graphql-parser",
  "proc-macro2",
@@ -3624,9 +3621,9 @@ dependencies = [
 
 [[package]]
 name = "shopify_api_macros"
-version = "1.0.0-rc.1"
+version = "1.0.0-rc.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cf0272b3fa91dc3c7bb055b9174a23afb99936461bb102fdff69b38a776bfa2c"
+checksum = "a392d1a312f44f43b1bf597551ceb08d5a318e49b13329846dbdc908d862386d"
 dependencies = [
  "proc-macro2",
  "quote",

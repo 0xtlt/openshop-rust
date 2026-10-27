@@ -5,8 +5,8 @@ Use this reference for Shopify Admin GraphQL operations in OpenShop app and fram
 Write an operation known in advance with `graphql!`, the macro of
 `shopify_api` that `openshop` re-exports: it is checked against
 Shopify's Admin schema when the crate compiles, and its variables and its
-result are typed. The crate that writes one depends on `shopify_api` and pins
-its version in `[package.metadata.shopify_api] api-version`; the first build
+result are typed. The crate that writes one depends on `openshop` alone (the
+generated code names `openshop::shopify_api`) and pins its version in `[package.metadata.shopify_api] api-version`; the first build
 downloads `graphql/admin.schema.json`, which is committed. `graphql()` and `graphql_as()` take any string and check
 nothing at compile time; keep them for operations built at run time, and
 follow the rules of the later sections for those.
@@ -41,7 +41,7 @@ pub async fn product_title(shopify: &ShopifyClient, id: &str) -> Result<String> 
 - The result mirrors the selection: snake-case fields, `Option` for nullable fields and for fields under a fragment on another type, `Vec` for lists, `String` for IDs, enum values and Shopify's string-encoded scalars, `i64` for `Int`.
 - The result types derive `Serialize` and `Deserialize`: return them from `ctx.step.run()` directly.
 - The types of an inline operation have no name. To return them from a function or share an operation, use the module form: `graphql! { pub mod get_product = "…"; }`, then `get_product::Data`, and `get_product::Variables { … }` or `get_product::operation()`, which `execute` takes.
-- Write input objects as literals checked field by field (`product = { id: id, title: title, vendor?: maybe_vendor }`), or build them ahead with `shopify_api::input!(ProductUpdateInput { … })`. Reference: https://docs.rs/shopify_api/latest/shopify_api/macro.graphql.html.
+- Write input objects as literals checked field by field (`product = { id: id, title: title, vendor?: maybe_vendor }`), or build them ahead with `openshop::shopify::input!(ProductUpdateInput { … })`. Reference: https://docs.rs/shopify_api/latest/shopify_api/macro.graphql.html.
 - Do not work around a compile error by switching to `graphql()`: fix the operation. The error names the field, argument or variable and the API version it was checked against.
 - Operations go to the version of the schema they were checked against. To move to another version, change `api-version` and commit the schema the next build downloads. `ShopifyClient::with_api_version(ApiVersion)` pins a client to a version.
 - For pagination, bulk operations or webhook subscriptions, use `ctx.shopify.api().await?`, the `shopify_api::Shopify` client of the shop.
