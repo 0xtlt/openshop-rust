@@ -1,20 +1,10 @@
 mod flows;
 mod providers;
 
-use std::sync::Arc;
-
 use openshop::prelude::*;
 
 use flows::sync_orders::sync_orders;
 use providers::warehouse::Warehouse;
-
-/// Called when a flow run fails.
-async fn report_failure(error: Arc<openshop::Error>, context: ErrorContext) {
-    eprintln!(
-        "[openshop:error] Flow \"{}\" failed: {error}",
-        context.flow.unwrap_or_default()
-    );
-}
 
 /// The application: what it is made of, and how it is set up.
 ///
@@ -31,7 +21,6 @@ static APP: App = app! {
     // MCP is off: `POST /mcp` is refused and the admin has no MCP page.
     // Remove this line to turn it on.
     mcp: McpConfig::disabled(),
-    on_error: report_failure,
     // The operator dashboard, under `/ops`, when `OPS_PASSWORD` is set: what
     // happens in every shop, read from outside Shopify admin.
     ops_password: std::env::var("OPS_PASSWORD").ok(),

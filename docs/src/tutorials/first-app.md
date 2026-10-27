@@ -49,7 +49,7 @@ Open these three files:
 | --- | --- |
 | `src/providers/warehouse.rs` | The `warehouse` provider: the `Warehouse` struct with two configuration fields, and a `#[provider]` block with a connection check and a `push` method |
 | `src/flows/sync_orders.rs` | The sample flow, a function marked `#[flow("syncOrders")]` with `fetch-orders` and `send-to-warehouse` steps, and `SyncOrdersInput`, the input of a run |
-| `src/main.rs` | The application: an `app!` declaration that lists the provider and the flow, with a sample cron schedule, an error hook, and MCP turned off. `main` runs it with `APP.main()` |
+| `src/main.rs` | The application: an `app!` declaration that lists the provider and the flow, with a sample cron schedule and MCP turned off. `main` runs it with `APP.main()` |
 
 Each building block is declared where it is written, with an attribute on the
 function or the struct. `src/main.rs` only lists them.
@@ -131,7 +131,6 @@ static APP: App = app! {
     // MCP is off: `POST /mcp` is refused and the admin has no MCP page.
     // Remove this line to turn it on.
     mcp: McpConfig::disabled(),
-    on_error: report_failure,
 };
 
 fn main() -> Result<()> {
@@ -148,14 +147,12 @@ static APP: App = app! {
     // MCP is off: `POST /mcp` is refused and the admin has no MCP page.
     // Remove this line to turn it on.
     mcp: McpConfig::disabled(),
-    on_error: report_failure,
 };
 ```
 
 Leave the rest of the file unchanged. We will run the flow from the admin UI
 after saving its provider credentials. This removes the generated schedule for
-now and keeps the error hook, `report_failure`, and the line that turns MCP
-off. The
+now and keeps the line that turns MCP off. The
 [flow guide](../guides/define-flow.md#3-schedule-the-flow-for-installed-shops) adds a
 schedule that explicitly targets installed shops.
 

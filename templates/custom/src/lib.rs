@@ -15,8 +15,6 @@ pub mod proxy;
 pub mod routes;
 pub mod webhooks;
 
-use std::sync::Arc;
-
 use openshop::prelude::*;
 
 use admin::reviews::ReviewsPage;
@@ -31,14 +29,6 @@ use proxy::reviews::reviews;
 use routes::ping::ping;
 use webhooks::app_uninstalled::app_uninstalled;
 use webhooks::orders_create::orders_create;
-
-/// Called when a flow run fails.
-async fn report_failure(error: Arc<openshop::Error>, context: ErrorContext) {
-    eprintln!(
-        "[openshop:error] Flow \"{}\" failed: {error}",
-        context.flow.unwrap_or_default()
-    );
-}
 
 /// The application: what it is made of, and how it is set up.
 pub static APP: App = app! {
@@ -61,7 +51,6 @@ pub static APP: App = app! {
             .input(json!({ "limit": 1000 }))
             .all_shops(),
     ],
-    on_error: report_failure,
     // The operator dashboard, under `/ops`, when `OPS_PASSWORD` is set: what
     // happens in every shop, read from outside Shopify admin.
     ops_password: std::env::var("OPS_PASSWORD").ok(),
