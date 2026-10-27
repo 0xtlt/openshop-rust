@@ -34,7 +34,7 @@ use crate::runtime::logger;
 use crate::server::client::client_ip;
 use crate::server::linger::Peer;
 
-pub use self::auth::{MIN_PRODUCTION_PASSWORD_LENGTH, check_password};
+pub use self::auth::check_password;
 
 const HOME: &str = "/ops";
 const LOGIN: &str = "/ops/login";

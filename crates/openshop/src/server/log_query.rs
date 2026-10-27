@@ -8,7 +8,6 @@
 //! log line. A query the engine refuses fails with [`InvalidLogQuery`], which
 //! the HTTP API answers with `400`; it is never read as "no match".
 
-use std::collections::HashSet;
 use std::sync::LazyLock;
 
 use chrono::{DateTime, Utc};
@@ -340,27 +339,6 @@ pub fn prepare_log_query(query: &str) -> Result<(ParsedLogQuery, LogMatcher), In
     Ok((parsed, matcher))
 }
 
-/// Adds `before` / `after` neighbours of every matched item.
-pub fn apply_context_expansion<'a>(
-    ids: &[&'a str],
-    matched: &HashSet<&'a str>,
-    context: LogContext,
-) -> HashSet<&'a str> {
-    if context.before == 0 && context.after == 0 {
-        return matched.clone();
-    }
-    let mut visible = matched.clone();
-    for (index, id) in ids.iter().enumerate() {
-        if !matched.contains(id) {
-            continue;
-        }
-        let start = index.saturating_sub(context.before);
-        let end = index.saturating_add(context.after).min(ids.len() - 1);
-        visible.extend(&ids[start..=end]);
-    }
-    visible
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -560,24 +538,5 @@ mod tests {
             filter(LogFilterOp::Contains, "orders"),
             filter(LogFilterOp::Contains, "products"),
         ]));
-    }
-
-    const ITEMS: [&str; 5] = ["a", "b", "c", "d", "e"];
-
-    fn expand(matched: &[&'static str], before: usize, after: usize) -> Vec<&'static str> {
-        let matched: HashSet<&str> = matched.iter().copied().collect();
-        let mut visible: Vec<&str> = apply_context_expansion(&ITEMS, &matched, LogContext { before, after })
-            .into_iter()
-            .collect();
-        visible.sort_unstable();
-        visible
-    }
-
-    #[test]
-    fn context_expansion() {
-        assert_eq!(expand(&["c"], 0, 0), vec!["c"]);
-        assert_eq!(expand(&["c"], 1, 1), vec!["b", "c", "d"]);
-        assert_eq!(expand(&["a"], 5, 0), vec!["a"]);
-        assert_eq!(expand(&["a", "e"], 0, 1), vec!["a", "b", "e"]);
     }
 }

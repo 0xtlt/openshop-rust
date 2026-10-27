@@ -5,7 +5,6 @@
 //! has already run is acknowledged and not run again, within [`REMEMBER`].
 
 use std::collections::HashMap;
-use std::panic::AssertUnwindSafe;
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -16,14 +15,12 @@ use axum::http::header::RETRY_AFTER;
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::Response;
 use axum::routing::post;
-use futures::FutureExt;
 use serde_json::{Value, json};
 use tokio::time::Instant;
 
-use super::http::{header, json_error, json_response};
+use super::http::{catch_panic, header, json_error, json_response, report_failure};
 use crate::app::OpenShop;
-use crate::engine::step::error_message;
-use crate::runtime::report::{self, Panicked};
+use crate::runtime::report;
 use crate::runtime::logger;
 use crate::server::connectors::Connectors;
 use crate::server::shop_domain::strict_shop_domain;
@@ -146,11 +143,6 @@ impl WebhookDeliveries {
     }
 }
 
-/// Shopify sends `orders/create`; handlers may also be registered as `ORDERS_CREATE`.
-pub fn normalize_topic(topic: &str) -> String {
-    topic.replace('/', "_").to_uppercase()
-}
-
 async fn handle(State(app): State<OpenShop>, headers: HeaderMap, body: Bytes) -> Response {
     let config = app.config();
     if !app.apps().has_configured_secret() {
@@ -169,10 +161,11 @@ async fn handle(State(app): State<OpenShop>, headers: HeaderMap, body: Bytes) ->
     let api_version = webhook.api_version().unwrap_or_default().to_string();
 
     let ok = || json_response(StatusCode::OK, json!({ "ok": true }));
+    // Shopify sends `orders/create`; handlers may also be registered as `ORDERS_CREATE`.
     let Some(handler) = config
         .webhooks
         .get(&topic)
-        .or_else(|| config.webhooks.get(&normalize_topic(&topic)))
+        .or_else(|| config.webhooks.get(&webhook.topic_enum()))
     else {
         logger::warn(format!("[openshop] No webhook handler for topic \"{topic}\""));
         // Always return 200 to Shopify
@@ -229,22 +222,14 @@ async fn handle(State(app): State<OpenShop>, headers: HeaderMap, body: Bytes) ->
         app: app.clone(),
     };
     // Still return 200 on handler errors — don't let Shopify retry them.
-    let failure = match AssertUnwindSafe((handler.run)(context)).catch_unwind().await {
-        Ok(outcome) => outcome.err(),
-        Err(_) => Some(Panicked::error("handler panicked")),
-    };
-    match failure {
-        Some(error) => {
-            report::error(&error);
-            logger::error_with(
-                format!("[openshop] Webhook handler error for \"{topic}\""),
-                json!({ "error": error_message(&error) }),
-            );
+    match catch_panic("handler", (handler.run)(context)).await {
+        Err(error) => {
+            report_failure(format!("[openshop] Webhook handler error for \"{topic}\""), &error);
             // A delivery whose handler failed is not handled: dropping the
             // claim lets a repeat of it run.
             drop(claim);
         }
-        None => {
+        Ok(_) => {
             if let Some(delivery) = claim {
                 delivery.complete();
             }
@@ -336,12 +321,5 @@ mod tests {
             Claim::Done
         ));
         first(deliveries.claim_at(now, "app", "T", "0", "sig")).complete();
-    }
-
-    #[test]
-    fn normalizes_topics() {
-        assert_eq!(normalize_topic("orders/create"), "ORDERS_CREATE");
-        assert_eq!(normalize_topic("app/uninstalled"), "APP_UNINSTALLED");
-        assert_eq!(normalize_topic("ORDERS_CREATE"), "ORDERS_CREATE");
     }
 }

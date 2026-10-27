@@ -402,12 +402,12 @@ async fn a_compressed_asset_has_a_weak_etag() {
 
 #[tokio::test]
 async fn an_asset_compiled_into_the_application_is_served_with_an_etag() {
-    let ui = UiSource::assets(|path| match path {
+    let ui = UiSource::Assets(|path| match path {
         "index.html" => Some(Cow::Borrowed(SHELL.as_bytes())),
         "app-1a2b3c4d5e.js" => Some(Cow::Borrowed(b"console.log('compiled')".as_slice())),
         _ => None,
     });
-    let ctx = context_with(static_config(), ServerOptions::default().ui(ui)).await;
+    let ctx = context_with(static_config(), ServerOptions { ui, dev: false }).await;
 
     let reply = get(&ctx, "/app-1a2b3c4d5e.js").await;
     assert_eq!(reply.status, StatusCode::OK);
@@ -972,7 +972,7 @@ async fn server_without_ui_returns_404_for_pages_and_assets(ctx: &TestContext) {
 }
 
 #[cfg(feature = "embedded-ui")]
-#[openshop::test(context_with(static_config(), ServerOptions::production()))]
+#[openshop::test(context_with(static_config(), ServerOptions { ui: UiSource::Embedded, dev: false }))]
 async fn embedded_ui_serves_the_bundled_shell_and_assets(ctx: &TestContext) {
     assert_unauthorized_ui(&get(ctx, "/").await);
 

@@ -39,7 +39,7 @@ pub async fn start_dev(config: OpenShopConfig) -> Result<()> {
     // 2. API server + admin UI
     let ui = ui_source(&config);
     let app = OpenShop::new(config, pool, env)?;
-    let server = listen(&app, port, ServerOptions::development().ui(ui)).await?;
+    let server = listen(&app, port, ServerOptions { ui, dev: true }).await?;
 
     // 3. Worker and scheduler run in-process
     let worker = Worker::new(app.clone(), WorkerConfig::default());

@@ -180,7 +180,7 @@ async fn serves_a_ui_bundle_compiled_into_the_application() {
         TestOptions {
             access_token: Some("shpat_test".to_string()),
             server: ServerOptions {
-                ui: UiSource::assets(bundled_asset),
+                ui: UiSource::Assets(bundled_asset),
                 dev: false,
             },
             ..Default::default()

@@ -6,80 +6,13 @@ use serde_json::{Value, json};
 use crate::runtime::time::to_iso;
 use crate::types::{DiscountMode, Function, FunctionOwner, FunctionTitle, FunctionType, JsonMap};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum InputStyle {
-    Wrapped,
-    Flat,
-}
-
 /// Names of the GraphQL fields for one kind of function owner.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MutationSet {
     pub list: &'static str,
-    pub create: &'static str,
+    /// `None` for a type whose instances are deleted and created again instead.
     pub update: Option<&'static str>,
     pub delete: &'static str,
-    pub input_style: InputStyle,
-}
-
-pub fn discount_mutations(mode: DiscountMode) -> MutationSet {
-    match mode {
-        DiscountMode::Automatic => MutationSet {
-            list: "discountNodes",
-            create: "discountAutomaticAppCreate",
-            update: Some("discountAutomaticAppUpdate"),
-            delete: "discountAutomaticDelete",
-            input_style: InputStyle::Wrapped,
-        },
-        DiscountMode::Code => MutationSet {
-            list: "discountNodes",
-            create: "discountCodeAppCreate",
-            update: Some("discountCodeAppUpdate"),
-            delete: "discountCodeDelete",
-            input_style: InputStyle::Wrapped,
-        },
-    }
-}
-
-pub fn function_mutations(function_type: FunctionType) -> Option<MutationSet> {
-    Some(match function_type {
-        FunctionType::Discount => return None,
-        FunctionType::CartTransform => MutationSet {
-            list: "cartTransforms",
-            create: "cartTransformCreate",
-            update: None,
-            delete: "cartTransformDelete",
-            input_style: InputStyle::Flat,
-        },
-        FunctionType::DeliveryCustomization => MutationSet {
-            list: "deliveryCustomizations",
-            create: "deliveryCustomizationCreate",
-            update: Some("deliveryCustomizationUpdate"),
-            delete: "deliveryCustomizationDelete",
-            input_style: InputStyle::Wrapped,
-        },
-        FunctionType::PaymentCustomization => MutationSet {
-            list: "paymentCustomizations",
-            create: "paymentCustomizationCreate",
-            update: Some("paymentCustomizationUpdate"),
-            delete: "paymentCustomizationDelete",
-            input_style: InputStyle::Wrapped,
-        },
-        FunctionType::CheckoutValidation => MutationSet {
-            list: "validations",
-            create: "validationCreate",
-            update: Some("validationUpdate"),
-            delete: "validationDelete",
-            input_style: InputStyle::Wrapped,
-        },
-        FunctionType::FulfillmentConstraints => MutationSet {
-            list: "fulfillmentConstraintRules",
-            create: "fulfillmentConstraintRuleCreate",
-            update: None,
-            delete: "fulfillmentConstraintRuleDelete",
-            input_style: InputStyle::Flat,
-        },
-    })
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -91,11 +24,35 @@ pub struct MutationRequest {
 pub const METAFIELD_NAMESPACE: &str = "$app:openshop";
 
 /// For discounts the set depends on the mode (default: the function's first mode).
-pub fn get_mutations(definition: &Function, mode: Option<DiscountMode>) -> Option<MutationSet> {
-    if definition.function_type == FunctionType::Discount {
-        return Some(discount_mutations(mode.unwrap_or_else(|| definition.first_mode())));
-    }
-    function_mutations(definition.function_type)
+pub fn get_mutations(definition: &Function, mode: Option<DiscountMode>) -> MutationSet {
+    let (list, update, delete) = match definition.function_type {
+        FunctionType::Discount => match mode.unwrap_or_else(|| definition.first_mode()) {
+            DiscountMode::Automatic => (
+                "discountNodes",
+                Some("discountAutomaticAppUpdate"),
+                "discountAutomaticDelete",
+            ),
+            DiscountMode::Code => ("discountNodes", Some("discountCodeAppUpdate"), "discountCodeDelete"),
+        },
+        FunctionType::CartTransform => ("cartTransforms", None, "cartTransformDelete"),
+        FunctionType::DeliveryCustomization => (
+            "deliveryCustomizations",
+            Some("deliveryCustomizationUpdate"),
+            "deliveryCustomizationDelete",
+        ),
+        FunctionType::PaymentCustomization => (
+            "paymentCustomizations",
+            Some("paymentCustomizationUpdate"),
+            "paymentCustomizationDelete",
+        ),
+        FunctionType::CheckoutValidation => ("validations", Some("validationUpdate"), "validationDelete"),
+        FunctionType::FulfillmentConstraints => (
+            "fulfillmentConstraintRules",
+            None,
+            "fulfillmentConstraintRuleDelete",
+        ),
+    };
+    MutationSet { list, update, delete }
 }
 
 /// The payload of the single mutation in a response (ignoring `extensions`).
@@ -175,12 +132,12 @@ pub fn build_create_mutation(
     title: &str,
     config: &JsonMap,
     body: &JsonMap,
-) -> Option<MutationRequest> {
+) -> MutationRequest {
     let metafield = build_metafield(handle, config);
     let now = || Value::from(to_iso(&Utc::now()));
 
     match definition.function_type {
-        FunctionType::Discount if mode == DiscountMode::Automatic => Some(MutationRequest {
+        FunctionType::Discount if mode == DiscountMode::Automatic => MutationRequest {
             mutation: "#graphql
           mutation CreateAutoDiscount($input: DiscountAutomaticAppInput!) {
             discountAutomaticAppCreate(automaticAppDiscount: $input) {
@@ -199,7 +156,7 @@ pub fn build_create_mutation(
                     "metafields": [metafield],
                 },
             }),
-        }),
+        },
 
         FunctionType::Discount => {
             let mut input = JsonMap::new();
@@ -211,7 +168,7 @@ pub fn build_create_mutation(
             input.insert("usageLimit".into(), body_or(body, "usageLimit", Value::Null));
             input.insert("combinesWith".into(), combines_with(definition.owner.as_ref()));
             input.insert("metafields".into(), json!([metafield]));
-            Some(MutationRequest {
+            MutationRequest {
                 mutation: "#graphql
         mutation CreateCodeDiscount($input: DiscountCodeAppInput!) {
           discountCodeAppCreate(codeAppDiscount: $input) {
@@ -221,10 +178,10 @@ pub fn build_create_mutation(
         }"
                 .to_string(),
                 variables: json!({ "input": input }),
-            })
+            }
         }
 
-        FunctionType::CartTransform => Some(MutationRequest {
+        FunctionType::CartTransform => MutationRequest {
             mutation: "#graphql
         mutation CreateCartTransform($functionHandle: String!, $blockOnFailure: Boolean, $metafields: [MetafieldInput!]) {
           cartTransformCreate(functionHandle: $functionHandle, blockOnFailure: $blockOnFailure, metafields: $metafields) {
@@ -238,9 +195,9 @@ pub fn build_create_mutation(
                 "blockOnFailure": body_or(body, "blockOnFailure", Value::Bool(false)),
                 "metafields": [metafield],
             }),
-        }),
+        },
 
-        FunctionType::FulfillmentConstraints => Some(MutationRequest {
+        FunctionType::FulfillmentConstraints => MutationRequest {
             mutation: "#graphql
         mutation CreateFulfillmentConstraint($functionHandle: String!, $deliveryMethodTypes: [DeliveryMethodType!]!, $metafields: [MetafieldInput!]) {
           fulfillmentConstraintRuleCreate(functionHandle: $functionHandle, deliveryMethodTypes: $deliveryMethodTypes, metafields: $metafields) {
@@ -254,9 +211,9 @@ pub fn build_create_mutation(
                 "deliveryMethodTypes": body_or(body, "deliveryMethodTypes", json!(["SHIPPING"])),
                 "metafields": [metafield],
             }),
-        }),
+        },
 
-        FunctionType::DeliveryCustomization => Some(MutationRequest {
+        FunctionType::DeliveryCustomization => MutationRequest {
             mutation: "#graphql
         mutation CreateDeliveryCustomization($input: DeliveryCustomizationInput!) {
           deliveryCustomizationCreate(deliveryCustomization: $input) {
@@ -268,9 +225,9 @@ pub fn build_create_mutation(
             variables: json!({
                 "input": { "functionHandle": handle, "title": title, "enabled": true, "metafields": [metafield] },
             }),
-        }),
+        },
 
-        FunctionType::PaymentCustomization => Some(MutationRequest {
+        FunctionType::PaymentCustomization => MutationRequest {
             mutation: "#graphql
         mutation CreatePaymentCustomization($input: PaymentCustomizationInput!) {
           paymentCustomizationCreate(paymentCustomization: $input) {
@@ -282,9 +239,9 @@ pub fn build_create_mutation(
             variables: json!({
                 "input": { "functionHandle": handle, "title": title, "enabled": true, "metafields": [metafield] },
             }),
-        }),
+        },
 
-        FunctionType::CheckoutValidation => Some(MutationRequest {
+        FunctionType::CheckoutValidation => MutationRequest {
             mutation: "#graphql
         mutation CreateValidation($input: ValidationCreateInput!) {
           validationCreate(validation: $input) {
@@ -302,10 +259,12 @@ pub fn build_create_mutation(
                     "metafields": [metafield],
                 },
             }),
-        }),
+        },
     }
 }
 
+/// Only for a type whose [`MutationSet`] has an `update`: the others have no
+/// update mutation.
 pub fn build_update_mutation(
     definition: &Function,
     handle: &str,
@@ -314,7 +273,7 @@ pub fn build_update_mutation(
     title: &str,
     config: &JsonMap,
     body: &JsonMap,
-) -> Option<MutationRequest> {
+) -> MutationRequest {
     let metafield = build_metafield(handle, config);
     let combines = definition
         .owner
@@ -387,15 +346,17 @@ pub fn build_update_mutation(
                 input,
             )
         }
-        FunctionType::CartTransform | FunctionType::FulfillmentConstraints => return None,
+        FunctionType::CartTransform | FunctionType::FulfillmentConstraints => {
+            unreachable!("a {} instance has no update", definition.function_type.as_str())
+        }
     };
 
     let mut input = input;
     input.insert("metafields".into(), json!([metafield]));
-    Some(MutationRequest {
+    MutationRequest {
         mutation: mutation.to_string(),
         variables: json!({ "id": id, "input": input }),
-    })
+    }
 }
 
 pub fn build_delete_mutation(mutation_name: &str, id: &str) -> MutationRequest {
@@ -438,17 +399,15 @@ mod tests {
     #[test]
     fn picks_mutation_sets_by_type_and_mode() {
         assert_eq!(
-            get_mutations(&discount(), None).unwrap().create,
-            "discountAutomaticAppCreate"
+            get_mutations(&discount(), None).update,
+            Some("discountAutomaticAppUpdate")
         );
         assert_eq!(
-            get_mutations(&discount(), Some(DiscountMode::Code)).unwrap().delete,
+            get_mutations(&discount(), Some(DiscountMode::Code)).delete,
             "discountCodeDelete"
         );
         let cart = Function::new(FunctionType::CartTransform, "bundles");
-        let set = get_mutations(&cart, None).unwrap();
-        assert_eq!(set.update, None);
-        assert_eq!(set.input_style, InputStyle::Flat);
+        assert_eq!(get_mutations(&cart, None).update, None);
     }
 
     #[test]
@@ -479,8 +438,7 @@ mod tests {
             "10% off",
             &config,
             &body,
-        )
-        .unwrap();
+        );
         assert!(request.mutation.contains("discountAutomaticAppCreate"));
         let input = &request.variables["input"];
         assert_eq!(input["functionHandle"], "volume-discount");
@@ -504,8 +462,7 @@ mod tests {
             "t",
             &JsonMap::new(),
             &body,
-        )
-        .unwrap();
+        );
         assert!(request.mutation.contains("discountCodeAppCreate"));
         let input = &request.variables["input"];
         assert_eq!(input["code"], "SAVE10");
@@ -517,24 +474,24 @@ mod tests {
     fn builds_flat_and_wrapped_creations_for_other_types() {
         let empty = JsonMap::new();
         let cart = Function::new(FunctionType::CartTransform, "bundles");
-        let request = build_create_mutation(&cart, "bundles", DiscountMode::Automatic, "t", &empty, &empty).unwrap();
+        let request = build_create_mutation(&cart, "bundles", DiscountMode::Automatic, "t", &empty, &empty);
         assert_eq!(request.variables["functionHandle"], "bundles");
         assert_eq!(request.variables["blockOnFailure"], false);
 
         let rules = Function::new(FunctionType::FulfillmentConstraints, "rules");
-        let request = build_create_mutation(&rules, "rules", DiscountMode::Automatic, "t", &empty, &empty).unwrap();
+        let request = build_create_mutation(&rules, "rules", DiscountMode::Automatic, "t", &empty, &empty);
         assert_eq!(request.variables["deliveryMethodTypes"], json!(["SHIPPING"]));
 
         let validation = Function::new(FunctionType::CheckoutValidation, "limits");
         let body = object(json!({ "blockOnFailure": true }));
         let request =
-            build_create_mutation(&validation, "limits", DiscountMode::Automatic, "Limits", &empty, &body).unwrap();
+            build_create_mutation(&validation, "limits", DiscountMode::Automatic, "Limits", &empty, &body);
         assert_eq!(request.variables["input"]["enable"], true);
         assert_eq!(request.variables["input"]["blockOnFailure"], true);
 
         let delivery = Function::new(FunctionType::DeliveryCustomization, "hide");
         let request =
-            build_create_mutation(&delivery, "hide", DiscountMode::Automatic, "Hide", &empty, &empty).unwrap();
+            build_create_mutation(&delivery, "hide", DiscountMode::Automatic, "Hide", &empty, &empty);
         assert_eq!(request.variables["input"]["enabled"], true);
     }
 
@@ -548,31 +505,13 @@ mod tests {
             "t",
             &JsonMap::new(),
             &object(json!({ "endsAt": null })),
-        )
-        .unwrap();
+        );
         let input = request.variables["input"].as_object().unwrap();
         assert!(!input.contains_key("startsAt"));
         assert_eq!(input["endsAt"], Value::Null);
         assert!(!input.contains_key("usageLimit"));
         assert!(input.contains_key("combinesWith"));
         assert_eq!(request.variables["id"], "gid://shopify/DiscountAutomaticNode/1");
-    }
-
-    #[test]
-    fn update_is_unsupported_for_flat_types() {
-        let cart = Function::new(FunctionType::CartTransform, "bundles");
-        assert!(
-            build_update_mutation(
-                &cart,
-                "bundles",
-                DiscountMode::Automatic,
-                "id",
-                "t",
-                &JsonMap::new(),
-                &JsonMap::new()
-            )
-            .is_none()
-        );
     }
 
     #[test]

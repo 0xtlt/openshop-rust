@@ -1,7 +1,6 @@
 //! Admin API for custom admin pages: discovery, access checks and the RPC
 //! endpoint behind loaders and actions.
 
-use std::panic::AssertUnwindSafe;
 use std::time::Instant;
 
 use axum::Router;
@@ -11,19 +10,18 @@ use axum::http::header::CONTENT_TYPE;
 use axum::http::{HeaderMap, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
-use futures::FutureExt;
 use indexmap::IndexMap;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
-use super::http::{header, json_response, parse_query};
+use super::http::{catch_panic, header, json_response, parse_query};
 use super::shop::ShopSession;
 use crate::admin::{
     AdminAuthorize, AdminContext, AdminFunctionKind, AdminPublicError, CustomAdminPage, validate_admin_menu,
 };
 use crate::app::OpenShop;
 use crate::engine::step::error_message;
-use crate::runtime::report::{self, Panicked};
+use crate::runtime::report;
 use crate::runtime::logger;
 use crate::types::{CustomAdminPageAccess, CustomAdminPagesResponse, JsonMap};
 use openshop_shared::match_custom_admin_path;
@@ -104,10 +102,7 @@ async fn page_is_allowed(app: &OpenShop, session: &ShopSession, page: &CustomAdm
         let context = create_context(app, session, params, Uuid::new_v4().to_string(), None).await?;
         is_allowed(&ancestor_access(app.custom_pages(), page), &context, None).await
     };
-    let outcome: anyhow::Result<bool> = AssertUnwindSafe(check)
-        .catch_unwind()
-        .await
-        .unwrap_or_else(|_| Err(anyhow::anyhow!("access rule panicked")));
+    let outcome: anyhow::Result<bool> = catch_panic("access rule", check).await;
 
     outcome.unwrap_or_else(|error| {
         logger::warn_with(
@@ -297,10 +292,7 @@ async fn rpc(
 
     // A panicking access rule or function is an internal error, not a dropped connection.
     let execution = execute_rpc(&app, &session, uri.path(), &headers, &body, &request_id, &mut metadata);
-    let outcome = AssertUnwindSafe(execution)
-        .catch_unwind()
-        .await
-        .unwrap_or_else(|_| Err(Panicked::error("admin function panicked")));
+    let outcome = catch_panic("admin function", execution).await;
     metadata.insert(
         "durationMs".into(),
         Value::from(started_at.elapsed().as_millis() as u64),

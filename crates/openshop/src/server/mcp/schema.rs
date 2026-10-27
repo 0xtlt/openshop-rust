@@ -9,8 +9,6 @@ use serde_json::Value;
 
 use crate::types::JsonMap;
 
-const JSON_TYPES: [&str; 7] = ["object", "array", "string", "number", "integer", "boolean", "null"];
-
 fn is_integer(value: &Value) -> bool {
     match value {
         Value::Number(number) => {
@@ -220,11 +218,6 @@ pub fn validate_mcp_tool_arguments(input_schema: Option<&Value>, value: Option<&
     let schema = input_schema.unwrap_or(&default_schema);
     validate_json_schema(&Value::Object(arguments.clone()), schema, "arguments")?;
     Ok(arguments)
-}
-
-/// Known JSON Schema type names.
-pub fn is_json_type(name: &str) -> bool {
-    JSON_TYPES.contains(&name)
 }
 
 #[cfg(test)]

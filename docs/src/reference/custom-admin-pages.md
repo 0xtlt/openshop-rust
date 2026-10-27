@@ -437,7 +437,7 @@ pages change and serves `dist` for you. `dev` and `start` pick the first of:
 | `UiSource` | Serves |
 | --- | --- |
 | `UiSource::Dir(path)` | The files of a directory on disk, such as `dist`. |
-| `UiSource::assets(lookup)` | A bundle compiled into your binary. `lookup` is a `fn(&str) -> Option<Cow<'static, [u8]>>` that receives an asset path such as `index.html`. |
+| `UiSource::Assets(lookup)` | A bundle compiled into your binary. `lookup` is a `fn(&str) -> Option<Cow<'static, [u8]>>` that receives an asset path such as `index.html`. |
 | `UiSource::Embedded` | The bundle built into the framework. |
 | `UiSource::None` | No UI: the server is API-only. |
 
@@ -456,7 +456,7 @@ fn admin_ui(path: &str) -> Option<Cow<'static, [u8]>> {
 }
 
 static APP: App = app! {
-    admin_ui: UiSource::assets(admin_ui),
+    admin_ui: UiSource::Assets(admin_ui),
 };
 ```
 

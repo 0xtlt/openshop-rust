@@ -73,7 +73,12 @@ async fn save_provider(
     let existing_config = app
         .crypto()
         .decrypt_config(existing.as_ref().and_then(|row| row.config.as_ref()))?;
-    let parsed = match parse_provider_config(provider, body.get("config"), &existing_config) {
+    let parsed = match parse_provider_config(
+        &provider.fields,
+        provider.transformer.as_ref(),
+        body.get("config"),
+        &existing_config,
+    ) {
         Ok(parsed) => parsed,
         Err(error) => return Ok(json_error(StatusCode::BAD_REQUEST, error)),
     };
@@ -106,13 +111,13 @@ async fn check_provider(
     };
     let stored = stored_config(&app, &session, &name).await?;
 
-    let outcome: anyhow::Result<bool> = async {
+    let check = async {
         let config = app
             .crypto()
             .decrypt_config(stored.as_ref().and_then(|row| row.config.as_ref()))?;
-        let ok = tokio::time::timeout(CHECK_TIMEOUT, AssertUnwindSafe(checker(config)).catch_unwind())
+        let ok = AssertUnwindSafe(checker(config))
+            .catch_unwind()
             .await
-            .map_err(|_| CheckTimedOut)?
             .unwrap_or_else(|_| Err(public_error("checker panicked")))?;
 
         if let Some(stored) = &stored {
@@ -122,17 +127,19 @@ async fn check_provider(
                 .execute(app.db())
                 .await?;
         }
-        Ok(ok)
-    }
-    .await;
+        anyhow::Ok(ok)
+    };
 
-    Ok(match outcome {
-        Ok(ok) => json_response(StatusCode::OK, json!({ "ok": ok })),
-        Err(error) if error.is::<CheckTimedOut>() => json_response(
+    Ok(match tokio::time::timeout(CHECK_TIMEOUT, check).await {
+        Ok(Ok(ok)) => json_response(StatusCode::OK, json!({ "ok": ok })),
+        Err(_) => json_response(
             StatusCode::GATEWAY_TIMEOUT,
-            json!({ "ok": false, "error": format!("Error: {error}") }),
+            json!({
+                "ok": false,
+                "error": format!("Error: the check timed out after {} seconds", CHECK_TIMEOUT.as_secs()),
+            }),
         ),
-        Err(error) => {
+        Ok(Err(error)) => {
             let failure = client_error(&format!("Check of provider \"{name}\" failed"), &error);
             let mut body = json!({ "ok": false, "error": format!("Error: {}", failure.message) });
             if let Some(id) = failure.error_id {
@@ -145,17 +152,6 @@ async fn check_provider(
 
 /// The longest a connection check may take: the admin waits for the answer.
 const CHECK_TIMEOUT: Duration = Duration::from_secs(10);
-
-#[derive(Debug)]
-struct CheckTimedOut;
-
-impl std::fmt::Display for CheckTimedOut {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "the check timed out after {} seconds", CHECK_TIMEOUT.as_secs())
-    }
-}
-
-impl std::error::Error for CheckTimedOut {}
 
 pub fn routes() -> Router<OpenShop> {
     Router::new()

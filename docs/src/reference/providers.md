@@ -338,7 +338,7 @@ async fn push(ctx: &FlowContext, rows: &[JsonMap]) -> Result<u64> {
 | --- | --- |
 | `connectors.call(provider, method, args).await` | `Result<Value>` |
 | `connectors.call_as::<T>(provider, method, args).await` | `Result<T>`. A result that is not a `T` fails with `Invalid result from "<provider>.<method>": …`. |
-| `connectors.get(provider).await` | `Result<&Connector>`, with `call(method, args)` and `call_as::<T>(method, args)` plus `has(method)` and `method_names()` |
+| `connectors.get(provider).await` | `Result<&Connector>`, with `call(method, args)` |
 | `connectors.names()` | Iterator over the provider keys |
 
 These are the calls by name. For a [provider struct](#the-methods), prefer

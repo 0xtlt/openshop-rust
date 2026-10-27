@@ -127,8 +127,7 @@ larger configurations easier to split:
   a run that changed meanwhile is answered `409`. A retry of a flow that
   rejects concurrent runs answers `409` with `existingRunId` while another
   run of it is active for the shop.
-- Log export uses JSON for any `format` other than `csv`, and only letters and
-  digits are kept in the file extension.
+- Log export uses JSON, in a `.json` file, for any `format` other than `csv`.
 - Run details list steps in creation order.
 - Unknown paths under `/api` return `404` after authentication.
 - Request bodies are limited to 2 MB (`413` above that). Set
@@ -199,7 +198,7 @@ larger configurations easier to split:
 - The UI is written in Rust with Leptos and compiled to WebAssembly. It is
   embedded in the framework crate. An application with custom admin pages
   serves its own bundle with the setting `admin_ui: UiSource::Dir(…)`,
-  `admin_ui: UiSource::assets(…)` for a bundle compiled into the binary, or
+  `admin_ui: UiSource::Assets(…)` for a bundle compiled into the binary, or
   the `OPENSHOP_UI_DIR` environment variable.
 - Assets whose file name carries a content hash are served with
   `Cache-Control: public, max-age=31536000, immutable`; other files with

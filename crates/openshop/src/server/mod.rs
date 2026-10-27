@@ -9,7 +9,6 @@ mod compression;
 pub mod connectors;
 pub mod crypto;
 pub mod file_routes;
-pub mod function_config;
 pub mod function_mutations;
 pub mod functions;
 pub mod hmac;
@@ -20,7 +19,6 @@ mod linger;
 pub mod log_query;
 pub mod mcp;
 pub mod ops;
-mod polaris;
 pub mod provider_config;
 pub mod proxy;
 mod reload;
@@ -59,45 +57,21 @@ use crate::types::AdminPageMode;
 use openshop_shared::admin_page_from_api_path;
 
 pub use self::limits::{DEFAULT_MAX_CONCURRENT_REQUESTS, DEFAULT_REQUEST_TIMEOUT};
-pub use self::shop::ShopSession;
 pub use self::static_ui::UiSource;
 
-pub(crate) const ROBOTS_HEADER: &str = "noindex, nofollow, noarchive, nosnippet";
+const ROBOTS_HEADER: &str = "noindex, nofollow, noarchive, nosnippet";
 /// Request bodies above this size are rejected with `413` unless the
 /// application sets `max_request_body_bytes`.
 pub const DEFAULT_MAX_REQUEST_BODY_BYTES: usize = 2 * 1024 * 1024;
 const ROBOTS_TXT: &str = "User-agent: *\nDisallow: /\n";
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default)]
 pub struct ServerOptions {
     /// Admin UI to serve. Without one the server is API-only and enables CORS on `/api`.
     pub ui: UiSource,
     /// Development mode: the UI shell is served without the signed-query gate,
     /// and reloads when the server is started again or its bundle rebuilt.
     pub dev: bool,
-}
-
-impl ServerOptions {
-    /// Production: the embedded UI behind the signed-query gate.
-    pub fn production() -> Self {
-        Self {
-            ui: UiSource::Embedded,
-            dev: false,
-        }
-    }
-
-    /// Development: the embedded UI without the signed-query gate.
-    pub fn development() -> Self {
-        Self {
-            ui: UiSource::Embedded,
-            dev: true,
-        }
-    }
-
-    pub fn ui(mut self, ui: UiSource) -> Self {
-        self.ui = ui;
-        self
-    }
 }
 
 static LOCAL_ORIGIN: LazyLock<Regex> = LazyLock::new(|| {
@@ -193,7 +167,8 @@ pub(crate) fn create_router(app: &OpenShop, options: ServerOptions, log: bool) -
         .method_not_allowed_fallback(|| async { not_found() })
         .layer(middleware::from_fn_with_state(app.clone(), page_gate))
         .layer(middleware::from_fn_with_state(app.clone(), shop::shop_middleware));
-    // CORS for dev only (not needed when serving from same origin in prod)
+    // CORS when the admin UI is not served from this origin: in development,
+    // and on an API-only server, production included.
     if !options.ui.is_enabled() || options.dev {
         api = with_cors(api, &cors);
     }

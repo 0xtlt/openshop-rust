@@ -1,12 +1,16 @@
 //! Small HTTP helpers shared by the route modules.
 
+use std::panic::AssertUnwindSafe;
+
 use axum::Json;
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
+use futures::FutureExt;
 use indexmap::IndexMap;
 use serde_json::{Value, json};
 
 use crate::engine::step::error_message;
+use crate::runtime::report::Panicked;
 use crate::runtime::{logger, report};
 use crate::types::JsonMap;
 
@@ -44,6 +48,40 @@ pub(crate) fn containing(text: &str) -> String {
     }
     pattern.push('%');
     pattern
+}
+
+/// Runs code of the application: a panic in it fails it as an error it
+/// returned would, `<what> panicked`.
+pub(crate) async fn catch_panic<T>(
+    what: &str,
+    work: impl Future<Output = anyhow::Result<T>>,
+) -> anyhow::Result<T> {
+    AssertUnwindSafe(work)
+        .catch_unwind()
+        .await
+        .unwrap_or_else(|_| Err(Panicked::error(format!("{what} panicked"))))
+}
+
+/// Reports a failure of code of the application, and logs it under `message`.
+pub(crate) fn report_failure(message: impl AsRef<str>, error: &anyhow::Error) {
+    report::error(error);
+    logger::error_with(message, json!({ "error": error_message(error) }));
+}
+
+/// Escapes text for an HTML element or a quoted attribute.
+pub(crate) fn escape(text: &str) -> String {
+    let mut escaped = String::with_capacity(text.len());
+    for character in text.chars() {
+        match character {
+            '&' => escaped.push_str("&amp;"),
+            '<' => escaped.push_str("&lt;"),
+            '>' => escaped.push_str("&gt;"),
+            '"' => escaped.push_str("&quot;"),
+            '\'' => escaped.push_str("&#39;"),
+            other => escaped.push(other),
+        }
+    }
+    escaped
 }
 
 pub(crate) fn header<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {

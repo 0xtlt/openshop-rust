@@ -7,8 +7,6 @@ pub mod schema;
 pub mod tokens;
 mod verifier;
 
-pub use crate::types::{McpAuditStatus, McpCapabilityType};
-
 use std::panic::AssertUnwindSafe;
 use std::time::{Duration, Instant};
 
@@ -26,21 +24,22 @@ use self::auth::{McpAuthResult, ResolvedMcpToken, resolve_mcp_bearer_token};
 use self::registry::{McpRegistry, has_all_permissions};
 use self::schema::validate_mcp_tool_arguments;
 use crate::app::OpenShop;
-use crate::engine::step::error_message;
 use crate::server::client::request_client_ip;
 use crate::server::connectors::Connectors;
-use crate::server::http::{client_error, public_error};
+use crate::server::http::{client_error, public_error, report_failure};
 use crate::server::shop_domain::normalize_shop_domain;
 use crate::shopify::client::ShopifyClient;
 use crate::types::{JsonMap, McpContext};
 
-pub const MCP_PROTOCOL_VERSION: &str = "2025-11-25";
+const MCP_PROTOCOL_VERSION: &str = "2025-11-25";
 const MAX_MCP_PAYLOAD_BYTES: usize = 1_000_000;
 const MAX_MCP_EXECUTION: Duration = Duration::from_millis(30_000);
 
+/// The capability a request calls, as `mcp_audit_logs` records it.
 #[derive(Default, Clone)]
 struct ActiveAudit {
-    capability_type: Option<McpCapabilityType>,
+    /// `tool` or `resource`.
+    capability_type: Option<&'static str>,
     capability_name: Option<String>,
     permission_keys: Vec<String>,
     target_shop: Option<String>,
@@ -93,59 +92,20 @@ fn text_content(text: String) -> Value {
 /// Strings become text content; objects without `content` / `structuredContent`
 /// are returned both as pretty-printed text and as structured content.
 fn normalize_tool_result(result: Value) -> Value {
-    match result {
-        Value::String(text) => json!({ "content": text_content(text) }),
-        Value::Object(object) => {
-            if object.get("content").is_some_and(Value::is_array) || object.contains_key("structuredContent") {
-                return Value::Object(object);
-            }
-            let value = Value::Object(object);
-            json!({
-                "content": text_content(serde_json::to_string_pretty(&value).unwrap_or_default()),
-                "structuredContent": value,
-            })
+    match &result {
+        Value::String(text) => json!({ "content": text_content(text.clone()) }),
+        Value::Object(object)
+            if object.get("content").is_some_and(Value::is_array) || object.contains_key("structuredContent") =>
+        {
+            result
         }
-        Value::Array(items) => {
-            let value = Value::Array(items);
-            json!({
-                "content": text_content(serde_json::to_string_pretty(&value).unwrap_or_default()),
-                "structuredContent": value,
-            })
-        }
+        Value::Object(_) | Value::Array(_) => json!({
+            "content": text_content(serde_json::to_string_pretty(&result).unwrap_or_default()),
+            "structuredContent": result,
+        }),
         Value::Null => json!({ "content": text_content(String::new()) }),
         other => json!({ "content": text_content(other.to_string()) }),
     }
-}
-
-struct AuditEntry<'a> {
-    token: &'a ResolvedMcpToken,
-    audit: &'a ActiveAudit,
-    status: McpAuditStatus,
-    error: Option<&'a str>,
-    started_at: Instant,
-    request_id: Option<&'a str>,
-}
-
-async fn audit(app: &OpenShop, entry: AuditEntry<'_>) -> Result<()> {
-    sqlx::query(
-        "INSERT INTO mcp_audit_logs \
-           (app_handle, shop, token_id, capability_type, capability_name, permission_keys, target_shop, status, error, duration_ms, request_id) \
-         VALUES ($1, $2, $3, $4, $5, $6::json, $7, $8, $9, $10, $11)",
-    )
-    .bind(&entry.token.app_handle)
-    .bind(&entry.token.shop)
-    .bind(&entry.token.token_id)
-    .bind(entry.audit.capability_type.map(McpCapabilityType::as_str))
-    .bind(&entry.audit.capability_name)
-    .bind(serde_json::to_string(&entry.audit.permission_keys)?)
-    .bind(&entry.audit.target_shop)
-    .bind(entry.status.as_str())
-    .bind(entry.error)
-    .bind(entry.started_at.elapsed().as_millis().min(i32::MAX as u128) as i32)
-    .bind(entry.request_id)
-    .execute(app.db())
-    .await?;
-    Ok(())
 }
 
 fn create_context(app: &OpenShop, token: &ResolvedMcpToken, signal: CancellationToken) -> McpContext {
@@ -186,11 +146,11 @@ where
 fn list_tools(registry: &McpRegistry, permissions: &[String]) -> Value {
     let tools: Vec<Value> = registry
         .tools
-        .values()
-        .filter(|tool| has_all_permissions(permissions, &tool.definition.required_permissions))
-        .map(|tool| {
+        .iter()
+        .filter(|(_, tool)| has_all_permissions(permissions, &tool.definition.required_permissions))
+        .map(|(name, tool)| {
             json!({
-                "name": tool.name,
+                "name": name,
                 "description": tool.definition.description,
                 "inputSchema": tool.definition.input_schema.clone()
                     .unwrap_or_else(|| json!({ "type": "object", "properties": {} })),
@@ -203,11 +163,11 @@ fn list_tools(registry: &McpRegistry, permissions: &[String]) -> Value {
 fn list_resources(registry: &McpRegistry, permissions: &[String]) -> Value {
     let resources: Vec<Value> = registry
         .resources
-        .values()
-        .filter(|resource| has_all_permissions(permissions, &resource.definition.required_permissions))
-        .map(|resource| {
+        .iter()
+        .filter(|(_, resource)| has_all_permissions(permissions, &resource.definition.required_permissions))
+        .map(|(uri, resource)| {
             let mut item = JsonMap::new();
-            item.insert("uri".into(), Value::from(resource.uri.clone()));
+            item.insert("uri".into(), Value::from(uri.clone()));
             item.insert("name".into(), Value::from(resource.definition.name.clone()));
             if let Some(description) = &resource.definition.description {
                 item.insert("description".into(), Value::from(description.clone()));
@@ -239,6 +199,59 @@ struct McpCall<'a> {
     request_id: Option<&'a str>,
 }
 
+impl McpCall<'_> {
+    /// Writes the row of `mcp_audit_logs` of the call. `status` is `success`,
+    /// `denied` or `error`.
+    async fn audit(&self, active: &ActiveAudit, status: &str, error: Option<&str>) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO mcp_audit_logs \
+               (app_handle, shop, token_id, capability_type, capability_name, permission_keys, target_shop, status, error, duration_ms, request_id) \
+             VALUES ($1, $2, $3, $4, $5, $6::json, $7, $8, $9, $10, $11)",
+        )
+        .bind(&self.token.app_handle)
+        .bind(&self.token.shop)
+        .bind(&self.token.token_id)
+        .bind(active.capability_type)
+        .bind(&active.capability_name)
+        .bind(serde_json::to_string(&active.permission_keys)?)
+        .bind(&active.target_shop)
+        .bind(status)
+        .bind(error)
+        .bind(self.started_at.elapsed().as_millis().min(i32::MAX as u128) as i32)
+        .bind(self.request_id)
+        .execute(self.app.db())
+        .await?;
+        Ok(())
+    }
+
+    /// Records the capability called in `active`. When the token lacks a
+    /// permission it requires, the denial is audited and its answer returned.
+    async fn authorize(
+        &self,
+        active: &mut ActiveAudit,
+        capability_type: &'static str,
+        name: &str,
+        required_permissions: &[String],
+    ) -> Result<Option<Response>> {
+        *active = ActiveAudit {
+            capability_type: Some(capability_type),
+            capability_name: Some(name.to_string()),
+            permission_keys: required_permissions.to_vec(),
+            target_shop: None,
+        };
+        if has_all_permissions(&self.token.permissions, required_permissions) {
+            return Ok(None);
+        }
+        self.audit(active, "denied", Some("Permission denied")).await?;
+        Ok(Some(json_rpc_error(
+            self.request.get("id"),
+            -32003,
+            &format!("Permission denied for {capability_type} \"{name}\""),
+            StatusCode::OK,
+        )))
+    }
+}
+
 /// Outcome of a dispatched method: a response, or an error to audit and report.
 async fn dispatch(call: McpCall<'_>, method: &str, active: &mut ActiveAudit) -> Result<Response> {
     let McpCall {
@@ -246,8 +259,7 @@ async fn dispatch(call: McpCall<'_>, method: &str, active: &mut ActiveAudit) -> 
         registry,
         token,
         request,
-        started_at,
-        request_id,
+        ..
     } = call;
     let id = request.get("id");
     let ok = StatusCode::OK;
@@ -261,7 +273,7 @@ async fn dispatch(call: McpCall<'_>, method: &str, active: &mut ActiveAudit) -> 
                     "tools": { "listChanged": false },
                     "resources": { "subscribe": false, "listChanged": false },
                 },
-                "serverInfo": { "name": "openshop", "version": "0.1.1" },
+                "serverInfo": { "name": "openshop", "version": env!("CARGO_PKG_VERSION") },
             }),
         )),
 
@@ -273,31 +285,11 @@ async fn dispatch(call: McpCall<'_>, method: &str, active: &mut ActiveAudit) -> 
             let Some(tool) = registry.tools.get(name) else {
                 return Ok(json_rpc_error(id, -32602, &format!("Unknown tool \"{name}\""), ok));
             };
-            *active = ActiveAudit {
-                capability_type: Some(McpCapabilityType::Tool),
-                capability_name: Some(name.to_string()),
-                permission_keys: tool.definition.required_permissions.clone(),
-                target_shop: None,
-            };
-            if !has_all_permissions(&token.permissions, &tool.definition.required_permissions) {
-                audit(
-                    app,
-                    AuditEntry {
-                        token,
-                        audit: active,
-                        status: McpAuditStatus::Denied,
-                        error: Some("Permission denied"),
-                        started_at,
-                        request_id,
-                    },
-                )
-                .await?;
-                return Ok(json_rpc_error(
-                    id,
-                    -32003,
-                    &format!("Permission denied for tool \"{name}\""),
-                    ok,
-                ));
+            if let Some(denied) = call
+                .authorize(active, "tool", name, &tool.definition.required_permissions)
+                .await?
+            {
+                return Ok(denied);
             }
 
             let input =
@@ -318,18 +310,7 @@ async fn dispatch(call: McpCall<'_>, method: &str, active: &mut ActiveAudit) -> 
                 run(create_context(app, token, signal), input)
             })
             .await?;
-            audit(
-                app,
-                AuditEntry {
-                    token,
-                    audit: active,
-                    status: McpAuditStatus::Success,
-                    error: None,
-                    started_at,
-                    request_id,
-                },
-            )
-            .await?;
+            call.audit(active, "success", None).await?;
             Ok(json_rpc_result(id, normalize_tool_result(result)))
         }
 
@@ -341,31 +322,11 @@ async fn dispatch(call: McpCall<'_>, method: &str, active: &mut ActiveAudit) -> 
             let Some(resource) = registry.resources.get(uri) else {
                 return Ok(json_rpc_error(id, -32602, &format!("Unknown resource \"{uri}\""), ok));
             };
-            *active = ActiveAudit {
-                capability_type: Some(McpCapabilityType::Resource),
-                capability_name: Some(uri.to_string()),
-                permission_keys: resource.definition.required_permissions.clone(),
-                target_shop: None,
-            };
-            if !has_all_permissions(&token.permissions, &resource.definition.required_permissions) {
-                audit(
-                    app,
-                    AuditEntry {
-                        token,
-                        audit: active,
-                        status: McpAuditStatus::Denied,
-                        error: Some("Permission denied"),
-                        started_at,
-                        request_id,
-                    },
-                )
-                .await?;
-                return Ok(json_rpc_error(
-                    id,
-                    -32003,
-                    &format!("Permission denied for resource \"{uri}\""),
-                    ok,
-                ));
+            if let Some(denied) = call
+                .authorize(active, "resource", uri, &resource.definition.required_permissions)
+                .await?
+            {
+                return Ok(denied);
             }
 
             let read = resource.definition.read.clone();
@@ -373,18 +334,7 @@ async fn dispatch(call: McpCall<'_>, method: &str, active: &mut ActiveAudit) -> 
                 read(create_context(app, token, signal))
             })
             .await?;
-            audit(
-                app,
-                AuditEntry {
-                    token,
-                    audit: active,
-                    status: McpAuditStatus::Success,
-                    error: None,
-                    started_at,
-                    request_id,
-                },
-            )
-            .await?;
+            call.audit(active, "success", None).await?;
 
             let mime_type = content
                 .mime_type
@@ -401,6 +351,12 @@ async fn dispatch(call: McpCall<'_>, method: &str, active: &mut ActiveAudit) -> 
 }
 
 pub(crate) async fn handle(State(app): State<OpenShop>, request: Request) -> Response {
+    // Before the token: a disabled endpoint looks nothing up and checks no hash.
+    let registry = app.mcp_registry();
+    if !registry.enabled {
+        return plain_error(403, "MCP is disabled");
+    }
+
     let client = request_client_ip(&request);
     let authorization = request
         .headers()
@@ -424,19 +380,10 @@ pub(crate) async fn handle(State(app): State<OpenShop>, request: Request) -> Res
             return plain_error(status, error);
         }
         Err(error) => {
-            crate::runtime::logger::error_with(
-                "[openshop] MCP authentication failed",
-                json!({ "error": error_message(&error) }),
-            );
-            crate::runtime::report::error(&error);
+            report_failure("[openshop] MCP authentication failed", &error);
             return plain_error(500, "Internal Server Error");
         }
     };
-
-    let registry = app.mcp_registry();
-    if !registry.enabled {
-        return plain_error(403, "MCP is disabled");
-    }
 
     let Ok(body) = axum::body::to_bytes(request.into_body(), MAX_MCP_PAYLOAD_BYTES).await else {
         return plain_error(413, "MCP payload too large");
@@ -478,18 +425,7 @@ pub(crate) async fn handle(State(app): State<OpenShop>, request: Request) -> Res
             // What the caller did wrong is told as it is; a database or network
             // failure is logged under an id, and only the id goes out.
             let message = client_error(&format!("MCP {method} failed"), &error).message;
-            let _ = audit(
-                &app,
-                AuditEntry {
-                    token: &token,
-                    audit: &active,
-                    status: McpAuditStatus::Error,
-                    error: Some(&message),
-                    started_at,
-                    request_id: request_id.as_deref(),
-                },
-            )
-            .await;
+            let _ = call.audit(&active, "error", Some(&message)).await;
             json_rpc_error(request.get("id"), -32000, &message, StatusCode::OK)
         }
     }

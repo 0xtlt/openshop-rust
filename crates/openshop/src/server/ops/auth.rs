@@ -18,7 +18,7 @@ use crate::server::hmac::{constant_time_eq, hmac_sha256};
 use crate::server::http::header;
 
 /// In production, a shorter password is refused when the application starts.
-pub const MIN_PRODUCTION_PASSWORD_LENGTH: usize = 16;
+const MIN_PRODUCTION_PASSWORD_LENGTH: usize = 16;
 
 const COOKIE_NAME: &str = "openshop_ops";
 const SESSION_SECONDS: i64 = 12 * 60 * 60;

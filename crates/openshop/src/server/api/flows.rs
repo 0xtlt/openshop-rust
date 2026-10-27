@@ -3,10 +3,11 @@ use axum::extract::{Extension, State};
 use axum::http::StatusCode;
 use axum::response::Response;
 use axum::routing::get;
-use serde_json::{Value, json};
+use serde_json::Value;
 
 use crate::app::OpenShop;
 use crate::server::http::json_response;
+use crate::server::mcp::core::flow_items;
 use crate::server::shop::ShopSession;
 use crate::types::{Cron, JsonMap};
 
@@ -29,24 +30,7 @@ fn cron_json(cron: &Cron, shop: &str) -> Value {
 }
 
 async fn list_flows(State(app): State<OpenShop>, Extension(session): Extension<ShopSession>) -> Response {
-    let config = app.config();
-    let flows: Vec<Value> = config
-        .flows
-        .iter()
-        .map(|(name, flow)| {
-            let crons: Vec<Value> = config
-                .crons
-                .iter()
-                .filter(|cron| cron.flow == *name && cron.is_visible_to(&session.shop))
-                .map(|cron| cron_json(cron, &session.shop))
-                .collect();
-            json!({
-                "name": name,
-                "crons": crons,
-                "inputSchema": flow.input.as_ref().map(|schema| schema.json_schema.clone()),
-            })
-        })
-        .collect();
+    let flows = flow_items(&app, &session.shop, |cron| cron_json(cron, &session.shop));
     json_response(StatusCode::OK, Value::Array(flows))
 }
 
