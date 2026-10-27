@@ -3,21 +3,11 @@ mod common;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use common::{TEST_SHOP, TestApp, create_config, noop_flow};
+use common::{TEST_SHOP, TestApp, create_config, find_run, noop_flow};
 use openshop::builder::InputSchema;
-use openshop::db::schema::FlowRun;
 use openshop::{
     Concurrency, DispatchOptions, FlowConcurrencyError, InvalidFlowInput, RetryPolicy, UnknownFlowError, Value, json,
 };
-use uuid::Uuid;
-
-async fn find_run(test: &TestApp, run_id: Uuid) -> FlowRun {
-    sqlx::query_as("SELECT * FROM flow_runs WHERE id = $1")
-        .bind(run_id)
-        .fetch_one(&test.db)
-        .await
-        .unwrap()
-}
 
 #[tokio::test]
 async fn creates_a_pending_flow_run() {
@@ -29,7 +19,7 @@ async fn creates_a_pending_flow_run() {
         .unwrap();
     assert_eq!(dispatched.status, "pending");
 
-    let run = find_run(&test, dispatched.run_id).await;
+    let run = find_run(&test.db, dispatched.run_id).await;
     assert_eq!(run.status, "pending");
     assert_eq!(run.flow_name, "test-flow");
     assert_eq!(run.shop, TEST_SHOP);
@@ -53,7 +43,7 @@ async fn stores_input_and_app_handle() {
         .await
         .unwrap();
 
-    let run = find_run(&test, dispatched.run_id).await;
+    let run = find_run(&test.db, dispatched.run_id).await;
     assert_eq!(run.input, Some(json!({ "source": "config", "z": 1, "a": 2 })));
     assert_eq!(run.app_handle, "client-a");
     assert_eq!(run.parent_run_id.as_deref(), Some("parent-1"));
@@ -118,7 +108,7 @@ async fn refuses_input_that_fails_the_input_schema_before_queueing_a_run() {
         .await
         .unwrap();
     assert_eq!(
-        find_run(&test, queued.run_id).await.input,
+        find_run(&test.db, queued.run_id).await.input,
         Some(json!({ "orderId": 12 }))
     );
     test.cleanup().await;
@@ -228,7 +218,10 @@ async fn sets_deadline_from_flow_timeout() {
         .dispatch_flow(DispatchOptions::new("timeout-flow", TEST_SHOP))
         .await
         .unwrap();
-    let deadline: DateTime<Utc> = find_run(&test, dispatched.run_id).await.deadline_at.expect("deadline");
+    let deadline: DateTime<Utc> = find_run(&test.db, dispatched.run_id)
+        .await
+        .deadline_at
+        .expect("deadline");
     let delta = (deadline - before).num_milliseconds();
     assert!((29_000..=31_000).contains(&delta), "{delta}");
 
@@ -237,7 +230,7 @@ async fn sets_deadline_from_flow_timeout() {
         .dispatch_flow(DispatchOptions::new("no-timeout", TEST_SHOP))
         .await
         .unwrap();
-    assert!(find_run(&test, dispatched.run_id).await.deadline_at.is_none());
+    assert!(find_run(&test.db, dispatched.run_id).await.deadline_at.is_none());
     test.cleanup().await;
 }
 
@@ -261,7 +254,7 @@ async fn stores_the_merged_retry_policy() {
         .await
         .unwrap();
     assert_eq!(
-        find_run(&test, dispatched.run_id).await.retry_policy,
+        find_run(&test.db, dispatched.run_id).await.retry_policy,
         Some(json!({ "maxAttempts": 5, "initialIntervalMs": 250, "backoffCoefficient": 2.0, "maxIntervalMs": 30000 }))
     );
 
@@ -272,7 +265,7 @@ async fn stores_the_merged_retry_policy() {
         )
         .await
         .unwrap();
-    let policy = find_run(&test, dispatched.run_id).await.retry_policy.unwrap();
+    let policy = find_run(&test.db, dispatched.run_id).await.retry_policy.unwrap();
     assert_eq!(policy["maxAttempts"], 0);
     test.cleanup().await;
 }
@@ -287,7 +280,7 @@ async fn delayed_dispatch_sets_future_available_at() {
         .await
         .unwrap();
 
-    let available_at = find_run(&test, dispatched.run_id).await.available_at.unwrap();
+    let available_at = find_run(&test.db, dispatched.run_id).await.available_at.unwrap();
     assert!(available_at > before + chrono::Duration::milliseconds(5_000));
     test.cleanup().await;
 }

@@ -2,17 +2,19 @@
 //! another shop, injection attempts and session-token edge cases. The routes
 //! scoped to the session's shop and app are tried one by one in `api.rs`.
 
+mod common;
+
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use chrono::Utc;
+use common::{find_run, json_body, run_exists};
 use hmac::{Hmac, Mac};
 use openshop::builder::{Field, Flow, Provider};
-use openshop::db::schema::FlowRun;
 use openshop::testing::{
     TestContext, TestOptions, proxy_signature, sign_query, sign_session_token, sign_webhook_body, to_query_string,
 };
 use openshop::{Concurrency, Cron, DispatchOptions, FlowContext, OpenShopConfig, Value, json};
-use reqwest::{Method, RequestBuilder, Response};
+use reqwest::{Method, Response};
 use sha2::Sha256;
 use uuid::Uuid;
 
@@ -47,23 +49,12 @@ async fn context() -> TestContext {
     TestContext::new(config()).await.unwrap()
 }
 
-/// A request authenticated as a staff member of `shop`.
-fn request_as(ctx: &TestContext, shop: &str, method: Method, path: &str) -> RequestBuilder {
-    ctx.http
-        .request(method, format!("{}{path}", ctx.url))
-        .bearer_auth(ctx.session_token_for(shop, "123"))
-}
-
 async fn get_as(ctx: &TestContext, shop: &str, path: &str) -> Response {
-    request_as(ctx, shop, Method::GET, path).send().await.unwrap()
+    ctx.request_as(Method::GET, path, shop, "123").send().await.unwrap()
 }
 
 async fn post_as(ctx: &TestContext, shop: &str, path: &str) -> Response {
-    request_as(ctx, shop, Method::POST, path).send().await.unwrap()
-}
-
-async fn json_body(response: Response) -> Value {
-    response.json().await.unwrap()
+    ctx.request_as(Method::POST, path, shop, "123").send().await.unwrap()
 }
 
 async fn assert_run_not_found(response: Response) {
@@ -87,14 +78,6 @@ async fn dispatch(ctx: &TestContext, shop: &str) -> Uuid {
         .run_id
 }
 
-async fn find_run(ctx: &TestContext, run_id: Uuid) -> Option<FlowRun> {
-    sqlx::query_as("SELECT * FROM flow_runs WHERE id = $1")
-        .bind(run_id)
-        .fetch_optional(&ctx.db)
-        .await
-        .unwrap()
-}
-
 // ─── Cross-shop isolation ────────────────────────────────────────────
 
 #[openshop::test(context())]
@@ -102,7 +85,8 @@ async fn session_shop_cannot_be_overridden_by_the_request(ctx: &TestContext) {
     let run_a = dispatch(ctx, SHOP_A).await;
     dispatch(ctx, SHOP_B).await;
 
-    let response = request_as(ctx, SHOP_A, Method::GET, "/api/runs")
+    let response = ctx
+        .request_as(Method::GET, "/api/runs", SHOP_A, "123")
         .query(&[("shop", SHOP_B), ("shopifyApp", "other"), ("appHandle", "other")])
         .header("x-shopify-shop-domain", SHOP_B)
         .send()
@@ -111,14 +95,15 @@ async fn session_shop_cannot_be_overridden_by_the_request(ctx: &TestContext) {
     assert_eq!(ids(&json_body(response).await), [run_a.to_string()]);
 
     // A run started by shop A is a run of shop A, whatever the body claims.
-    let response = request_as(ctx, SHOP_A, Method::POST, "/api/flows/test-flow/run")
+    let response = ctx
+        .request_as(Method::POST, "/api/flows/test-flow/run", SHOP_A, "123")
         .json(&json!({ "input": {}, "shop": SHOP_B, "shopifyApp": "other", "appHandle": "other" }))
         .send()
         .await
         .unwrap();
     assert_eq!(response.status(), 202);
     let started: Uuid = json_body(response).await["runId"].as_str().unwrap().parse().unwrap();
-    let run = find_run(ctx, started).await.unwrap();
+    let run = find_run(&ctx.db, started).await;
     assert_eq!((run.shop.as_str(), run.app_handle.as_str()), (SHOP_A, "default"));
     assert_eq!(
         json_body(get_as(ctx, SHOP_B, "/api/runs").await)
@@ -228,7 +213,8 @@ async fn search_param_with_sql_injection_returns_empty_not_error(ctx: &TestConte
         "' UNION SELECT * FROM installations --",
         "Robert'); DROP TABLE flow_runs;--",
     ] {
-        let response = request_as(ctx, SHOP_A, Method::GET, "/api/runs")
+        let response = ctx
+            .request_as(Method::GET, "/api/runs", SHOP_A, "123")
             .query(&[("search", payload)])
             .send()
             .await
@@ -248,7 +234,8 @@ async fn search_param_with_sql_injection_returns_empty_not_error(ctx: &TestConte
 async fn status_param_with_injection_is_safe(ctx: &TestContext) {
     let injection = [("status", "' OR 1=1 --")];
 
-    let response = request_as(ctx, SHOP_A, Method::GET, "/api/runs")
+    let response = ctx
+        .request_as(Method::GET, "/api/runs", SHOP_A, "123")
         .query(&injection)
         .send()
         .await
@@ -259,7 +246,8 @@ async fn status_param_with_injection_is_safe(ctx: &TestContext) {
     // An unknown status is ignored; it never widens the result beyond the session's shop.
     let run_a = dispatch(ctx, SHOP_A).await;
     dispatch(ctx, SHOP_B).await;
-    let response = request_as(ctx, SHOP_A, Method::GET, "/api/runs")
+    let response = ctx
+        .request_as(Method::GET, "/api/runs", SHOP_A, "123")
         .query(&injection)
         .send()
         .await
@@ -275,7 +263,8 @@ async fn from_and_to_date_params_with_injection_are_safe(ctx: &TestContext) {
 
     // An invalid date is ignored: 200 with the normal results.
     for param in ["from", "to"] {
-        let response = request_as(ctx, SHOP_A, Method::GET, "/api/runs")
+        let response = ctx
+            .request_as(Method::GET, "/api/runs", SHOP_A, "123")
             .query(&[(param, "' OR 1=1 --")])
             .send()
             .await
@@ -322,7 +311,7 @@ async fn run_id_and_flow_name_path_params_with_injection_are_safe(ctx: &TestCont
     assert_eq!(response.status(), 200);
     assert_eq!(json_body(response).await, json!([]));
 
-    assert!(find_run(ctx, run_b).await.is_some());
+    assert!(run_exists(&ctx.db, run_b).await);
 }
 
 // ─── Session-token edge cases ────────────────────────────────────────
@@ -628,7 +617,8 @@ async fn credentials_of_one_surface_are_not_accepted_on_another(ctx: &TestContex
     assert_eq!(json_body(response).await, missing);
 
     // A staff session token is not an MCP token.
-    let response = request_as(ctx, SHOP_A, Method::POST, "/mcp")
+    let response = ctx
+        .request_as(Method::POST, "/mcp", SHOP_A, "123")
         .json(&json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }))
         .send()
         .await

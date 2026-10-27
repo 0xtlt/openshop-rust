@@ -2,7 +2,7 @@
 
 mod common;
 
-use common::{create_config, noop_flow};
+use common::{create_config, noop_flow, send};
 use openshop::builder::{AdminPage, Field, Function, FunctionType, OpenShopBuilder, Provider};
 use openshop::server::mcp::tokens::create_mcp_token;
 use openshop::testing::TestContext;
@@ -31,15 +31,7 @@ async fn context(builder: OpenShopBuilder) -> TestContext {
         .expect("test context")
 }
 
-async fn send(request: RequestBuilder) -> (StatusCode, Value) {
-    let response = request.send().await.expect("response");
-    let status = response.status();
-    let text = response.text().await.expect("response body");
-    let body = serde_json::from_str(&text).unwrap_or(Value::String(text));
-    (status, body)
-}
-
-async fn status_of(request: RequestBuilder) -> StatusCode {
+async fn status_of(request: RequestBuilder) -> u16 {
     send(request).await.0
 }
 

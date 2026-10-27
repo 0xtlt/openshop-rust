@@ -9,11 +9,11 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use axum::Router;
-use common::{TestApp, create_config, noop_flow};
+use common::{TestApp, create_config, install, noop_flow, two_shopify_apps};
 use openshop::server::ServerOptions;
 use openshop::server::{listen, serve};
 use openshop::testing::{TestContext, TestOptions, sign_query, to_query_string};
-use openshop::{IndexMap, OpenShopConfig, PgPool, ShopifyAppConfig, ShopifyConfig, UiSource, Value, json};
+use openshop::{OpenShopConfig, UiSource, Value, json};
 use reqwest::header::{CACHE_CONTROL, CONTENT_SECURITY_POLICY, CONTENT_TYPE, HOST, HeaderMap, LOCATION, REFERER};
 use reqwest::{Method, RequestBuilder, StatusCode};
 use tokio::net::{TcpListener, TcpStream};
@@ -89,19 +89,8 @@ fn static_config() -> OpenShopConfig {
 }
 
 fn multi_app_config() -> OpenShopConfig {
-    let app = |handle: &str| ShopifyAppConfig::Keys {
-        api_key: format!("client-{handle}-key"),
-        api_secret: format!("client-{handle}-secret"),
-        app_url: Some(format!("https://client-{handle}.example.test")),
-    };
     OpenShopConfig::builder()
-        .shopify(ShopifyConfig {
-            scopes: Some("read_products".to_string()),
-            apps: Some(IndexMap::from([
-                ("clientA".to_string(), app("a")),
-                ("clientB".to_string(), app("b")),
-            ])),
-        })
+        .shopify(two_shopify_apps())
         .flow(noop_flow("static-flow"))
         .build()
         .unwrap()
@@ -125,18 +114,6 @@ async fn context_with(config: OpenShopConfig, server: ServerOptions) -> TestCont
 /// The UI behind the signed-launch gate.
 async fn ui_context(ui: &UiDir) -> TestContext {
     context_with(static_config(), ui.server(false)).await
-}
-
-async fn install(db: &PgPool, app_handle: &str, shop: &str) {
-    sqlx::query(
-        "INSERT INTO installations (app_handle, shop, access_token, scopes) \
-         VALUES ($1, $2, 'offline-token', 'read_products')",
-    )
-    .bind(app_handle)
-    .bind(shop)
-    .execute(db)
-    .await
-    .unwrap();
 }
 
 /// The path Shopify admin opens: launch parameters signed with the app
@@ -555,7 +532,7 @@ async fn get_with_signed_shopify_launch_injects_the_matching_app_bridge_api_key(
     .await
     .unwrap();
     let shop = "static-client-b.myshopify.com";
-    install(&ctx.db, "clientB", shop).await;
+    install(&ctx.db, "clientB", shop, Some("offline-token"), false).await;
 
     let reply = get(&ctx, &signed_launch("/", shop, "client-b-secret")).await;
     assert_shell(&reply, "client-b-key");

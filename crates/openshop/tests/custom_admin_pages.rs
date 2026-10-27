@@ -1,23 +1,24 @@
 //! Custom admin pages: discovery, access checks and the loader/action RPC endpoint.
 
+mod common;
+
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use openshop::builder::{AdminFunction, AdminPage, Field, InputSchema, OpenShopBuilder, Provider};
+use common::{TEST_SHOP, install, json_body, two_shopify_apps, vault_provider};
+use openshop::builder::{AdminFunction, AdminPage, InputSchema, OpenShopBuilder};
 use openshop::testing::{
     AdminTestOptions, MockTransport, TestContext, TestOptions, admin_context, invoke_admin_function, session_token,
     sign_session_token,
 };
 use openshop::{
-    AdminActor, AdminContext, AdminMenuItem, AdminPublicError, OpenShopConfig, Result, ShopifyAppConfig, ShopifyConfig,
-    Value, anyhow, json,
+    AdminActor, AdminContext, AdminMenuItem, AdminPublicError, OpenShopConfig, Result, Value, anyhow, json,
 };
 use openshop_shared::build_admin_function_rpc_url;
 use reqwest::{Method, RequestBuilder, Response};
 use schemars::JsonSchema;
 use serde::Deserialize;
 
-const TEST_SHOP: &str = "test-integration.myshopify.com";
 /// The staff member the `/reviews` pages are restricted to.
 const REVIEWER: &str = "123";
 const OTHER_STAFF: &str = "456";
@@ -73,17 +74,11 @@ async fn context(config: OpenShopConfig) -> TestContext {
     TestContext::with_options(config, options).await.expect("test context")
 }
 
-/// A request carrying the session token of the staff member `sub`.
-fn request_as(ctx: &TestContext, sub: &str, method: Method, path: &str) -> RequestBuilder {
-    ctx.http
-        .request(method, format!("{}{path}", ctx.url))
-        .bearer_auth(ctx.session_token_for(&ctx.shop, sub))
-}
-
 /// Calls the loader or action `name` of the page displayed at `pathname`.
 fn rpc(ctx: &TestContext, sub: &str, pathname: &str, kind: &str, name: &str, input: Value) -> RequestBuilder {
     let url = build_admin_function_rpc_url(kind, name, pathname);
-    request_as(ctx, sub, Method::POST, &url).json(&json!({ "input": input }))
+    ctx.request_as(Method::POST, &url, &ctx.shop, sub)
+        .json(&json!({ "input": input }))
 }
 
 async fn load(ctx: &TestContext, pathname: &str, name: &str, input: Value) -> Response {
@@ -101,14 +96,10 @@ async fn act(ctx: &TestContext, pathname: &str, name: &str, input: Value) -> Res
 }
 
 async fn access(ctx: &TestContext, sub: &str, query: &str) -> Response {
-    request_as(ctx, sub, Method::GET, &format!("/api/pages/custom/access{query}"))
+    ctx.request_as(Method::GET, &format!("/api/pages/custom/access{query}"), &ctx.shop, sub)
         .send()
         .await
         .unwrap()
-}
-
-async fn json_body(response: Response) -> Value {
-    response.json().await.expect("JSON body")
 }
 
 /// Checks an RPC error payload and returns its request id.
@@ -138,7 +129,8 @@ async fn passes_trusted_identity_and_dynamic_params_to_a_loader(ctx: &TestContex
 
     // Identity never comes from the query string or the input.
     let url = "/api/pages/custom/reviews/42/_rpc/loader/details?shop=attacker.myshopify.com";
-    let response = request_as(ctx, REVIEWER, Method::POST, url)
+    let response = ctx
+        .request_as(Method::POST, url, &ctx.shop, REVIEWER)
         .json(&json!({ "input": { "shop": "attacker.myshopify.com", "actor": { "id": "1" } } }))
         .send()
         .await
@@ -227,7 +219,11 @@ async fn a_static_page_takes_precedence_over_a_dynamic_sibling() {
 
     // Posting to the collection endpoints is an RPC without a function.
     for path in ["/api/pages/custom", "/api/pages/custom/access"] {
-        let response = request_as(&ctx, REVIEWER, Method::POST, path).send().await.unwrap();
+        let response = ctx
+            .request_as(Method::POST, path, &ctx.shop, REVIEWER)
+            .send()
+            .await
+            .unwrap();
         assert_rpc_error(response, 404, "NOT_FOUND", "Not found").await;
     }
     ctx.shutdown().await.unwrap();
@@ -297,7 +293,7 @@ async fn an_invalid_admin_menu_is_rejected_when_the_config_is_built() {
         .unwrap();
     let ctx = context(config).await;
     let body = json_body(
-        request_as(&ctx, REVIEWER, Method::GET, "/api/pages/custom")
+        ctx.request_as(Method::GET, "/api/pages/custom", &ctx.shop, REVIEWER)
             .send()
             .await
             .unwrap(),
@@ -359,7 +355,8 @@ async fn lists_navigation_and_page_access_for_the_actor() {
         .unwrap();
     let ctx = context(config).await;
 
-    let response = request_as(&ctx, REVIEWER, Method::GET, "/api/pages/custom")
+    let response = ctx
+        .request_as(Method::GET, "/api/pages/custom", &ctx.shop, REVIEWER)
         .send()
         .await
         .unwrap();
@@ -380,7 +377,8 @@ async fn lists_navigation_and_page_access_for_the_actor() {
         })
     );
 
-    let response = request_as(&ctx, OTHER_STAFF, Method::GET, "/api/pages/custom")
+    let response = ctx
+        .request_as(Method::GET, "/api/pages/custom", &ctx.shop, OTHER_STAFF)
         .send()
         .await
         .unwrap();
@@ -400,7 +398,8 @@ async fn lists_navigation_and_page_access_for_the_actor() {
 
 #[openshop::test(context(OpenShopConfig::builder().build().unwrap()))]
 async fn an_application_without_pages_has_no_custom_pages(ctx: &TestContext) {
-    let custom_pages = request_as(ctx, REVIEWER, Method::GET, "/api/pages/custom")
+    let custom_pages = ctx
+        .request_as(Method::GET, "/api/pages/custom", &ctx.shop, REVIEWER)
         .send()
         .await
         .unwrap();
@@ -414,7 +413,8 @@ async fn an_application_without_pages_has_no_custom_pages(ctx: &TestContext) {
     let response = load(ctx, "/reviews/42", "details", Value::Null).await;
     assert_rpc_error(response, 404, "NOT_FOUND", "Not found").await;
 
-    let built_in_pages = request_as(ctx, REVIEWER, Method::GET, "/api/pages")
+    let built_in_pages = ctx
+        .request_as(Method::GET, "/api/pages", &ctx.shop, REVIEWER)
         .send()
         .await
         .unwrap();
@@ -436,7 +436,8 @@ async fn listing_a_page_serves_it_and_its_nav_label_is_its_menu_entry() {
     );
     let ctx = context(config).await;
 
-    let custom_pages = request_as(&ctx, REVIEWER, Method::GET, "/api/pages/custom")
+    let custom_pages = ctx
+        .request_as(Method::GET, "/api/pages/custom", &ctx.shop, REVIEWER)
         .send()
         .await
         .unwrap();
@@ -491,7 +492,8 @@ async fn a_page_at_the_root_is_the_home_of_the_admin(ctx: &TestContext) {
         "/api/pages/custom/_rpc/loader/summary",
         "/api/pages/custom//_rpc/loader/summary",
     ] {
-        let response = request_as(ctx, REVIEWER, Method::POST, url)
+        let response = ctx
+            .request_as(Method::POST, url, &ctx.shop, REVIEWER)
             .json(&json!({ "input": null }))
             .send()
             .await
@@ -500,7 +502,8 @@ async fn a_page_at_the_root_is_the_home_of_the_admin(ctx: &TestContext) {
         assert_eq!(json_body(response).await, json!({ "shop": TEST_SHOP }), "{url}");
     }
 
-    let listed = request_as(ctx, REVIEWER, Method::GET, "/api/pages/custom")
+    let listed = ctx
+        .request_as(Method::GET, "/api/pages/custom", &ctx.shop, REVIEWER)
         .send()
         .await
         .unwrap();
@@ -622,7 +625,7 @@ async fn page_access_reports_whether_the_actor_may_open_a_path() {
 
     // A page whose rule fails is left out of the sidebar, not the whole listing.
     let body = json_body(
-        request_as(&ctx, REVIEWER, Method::GET, "/api/pages/custom")
+        ctx.request_as(Method::GET, "/api/pages/custom", &ctx.shop, REVIEWER)
             .send()
             .await
             .unwrap(),
@@ -667,7 +670,8 @@ async fn returns_404_for_unknown_pages_functions_and_kind_mismatches() {
         "/api/pages/custom/tools",
         "/api/pages/custom/_rpc/loader/list",
     ] {
-        let response = request_as(&ctx, REVIEWER, Method::POST, path)
+        let response = ctx
+            .request_as(Method::POST, path, &ctx.shop, REVIEWER)
             .json(&json!({ "input": null }))
             .send()
             .await
@@ -680,7 +684,13 @@ async fn returns_404_for_unknown_pages_functions_and_kind_mismatches() {
     }
 
     // The endpoint only answers POST.
-    let response = request_as(&ctx, REVIEWER, Method::GET, "/api/pages/custom/tools/_rpc/loader/list")
+    let response = ctx
+        .request_as(
+            Method::GET,
+            "/api/pages/custom/tools/_rpc/loader/list",
+            &ctx.shop,
+            REVIEWER,
+        )
         .send()
         .await
         .unwrap();
@@ -796,9 +806,11 @@ async fn validates_input_and_rejects_with_422() {
     // A body without `input`, or no JSON body at all, is a missing input.
     let url = "/api/pages/custom/tools/_rpc/action/save";
     for request in [
-        request_as(&ctx, REVIEWER, Method::POST, url).json(&json!({ "title": "Great", "rating": 5 })),
-        request_as(&ctx, REVIEWER, Method::POST, url).body("{ not json"),
-        request_as(&ctx, REVIEWER, Method::POST, url),
+        ctx.request_as(Method::POST, url, &ctx.shop, REVIEWER)
+            .json(&json!({ "title": "Great", "rating": 5 })),
+        ctx.request_as(Method::POST, url, &ctx.shop, REVIEWER)
+            .body("{ not json"),
+        ctx.request_as(Method::POST, url, &ctx.shop, REVIEWER),
     ] {
         let response = request.send().await.unwrap();
         assert_eq!(response.status(), 422);
@@ -818,7 +830,13 @@ async fn validates_input_and_rejects_with_422() {
         json_body(echoed).await,
         json!({ "input": { "page": 2, "tags": ["a", "b"] } })
     );
-    let response = request_as(&ctx, REVIEWER, Method::POST, "/api/pages/custom/tools/_rpc/loader/echo")
+    let response = ctx
+        .request_as(
+            Method::POST,
+            "/api/pages/custom/tools/_rpc/loader/echo",
+            &ctx.shop,
+            REVIEWER,
+        )
         .send()
         .await
         .unwrap();
@@ -1041,15 +1059,6 @@ async fn takes_the_actor_from_the_session_token() {
     ctx.shutdown().await.unwrap();
 }
 
-fn vault_provider() -> Provider {
-    Provider::new("Vault")
-        .field("secret", Field::password("Secret"))
-        .typed_method("reveal", |config, prefix: String| async move {
-            let secret = config.get("secret").and_then(Value::as_str).unwrap_or_default();
-            Ok(format!("{prefix}:{secret}"))
-        })
-}
-
 /// Reads everything a function can reach for its tenant.
 async fn tenant(ctx: AdminContext, _input: Value) -> Result<Value> {
     let secret: String = ctx.connectors.call_as("vault", "reveal", "vault").await?;
@@ -1077,16 +1086,6 @@ async fn store_vault_secret(ctx: &TestContext, app_handle: &str, shop: &str, sec
     .execute(&ctx.db)
     .await
     .unwrap();
-}
-
-async fn install(ctx: &TestContext, app_handle: &str, shop: &str, access_token: &str) {
-    sqlx::query("INSERT INTO installations (app_handle, shop, access_token) VALUES ($1, $2, $3)")
-        .bind(app_handle)
-        .bind(shop)
-        .bind(access_token)
-        .execute(&ctx.db)
-        .await
-        .unwrap();
 }
 
 /// Answers GraphQL calls with the name of the shop they were sent to.
@@ -1127,7 +1126,7 @@ async fn scopes_connectors_and_shopify_client_to_the_session_shop() {
         .unwrap();
     let ctx = context(config).await;
     answer_with_shop_name(&ctx.transport);
-    install(&ctx, "default", OTHER_SHOP, "other-access-token").await;
+    install(&ctx.db, "default", OTHER_SHOP, Some("other-access-token"), false).await;
     store_vault_secret(&ctx, "default", TEST_SHOP, "first-secret").await;
     store_vault_secret(&ctx, "default", OTHER_SHOP, "other-secret").await;
 
@@ -1170,22 +1169,8 @@ async fn scopes_connectors_and_shopify_client_to_the_session_shop() {
 
 #[tokio::test]
 async fn resolves_the_shopify_app_from_the_token_audience() {
-    let app = |api_key: &str, api_secret: &str| ShopifyAppConfig::Keys {
-        api_key: api_key.to_string(),
-        api_secret: api_secret.to_string(),
-        app_url: None,
-    };
     let config = OpenShopConfig::builder()
-        .shopify(ShopifyConfig {
-            scopes: Some("read_products".to_string()),
-            apps: Some(
-                [
-                    ("clientA".to_string(), app("client-a-key", "client-a-secret")),
-                    ("clientB".to_string(), app("client-b-key", "client-b-secret")),
-                ]
-                .into(),
-            ),
-        })
+        .shopify(two_shopify_apps())
         .provider_as("vault", vault_provider())
         .admin_page(AdminPage::new("/tools").loader("tenant", tenant))
         .admin_menu([])
@@ -1194,8 +1179,8 @@ async fn resolves_the_shopify_app_from_the_token_audience() {
     let ctx = TestContext::new(config).await.unwrap();
     answer_with_shop_name(&ctx.transport);
     // The same shop installed both apps, each with its own token and configuration.
-    install(&ctx, "clientA", TEST_SHOP, "token-a").await;
-    install(&ctx, "clientB", TEST_SHOP, "token-b").await;
+    install(&ctx.db, "clientA", TEST_SHOP, Some("token-a"), false).await;
+    install(&ctx.db, "clientB", TEST_SHOP, Some("token-b"), false).await;
     store_vault_secret(&ctx, "clientA", TEST_SHOP, "secret-a").await;
     store_vault_secret(&ctx, "clientB", TEST_SHOP, "secret-b").await;
     let url = format!("{}/api/pages/custom/tools/_rpc/loader/tenant", ctx.url);

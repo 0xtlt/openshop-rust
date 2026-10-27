@@ -5,11 +5,11 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use common::{
-    TEST_SHOP, TestApp, app_with_a_clock_ahead, create_config, heal_write_fault, inject_write_fault, noop_flow,
-    write_fault_hits,
+    LogCapture, TEST_SHOP, TestApp, app_with_a_clock_ahead, create_config, explode, find_run, find_steps,
+    heal_write_fault, inject_write_fault, noop_flow, write_fault_hits,
 };
 use openshop::builder::{Flow, InputSchema};
-use openshop::db::schema::{FlowRun, StepResult};
+use openshop::db::schema::FlowRun;
 use openshop::engine::{Worker, cancel_run};
 use openshop::{
     CancellationToken, Concurrency, DispatchOptions, FlowContext, OpenShop, OpenShopConfig, RetryPolicy, WorkerConfig,
@@ -57,26 +57,10 @@ fn without_retry() -> RetryPolicy {
     RetryPolicy::new().max_attempts(0)
 }
 
-async fn find_run(test: &TestApp, run_id: Uuid) -> FlowRun {
-    sqlx::query_as("SELECT * FROM flow_runs WHERE id = $1")
-        .bind(run_id)
-        .fetch_one(&test.db)
-        .await
-        .unwrap()
-}
-
-async fn find_steps(test: &TestApp, run_id: Uuid) -> Vec<StepResult> {
-    sqlx::query_as("SELECT * FROM step_results WHERE flow_run_id = $1 ORDER BY created_at, attempt")
-        .bind(run_id.to_string())
-        .fetch_all(&test.db)
-        .await
-        .unwrap()
-}
-
 async fn wait_for_status(test: &TestApp, run_id: Uuid, status: &str) -> FlowRun {
     let deadline = Instant::now() + TIMEOUT;
     loop {
-        let run = find_run(test, run_id).await;
+        let run = find_run(&test.db, run_id).await;
         if run.status == status {
             return run;
         }
@@ -277,13 +261,13 @@ async fn fills_its_free_slots_with_one_claim() {
     // The three oldest runs were claimed, by a single statement: they share its timestamp.
     let mut started_at = Vec::new();
     for run_id in &runs[..3] {
-        let run = find_run(&test, *run_id).await;
+        let run = find_run(&test.db, *run_id).await;
         assert_eq!((run.status.as_str(), run.attempts), ("running", 1));
         started_at.push(run.started_at.expect("started"));
     }
     assert!(started_at.iter().all(|at| *at == started_at[0]), "{started_at:?}");
     for run_id in &runs[3..] {
-        let run = find_run(&test, *run_id).await;
+        let run = find_run(&test.db, *run_id).await;
         assert_eq!((run.status.as_str(), run.attempts), ("pending", 0));
     }
 
@@ -325,9 +309,9 @@ async fn graceful_stop_waits_for_active_runs() {
 
     assert!(!worker.is_running());
     assert_eq!(worker.active_count(), 0);
-    assert_eq!(find_run(&test, active).await.status, "completed");
+    assert_eq!(find_run(&test.db, active).await.status, "completed");
     // A stopping worker does not start new runs.
-    let queued = find_run(&test, queued).await;
+    let queued = find_run(&test.db, queued).await;
     assert_eq!((queued.status.as_str(), queued.attempts), ("pending", 0));
     test.cleanup().await;
 }
@@ -391,7 +375,7 @@ async fn passes_the_input_the_shop_and_the_app_to_the_flow() {
     worker.stop().await;
 
     assert_eq!(
-        find_steps(&test, run_id).await[0].output,
+        find_steps(&test.db, run_id).await[0].output,
         Some(json!({
             "shop": "other.myshopify.com",
             "app": "client-a",
@@ -444,7 +428,7 @@ async fn retries_a_failed_run_and_replays_its_completed_steps() {
         1,
         "the completed step must not run twice"
     );
-    let steps = find_steps(&test, run_id).await;
+    let steps = find_steps(&test.db, run_id).await;
     assert_eq!(steps.len(), 1);
     assert_eq!((steps[0].attempt, steps[0].status.as_str()), (1, "completed"));
     test.cleanup().await;
@@ -513,12 +497,12 @@ async fn cancel_run_interrupts_a_run_in_flight_and_frees_the_worker() {
     assert_eq!(run.attempts, 1);
     assert_eq!(run.worker_id, None);
     assert!(run.completed_at.is_some());
-    assert_eq!(find_steps(&test, run_id).await[0].status, "canceled");
+    assert_eq!(find_steps(&test.db, run_id).await[0].status, "canceled");
 
     let next = dispatch(&test, "quick-flow").await;
     wait_for_status(&test, next, "completed").await;
     worker.stop().await;
-    assert_eq!(find_run(&test, run_id).await.status, "canceled");
+    assert_eq!(find_run(&test.db, run_id).await.status, "canceled");
     test.cleanup().await;
 }
 
@@ -557,7 +541,7 @@ async fn resumes_a_sleeping_run_after_its_resume_time() {
     assert_eq!(before_runs.load(Ordering::SeqCst), 1);
     assert!(elapsed >= Duration::from_millis(150), "{elapsed:?}");
 
-    let steps: Vec<(String, String, i32)> = find_steps(&test, run_id)
+    let steps: Vec<(String, String, i32)> = find_steps(&test.db, run_id)
         .await
         .into_iter()
         .map(|step| (step.step_name, step.status, step.attempt))
@@ -693,7 +677,7 @@ async fn fails_a_run_that_used_all_its_attempts_instead_of_claiming_it_again() {
     worker.stop().await;
 
     for (run_id, attempts) in [(exhausted, 2), (without_retries, 1)] {
-        let run = find_run(&test, run_id).await;
+        let run = find_run(&test.db, run_id).await;
         assert_eq!(run.status, "failed");
         assert_eq!(run.attempts, attempts, "it is not claimed again");
         assert_eq!(run.worker_id, None);
@@ -701,7 +685,7 @@ async fn fails_a_run_that_used_all_its_attempts_instead_of_claiming_it_again() {
         let error = run.error.expect("the reason");
         assert!(error.contains("attempts"), "{error}");
     }
-    assert_eq!(find_run(&test, spared).await.attempts, 2);
+    assert_eq!(find_run(&test.db, spared).await.attempts, 2);
     assert_eq!(executions.load(Ordering::SeqCst), 1, "only the spared run executed");
     test.cleanup().await;
 }
@@ -778,7 +762,7 @@ async fn reclaim_a_run_in_flight(takeover: Takeover) -> Reclaimed {
     tokio::time::timeout(TIMEOUT, started.notified())
         .await
         .expect("run claimed");
-    assert_eq!(find_run(&test, run_id).await.attempts, 1);
+    assert_eq!(find_run(&test.db, run_id).await.attempts, 1);
 
     // The same worker claims it again while the first execution is still going.
     let lose = match takeover {
@@ -824,7 +808,7 @@ async fn an_execution_that_lost_its_run_cannot_finish_it() {
         // The old execution returns first, successfully.
         release_first.cancel();
         wait_until("the old execution to end", || worker.active_count() == 1).await;
-        let run = find_run(&test, run_id).await;
+        let run = find_run(&test.db, run_id).await;
         assert_eq!(
             run.status, "running",
             "{takeover:?}: the old execution finished the run"
@@ -862,7 +846,7 @@ async fn an_execution_that_lost_its_run_stops_at_its_next_heartbeat() {
         })
         .await;
         wait_until("the old execution to end", || worker.active_count() == 1).await;
-        let run = find_run(&test, run_id).await;
+        let run = find_run(&test.db, run_id).await;
         assert_eq!(
             (run.status.as_str(), run.attempts),
             ("running", attempts),
@@ -948,7 +932,7 @@ async fn leaves_a_run_to_its_lease_when_its_outcome_cannot_be_written() {
     .await;
 
     // The run is not failed: it keeps its lease, which nothing extends any more.
-    let run = find_run(&test, run_id).await;
+    let run = find_run(&test.db, run_id).await;
     assert_eq!(run.status, "running");
     assert_eq!(run.error, None);
     assert_eq!(run.worker_id.as_deref(), Some(worker.worker_id()));
@@ -991,7 +975,7 @@ async fn does_not_claim_runs_scheduled_in_the_future() {
     }
     worker.stop().await;
 
-    let run = find_run(&test, delayed).await;
+    let run = find_run(&test.db, delayed).await;
     assert_eq!(run.status, "pending");
     assert_eq!(run.attempts, 0);
     assert!(run.started_at.is_none());
@@ -1081,7 +1065,7 @@ async fn expires_runs_past_their_deadline() {
     worker.stop().await;
 
     for run_id in expired {
-        let run = find_run(&test, run_id).await;
+        let run = find_run(&test.db, run_id).await;
         assert_eq!(run.status, "failed");
         assert_eq!(run.error.as_deref(), Some(TIMED_OUT));
         assert_eq!(run.available_at, None);
@@ -1156,7 +1140,7 @@ async fn does_not_start_a_run_whose_deadline_passed_since_the_last_sweep() {
     worker.stop().await;
 
     // The claims skipped it, and no sweep has failed it yet.
-    let run = find_run(&test, overdue).await;
+    let run = find_run(&test.db, overdue).await;
     assert_eq!((run.status.as_str(), run.attempts), ("pending", 0));
     assert_eq!(
         executions.load(Ordering::SeqCst),
@@ -1254,7 +1238,7 @@ async fn takes_over_a_run_whose_lease_expired() {
     assert_eq!(taken_over.attempts, 2);
     assert_eq!(taken_over.worker_id, None);
     assert_eq!(executions.load(Ordering::SeqCst), 1);
-    let steps = find_steps(&test, run_id).await;
+    let steps = find_steps(&test.db, run_id).await;
     assert_eq!(steps.len(), 1, "the second attempt replays the checkpoint");
     test.cleanup().await;
 }
@@ -1294,11 +1278,11 @@ async fn a_live_worker_keeps_a_lease_shorter_than_its_flow() {
     // Heartbeats follow the lease duration: every half lease extends it, and
     // the second worker never sees the run as abandoned.
     for _ in 0..2 {
-        let leased_until = find_run(&test, run_id).await.available_at.expect("lease");
+        let leased_until = find_run(&test.db, run_id).await.available_at.expect("lease");
         skip(SKIPPED).await;
         let deadline = Instant::now() + AT_ONCE;
         loop {
-            let run = find_run(&test, run_id).await;
+            let run = find_run(&test.db, run_id).await;
             if run.available_at.is_some_and(|available_at| available_at > leased_until) {
                 assert_eq!(run.status, "running");
                 assert_eq!(run.worker_id.as_deref(), Some(first.worker_id()));
@@ -1375,10 +1359,6 @@ async fn two_workers_never_execute_the_same_run_twice() {
         .unwrap();
     assert_eq!(max_attempts, 1);
     test.cleanup().await;
-}
-
-fn explode(_ctx: FlowContext) -> std::future::Ready<openshop::Result<()>> {
-    panic!("exploded before the first await")
 }
 
 #[tokio::test]
@@ -1477,11 +1457,11 @@ async fn heartbeat_extends_the_lease_of_a_long_run() {
     tokio::time::timeout(TIMEOUT, started.notified())
         .await
         .expect("run claimed");
-    let leased_until = find_run(&test, run_id).await.available_at.expect("lease");
+    let leased_until = find_run(&test.db, run_id).await.available_at.expect("lease");
     skip_to_next_heartbeat().await;
     let deadline = Instant::now() + TIMEOUT;
     loop {
-        let run = find_run(&test, run_id).await;
+        let run = find_run(&test.db, run_id).await;
         if run.available_at.is_some_and(|available_at| available_at > leased_until) {
             assert_eq!(run.status, "running");
             assert_eq!(run.worker_id.as_deref(), Some(worker.worker_id()));
@@ -1531,7 +1511,7 @@ async fn worker_that_lost_its_lease_cancels_the_flow_on_the_next_heartbeat() {
         .execute(&test.db)
         .await
         .unwrap();
-    let stolen = find_run(&test, run_id).await;
+    let stolen = find_run(&test.db, run_id).await;
 
     skip_to_next_heartbeat().await;
     wait_until("the flow to be interrupted", || worker.active_count() == 0).await;
@@ -1539,13 +1519,13 @@ async fn worker_that_lost_its_lease_cancels_the_flow_on_the_next_heartbeat() {
 
     // The step does not record its cancellation either: it belongs to the
     // other worker's run now, like the run itself.
-    let steps = find_steps(&test, run_id).await;
+    let steps = find_steps(&test.db, run_id).await;
     assert_eq!(
         (steps[0].step_name.as_str(), steps[0].status.as_str()),
         ("forever", "running")
     );
     // The run itself now belongs to the other worker and is left untouched.
-    assert_eq!(find_run(&test, run_id).await, stolen);
+    assert_eq!(find_run(&test.db, run_id).await, stolen);
     test.cleanup().await;
 }
 
@@ -1566,7 +1546,7 @@ async fn a_lease_is_dated_by_the_clock_of_the_database() {
 
     // The lease ends 30 seconds after `now()` of the database, whatever the
     // clock of the worker says.
-    let run = find_run(&test, run_id).await;
+    let run = find_run(&test.db, run_id).await;
     let lease = run.available_at.expect("a lease");
     let hour_ahead = chrono::Utc::now() + chrono::Duration::minutes(59);
     assert!(
@@ -1578,7 +1558,7 @@ async fn a_lease_is_dated_by_the_clock_of_the_database() {
     let second = worker(&ahead, 1);
     second.start().await;
     tokio::time::sleep(Duration::from_millis(300)).await;
-    let run = find_run(&test, run_id).await;
+    let run = find_run(&test.db, run_id).await;
     assert_eq!((run.status.as_str(), run.attempts), ("running", 1));
     assert_eq!(run.worker_id.as_deref(), Some(first.worker_id()));
 
@@ -1640,7 +1620,7 @@ async fn shutdown_hands_back_the_runs_it_still_holds() {
 
     // It is back in the queue at once, not when its lease would have expired, and
     // its execution was told to stop without recording anything.
-    let run = find_run(&test, run_id).await;
+    let run = find_run(&test.db, run_id).await;
     assert_eq!(run.status, "pending");
     assert_eq!(run.worker_id, None);
     assert_eq!(run.error, None);
@@ -1699,7 +1679,7 @@ async fn shutdown_does_not_take_back_a_run_claimed_again() {
         .unwrap();
 
     first.stop().await;
-    let run = find_run(&test, run_id).await;
+    let run = find_run(&test.db, run_id).await;
     assert_eq!((run.status.as_str(), run.attempts), ("running", 2));
     assert_eq!(run.worker_id.as_deref(), Some(first.worker_id()));
     release.cancel();
@@ -1715,20 +1695,6 @@ async fn lock_run(test: &TestApp, run_id: Uuid) -> sqlx::Transaction<'static, sq
         .await
         .unwrap();
     tx
-}
-
-struct Lines(Mutex<Vec<String>>);
-
-impl openshop::runtime::RuntimeLogger for Lines {
-    fn info(&self, message: &str, _context: Option<&serde_json::Value>) {
-        self.0.lock().unwrap().push(message.to_string());
-    }
-    fn warn(&self, message: &str, _context: Option<&serde_json::Value>) {
-        self.0.lock().unwrap().push(message.to_string());
-    }
-    fn error(&self, message: &str, _context: Option<&serde_json::Value>) {
-        self.0.lock().unwrap().push(message.to_string());
-    }
 }
 
 #[tokio::test]
@@ -1758,8 +1724,7 @@ async fn a_heartbeat_that_cannot_extend_the_lease_is_logged_and_stops_the_run_be
     });
     let test = TestApp::new(create_config([flow])).await;
     let run_id = dispatch(&test, "slow-flow").await;
-    let lines = Arc::new(Lines(Mutex::new(Vec::new())));
-    let previous = openshop::runtime::set_logger(lines.clone());
+    let logs = LogCapture::start().await;
 
     let worker = worker_with(
         &test.app,
@@ -1776,14 +1741,13 @@ async fn a_heartbeat_that_cannot_extend_the_lease_is_logged_and_stops_the_run_be
     // instead of waiting for ever.
     let lock = lock_run(&test, run_id).await;
     wait_until("the execution to be stopped", || stopped.load(Ordering::SeqCst) == 1).await;
-    openshop::runtime::set_logger(previous);
     // The flow is dropped, not only told to stop: nothing of it runs on, beside the
     // worker that may own the run now.
     let ticked = ticks.load(Ordering::SeqCst);
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert_eq!(ticks.load(Ordering::SeqCst), ticked, "the flow went on after its lease");
 
-    let lines = lines.0.lock().unwrap().clone();
+    let lines: Vec<String> = logs.lines().into_iter().map(|line| line.message).collect();
     let failure = format!("Heartbeat of run {run_id} failed");
     assert!(
         lines
@@ -1799,7 +1763,7 @@ async fn a_heartbeat_that_cannot_extend_the_lease_is_logged_and_stops_the_run_be
     );
     // The execution stopped, but the run was not canceled nor failed: its lease
     // runs out and the run is claimed again.
-    let run = find_run(&test, run_id).await;
+    let run = find_run(&test.db, run_id).await;
     assert_eq!(run.status, "running");
     assert_eq!(run.error, None);
     assert!(run.completed_at.is_none());
@@ -1868,10 +1832,10 @@ async fn a_release_that_waits_does_not_hold_back_the_shutdown_nor_the_other_rele
     assert_eq!(worker.active_count(), 0);
     assert_eq!(stopped.load(Ordering::SeqCst), 2);
     // The other run was released although the first release was stuck.
-    let free = find_run(&test, free).await;
+    let free = find_run(&test.db, free).await;
     assert_eq!((free.status.as_str(), free.worker_id), ("pending", None));
     // The stuck one is left to its lease: it is not released, and not lost.
-    let stuck = find_run(&test, stuck).await;
+    let stuck = find_run(&test.db, stuck).await;
     assert_eq!(stuck.status, "running");
     assert_eq!(stuck.worker_id.as_deref(), Some(worker.worker_id()));
     test.cleanup().await;

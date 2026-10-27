@@ -6,7 +6,7 @@ mod common;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use common::noop_flow;
+use common::{assert_error, noop_flow, two_shopify_apps, wait};
 use openshop::testing::{
     MockTransport, TestContext, TestOptions, session_token, sign_query, sign_webhook_body, to_query_string,
 };
@@ -23,23 +23,9 @@ fn config() -> OpenShopConfig {
 }
 
 fn multi_config() -> OpenShopConfig {
-    let apps = [("clientA", "client-a"), ("clientB", "client-b")]
-        .into_iter()
-        .map(|(handle, slug)| {
-            let app = ShopifyAppConfig::Keys {
-                api_key: format!("{slug}-key"),
-                api_secret: format!("{slug}-secret"),
-                app_url: Some(format!("https://{slug}.example.test")),
-            };
-            (handle.to_string(), app)
-        })
-        .collect();
     OpenShopConfig::builder()
         .flow(noop_flow("auth-flow"))
-        .shopify(ShopifyConfig {
-            scopes: Some("read_products".to_string()),
-            apps: Some(apps),
-        })
+        .shopify(two_shopify_apps())
         .build()
         .unwrap()
 }
@@ -137,12 +123,6 @@ fn location(response: &Response) -> String {
         .to_str()
         .unwrap()
         .to_string()
-}
-
-async fn assert_error(response: Response, status: u16, error: &str) {
-    assert_eq!(response.status().as_u16(), status);
-    let body: Value = response.json().await.unwrap();
-    assert_eq!(body, json!({ "error": error }));
 }
 
 fn signed_callback(shop: &str, code: &str, state: &str, secret: &str) -> IndexMap<String, String> {
@@ -1292,13 +1272,6 @@ async fn session_token_request_skips_the_token_exchange_for_installed_shops() {
     assert_eq!(row.access_token.as_deref(), Some("existing-token"));
     assert_eq!(row.scopes.as_deref(), Some("read_products,read_orders"));
     ctx.shutdown().await.unwrap();
-}
-
-/// Lets `duration` pass for the process, as a timer sees it.
-async fn wait(duration: Duration) {
-    tokio::time::pause();
-    tokio::time::advance(duration).await;
-    tokio::time::resume();
 }
 
 fn exchange_requests(ctx: &TestContext) -> usize {

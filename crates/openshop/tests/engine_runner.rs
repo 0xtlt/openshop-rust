@@ -1,14 +1,15 @@
 mod common;
 
-use std::future::Future;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use chrono::Utc;
-use common::{TEST_SHOP, TestApp, app_with_a_clock_ahead, create_config, noop_flow};
+use common::{
+    TEST_SHOP, TestApp, app_with_a_clock_ahead, create_config, explode, find_run, find_steps, noop_flow, within,
+};
 use openshop::builder::Flow;
-use openshop::db::schema::{FlowRun, LogRow, StepResult};
+use openshop::db::schema::LogRow;
 use openshop::engine::{RunFlowOptions, cancel_run, run_flow};
 use openshop::{
     Concurrency, DispatchOptions, ErrorContext, FlowContext, FlowTimeoutError, OpenShopConfig, RetryPolicy, RunOutcome,
@@ -20,22 +21,6 @@ use tokio::sync::Notify;
 use uuid::Uuid;
 
 const FLOW: &str = "test-flow";
-
-async fn find_run(test: &TestApp, run_id: Uuid) -> FlowRun {
-    sqlx::query_as("SELECT * FROM flow_runs WHERE id = $1")
-        .bind(run_id)
-        .fetch_one(&test.db)
-        .await
-        .unwrap()
-}
-
-async fn find_steps(test: &TestApp, run_id: Uuid) -> Vec<StepResult> {
-    sqlx::query_as("SELECT * FROM step_results WHERE flow_run_id = $1 ORDER BY created_at, attempt")
-        .bind(run_id.to_string())
-        .fetch_all(&test.db)
-        .await
-        .unwrap()
-}
 
 async fn find_logs(test: &TestApp, run_id: Uuid) -> Vec<LogRow> {
     sqlx::query_as("SELECT * FROM logs WHERE flow_run_id = $1 ORDER BY created_at")
@@ -93,12 +78,6 @@ fn options(run_id: Uuid) -> RunFlowOptions {
     RunFlowOptions::new(run_id, FLOW, TEST_SHOP)
 }
 
-async fn within<T>(future: impl Future<Output = T>) -> T {
-    tokio::time::timeout(Duration::from_secs(10), future)
-        .await
-        .expect("condition not reached in time")
-}
-
 #[tokio::test]
 async fn successful_flow_completes() {
     let flow = Flow::new(FLOW, |ctx: FlowContext| async move {
@@ -119,7 +98,7 @@ async fn successful_flow_completes() {
     let result = run_flow(&test.app, options(run_id)).await.unwrap();
     assert_eq!(result, RunOutcome::Completed);
 
-    let run = find_run(&test, run_id).await;
+    let run = find_run(&test.db, run_id).await;
     assert_eq!(run.status, "completed");
     assert!(run.completed_at.is_some());
     assert_eq!(run.worker_id, None);
@@ -151,7 +130,7 @@ async fn returns_lease_lost_when_the_worker_no_longer_owns_the_run() {
         .unwrap();
     assert_eq!(result, RunOutcome::LeaseLost);
 
-    let run = find_run(&test, run_id).await;
+    let run = find_run(&test.db, run_id).await;
     assert_eq!(run.status, "running");
     assert_eq!(run.worker_id.as_deref(), Some("worker-b"));
     assert!(run.completed_at.is_none());
@@ -198,7 +177,7 @@ async fn an_execution_whose_run_was_claimed_again_by_the_same_worker_cannot_reco
         .unwrap();
         assert_eq!(result, RunOutcome::LeaseLost, "{then}");
 
-        let run = find_run(&test, run_id).await;
+        let run = find_run(&test.db, run_id).await;
         assert_eq!(run.status, "running", "{then}");
         assert_eq!(run.worker_id.as_deref(), Some("worker-a"), "{then}");
         assert_eq!(run.attempts, 1, "{then}");
@@ -272,14 +251,14 @@ async fn an_execution_that_lost_its_run_cannot_store_a_step_result() {
         .unwrap();
         assert_eq!(result, RunOutcome::LeaseLost, "{when}");
 
-        let steps = find_steps(&test, run_id).await;
+        let steps = find_steps(&test.db, run_id).await;
         assert!(
             steps.iter().all(|step| step.status == "running"),
             "{when}: a stale execution stored {:?}",
             steps.iter().map(|step| step.status.as_str()).collect::<Vec<_>>()
         );
         assert_eq!(steps.len(), usize::from(when != "before"), "{when}");
-        let run = find_run(&test, run_id).await;
+        let run = find_run(&test.db, run_id).await;
         assert_eq!((run.status.as_str(), run.attempts), ("running", 1), "{when}");
         assert_eq!(run.error, None, "{when}");
     }
@@ -319,7 +298,7 @@ async fn lost_lease_never_records_a_failure_or_a_sleep() {
             .execute(&test.db)
             .await
             .unwrap();
-        let available_at = find_run(&test, run_id).await.available_at;
+        let available_at = find_run(&test.db, run_id).await.available_at;
 
         let result = run_flow(
             &test.app,
@@ -332,7 +311,7 @@ async fn lost_lease_never_records_a_failure_or_a_sleep() {
         .unwrap();
         assert_eq!(result, RunOutcome::LeaseLost, "{then}");
 
-        let run = find_run(&test, run_id).await;
+        let run = find_run(&test.db, run_id).await;
         assert_eq!(run.status, "running", "{then}");
         assert_eq!(run.worker_id.as_deref(), Some("worker-b"), "{then}");
         assert_eq!(run.error, None, "{then}");
@@ -358,7 +337,7 @@ async fn failing_flow_sets_status_to_failed() {
         }
     );
 
-    let run = find_run(&test, run_id).await;
+    let run = find_run(&test.db, run_id).await;
     assert_eq!(run.status, "failed");
     assert_eq!(run.error.as_deref(), Some("boom"));
     assert!(run.completed_at.is_some());
@@ -382,7 +361,7 @@ async fn flow_with_retry_stays_pending_after_failure() {
         }
     );
 
-    let run = find_run(&test, run_id).await;
+    let run = find_run(&test.db, run_id).await;
     assert_eq!(run.status, "pending");
     assert_eq!(run.error.as_deref(), Some("retry me"));
     assert!(run.completed_at.is_none());
@@ -441,12 +420,12 @@ async fn cancellation_sets_status_to_canceled() {
         "the token is forgotten once the run ends"
     );
 
-    let run = find_run(&test, run_id).await;
+    let run = find_run(&test.db, run_id).await;
     assert_eq!(run.status, "canceled");
     assert!(run.completed_at.is_some());
     assert_eq!(run.error, None);
 
-    let steps = find_steps(&test, run_id).await;
+    let steps = find_steps(&test.db, run_id).await;
     let statuses: Vec<(&str, &str)> = steps
         .iter()
         .map(|step| (step.step_name.as_str(), step.status.as_str()))
@@ -495,7 +474,7 @@ async fn input_validation_rejects_invalid_input() {
         assert!(error.starts_with("Invalid input for flow \"test-flow\": "), "{error}");
         assert!(!will_retry);
 
-        let run = find_run(&test, run_id).await;
+        let run = find_run(&test.db, run_id).await;
         assert_eq!(run.status, "failed");
         assert_eq!(run.error.as_deref(), Some(error.as_str()));
     }
@@ -618,7 +597,7 @@ async fn flow_timeout_causes_failure() {
     );
     assert!(started.elapsed() < Duration::from_secs(10));
 
-    let run = find_run(&test, run_id).await;
+    let run = find_run(&test.db, run_id).await;
     assert_eq!(run.status, "failed");
     assert!(run.error.unwrap().contains("timed out"));
     test.cleanup().await;
@@ -645,7 +624,7 @@ async fn a_step_interrupted_by_the_flow_timeout_is_marked_failed() {
     // The step row is closed in the background once its future is dropped.
     let step = within(async {
         loop {
-            let recorded = find_steps(&test, run_id).await.into_iter().next();
+            let recorded = find_steps(&test.db, run_id).await.into_iter().next();
             if let Some(step) = recorded.filter(|step| step.status != "running") {
                 break step;
             }
@@ -679,13 +658,13 @@ async fn completing_after_a_failed_attempt_clears_the_stored_error() {
     let first = run_flow(&test.app, options(run_id)).await.unwrap();
     assert!(matches!(first, RunOutcome::Failed { will_retry: true, .. }));
     assert_eq!(
-        find_run(&test, run_id).await.error.as_deref(),
+        find_run(&test.db, run_id).await.error.as_deref(),
         Some("first attempt fails")
     );
 
     let second = run_flow(&test.app, options(run_id)).await.unwrap();
     assert_eq!(second, RunOutcome::Completed);
-    let run = find_run(&test, run_id).await;
+    let run = find_run(&test.db, run_id).await;
     assert_eq!(run.status, "completed");
     assert_eq!(run.error, None);
     test.cleanup().await;
@@ -705,7 +684,7 @@ async fn flow_with_multiple_steps_stores_all_outputs() {
     let run_id = dispatch(&test).await;
     run_flow(&test.app, options(run_id)).await.unwrap();
 
-    let steps = find_steps(&test, run_id).await;
+    let steps = find_steps(&test.db, run_id).await;
     assert_eq!(steps.len(), 2);
     assert_eq!(steps[0].step_name, "step-a");
     assert_eq!(steps[0].output, Some(json!("alpha")));
@@ -738,7 +717,7 @@ async fn flow_context_carries_the_shop_the_app_and_the_input() {
     let defaulted = dispatch(&test).await;
     run_flow(&test.app, options(defaulted)).await.unwrap();
     assert_eq!(
-        find_steps(&test, defaulted).await[0].output,
+        find_steps(&test.db, defaulted).await[0].output,
         Some(json!({ "shop": TEST_SHOP, "app": "default", "input": {} }))
     );
 
@@ -752,7 +731,7 @@ async fn flow_context_carries_the_shop_the_app_and_the_input() {
     .await
     .unwrap();
     assert_eq!(
-        find_steps(&test, explicit).await[0].output,
+        find_steps(&test.db, explicit).await[0].output,
         Some(json!({ "shop": "other.myshopify.com", "app": "client-a", "input": { "limit": 3 } }))
     );
     test.cleanup().await;
@@ -793,14 +772,14 @@ async fn sleeping_flow_resumes_once_the_resume_time_has_passed() {
     };
     assert!(resume_at >= before + chrono::Duration::seconds(60));
 
-    let run = find_run(&test, run_id).await;
+    let run = find_run(&test.db, run_id).await;
     assert_eq!(run.status, "sleeping");
     assert_eq!(run.worker_id, None);
     assert!(run.completed_at.is_none());
     let drift = (run.available_at.expect("resume time") - resume_at).num_milliseconds();
     assert!(drift.abs() <= 1, "{drift}");
 
-    let steps = find_steps(&test, run_id).await;
+    let steps = find_steps(&test.db, run_id).await;
     assert_eq!(steps.len(), 2);
     assert_eq!(
         (steps[1].step_name.as_str(), steps[1].status.as_str()),
@@ -836,10 +815,10 @@ async fn sleeping_flow_resumes_once_the_resume_time_has_passed() {
     assert_eq!(before_runs.load(Ordering::SeqCst), 1);
     assert_eq!(after_runs.load(Ordering::SeqCst), 1);
 
-    let run = find_run(&test, run_id).await;
+    let run = find_run(&test.db, run_id).await;
     assert_eq!(run.status, "completed");
     assert!(run.completed_at.is_some());
-    let statuses: Vec<(String, String)> = find_steps(&test, run_id)
+    let statuses: Vec<(String, String)> = find_steps(&test.db, run_id)
         .await
         .into_iter()
         .map(|step| (step.step_name, step.status))
@@ -892,7 +871,7 @@ async fn retry_replays_completed_steps_instead_of_running_them_again() {
             will_retry: true
         }
     );
-    assert_eq!(find_run(&test, run_id).await.status, "pending");
+    assert_eq!(find_run(&test.db, run_id).await.status, "pending");
 
     claim(&test, run_id).await;
     let second = run_flow(&test.app, options(run_id)).await.unwrap();
@@ -904,7 +883,7 @@ async fn retry_replays_completed_steps_instead_of_running_them_again() {
     );
     assert_eq!(notifications.load(Ordering::SeqCst), 2);
 
-    let steps: Vec<(String, i32, String, Option<openshop::Value>)> = find_steps(&test, run_id)
+    let steps: Vec<(String, i32, String, Option<openshop::Value>)> = find_steps(&test.db, run_id)
         .await
         .into_iter()
         .map(|step| (step.step_name, step.attempt, step.status, step.output))
@@ -925,7 +904,7 @@ async fn retry_replays_completed_steps_instead_of_running_them_again() {
     let logs = find_logs(&test, run_id).await;
     assert!(messages(&logs).contains(&"Step \"charge\" skipped (cached)"));
 
-    let run = find_run(&test, run_id).await;
+    let run = find_run(&test.db, run_id).await;
     assert_eq!(run.status, "completed");
     assert_eq!(run.attempts, 2);
     test.cleanup().await;
@@ -947,7 +926,7 @@ async fn retries_stop_once_max_attempts_is_reached() {
         matches!(first, RunOutcome::Failed { will_retry: true, .. }),
         "{first:?}"
     );
-    assert_eq!(find_run(&test, run_id).await.status, "pending");
+    assert_eq!(find_run(&test.db, run_id).await.status, "pending");
 
     claim(&test, run_id).await;
     let second = run_flow(&test.app, options(run_id)).await.unwrap();
@@ -955,7 +934,7 @@ async fn retries_stop_once_max_attempts_is_reached() {
         matches!(second, RunOutcome::Failed { will_retry: false, .. }),
         "{second:?}"
     );
-    let run = find_run(&test, run_id).await;
+    let run = find_run(&test.db, run_id).await;
     assert_eq!(run.status, "failed");
     assert_eq!(run.error.as_deref(), Some("still broken"));
     assert!(run.completed_at.is_some());
@@ -983,7 +962,7 @@ async fn retry_is_skipped_when_it_would_land_past_the_deadline() {
             will_retry: false
         }
     );
-    assert_eq!(find_run(&test, run_id).await.status, "failed");
+    assert_eq!(find_run(&test.db, run_id).await.status, "failed");
     test.cleanup().await;
 }
 
@@ -1016,7 +995,7 @@ async fn flow_step_timeout_applies_to_every_step() {
             will_retry: false
         }
     );
-    let steps = find_steps(&test, run_id).await;
+    let steps = find_steps(&test.db, run_id).await;
     assert_eq!(
         (steps[0].step_name.as_str(), steps[0].status.as_str()),
         ("patient", "completed")
@@ -1183,7 +1162,7 @@ async fn panicking_on_error_hook_does_not_change_the_outcome() {
                 will_retry: false
             }
         );
-        assert_eq!(find_run(&test, run_id).await.status, "failed");
+        assert_eq!(find_run(&test.db, run_id).await.status, "failed");
         test.cleanup().await;
     }
 }
@@ -1206,7 +1185,7 @@ async fn panicking_flow_is_recorded_as_failed() {
     assert!(error.starts_with("Flow panicked: index out of bounds"), "{error}");
     assert!(!will_retry);
 
-    let run = find_run(&test, run_id).await;
+    let run = find_run(&test.db, run_id).await;
     assert_eq!(run.status, "failed");
     assert_eq!(run.error.as_deref(), Some(error.as_str()));
     assert!(run.completed_at.is_some());
@@ -1218,10 +1197,6 @@ async fn panicking_flow_is_recorded_as_failed() {
     let logs = find_logs(&test, run_id).await;
     assert_eq!(logs.last().map(|log| log.level.as_str()), Some("error"));
     test.cleanup().await;
-}
-
-fn explode(_ctx: FlowContext) -> std::future::Ready<openshop::Result<()>> {
-    panic!("exploded before the first await")
 }
 
 #[tokio::test]
@@ -1237,7 +1212,7 @@ async fn flow_panicking_before_returning_its_future_is_recorded_as_failed() {
             will_retry: false
         }
     );
-    assert_eq!(find_run(&test, run_id).await.status, "failed");
+    assert_eq!(find_run(&test.db, run_id).await.status, "failed");
     test.cleanup().await;
 }
 
@@ -1265,7 +1240,7 @@ async fn a_retry_and_a_wake_up_are_dated_by_the_clock_of_the_database() {
         let result = run_flow(&ahead, options(run_id).input(json!({ "then": then })))
             .await
             .unwrap();
-        let run = find_run(&test, run_id).await;
+        let run = find_run(&test.db, run_id).await;
         match (then, result) {
             ("fail", RunOutcome::Failed { will_retry: true, .. }) => assert_eq!(run.status, "pending"),
             ("sleep", RunOutcome::Sleeping { resume_at }) => {

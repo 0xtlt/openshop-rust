@@ -6,17 +6,16 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{DateTime, SubsecRound, Utc};
-use common::{create_config, noop_flow};
+use common::{LogCapture, create_config, find_run, noop_flow, run_exists, send, two_shopify_apps};
 use openshop::builder::{Field, FieldOption, Flow, Function, FunctionType, Provider};
-use openshop::db::schema::FlowRun;
 use openshop::engine::abort::register_abort;
 use openshop::engine::{RunFlowOptions, run_flow};
 use openshop::runtime::time::to_iso;
 use openshop::server::{ServerOptions, UiSource};
 use openshop::testing::{TestContext, TestOptions, session_token};
 use openshop::{
-    Concurrency, Cron, DispatchOptions, FlowCanceledError, FlowContext, IndexMap, OpenShopConfig, PgPool, RetryPolicy,
-    RunOutcome, ShopifyAppConfig, ShopifyConfig, Value, anyhow, json, validators,
+    Concurrency, Cron, DispatchOptions, FlowCanceledError, FlowContext, OpenShopConfig, PgPool, RetryPolicy,
+    RunOutcome, Value, anyhow, json, validators,
 };
 use reqwest::header::{
     ACCESS_CONTROL_ALLOW_HEADERS, ACCESS_CONTROL_ALLOW_METHODS, ACCESS_CONTROL_ALLOW_ORIGIN,
@@ -64,15 +63,6 @@ async fn context(config: OpenShopConfig) -> TestContext {
 
 async fn api_context() -> TestContext {
     context(api_config()).await
-}
-
-/// Status and body of a response; non-JSON bodies are returned as a string.
-async fn send(request: RequestBuilder) -> (StatusCode, Value) {
-    let response = request.send().await.expect("response");
-    let status = response.status();
-    let text = response.text().await.expect("response body");
-    let body = serde_json::from_str(&text).unwrap_or(Value::String(text));
-    (status, body)
 }
 
 /// A request authenticated with an arbitrary session token.
@@ -171,16 +161,8 @@ async fn seed_log(
     id
 }
 
-async fn find_run(db: &PgPool, run_id: Uuid) -> Option<FlowRun> {
-    sqlx::query_as("SELECT * FROM flow_runs WHERE id = $1")
-        .bind(run_id)
-        .fetch_optional(db)
-        .await
-        .unwrap()
-}
-
 async fn run_status(db: &PgPool, run_id: Uuid) -> String {
-    find_run(db, run_id).await.expect("run").status
+    find_run(db, run_id).await.status
 }
 
 async fn step_names(db: &PgPool, run_id: Uuid) -> Vec<String> {
@@ -723,7 +705,7 @@ async fn post_flow_run_triggers_a_flow(ctx: &TestContext) {
     assert_eq!(data["status"], "pending");
     let run_id = Uuid::parse_str(data["runId"].as_str().expect("runId")).unwrap();
 
-    let run = find_run(&ctx.db, run_id).await.expect("run");
+    let run = find_run(&ctx.db, run_id).await;
     assert_eq!(run.status, "pending");
     assert_eq!(run.flow_name, "test-flow");
     assert_eq!(run.shop, ctx.shop);
@@ -784,10 +766,7 @@ async fn post_flow_run_rejects_input_the_flow_refuses(ctx: &TestContext) {
     .await;
     assert_eq!(status, StatusCode::ACCEPTED);
     let run_id = Uuid::parse_str(data["runId"].as_str().expect("runId")).unwrap();
-    assert_eq!(
-        find_run(&ctx.db, run_id).await.expect("run").input,
-        Some(json!({ "orderId": 12 }))
-    );
+    assert_eq!(find_run(&ctx.db, run_id).await.input, Some(json!({ "orderId": 12 })));
 }
 
 #[openshop::test(context(api_config_with(noop_flow("test-flow").concurrency(Concurrency::Allow))))]
@@ -802,7 +781,7 @@ async fn post_flow_run_defaults_input_when_the_body_is_missing_or_invalid(ctx: &
         let (status, data) = send(request).await;
         assert_eq!(status, StatusCode::ACCEPTED);
         let run_id = Uuid::parse_str(data["runId"].as_str().expect("runId")).unwrap();
-        assert_eq!(find_run(&ctx.db, run_id).await.expect("run").input, Some(json!({})));
+        assert_eq!(find_run(&ctx.db, run_id).await.input, Some(json!({})));
     }
 }
 
@@ -814,7 +793,7 @@ async fn flow_names_are_decoded_from_the_path() {
     let (status, data) = send(ctx.post("/api/flows/orders%2Fsync%20now/run")).await;
     assert_eq!(status, StatusCode::ACCEPTED);
     let run_id = Uuid::parse_str(data["runId"].as_str().expect("runId")).unwrap();
-    assert_eq!(find_run(&ctx.db, run_id).await.expect("run").flow_name, name);
+    assert_eq!(find_run(&ctx.db, run_id).await.flow_name, name);
 
     let (status, runs) = send(ctx.get("/api/flows/orders%2Fsync%20now/runs")).await;
     assert_eq!(status, StatusCode::OK);
@@ -849,7 +828,7 @@ async fn post_run_cancel_cancels_a_pending_run(ctx: &TestContext) {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body, json!({ "ok": true }));
 
-    let run = find_run(&ctx.db, run_id).await.expect("run");
+    let run = find_run(&ctx.db, run_id).await;
     assert_eq!(run.status, "canceled");
     assert!(run.completed_at.is_some());
 }
@@ -925,7 +904,7 @@ async fn post_run_retry_retries_a_failed_run(ctx: &TestContext) {
         json!({ "ok": true, "runId": run_id.to_string(), "mode": "resume" })
     );
 
-    let run = find_run(&ctx.db, run_id).await.expect("run");
+    let run = find_run(&ctx.db, run_id).await;
     assert_eq!(run.status, "pending");
     assert_eq!(run.error, None);
     assert_eq!(run.attempts, 0);
@@ -974,7 +953,7 @@ async fn post_run_retry_resume_keeps_completed_steps_and_reset_discards_them() {
     assert_eq!(body["mode"], "resume");
     assert_eq!(step_names(&ctx.db, run_id).await, ["fetch"]);
 
-    let run = find_run(&ctx.db, run_id).await.expect("run");
+    let run = find_run(&ctx.db, run_id).await;
     assert_eq!(run.status, "pending");
     assert_eq!(run.error, None);
     let deadline_in = (run.deadline_at.expect("deadline from the flow timeout") - before).num_seconds();
@@ -1098,7 +1077,7 @@ async fn post_run_cancel_signals_the_worker_before_the_cancellation_is_visible(c
         .unwrap();
     drop(holder);
     let (code, body) = canceling.await.unwrap();
-    assert_eq!((code, body), (StatusCode::OK, json!({ "ok": true })));
+    assert_eq!((code, body), (200, json!({ "ok": true })));
     assert_eq!(run_status(&ctx.db, run_id).await, "canceled");
 }
 
@@ -1113,7 +1092,7 @@ async fn post_run_retry_of_a_run_deleted_meanwhile_is_not_found(ctx: &TestContex
 
     assert_eq!(code, StatusCode::NOT_FOUND);
     assert_eq!(body, error("Run not found"));
-    assert!(find_run(&ctx.db, run_id).await.is_none());
+    assert!(!run_exists(&ctx.db, run_id).await);
 }
 
 #[openshop::test(api_context())]
@@ -1134,7 +1113,7 @@ async fn post_run_retry_does_not_reset_a_run_that_started_again_meanwhile(ctx: &
 
     assert_eq!(code, StatusCode::CONFLICT);
     assert_eq!(body, error("Cannot retry a run with status \"running\""));
-    let run = find_run(&ctx.db, run_id).await.expect("run");
+    let run = find_run(&ctx.db, run_id).await;
     assert_eq!((run.status.as_str(), run.attempts), ("running", 3));
     assert_eq!(run.worker_id.as_deref(), Some("w1"));
     assert_eq!(step_names(&ctx.db, run_id).await, ["push"], "the steps are kept");
@@ -1191,7 +1170,7 @@ async fn post_runs_bulk_delete_skips_a_run_that_started_meanwhile(ctx: &TestCont
     assert_eq!(body, json!({ "deleted": 1, "skipped": 1 }));
     assert_eq!(run_status(&ctx.db, started).await, "running");
     assert_eq!(step_names(&ctx.db, started).await, ["step"]);
-    assert!(find_run(&ctx.db, finished).await.is_none());
+    assert!(!run_exists(&ctx.db, finished).await);
     assert!(step_names(&ctx.db, finished).await.is_empty());
 }
 
@@ -1263,11 +1242,11 @@ async fn delete_run_removes_the_run_with_its_steps_and_logs(ctx: &TestContext) {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body, json!({ "ok": true }));
 
-    assert!(find_run(&ctx.db, run_id).await.is_none());
+    assert!(!run_exists(&ctx.db, run_id).await);
     assert!(step_names(&ctx.db, run_id).await.is_empty());
     assert!(log_messages(&ctx.db, run_id).await.is_empty());
 
-    assert!(find_run(&ctx.db, kept).await.is_some());
+    assert!(run_exists(&ctx.db, kept).await);
     assert_eq!(step_names(&ctx.db, kept).await, ["step"]);
     assert_eq!(log_messages(&ctx.db, kept).await, ["line"]);
 
@@ -1284,7 +1263,7 @@ async fn delete_run_rejects_active_runs(ctx: &TestContext) {
         let (code, body) = send(ctx.delete(&format!("/api/runs/{run_id}"))).await;
         assert_eq!(code, StatusCode::CONFLICT);
         assert_eq!(body, error("Cannot delete an active run — cancel it first"));
-        assert!(find_run(&ctx.db, run_id).await.is_some());
+        assert!(run_exists(&ctx.db, run_id).await);
     }
 }
 
@@ -1308,12 +1287,12 @@ async fn post_runs_bulk_delete_deletes_finished_runs_and_skips_the_rest(ctx: &Te
     assert_eq!(body, json!({ "deleted": 2, "skipped": 4 }));
 
     for id in [completed, failed] {
-        assert!(find_run(&ctx.db, id).await.is_none());
+        assert!(!run_exists(&ctx.db, id).await);
         assert!(step_names(&ctx.db, id).await.is_empty());
         assert!(log_messages(&ctx.db, id).await.is_empty());
     }
     for id in [pending, untouched] {
-        assert!(find_run(&ctx.db, id).await.is_some());
+        assert!(run_exists(&ctx.db, id).await);
         assert_eq!(step_names(&ctx.db, id).await, ["step"]);
         assert_eq!(log_messages(&ctx.db, id).await, ["line"]);
     }
@@ -1347,7 +1326,7 @@ async fn post_runs_bulk_delete_validates_its_body(ctx: &TestContext) {
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(body, error("Max 100 runs per batch"));
 
-    assert!(find_run(&ctx.db, run_id).await.is_some());
+    assert!(run_exists(&ctx.db, run_id).await);
 
     let (status, body) = send(
         ctx.post("/api/runs/bulk-delete")
@@ -2632,27 +2611,8 @@ async fn post_providers_check_reports_checker_failures() {
     ctx.shutdown().await.unwrap();
 }
 
-/// Keeps every line logged while it is installed.
-#[derive(Default)]
-struct Lines(std::sync::Mutex<Vec<String>>);
-
-impl openshop::runtime::RuntimeLogger for Lines {
-    fn info(&self, message: &str, context: Option<&Value>) {
-        self.0.lock().unwrap().push(format!("{message} {context:?}"));
-    }
-    fn warn(&self, message: &str, context: Option<&Value>) {
-        self.info(message, context);
-    }
-    fn error(&self, message: &str, context: Option<&Value>) {
-        self.info(message, context);
-    }
-}
-
-static LOGGING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-
 #[tokio::test]
 async fn a_checker_failing_inside_the_server_is_logged_and_never_shown() {
-    let _logging = LOGGING.lock().await;
     let leaky = Provider::new("leaky")
         .field("token", Field::password("Token"))
         .checker(|config| async move {
@@ -2670,8 +2630,7 @@ async fn a_checker_failing_inside_the_server_is_logged_and_never_shown() {
         .build()
         .unwrap();
     let ctx = context(config).await;
-    let lines = Arc::new(Lines::default());
-    let previous = openshop::runtime::set_logger(lines.clone());
+    let logs = LogCapture::start().await;
 
     let mut ids = Vec::new();
     for token in ["plain", "wrapped"] {
@@ -2696,8 +2655,7 @@ async fn a_checker_failing_inside_the_server_is_logged_and_never_shown() {
     assert_ne!(ids[0], ids[1]);
 
     // The cause is in the log, under the id.
-    openshop::runtime::set_logger(previous);
-    let logged = lines.0.lock().unwrap().join("\n");
+    let logged = logs.text();
     for id in &ids {
         let line = logged.lines().find(|line| line.contains(id.as_str())).expect("a line");
         assert!(line.contains("hunter2"), "{line}");
@@ -2782,9 +2740,7 @@ async fn a_checker_that_never_answers_times_out() {
 
 #[openshop::test(api_context())]
 async fn an_unexpected_failure_has_an_id_in_a_header_and_in_the_log(ctx: &TestContext) {
-    let _logging = LOGGING.lock().await;
-    let lines = Arc::new(Lines::default());
-    let previous = openshop::runtime::set_logger(lines.clone());
+    let logs = LogCapture::start().await;
     sqlx::query("DROP TABLE flow_runs CASCADE")
         .execute(&ctx.db)
         .await
@@ -2795,8 +2751,7 @@ async fn an_unexpected_failure_has_an_id_in_a_header_and_in_the_log(ctx: &TestCo
     let id = response.headers()["x-error-id"].to_str().unwrap().to_string();
     assert_eq!(response.text().await.unwrap(), "Internal Server Error");
 
-    openshop::runtime::set_logger(previous);
-    let logged = lines.0.lock().unwrap().join("\n");
+    let logged = logs.text();
     let line = logged.lines().find(|line| line.contains(&id)).expect("a line");
     assert!(line.contains("flow_runs"), "{line}");
 }
@@ -2877,7 +2832,7 @@ async fn sessions_cannot_reach_runs_and_logs_of_another_shop(ctx: &TestContext) 
     let (status, body) = send(as_intruder(Method::POST, "/api/runs/bulk-delete".to_string()).json(&batch)).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body, json!({ "deleted": 1, "skipped": 2 }));
-    assert!(find_run(&ctx.db, finished).await.is_none());
+    assert!(!run_exists(&ctx.db, finished).await);
 
     assert_eq!(run_status(&ctx.db, run_id).await, "completed");
     assert_eq!(run_status(&ctx.db, active).await, "pending");
@@ -2888,7 +2843,7 @@ async fn sessions_cannot_reach_runs_and_logs_of_another_shop(ctx: &TestContext) 
     let (status, triggered) = send(as_intruder(Method::POST, "/api/flows/test-flow/run".to_string())).await;
     assert_eq!(status, StatusCode::ACCEPTED);
     let foreign = Uuid::parse_str(triggered["runId"].as_str().unwrap()).unwrap();
-    assert_eq!(find_run(&ctx.db, foreign).await.expect("run").shop, OTHER_SHOP);
+    assert_eq!(find_run(&ctx.db, foreign).await.shop, OTHER_SHOP);
 
     let (_, own) = send(ctx.get("/api/runs")).await;
     let mut own_ids = strings(&own, "id");
@@ -2937,7 +2892,7 @@ async fn crons_and_flows_of_the_admin_only_show_what_applies_to_the_session_shop
             .json(&json!({ "key": "test-flow:0 * * * *", "enabled": false })),
     )
     .await;
-    assert_eq!((status, body), (StatusCode::NOT_FOUND, error("Cron not found")));
+    assert_eq!((status, body), (404, error("Cron not found")));
     let (status, _) = send(
         ctx.post("/api/crons/toggle")
             .json(&json!({ "key": "test-flow:1 * * * *", "enabled": false })),
@@ -3019,19 +2974,8 @@ async fn sessions_cannot_reach_providers_and_crons_of_another_shop(ctx: &TestCon
 
 #[tokio::test]
 async fn sessions_cannot_reach_data_of_another_shopify_app() {
-    let app = |api_key: &str, api_secret: &str| ShopifyAppConfig::Keys {
-        api_key: api_key.to_string(),
-        api_secret: api_secret.to_string(),
-        app_url: Some(format!("https://{api_key}.example.test")),
-    };
     let config = OpenShopConfig::builder()
-        .shopify(ShopifyConfig {
-            scopes: Some("read_products".to_string()),
-            apps: Some(IndexMap::from([
-                ("clientA".to_string(), app("client-a-key", "client-a-secret")),
-                ("clientB".to_string(), app("client-b-key", "client-b-secret")),
-            ])),
-        })
+        .shopify(two_shopify_apps())
         .flow(noop_flow("test-flow"))
         .provider(warehouse())
         .cron(Cron::new("*/5 * * * *", "test-flow").name("Test cron"))
@@ -3055,7 +2999,7 @@ async fn sessions_cannot_reach_data_of_another_shopify_app() {
     let (status, triggered) = send(as_a(Method::POST, "/api/flows/test-flow/run")).await;
     assert_eq!(status, StatusCode::ACCEPTED);
     let run_id = Uuid::parse_str(triggered["runId"].as_str().unwrap()).unwrap();
-    assert_eq!(find_run(&ctx.db, run_id).await.expect("run").app_handle, "clientA");
+    assert_eq!(find_run(&ctx.db, run_id).await.app_handle, "clientA");
     seed_log(&ctx.db, run_id, "info", "private line", json!({}), base_time()).await;
     let (status, _) = send(as_a(Method::PUT, "/api/providers/warehouse").json(&warehouse_credentials())).await;
     assert_eq!(status, StatusCode::OK);
@@ -3095,7 +3039,7 @@ async fn sessions_cannot_reach_data_of_another_shopify_app() {
     let (status, other) = send(as_b(Method::POST, "/api/flows/test-flow/run")).await;
     assert_eq!(status, StatusCode::ACCEPTED);
     let other_run = Uuid::parse_str(other["runId"].as_str().unwrap()).unwrap();
-    assert_eq!(find_run(&ctx.db, other_run).await.expect("run").app_handle, "clientB");
+    assert_eq!(find_run(&ctx.db, other_run).await.app_handle, "clientB");
 
     // App A still sees exactly its own data.
     let (_, runs) = send(as_a(Method::GET, "/api/runs")).await;
