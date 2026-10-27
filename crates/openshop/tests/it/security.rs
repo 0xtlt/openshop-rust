@@ -2,12 +2,10 @@
 //! another shop, injection attempts and session-token edge cases. The routes
 //! scoped to the session's shop and app are tried one by one in `api.rs`.
 
-mod common;
-
+use crate::common::{find_run, json_body, run_exists};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use chrono::Utc;
-use common::{find_run, json_body, run_exists};
 use hmac::{Hmac, Mac};
 use openshop::builder::{Field, Flow, Provider};
 use openshop::testing::{

@@ -1,11 +1,9 @@
 //! The purge of old log lines: `log_retention`, run by the workers in batches.
 
-mod common;
-
 use std::time::{Duration, Instant};
 
+use crate::common::{TestApp, create_config};
 use chrono::Utc;
-use common::{TestApp, create_config};
 use openshop::OpenShopConfig;
 use openshop::engine::Worker;
 use openshop::engine::retention::{purge_logs, purge_logs_batch};

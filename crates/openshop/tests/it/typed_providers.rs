@@ -1,9 +1,7 @@
 //! Typed provider calls: a `ProviderCall` constant shared by the provider that
 //! implements it and the code that invokes it.
 
-mod common;
-
-use common::{noop_flow, shop_connectors as connectors};
+use crate::common::{noop_flow, shop_connectors as connectors};
 use openshop::builder::{Field, Provider, ProviderCall};
 use openshop::testing::TestContext;
 use openshop::{OpenShopConfig, Value, json, validators};
@@ -82,7 +80,7 @@ async fn context() -> TestContext {
 }
 
 async fn save_config(ctx: &TestContext, config: Value) {
-    common::save_provider_config(ctx, "warehouse", config).await;
+    crate::common::save_provider_config(ctx, "warehouse", config).await;
 }
 
 #[openshop::test(context())]
@@ -193,7 +191,7 @@ async fn invoking_a_call_that_is_not_registered_fails_by_name() {
 
 #[openshop::test(context())]
 async fn the_typed_checker_receives_the_stored_configuration(ctx: &TestContext) {
-    let unconfigured: Value = common::check_provider(ctx, "warehouse").await;
+    let unconfigured: Value = crate::common::check_provider(ctx, "warehouse").await;
     assert_eq!(
         unconfigured,
         json!({
@@ -204,7 +202,7 @@ async fn the_typed_checker_receives_the_stored_configuration(ctx: &TestContext) 
 
     for (api_key, expected) in [("secret-1", true), ("wrong", false)] {
         save_config(ctx, json!({ "apiUrl": "https://warehouse.test", "apiKey": api_key })).await;
-        let checked: Value = common::check_provider(ctx, "warehouse").await;
+        let checked: Value = crate::common::check_provider(ctx, "warehouse").await;
         assert_eq!(checked, json!({ "ok": expected }), "{api_key}");
     }
 }

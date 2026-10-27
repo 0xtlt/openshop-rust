@@ -2,8 +2,6 @@
 //! makes of them: nothing is built by a function, each block is the function
 //! or the struct itself.
 
-mod common;
-
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 

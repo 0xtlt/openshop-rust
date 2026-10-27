@@ -1,10 +1,8 @@
 //! `POST /webhooks`: HMAC verification, topic dispatch and the handler context.
 
-mod common;
-
 use std::sync::{Arc, Mutex};
 
-use common::{assert_error, noop_flow, two_shopify_apps, two_shopify_apps_with_one_secret};
+use crate::common::{assert_error, noop_flow, two_shopify_apps, two_shopify_apps_with_one_secret};
 use openshop::builder::{OpenShopBuilder, Webhook};
 use openshop::db::schema::FlowRun;
 use openshop::testing::{TestContext, TestOptions, sign_webhook_body};

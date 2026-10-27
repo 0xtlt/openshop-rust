@@ -1,9 +1,7 @@
-mod common;
-
 use std::collections::BTreeSet;
 use std::time::{Duration, Instant};
 
-use common::{LogCapture, TestApp, install, noop_flow, test_env};
+use crate::common::{LogCapture, TestApp, install, noop_flow, test_env};
 use openshop::builder::Flow;
 use openshop::db::schema::FlowRun;
 use openshop::engine::Scheduler;

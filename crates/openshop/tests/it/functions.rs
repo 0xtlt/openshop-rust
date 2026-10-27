@@ -1,12 +1,10 @@
 //! Shopify Functions admin API (`/api/functions`): definitions come from the
 //! configuration, instances live in Shopify behind the Admin GraphQL API.
 
-mod common;
-
 use std::sync::{Arc, Mutex};
 
+use crate::common::{graphql_requests, install, send, two_shopify_apps};
 use chrono::{DateTime, Utc};
-use common::{graphql_requests, install, send, two_shopify_apps};
 use openshop::builder::{
     CombinesWith, DiscountMode, Field, FieldOption, Function, FunctionOwner, FunctionType, OpenShopBuilder,
 };

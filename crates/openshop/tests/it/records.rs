@@ -1,10 +1,8 @@
 //! The rows of the framework tables, read across shops: installations, runs,
 //! their steps and their logs.
 
-mod common;
-
+use crate::common::{TestApp, create_config, install, noop_flow};
 use chrono::{Duration, Utc};
-use common::{TestApp, create_config, install, noop_flow};
 use openshop::testing::{AdminTestOptions, admin_context};
 use openshop::{FlowRun, Installation, LogRow, PgPool, Record, StepResult, Uuid, json};
 

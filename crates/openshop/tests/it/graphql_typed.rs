@@ -1,9 +1,7 @@
 //! `graphql!`: operations checked against Shopify's schema at
 //! compile time, run by `ShopifyClient` with the token of the installation.
 
-mod common;
-
-use common::noop_flow;
+use crate::common::noop_flow;
 use openshop::builder::Flow;
 use openshop::shopify::input;
 use openshop::testing::{TestContext, TestOptions};

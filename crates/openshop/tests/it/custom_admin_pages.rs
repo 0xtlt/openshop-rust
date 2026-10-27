@@ -1,11 +1,9 @@
 //! Custom admin pages: discovery, access checks and the loader/action RPC endpoint.
 
-mod common;
-
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use common::{TEST_SHOP, install, json_body, two_shopify_apps, vault_provider};
+use crate::common::{TEST_SHOP, install, json_body, two_shopify_apps, vault_provider};
 use openshop::builder::{AdminFunction, AdminPage, InputSchema, OpenShopBuilder};
 use openshop::testing::{
     AdminTestOptions, MockTransport, TestContext, TestOptions, admin_context, invoke_admin_function, session_token,

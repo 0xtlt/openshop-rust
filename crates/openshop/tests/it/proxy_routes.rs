@@ -1,8 +1,6 @@
 //! App proxy routes under `/proxy` and their extension-direct twins under `/ext`.
 
-mod common;
-
-use common::{assert_error, json_body, now, two_shopify_apps, two_shopify_apps_with_one_secret};
+use crate::common::{assert_error, json_body, now, two_shopify_apps, two_shopify_apps_with_one_secret};
 use openshop::builder::{Proxy, ProxyResponseType};
 use openshop::server::proxy::create_proxy_routes;
 use openshop::testing::{

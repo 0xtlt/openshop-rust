@@ -76,7 +76,7 @@ uuid.workspace = true
 
 [dev-dependencies]
 openshop = { path = ".", features = ["testing", "ui"] }
-# The views of `tests/admin_views.rs`.
+# The views of `tests/it/admin_views.rs`.
 leptos = "0.8"
 # The transport that keeps events, for `tests/sentry.rs`.
 sentry = { workspace = true, features = ["test"] }

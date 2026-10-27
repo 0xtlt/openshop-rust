@@ -3,13 +3,11 @@
 //! token), for the shop of the `client_credentials_shop` setting in background
 //! work, and to renew the token a shop's row holds.
 
-mod common;
-
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use common::{LogCapture, graphql_requests, install, noop_flow, now, two_shopify_apps, wait};
+use crate::common::{LogCapture, graphql_requests, install, noop_flow, now, two_shopify_apps, wait};
 use futures::StreamExt;
 use openshop::builder::{AdminPage, Flow, Route, Webhook};
 use openshop::engine::Scheduler;

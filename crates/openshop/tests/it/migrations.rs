@@ -1,11 +1,9 @@
 //! Client-owned SQL migrations (`./migrations`), ported from the TypeScript
 //! `cli/schema.spec.ts` and adapted to the Rust migrator.
 
-mod common;
-
 use std::path::{Path, PathBuf};
 
-use common::{TEST_SHOP, TempProject, create_config, empty_database, noop_flow, test_env};
+use crate::common::{TEST_SHOP, TempProject, create_config, empty_database, noop_flow, test_env};
 use openshop::db::migrate::{
     FRAMEWORK_MIGRATIONS, MigrationStatus, assert_migrated, check_migrations, generate_migrations,
     get_client_migration_status, migrate_schema, push_schema,

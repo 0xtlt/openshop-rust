@@ -1,13 +1,11 @@
-mod common;
-
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use chrono::Utc;
-use common::{
+use crate::common::{
     TEST_SHOP, TestApp, app_with_a_clock_ahead, create_config, explode, find_run, find_steps, noop_flow, within,
 };
+use chrono::Utc;
 use openshop::builder::Flow;
 use openshop::db::schema::LogRow;
 use openshop::engine::{RunFlowOptions, cancel_run, run_flow};

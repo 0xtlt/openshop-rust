@@ -1,12 +1,10 @@
 //! The Admin API: flows, runs, logs, crons and providers, scoped to the session's shop and app.
 
-mod common;
-
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::common::{LogCapture, create_config, find_run, noop_flow, run_exists, send, two_shopify_apps};
 use chrono::{DateTime, SubsecRound, Utc};
-use common::{LogCapture, create_config, find_run, noop_flow, run_exists, send, two_shopify_apps};
 use openshop::builder::{Field, FieldOption, Flow, Function, FunctionType, Provider};
 use openshop::engine::abort::register_abort;
 use openshop::engine::{RunFlowOptions, run_flow};

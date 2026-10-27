@@ -1,9 +1,7 @@
-mod common;
-
 use std::time::Duration;
 
+use crate::common::{TEST_SHOP, TestApp, create_config, find_run, noop_flow};
 use chrono::{DateTime, Utc};
-use common::{TEST_SHOP, TestApp, create_config, find_run, noop_flow};
 use openshop::builder::InputSchema;
 use openshop::{
     Concurrency, DispatchOptions, FlowConcurrencyError, InvalidFlowInput, RetryPolicy, UnknownFlowError, Value, json,

@@ -1,15 +1,13 @@
 //! Serving the admin UI (shell, assets, launch gate) and the server lifecycle.
 
-mod common;
-
 use std::borrow::Cow;
 use std::io::ErrorKind;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crate::common::{TestApp, create_config, install, noop_flow, two_shopify_apps};
 use axum::Router;
-use common::{TestApp, create_config, install, noop_flow, two_shopify_apps};
 use openshop::server::ServerOptions;
 use openshop::server::{listen, serve};
 use openshop::testing::{TestContext, TestOptions, sign_query, to_query_string};

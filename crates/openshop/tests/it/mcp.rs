@@ -1,14 +1,12 @@
 //! MCP: the admin token API (`/api/mcp/*`) and the JSON-RPC endpoint (`POST /mcp`).
 
-mod common;
-
 use std::io::{Read, Write};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use crate::common::{LogCapture, graphql_requests, install, send, two_shopify_apps};
 use chrono::{DateTime, Utc};
-use common::{LogCapture, graphql_requests, install, send, two_shopify_apps};
 use openshop::builder::{Flow, InputSchema, McpResource, McpTool};
 use openshop::db::schema::McpAuditLog;
 use openshop::engine::{RunFlowOptions, run_flow};

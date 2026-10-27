@@ -1,11 +1,9 @@
 //! Public server routes under `/routes`.
 
-mod common;
-
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use common::{install, json_body, two_shopify_apps, vault_provider};
+use crate::common::{install, json_body, two_shopify_apps, vault_provider};
 use openshop::builder::{OpenShopBuilder, Route};
 use openshop::response::{self, IntoResponse, Response, StatusCode};
 use openshop::server::http::parse_query;

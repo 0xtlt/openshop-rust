@@ -211,7 +211,7 @@ async fn reads_a_product(ctx: &TestContext) {
 ## Framework Code
 
 When changing GraphQL support in `crates/openshop`:
-- `graphql!` is `shopify_api`'s; OpenShop only re-exports it. `crates/openshop/tests/graphql_typed.rs` checks it end to end against `crates/openshop/graphql/admin.schema.json`, the schema of the version in `[package.metadata.shopify_api]` of `crates/openshop/Cargo.toml`.
+- `graphql!` is `shopify_api`'s; OpenShop only re-exports it. `crates/openshop/tests/it/graphql_typed.rs` checks it end to end against `crates/openshop/graphql/admin.schema.json`, the schema of the version in `[package.metadata.shopify_api]` of `crates/openshop/Cargo.toml`.
 - The client lives in `crates/openshop/src/shopify/client.rs`: a `ShopifyClient` resolves, at its first request, a `shopify_api::Shopify` client with the stored token, or the shared client of the client credentials grant (`crates/openshop/src/shopify/client_credentials.rs`), which stores what it obtains in `installations`.
 - Do not write a request to Shopify by hand: use `shopify_api` (the client, `oauth::ShopifyApp`, `webhooks::Webhook`). Its requests go through the `Transport` of the application (`crates/openshop/src/runtime/transport.rs`), which tests replace with `MockTransport`.
 - Update `docs/src` and the templates (`templates/minimal`, `templates/custom`, `templates/public`) when user-facing usage changes.

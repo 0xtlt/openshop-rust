@@ -1,5 +1,4 @@
-//! Shared helpers for the integration tests. Every test gets its own database schema.
-#![allow(dead_code)]
+//! Helpers shared by the modules of the integration tests.
 
 use std::future::Future;
 use std::sync::{Arc, Mutex};

@@ -30,22 +30,26 @@ From the repo root:
 
 ```bash
 cargo test -p openshop --lib
-cargo test -p openshop --test engine_runner
+cargo test -p openshop --test it engine_runner::
 cargo test -p openshop-template-custom
 cargo test -p openshop-template-public
 cargo test -p openshop-cli
 ```
 
 `--lib` runs the unit tests inside `crates/openshop/src`, which do not need a
-database. `--test <name>` runs one file of `crates/openshop/tests`.
+database. The integration tests are one binary, `crates/openshop/tests/it`,
+with a module per subject: `--test it <module>::` runs one of them. A test that
+reads the process logger does it with `common::LogCapture`, which takes turns
+with the other tests of the binary. Only the Sentry tests (`sentry*.rs`) and
+the `trybuild` tests of the macros (`--test macros`) are binaries of their own.
 
 Use targeted tests when the change is narrow:
 
-- Engine behavior: `crates/openshop/tests/engine_*.rs` (dispatch, runner, step, worker, scheduler) and the unit tests in `crates/openshop/src/engine`.
-- Server, Admin API, auth, security, proxy, routes, and webhooks: `api.rs`, `auth.rs`, `security.rs`, `proxy_routes.rs`, `server_routes.rs`, `server_limits.rs`, `webhooks.rs`, `pages.rs`, `static_ui.rs`, `functions.rs`, `mcp.rs`, and `custom_admin_pages.rs` in `crates/openshop/tests`.
-- Declared blocks (`#[flow]`, `#[webhook]`, `#[proxy]`, `#[route]`, `#[admin_page]`, `#[mcp_tool]`, `#[mcp_resource]`, `#[derive(FunctionConfig)]`), `app!` and what the builder refuses: `crates/openshop/tests/declared.rs`, and the unit tests of the macros in `crates/openshop-macros/src`.
-- What a context of a shop gives and what takes one (`dispatch`, `Model::of`), the typed inputs of proxies and routes, Liquid templates, and the input of a cron: `crates/openshop/tests/contexts.rs`.
-- Migrations: `crates/openshop/tests/migrations.rs` and the unit tests in `crates/openshop/src/db/migrate.rs`.
+- Engine behavior: `crates/openshop/tests/it/engine_*.rs` (dispatch, runner, step, worker, scheduler) and the unit tests in `crates/openshop/src/engine`.
+- Server, Admin API, auth, security, proxy, routes, and webhooks: `api.rs`, `auth.rs`, `security.rs`, `proxy_routes.rs`, `server_routes.rs`, `server_limits.rs`, `webhooks.rs`, `pages.rs`, `static_ui.rs`, `functions.rs`, `mcp.rs`, and `custom_admin_pages.rs` in `crates/openshop/tests/it`.
+- Declared blocks (`#[flow]`, `#[webhook]`, `#[proxy]`, `#[route]`, `#[admin_page]`, `#[mcp_tool]`, `#[mcp_resource]`, `#[derive(FunctionConfig)]`), `app!` and what the builder refuses: `crates/openshop/tests/it/declared.rs`, and the unit tests of the macros in `crates/openshop-macros/src`.
+- What a context of a shop gives and what takes one (`dispatch`, `Model::of`), the typed inputs of proxies and routes, Liquid templates, and the input of a cron: `crates/openshop/tests/it/contexts.rs`.
+- Migrations: `crates/openshop/tests/it/migrations.rs` and the unit tests in `crates/openshop/src/db/migrate.rs`.
 - CLI behavior (`init`, `dev` watcher, restarts): unit tests in `crates/openshop-cli/src`.
 - Shared rules: unit tests in `crates/openshop-shared/src`.
 
@@ -65,7 +69,7 @@ trunk build --release
 when the UI changes.
 
 The views of custom admin pages (`#[view]`, `openshop::ui`) are tested in
-`crates/openshop/tests/admin_views.rs`, and what the bundle of an application
+`crates/openshop/tests/it/admin_views.rs`, and what the bundle of an application
 is made of in the unit tests of `crates/openshop-cli/src/bundle.rs`. The custom and public
 templates have views: `mise run templates:ui` builds their bundles.
 

@@ -1,12 +1,10 @@
 //! OAuth (`/auth`, `/auth/callback`), the uninstall webhook and the session-token
 //! authentication of the Admin API.
 
-mod common;
-
 use std::time::Duration;
 
+use crate::common::{assert_error, noop_flow, two_shopify_apps, wait};
 use chrono::{DateTime, Utc};
-use common::{assert_error, noop_flow, two_shopify_apps, wait};
 use openshop::testing::{
     MockTransport, TestContext, TestOptions, session_token, sign_query, sign_webhook_body, to_query_string,
 };

@@ -1,10 +1,8 @@
-mod common;
-
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use common::{
+use crate::common::{
     LogCapture, TEST_SHOP, TestApp, app_with_a_clock_ahead, create_config, explode, find_run, find_steps,
     heal_write_fault, inject_write_fault, noop_flow, write_fault_hits,
 };
@@ -1903,8 +1901,13 @@ async fn lease_overlap(slow_first_claim: bool) {
         .connect_with((*test.db.connect_options()).clone())
         .await
         .unwrap();
-    let first_app =
-        OpenShop::with_transport(config, first_pool.clone(), common::test_env(), test.transport.clone()).unwrap();
+    let first_app = OpenShop::with_transport(
+        config,
+        first_pool.clone(),
+        crate::common::test_env(),
+        test.transport.clone(),
+    )
+    .unwrap();
     let settings = WorkerConfig::new()
         .concurrency(1)
         .lease_duration(Duration::from_secs(2))

@@ -1,9 +1,7 @@
 //! The operator dashboard under `/ops`: served only with a password, read-only,
 //! and showing every shop.
 
-mod common;
-
-use common::{install, noop_flow};
+use crate::common::{install, noop_flow};
 use openshop::builder::{Field, OpenShopBuilder, Provider};
 use openshop::server::{ServerOptions, UiSource};
 use openshop::testing::{TestContext, TestOptions};

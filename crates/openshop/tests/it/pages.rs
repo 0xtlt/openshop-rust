@@ -1,8 +1,6 @@
 //! Admin page visibility: `GET /api/pages` and the gate that blocks the Admin API of disabled pages.
 
-mod common;
-
-use common::{create_config, noop_flow, send};
+use crate::common::{create_config, noop_flow, send};
 use openshop::builder::{AdminPage, Field, Function, FunctionType, OpenShopBuilder, Provider};
 use openshop::server::mcp::tokens::create_mcp_token;
 use openshop::testing::TestContext;

@@ -1,14 +1,12 @@
-mod common;
-
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
-use chrono::Utc;
-use common::{
+use crate::common::{
     DropProxy, LogCapture, TEST_SHOP, TestApp, create_config, find_steps, inject_write_fault, noop_flow, within,
     write_fault_hits,
 };
+use chrono::Utc;
 use openshop::engine::{LeaseLostError, RunOwner, SleepSignal, StepExecutor};
 use openshop::runtime::time::to_iso;
 use openshop::{
