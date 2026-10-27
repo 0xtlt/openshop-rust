@@ -5,6 +5,7 @@
 
 use std::fmt;
 
+#[cfg(any(test, feature = "testing"))]
 use serde_json::Value;
 
 const HIDDEN: &str = "[redacted]";
@@ -32,6 +33,7 @@ pub(crate) fn redacted_option(secret: &Option<String>) -> Option<Redacted<'_>> {
 }
 
 /// Whether the name of a header or of a field says that it holds a secret.
+#[cfg(any(test, feature = "testing"))]
 pub(crate) fn is_secret_name(name: &str) -> bool {
     let name = name.to_ascii_lowercase();
     ["secret", "token", "password", "authorization", "cookie", "code", "signature", "key"]
@@ -40,6 +42,7 @@ pub(crate) fn is_secret_name(name: &str) -> bool {
 }
 
 /// A JSON value for display, with the fields that hold a secret hidden at any depth.
+#[cfg(any(test, feature = "testing"))]
 pub(crate) fn redacted_json(value: &Value) -> Value {
     match value {
         Value::Object(fields) => Value::Object(
@@ -213,9 +216,10 @@ mod tests {
 
     #[test]
     fn debug_of_an_outbound_request_hides_tokens_and_client_secrets() {
-        use crate::runtime::OutboundRequest;
+        use crate::testing::OutboundRequest;
 
         let request = OutboundRequest {
+            method: "POST",
             url: "https://a.myshopify.com/admin/oauth/access_token".into(),
             headers: vec![
                 ("Content-Type".into(), "application/json".into()),

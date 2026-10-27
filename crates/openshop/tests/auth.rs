@@ -229,7 +229,7 @@ async fn shopify_access_token_header(ctx: &TestContext, shop: &str) -> String {
     ctx.transport
         .respond_json(json!({ "data": { "shop": { "name": "Test" } } }));
     let client = ctx.app.shopify_client(shop, "default");
-    client.graphql("{ shop { name } }", None).await.unwrap();
+    client.graphql("{ shop { name } }", ()).await.unwrap();
 
     let request = ctx.transport.last_request().expect("GraphQL request");
     assert!(
@@ -292,7 +292,7 @@ async fn get_auth_with_shop_builds_shopify_oauth_redirect() {
         location.starts_with("https://redirect-shop.myshopify.com/admin/oauth/authorize?client_id=test-client-id&"),
         "{location}"
     );
-    assert!(location.contains("&scope=read_products,write_orders&"), "{location}");
+    assert!(location.contains("&scope=read_products%2Cwrite_orders&"), "{location}");
     assert!(
         location.contains("&redirect_uri=https%3A%2F%2Fapp.example.test%2Fauth%2Fcallback&"),
         "{location}"
@@ -923,7 +923,13 @@ async fn get_auth_callback_reports_a_failed_token_exchange(ctx: &TestContext) {
         .respond_with(|_| Ok(MockTransport::json(400, json!({ "error": "invalid_request" }))));
 
     let response = finish(ctx, shop, &started, SECRET).await;
-    assert_error(response, 500, "Token exchange failed: {\"error\":\"invalid_request\"}").await;
+    assert_error(
+        response,
+        500,
+        "Token exchange failed: authentication failed: the token endpoint of exchange-fails.myshopify.com \
+         answered 400 (invalid_request)",
+    )
+    .await;
 
     // The code Shopify gave is spent with it: the merchant starts again.
     let started = begin(ctx, shop).await;
@@ -1078,7 +1084,7 @@ async fn app_uninstalled_webhook_clears_the_token_of_the_shop(ctx: &TestContext)
     seed_installation(ctx, "default", "other.myshopify.com", None, Some("other-token")).await;
     let body = json!({ "id": 1, "myshopify_domain": "TEST.myshopify.com" }).to_string();
 
-    // The signed payload wins over the unsigned header, and is normalized.
+    // The unsigned header must name the shop of the signed payload.
     let response = post_uninstall(
         ctx,
         &body,
@@ -1086,6 +1092,17 @@ async fn app_uninstalled_webhook_clears_the_token_of_the_shop(ctx: &TestContext)
         Some("other.myshopify.com"),
     )
     .await;
+    assert_eq!(response.status(), 200);
+    assert!(installation(ctx, "default", SHOP).await.uninstalled_at.is_none());
+    assert!(
+        installation(ctx, "default", "other.myshopify.com")
+            .await
+            .uninstalled_at
+            .is_none()
+    );
+
+    // Both name it, in any case.
+    let response = post_uninstall(ctx, &body, &sign_webhook_body(&body, SECRET), Some(SHOP)).await;
     assert_eq!(response.status(), 200);
     assert_eq!(response.json::<Value>().await.unwrap(), json!({ "ok": true }));
 
@@ -1098,16 +1115,17 @@ async fn app_uninstalled_webhook_clears_the_token_of_the_shop(ctx: &TestContext)
 }
 
 #[openshop::test(single_app())]
-async fn app_uninstalled_webhook_falls_back_to_the_shop_header(ctx: &TestContext) {
+async fn app_uninstalled_webhook_needs_the_payload_to_name_the_shop(ctx: &TestContext) {
     seed_installation(ctx, "default", SHOP, None, Some("token")).await;
     let body = json!({ "id": 1 }).to_string();
 
+    // The header alone is not signed: it uninstalls nothing.
     let response = post_uninstall(ctx, &body, &sign_webhook_body(&body, SECRET), Some(SHOP)).await;
     assert_eq!(response.status(), 200);
 
     let row = installation(ctx, "default", SHOP).await;
-    assert!(row.access_token.is_none());
-    assert!(row.uninstalled_at.is_some());
+    assert_eq!(row.access_token.as_deref(), Some("token"));
+    assert!(row.uninstalled_at.is_none());
 }
 
 #[openshop::test(single_app())]
@@ -1125,12 +1143,16 @@ async fn app_uninstalled_webhook_ignores_unknown_or_invalid_shops(ctx: &TestCont
         assert_eq!(response.status(), 200, "{shop}");
     }
     let empty = "{}";
-    let response = post_uninstall(ctx, empty, &sign_webhook_body(empty, SECRET), None).await;
+    let response = post_uninstall(ctx, empty, &sign_webhook_body(empty, SECRET), Some(SHOP)).await;
     assert_eq!(response.status(), 200);
-    // A signed body that is not JSON is an unhandled error, not an uninstall.
+    // A delivery without the shop header is not one of Shopify's.
+    let response = post_uninstall(ctx, empty, &sign_webhook_body(empty, SECRET), None).await;
+    assert_eq!(response.status(), 401);
+    // A signed body that is not a JSON object verifies as no webhook.
     let response = post_uninstall(ctx, "not json", &sign_webhook_body("not json", SECRET), Some(SHOP)).await;
-    assert_eq!(response.status(), 500);
-    assert_eq!(response.text().await.unwrap(), "Internal Server Error");
+    assert_eq!(response.status(), 401);
+    let response = post_uninstall(ctx, "{not json", &sign_webhook_body("{not json", SECRET), Some(SHOP)).await;
+    assert_eq!(response.status(), 200);
 
     let row = installation(ctx, "default", SHOP).await;
     assert_eq!(row.access_token.as_deref(), Some("token"));
@@ -1239,6 +1261,7 @@ async fn session_token_request_exchanges_the_token_and_stores_it_encrypted(ctx: 
             "subject_token": token,
             "subject_token_type": "urn:ietf:params:oauth:token-type:id_token",
             "requested_token_type": "urn:shopify:params:oauth:token-type:offline-access-token",
+            "expiring": "0",
         })
     );
 

@@ -13,7 +13,6 @@ An OpenShop app has two command lines:
 | `openshop init [<dir>]` | — | Scaffold a new project from a template. |
 | `openshop init-ui` | — | Scaffold a custom admin page with its view. |
 | `openshop dev [cargo args]` | `cargo run [cargo args] -- dev`, restarted on changes | Start the development server. The admin UI reloads by itself. |
-| `openshop codegen [--api-version=YYYY-MM] [--out=<file>]` | — | Download the Shopify Admin GraphQL schema of another API version for [`graphql!`](graphql.md#schema-and-api-version). Gives up when the endpoint does not connect in 15 seconds or the download takes more than 120. |
 | `openshop build [args]` | `openshop build-ui`, then `cargo build --release [args]` | Build the app for production. |
 | `openshop build-ui` | `trunk build --release` on the crate of the bundle | Build the admin UI bundle of an app whose admin pages have a view, into `dist/`. |
 | `openshop start [args]` | `cargo run --release -- start [args]` | Start the production web process. |
@@ -32,7 +31,7 @@ the dependencies the repository tested:
 cargo install --locked --git https://github.com/0xtlt/openshop-rust openshop-cli
 ```
 
-The CLI is a convenience. Every command except `init`, `init-ui`, `codegen`,
+The CLI is a convenience. Every command except `init`, `init-ui`,
 `build-ui`, and the file watcher of `dev` can be run with `cargo run -- <command>` or, in
 production, by executing the compiled binary directly (`./my-app start`).
 

@@ -199,7 +199,7 @@ cannot be published as it is. What stands in the way, for whoever decides to:
   `openshop = "<version>"`, and `bundle.rs`, which builds the admin UI bundle
   of a project, would have to accept that source too.
 - The crates depend on each other by `path` with a `version`, so they publish in
-  order: `openshop-shared`, `openshop-macros`, `openshop-graphql`,
+  order: `openshop-shared`, `openshop-macros`,
   `openshop-ui`, `openshop`, then `openshop-cli`. `openshop-ui` is its own
   workspace, built for wasm32, with its own lockfile, and has to be published
   too since the `ui` feature of `openshop` depends on it. `openshop` embeds

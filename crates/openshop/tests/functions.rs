@@ -7,14 +7,14 @@ use chrono::{DateTime, Utc};
 use openshop::builder::{
     CombinesWith, DiscountMode, Field, FieldOption, Function, FunctionOwner, FunctionType, OpenShopBuilder,
 };
-use openshop::runtime::OutboundRequest;
+use openshop::testing::OutboundRequest;
 use openshop::testing::{MockTransport, TestContext, TestOptions, session_token};
 use openshop::{IndexMap, OpenShopConfig, ShopifyAppConfig, ShopifyConfig, Value, json, validators};
 use reqwest::{Method, RequestBuilder};
 
 const ACCESS_TOKEN: &str = "shpat_test";
 const SHOP_B: &str = "functions-shop-b.myshopify.com";
-const API_VERSION: &str = "2026-04";
+const API_VERSION: &str = "2026-10";
 
 // ─── Application under test ──────────────────────────────────────────
 

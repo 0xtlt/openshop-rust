@@ -176,9 +176,15 @@ larger configurations easier to split:
   tokens remain valid on `/ext` and `/proxy`.
 - A blank `SHOPIFY_API_SECRET` (whitespace only) counts as not configured
   everywhere, including session token verification.
-- `POST /auth/webhooks/app-uninstalled` takes the shop from the signed payload
-  (`myshopify_domain`). The unsigned `X-Shopify-Shop-Domain` header is only used
-  when the payload has none.
+- Session tokens, launches, OAuth callbacks, app proxy requests and webhooks
+  are verified by `shopify_api`: ten seconds of clock skew on a session token,
+  whose `dest` and `iss` are exactly `https://<shop>.myshopify.com` and its
+  `/admin`; a signed launch, callback or app proxy request of the last 90
+  seconds; a webhook whose body is a JSON object, with its `X-Shopify-Topic`
+  and `X-Shopify-Shop-Domain` headers.
+- `POST /auth/webhooks/app-uninstalled` uninstalls the shop that both the
+  signed payload (`myshopify_domain`) and the unsigned `X-Shopify-Shop-Domain`
+  header name, and nothing when they differ.
 - App proxy signatures are compared as strict hexadecimal. A valid signature
   followed by other characters is rejected.
 - Static asset paths are decoded and checked segment by segment; a path that
@@ -273,9 +279,9 @@ larger configurations easier to split:
 - GraphQL code generation as a separate step. `graphql!` checks an operation
   against Shopify's schema and types it when the crate compiles, so there is
   no `.graphqlrc.ts`, no generated file and no watch mode, and `dev` has
-  nothing to generate. `openshop codegen` only downloads the schema of another
-  API version. Enum values are strings, and the types of an inline operation
-  have no name. See [Typed GraphQL](graphql.md).
+  nothing to generate. The first build downloads the schema of the version of
+  `[package.metadata.shopify_api]`. Enum values are strings, and the types of
+  an inline operation have no name. See [Typed GraphQL](graphql.md).
 - `openshop build` and `openshop test` map to `cargo build --release` and
   `cargo test`.
 - The proxy test client's `.expect(schema)`; deserialize the response instead.

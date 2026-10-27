@@ -364,11 +364,19 @@ fn project_manifest(template: &str, package_name: &str, openshop: &str) -> Resul
     let openshop = openshop_dependency(openshop)?;
 
     if manifest.contains_key("package") {
+        // What tools read of the package, such as the Admin API version of `graphql!`.
+        let metadata = manifest
+            .get("package")
+            .and_then(|package| package.get("metadata"))
+            .cloned();
         let mut package = Table::new();
         package.insert("name", value(package_name));
         package.insert("version", value("0.1.0"));
         package.insert("edition", Item::Value(workspace_value("package", "edition")?));
         package.insert("publish", value(false));
+        if let Some(metadata) = metadata {
+            package.insert("metadata", metadata);
+        }
         manifest.insert("package", Item::Table(package));
     }
     for section in ["dependencies", "dev-dependencies"] {
@@ -1451,5 +1459,18 @@ other = "1""#
         std::fs::create_dir_all(cwd.join("empty")).unwrap();
         assert!(init(&cwd, "empty", minimal(), None).is_ok());
         std::fs::remove_dir_all(cwd).ok();
+    }
+
+    #[test]
+    fn a_project_keeps_the_metadata_of_its_template() {
+        let template = "[package]\nname = \"openshop-template-x\"\nversion.workspace = true\n\n[package.metadata.shopify_api]\napi-version = \"2026-10\"\n\n[dependencies]\nserde.workspace = true\n";
+        let manifest = project_manifest(template, "my-app", "path = \"../openshop\"").unwrap();
+        let parsed: toml_edit::DocumentMut = manifest.parse().unwrap();
+        assert_eq!(parsed["package"]["name"].as_str(), Some("my-app"));
+        assert_eq!(
+            parsed["package"]["metadata"]["shopify_api"]["api-version"].as_str(),
+            Some("2026-10"),
+            "{manifest}"
+        );
     }
 }

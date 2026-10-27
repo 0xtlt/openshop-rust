@@ -139,14 +139,11 @@ async fn install(db: &PgPool, app_handle: &str, shop: &str) {
     .unwrap();
 }
 
-/// The path Shopify admin opens: launch parameters signed with the app secret.
+/// The path Shopify admin opens: launch parameters signed with the app
+/// secret, with the `timestamp` of now.
 fn signed_launch(path: &str, shop: &str, secret: &str) -> String {
     let query = sign_query(
-        &[
-            ("host", "admin.shopify.com/store/static-test"),
-            ("shop", shop),
-            ("timestamp", "1770000000"),
-        ],
+        &[("host", "admin.shopify.com/store/static-test"), ("shop", shop)],
         secret,
     );
     format!("{path}?{}", to_query_string(&query))
@@ -639,20 +636,30 @@ async fn signed_launch_rejects_tampered_or_foreign_signatures() {
     let valid = signed_launch("/", SHOP, SECRET);
     assert_shell(&get(&ctx, &valid).await, "test-app");
 
-    let signed_without_shop = to_query_string(&sign_query(&[("timestamp", "1770000000")], SECRET));
+    let signed_without_shop = to_query_string(&sign_query(&[], SECRET));
     let hmac = valid.rsplit("hmac=").next().unwrap();
+    let timestamp = valid.split("timestamp=").nth(1).unwrap().split('&').next().unwrap();
+    let later = (timestamp.parse::<i64>().unwrap() + 1).to_string();
+    let stale = to_query_string(&sign_query(
+        &[
+            ("shop", SHOP),
+            ("timestamp", &(timestamp.parse::<i64>().unwrap() - 120).to_string()),
+        ],
+        SECRET,
+    ));
     let cases = [
         // Signed by someone else.
         signed_launch("/", SHOP, "another-secret"),
         // Parameters changed after signing.
-        valid.replace("timestamp=1770000000", "timestamp=1770000001"),
+        valid.replace(&format!("timestamp={timestamp}"), &format!("timestamp={later}")),
         valid.replace(SHOP, "uninstalled.myshopify.com"),
         format!("{valid}&extra=1"),
         // Missing or mangled signature.
         format!("/?shop={SHOP}"),
         format!("/?shop={SHOP}&hmac="),
         format!("/?shop={SHOP}&hmac={}", &hmac[..hmac.len() - 1]),
-        valid.replace(hmac, &hmac.to_uppercase()),
+        // Signed, but more than 90 seconds ago: replayed.
+        format!("/?{stale}"),
         // Correctly signed, but not for a shop.
         format!("/?{signed_without_shop}"),
         signed_launch("/", "evil.example.com", SECRET),

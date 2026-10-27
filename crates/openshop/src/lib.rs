@@ -144,7 +144,7 @@ not_wasm! {
     pub use server::UiSource;
     pub use server::http::PublicError;
     pub use server::connectors::Connectors;
-    pub use shopify::{GraphqlOperation, ShopifyClient};
+    pub use shopify::ShopifyClient;
     pub use template::Liquid;
     pub use types::{
         AdminMenuItem, AdminPageId, AdminPageMode, AdminPagesConfig, Concurrency, Cron, CronShops, ErrorContext,
@@ -338,14 +338,21 @@ pub use openshop_macros::ProviderConfig;
 /// See [`ProviderConfig`](macro@ProviderConfig) for an example.
 pub use openshop_macros::provider;
 
-/// Builds a typed Shopify Admin GraphQL operation, checked at compile time.
+/// `shopify_api`, the Shopify client OpenShop runs on: what `graphql!`
+/// generates names it here, so that an application depends on `openshop`
+/// alone.
+#[cfg(not(target_arch = "wasm32"))]
+pub use shopify_api;
+
+/// A Shopify Admin GraphQL operation, checked against Shopify's schema while
+/// the crate compiles: `shopify_api`'s [`graphql!`](shopify_api::graphql),
+/// with the code it generates pointed at [`openshop::shopify_api`](mod@shopify_api).
 ///
-/// The operation is checked against Shopify's schema while the crate
-/// compiles: an unknown field, a missing argument or a variable of the wrong
-/// type is a compile error. The value it returns carries the type of the
-/// operation's `data`, which [`ShopifyClient::execute`] returns.
+/// An unknown field, a missing argument or a variable of the wrong type is a
+/// compile error. The value it returns carries the type of the operation's
+/// `data`, which [`ShopifyClient::execute`] returns.
 ///
-/// ```
+/// ```no_run
 /// # async fn example(shopify: openshop::ShopifyClient, limit: u32) -> openshop::Result<()> {
 /// let data = shopify
 ///     .execute(openshop::graphql!(
@@ -361,32 +368,31 @@ pub use openshop_macros::provider;
 /// # }
 /// ```
 ///
-/// Variables follow the operation as `name = value`. A value is converted to
-/// the Rust type of the variable ([`IntoVariable`](shopify::IntoVariable)); a variable holding an
-/// input object accepts any serializable value.
-///
-/// To name the generated types, for an operation used in several places or
-/// with input objects, give the operation a module:
-///
-/// ```
-/// openshop::graphql! {
-///     pub mod product_title = "query($id: ID!) { product(id: $id) { title } }";
-/// }
-///
-/// # async fn example(shopify: openshop::ShopifyClient) -> openshop::Result<Option<String>> {
-/// let data: product_title::Data = shopify
-///     .execute(product_title::operation(product_title::Variables {
-///         id: "gid://shopify/Product/1".to_string(),
-///     }))
-///     .await?;
-/// Ok(data.product.map(|product| product.title))
-/// # }
-/// ```
-///
-/// The schema is the one of [`shopify::SHOPIFY_API_VERSION`], bundled with the
-/// framework. `openshop codegen --api-version=<version>` stores another one in
-/// `graphql/admin.schema.json`, which takes precedence.
-pub use openshop_macros::graphql;
+/// The schema is the one of `graphql/admin.schema.json`, next to the
+/// `Cargo.toml` of the crate that writes the operation, which the first
+/// build downloads for the version of `[package.metadata.shopify_api]`
+/// `api-version`; each operation is sent to that version. The application
+/// names the crate `openshop` in its `Cargo.toml`, not another name. See the
+/// [documentation of `shopify_api`](https://docs.rs/shopify_api) for the
+/// module form, input objects, bulk operations and other versions.
+#[cfg(not(target_arch = "wasm32"))]
+#[macro_export]
+macro_rules! graphql {
+    ($($input:tt)*) => {
+        $crate::shopify_api::graphql! { crate = ::openshop::shopify_api, $($input)* }
+    };
+}
+
+/// [`shopify::input!`](crate::shopify::input), declared here: a module of
+/// the server cannot export a macro by its path.
+#[cfg(not(target_arch = "wasm32"))]
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __shopify_input {
+    ($($input:tt)*) => {
+        $crate::shopify_api::input! { crate = ::openshop::shopify_api, $($input)* }
+    };
+}
 
 /// Declares an application: the building blocks it is made of, and its settings.
 ///

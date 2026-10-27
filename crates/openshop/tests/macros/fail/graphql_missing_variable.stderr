@@ -1,5 +1,0 @@
-error: Variable `$id: ID!` needs a value: add `id = …` after the operation
- --> tests/macros/fail/graphql_missing_variable.rs:4:22
-  |
-4 |     let _ = graphql!("query($id: ID!) { product(id: $id) { title } }");
-  |                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

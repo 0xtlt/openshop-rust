@@ -1077,7 +1077,7 @@ fn vault_provider() -> Provider {
 /// Reads everything a function can reach for its tenant.
 async fn tenant(ctx: AdminContext, _input: Value) -> Result<Value> {
     let secret: String = ctx.connectors.call_as("vault", "reveal", "vault").await?;
-    let shopify = ctx.shopify.graphql("{ shop { name } }", None).await?;
+    let shopify = ctx.shopify.graphql("{ shop { name } }", ()).await?;
     let (installations,): (i64,) = sqlx::query_as("SELECT count(*) FROM installations")
         .fetch_one(&ctx.db)
         .await?;

@@ -15,7 +15,7 @@ use crate::declare::Declared;
 use crate::engine::dispatch::{DispatchOptions, QueuedRun, dispatch_flow};
 #[cfg(feature = "sentry")]
 use crate::runtime::SentryConfig;
-use crate::runtime::{HttpTransport, ReqwestTransport, RuntimeEnv};
+use crate::runtime::{RuntimeEnv, Transport, default_transport};
 use crate::server::connectors::Connectors;
 use crate::server::crypto::Crypto;
 use crate::server::mcp::core::create_core_mcp_capabilities;
@@ -457,7 +457,7 @@ struct Inner {
     env: RuntimeEnv,
     crypto: Crypto,
     apps: ShopifyApps,
-    transport: Arc<dyn HttpTransport>,
+    transport: Arc<dyn Transport>,
     client_credentials: ClientCredentials,
     custom_pages: Vec<CustomAdminPage>,
     mcp_registry: McpRegistry,
@@ -473,19 +473,20 @@ pub struct OpenShop {
 
 impl OpenShop {
     pub fn new(config: OpenShopConfig, db: PgPool, env: RuntimeEnv) -> Result<Self> {
-        Self::with_transport(config, db, env, Arc::new(ReqwestTransport::new()))
+        Self::with_transport(config, db, env, default_transport()?)
     }
 
-    /// Like [`OpenShop::new`] with a custom transport for Shopify HTTP calls.
+    /// Like [`OpenShop::new`] with another transport for every exchange with
+    /// Shopify, such as [`MockTransport`](crate::testing::MockTransport) in tests.
     pub fn with_transport(
         config: OpenShopConfig,
         db: PgPool,
         env: RuntimeEnv,
-        transport: Arc<dyn HttpTransport>,
+        transport: Arc<dyn Transport>,
     ) -> Result<Self> {
         validate_openshop_config(&config)?;
         crate::server::ops::check_password(config.ops_password.as_deref(), env.production)?;
-        let apps = ShopifyApps::resolve(config.shopify.as_ref(), &env)?;
+        let apps = ShopifyApps::resolve(config.shopify.as_ref(), &env)?.with_transport(transport.clone());
         let crypto = Crypto::new(env.encryption_key.clone(), env.allows_plaintext_secrets());
         crypto.check_configured()?;
         let client_credentials = ClientCredentials::new(config.client_credentials_shop.as_deref())?;
@@ -532,7 +533,7 @@ impl OpenShop {
         &self.inner.apps
     }
 
-    pub fn transport(&self) -> &Arc<dyn HttpTransport> {
+    pub fn transport(&self) -> &Arc<dyn Transport> {
         &self.inner.transport
     }
 

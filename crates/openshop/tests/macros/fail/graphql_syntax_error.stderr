@@ -1,6 +1,0 @@
-error: Invalid GraphQL: Parse error at 1:16 Unexpected end of input Expected }
-       (checked against the Shopify Admin API 2026-04)
- --> tests/macros/fail/graphql_syntax_error.rs:4:22
-  |
-4 |     let _ = graphql!("{ shop { name }");
-  |                      ^^^^^^^^^^^^^^^^^

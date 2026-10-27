@@ -262,7 +262,7 @@ Shopify GraphQL calls go to `ctx.transport`:
 
 | `MockTransport` | Contract |
 | --- | --- |
-| `respond_with(responder)` | Sets the responder, a closure that receives the `OutboundRequest` (`url`, `headers`, `body`) and returns a `Result<OutboundResponse>`. |
+| `respond_with(responder)` | Sets the responder, a closure that receives the `OutboundRequest` (`method`, `url`, `headers`, `body`: the JSON of the request, or the fields of a form as an object of strings) and returns a `Result<OutboundResponse>`. An `Err` is a request that did not reach Shopify. |
 | `respond_json(body)` | Answers every request with status `200` and this JSON body. |
 | `MockTransport::json(status, body)` | Builds a JSON `OutboundResponse`. |
 | `requests()`, `last_request()` | The recorded requests. |
@@ -270,7 +270,8 @@ Shopify GraphQL calls go to `ctx.transport`:
 
 Without a responder every request is answered with `404` and the body
 `not mocked`. The transport also receives the OAuth token requests made by the
-server.
+server. `MockTransport` is a `shopify_api` `Transport`: every request of the
+`shopify_api` client goes through it.
 
 Use `dispatch_flow(flow, input)` to test queueing:
 
@@ -551,7 +552,7 @@ pub fn customer_factory() -> Factory<Customer> {
         |shopify, overrides: Value| async move {
             let email = overrides["email"].as_str().unwrap_or("test@example.com").to_string();
             let data = shopify
-                .graphql(CREATE_CUSTOMER, Some(json!({ "input": { "email": email } })))
+                .graphql(CREATE_CUSTOMER, json!({ "input": { "email": email } }))
                 .await?;
             if let Some(error) = data["customerCreate"]["userErrors"].get(0) {
                 bail!("{}", error["message"]);
@@ -560,7 +561,7 @@ pub fn customer_factory() -> Factory<Customer> {
             Ok(Customer { id, email })
         },
         |shopify, customer: Customer| async move {
-            shopify.graphql(DELETE_CUSTOMER, Some(json!({ "id": customer.id }))).await?;
+            shopify.graphql(DELETE_CUSTOMER, json!({ "id": customer.id })).await?;
             Ok(())
         },
     )

@@ -119,14 +119,19 @@ itself: `Review::of(&ctx)`, and `sync_orders::dispatch(&ctx, …)` as shown
 under [Idempotence and durable work](#idempotence-and-durable-work).
 
 OpenShop verifies `X-Shopify-Hmac-Sha256` against the raw bytes of the request
-body before parsing JSON: a body that is not UTF-8 is not converted first, so
-the signature is of what Shopify sent and of nothing else. In multi-app mode,
+body before parsing JSON, with `shopify_api`'s `Webhook::verify`: a body that
+is not UTF-8 is not converted first, so the signature is of what Shopify sent
+and of nothing else. Only a JSON object verifies, a body whose first byte is
+`{`: the secret also signs launches, app proxy requests and session tokens,
+none of which starts so. The `X-Shopify-Topic` and `X-Shopify-Shop-Domain`
+headers must be there, as Shopify always sends them. In multi-app mode,
 exactly one configured app secret must match.
 
 OpenShop also serves `POST /auth/webhooks/app-uninstalled`. It verifies the
-same HMAC, marks the installation as uninstalled, and deletes its access token.
-The shop is taken from the signed payload (`myshopify_domain`); the
-`X-Shopify-Shop-Domain` header is only used when the payload has none. Point
+same signature, marks the installation as uninstalled, and deletes its access
+token. The shop is the one both the signed payload (`myshopify_domain`) and
+the unsigned `X-Shopify-Shop-Domain` header name; a delivery where they differ
+uninstalls nothing. Point
 Shopify's `app/uninstalled` subscription at it, or register your own
 `app/uninstalled` handler on `/webhooks` when you need custom cleanup.
 
@@ -148,7 +153,7 @@ Shopify version used by your app.
 | `200 { "ok": true }` | Handler returned an error or panicked, or the payload could not be read into the type of its second argument; OpenShop logs the error. |
 | `400 { "error": "Invalid JSON body" }` | Authenticated body is not valid JSON and a handler matched. |
 | `400 { "error": "Invalid shop domain" }` | A handler matched and `X-Shopify-Shop-Domain` is not a shop written as `<name>.myshopify.com`. |
-| `401 { "error": "Invalid webhook HMAC" }` | HMAC did not match exactly one configured app. |
+| `401 { "error": "Invalid webhook HMAC" }` | The signature did not verify with exactly one configured app, the body is not a JSON object, or a header Shopify always sends (`X-Shopify-Topic`, a valid `X-Shopify-Shop-Domain`) is missing. |
 | `413` | Request body is larger than the request body limit (2 MB unless the `max_request_body_bytes` setting of `app!` is set). |
 | `500 { "error": "SHOPIFY_API_SECRET is not configured" }` | No Shopify app secret is configured. A secret that is empty or only whitespace counts as not configured. |
 

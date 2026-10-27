@@ -21,7 +21,7 @@ use crate::declare::App;
 use crate::engine::dispatch::DispatchOptions;
 use crate::engine::runner::{RunFlowOptions, RunOutcome, run_flow};
 use crate::runtime::RuntimeEnv;
-use crate::server::hmac::proxy_signature;
+use super::proxy_signature;
 use crate::server::shopify_apps::DEFAULT_SHOPIFY_APP_HANDLE;
 use crate::server::{ServerHandle, ServerOptions, create_router, serve};
 use crate::types::ShopScope;

@@ -27,7 +27,6 @@ afterwards has no effect on a running process.
 | `PGPOOL_IDLE_TIMEOUT_MS` | No | `30000` | Idle PostgreSQL connection timeout |
 | `PGPOOL_CONNECTION_TIMEOUT_MS` | No | `5000` | PostgreSQL connection acquisition timeout |
 | `RUST_LOG` | No | `info,sqlx=warn` | Log filter of the process logger |
-| `OPENSHOP_GRAPHQL_SCHEMA` | No | `graphql/admin.schema.json` when it exists, then the bundled schema | Read when the crate compiles, not when it runs: the schema file [`graphql!`](graphql.md#schema-and-api-version) checks operations against |
 | `TEST_DATABASE_URL` | No | Falls back to `DATABASE_URL` when it points at this machine (`localhost`, a loopback address, a socket), then the local development database | Database of the test harness |
 
 Notes:

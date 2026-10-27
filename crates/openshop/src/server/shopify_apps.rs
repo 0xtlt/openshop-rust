@@ -1,14 +1,17 @@
 //! Resolution of the Shopify app(s) served by this OpenShop instance.
 
 use std::path::Path;
-use std::sync::LazyLock;
+use std::sync::{Arc, LazyLock};
 
 use anyhow::{Result, anyhow, bail};
-use indexmap::IndexMap;
 use regex::Regex;
 
-use super::hmac::{verify_query_hmac, verify_webhook_hmac};
-use crate::runtime::RuntimeEnv;
+use axum::http::HeaderMap;
+use shopify_api::oauth::{ShopifyApp, SignedQuery};
+use shopify_api::webhooks::Webhook;
+
+use crate::runtime::transport::{SharedTransport, USER_AGENT};
+use crate::runtime::{RuntimeEnv, Transport};
 use crate::types::{ShopifyAppConfig, ShopifyConfig};
 
 pub const DEFAULT_SHOPIFY_APP_HANDLE: &str = "default";
@@ -198,23 +201,66 @@ pub fn resolve_shopify_apps(config: Option<&ShopifyConfig>, env: &RuntimeEnv) ->
     Ok(apps)
 }
 
-/// The resolved apps of a running instance.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// The secret that verifies what Shopify signs for `app`: none when it is
+/// blank, which anybody could sign with.
+fn signing_secret(app: &ResolvedShopifyApp) -> &str {
+    if app.api_secret.trim().is_empty() { "" } else { &app.api_secret }
+}
+
+/// The resolved apps of a running instance, each with the `shopify_api` app
+/// that verifies what Shopify signs for it and asks Shopify for its tokens.
+#[derive(Debug, Clone)]
 pub struct ShopifyApps {
     apps: Vec<ResolvedShopifyApp>,
+    oauth: Vec<ShopifyApp>,
 }
+
+impl PartialEq for ShopifyApps {
+    fn eq(&self, other: &Self) -> bool {
+        self.apps == other.apps
+    }
+}
+
+impl Eq for ShopifyApps {}
 
 impl ShopifyApps {
     pub fn new(apps: Vec<ResolvedShopifyApp>) -> Self {
-        Self { apps }
+        let oauth = apps
+            .iter()
+            .map(|app| ShopifyApp::new(&app.api_key, signing_secret(app)).with_user_agent(USER_AGENT))
+            .collect();
+        Self { apps, oauth }
     }
 
     pub fn resolve(config: Option<&ShopifyConfig>, env: &RuntimeEnv) -> Result<Self> {
         Ok(Self::new(resolve_shopify_apps(config, env)?))
     }
 
+    /// The same apps, asking Shopify for tokens through `transport`.
+    pub(crate) fn with_transport(mut self, transport: Arc<dyn Transport>) -> Self {
+        for oauth in &mut self.oauth {
+            *oauth = oauth.clone().with_transport(SharedTransport(transport.clone()));
+        }
+        self
+    }
+
     pub fn all(&self) -> &[ResolvedShopifyApp] {
         &self.apps
+    }
+
+    /// The `shopify_api` app of one of these apps: what verifies the requests
+    /// Shopify signs for it, and exchanges its codes and session tokens.
+    pub fn oauth(&self, app: &ResolvedShopifyApp) -> &ShopifyApp {
+        let index = self
+            .apps
+            .iter()
+            .position(|known| known.handle == app.handle)
+            .expect("the app is one of these apps");
+        &self.oauth[index]
+    }
+
+    fn pairs(&self) -> impl Iterator<Item = (&ResolvedShopifyApp, &ShopifyApp)> {
+        self.apps.iter().zip(&self.oauth)
     }
 
     pub fn has_configured_secret(&self) -> bool {
@@ -247,29 +293,43 @@ impl ShopifyApps {
         }
     }
 
-    pub fn by_signed_query(&self, query: &IndexMap<String, String>) -> Result<&ResolvedShopifyApp> {
-        let matches: Vec<&ResolvedShopifyApp> = self
-            .apps
-            .iter()
-            .filter(|app| verify_query_hmac(query, &app.api_secret))
-            .collect();
-        match matches[..] {
-            [app] => Ok(app),
-            [] => bail!("[openshop] No Shopify app matched the signed request"),
-            _ => bail!("[openshop] Multiple Shopify apps matched the signed request"),
+    /// The one app whose secret signed `query`, a launch from Shopify admin or
+    /// an OAuth callback (`hmac`, and a `timestamp` of the last 90 seconds), and
+    /// the query as it verified.
+    pub fn by_signed_query(&self, query: &str) -> Result<(&ResolvedShopifyApp, SignedQuery)> {
+        let mut matches = self
+            .pairs()
+            .filter_map(|(app, oauth)| Some((app, oauth.verify_query(query).ok()?)));
+        match (matches.next(), matches.next()) {
+            (Some(verified), None) => Ok(verified),
+            (None, _) => bail!("[openshop] No Shopify app matched the signed request"),
+            (Some(_), Some(_)) => bail!("[openshop] Multiple Shopify apps matched the signed request"),
         }
     }
 
-    pub fn by_webhook_hmac(&self, body: &[u8], hmac: &str) -> Result<&ResolvedShopifyApp> {
-        let matches: Vec<&ResolvedShopifyApp> = self
-            .apps
-            .iter()
-            .filter(|app| verify_webhook_hmac(body, hmac, &app.api_secret))
-            .collect();
-        match matches[..] {
-            [app] => Ok(app),
-            [] => bail!("[openshop] No Shopify app matched the webhook signature"),
-            _ => bail!("[openshop] Multiple Shopify apps matched the webhook signature"),
+    /// The one app whose secret signed the app proxy request of `query`
+    /// (`signature`, and a `timestamp` of the last 90 seconds).
+    pub fn by_proxy_signature(&self, query: &str) -> Result<(&ResolvedShopifyApp, SignedQuery)> {
+        let mut matches = self
+            .pairs()
+            .filter_map(|(app, oauth)| Some((app, oauth.verify_app_proxy(query).ok()?)));
+        match (matches.next(), matches.next()) {
+            (Some(verified), None) => Ok(verified),
+            (None, _) => bail!("[openshop] No Shopify app matched the proxy signature"),
+            (Some(_), Some(_)) => bail!("[openshop] Multiple Shopify apps matched the proxy signature"),
+        }
+    }
+
+    /// The one app whose secret signed a webhook, and the webhook as it verified.
+    pub fn by_webhook(&self, headers: &HeaderMap, body: &[u8]) -> Result<(&ResolvedShopifyApp, Webhook)> {
+        let mut matches = self.apps.iter().filter_map(|app| {
+            let webhook = Webhook::verify(headers, body.to_vec(), signing_secret(app)).ok()?;
+            Some((app, webhook))
+        });
+        match (matches.next(), matches.next()) {
+            (Some(verified), None) => Ok(verified),
+            (None, _) => bail!("[openshop] No Shopify app matched the webhook signature"),
+            (Some(_), Some(_)) => bail!("[openshop] Multiple Shopify apps matched the webhook signature"),
         }
     }
 }
@@ -277,7 +337,27 @@ impl ShopifyApps {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::server::hmac::tests::{sign_body, sign_query};
+
+    /// `params` as a query string, signed with `secret` as Shopify admin signs a launch.
+    fn sign_query(params: &[(&str, &str)], secret: &str) -> String {
+        let query = serde_urlencoded::to_string(params).unwrap();
+        let hmac = ShopifyApp::new("", secret).sign_query(&query).unwrap();
+        format!("{query}&hmac={hmac}")
+    }
+
+    /// The headers Shopify sends with a webhook whose body is `body`.
+    fn webhook_headers(body: &str, secret: &str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        let signature = shopify_api::webhooks::sign(secret, body.as_bytes());
+        headers.insert("x-shopify-hmac-sha256", signature.parse().unwrap());
+        headers.insert("x-shopify-topic", "orders/create".parse().unwrap());
+        headers.insert("x-shopify-shop-domain", "x.myshopify.com".parse().unwrap());
+        headers
+    }
+
+    fn now() -> String {
+        chrono::Utc::now().timestamp().to_string()
+    }
 
     fn keys(api_key: &str, api_secret: &str, app_url: &str) -> ShopifyAppConfig {
         ShopifyAppConfig::Keys {
@@ -454,12 +534,13 @@ scopes = "read_products,read_orders"
     fn resolves_signed_oauth_and_webhook_requests_against_the_matching_app_secret() {
         let apps = two_apps("secret-a", "secret-b", "client-a-key", "client-b-key");
 
-        let query = sign_query(&[("shop", "x.myshopify.com"), ("timestamp", "1780000000")], "secret-b");
-        assert_eq!(apps.by_signed_query(&query).unwrap().handle, "clientB");
+        let query = sign_query(&[("shop", "x.myshopify.com"), ("timestamp", &now())], "secret-b");
+        assert_eq!(apps.by_signed_query(&query).unwrap().0.handle, "clientB");
 
         let body = r#"{"id":1}"#;
-        let hmac = sign_body(body, "secret-a");
-        assert_eq!(apps.by_webhook_hmac(body.as_bytes(), &hmac).unwrap().handle, "clientA");
+        let (app, webhook) = apps.by_webhook(&webhook_headers(body, "secret-a"), body.as_bytes()).unwrap();
+        assert_eq!(app.handle, "clientA");
+        assert_eq!(webhook.topic(), "orders/create");
     }
 
     #[test]
@@ -471,10 +552,7 @@ scopes = "read_products,read_orders"
         let error = apps.by_api_key("duplicate-key").unwrap_err().to_string();
         assert!(error.contains("Multiple Shopify apps use apiKey"));
 
-        let query = sign_query(
-            &[("shop", "x.myshopify.com"), ("timestamp", "1780000000")],
-            "shared-secret",
-        );
+        let query = sign_query(&[("shop", "x.myshopify.com"), ("timestamp", &now())], "shared-secret");
         let error = apps.by_signed_query(&query).unwrap_err().to_string();
         assert!(error.contains("Multiple Shopify apps matched"));
 
@@ -491,13 +569,13 @@ scopes = "read_products,read_orders"
         let apps = ShopifyApps::resolve(None, &RuntimeEnv::default()).unwrap();
         assert!(!apps.has_configured_secret());
 
-        let query = sign_query(&[("shop", "x.myshopify.com"), ("timestamp", "1780000000")], "");
+        let query = sign_query(&[("shop", "x.myshopify.com"), ("timestamp", &now())], "");
         let error = apps.by_signed_query(&query).unwrap_err().to_string();
         assert!(error.contains("No Shopify app matched"));
 
         let body = r#"{"id":1}"#;
         let error = apps
-            .by_webhook_hmac(body.as_bytes(), &sign_body(body, ""))
+            .by_webhook(&webhook_headers(body, ""), body.as_bytes())
             .unwrap_err()
             .to_string();
         assert!(error.contains("No Shopify app matched"));

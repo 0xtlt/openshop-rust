@@ -117,11 +117,14 @@ is intentionally blocked, and so is the schema push of `dev`.
   `5xx`, a `429`, a timeout or a network error). A refusal met by background
   work does not hold back the next launch from Shopify admin, which asks
   again.
-- `Shopify GraphQL error (<status>)` is an HTTP failure from Shopify. A 401 or
+- `Shopify answered <status> to …` is an HTTP failure from Shopify. A 401 or
   403 usually points to a revoked token or a missing scope.
 - `GraphQL errors: …` lists the errors Shopify returned for the operation.
   Confirm the query against the API version in use and that the configured
   Shopify scopes allow the operation.
+
+Both are a `shopify_api::Error` (`Http`, `Graphql`), which
+`error.downcast_ref::<openshop::shopify_api::Error>()` reads.
 
 An operation written with `graphql!` is checked against the schema when the
 project compiles. One sent with `ctx.shopify.graphql()` is not: a field that is

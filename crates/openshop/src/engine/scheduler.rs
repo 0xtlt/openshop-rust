@@ -107,7 +107,7 @@ async fn configured_targets(app: &OpenShop) -> Result<Vec<CronTarget>> {
         }
         // The shops of the other rows are served whatever happens here.
         let granted = match credentials
-            .grant(app, &shopify_app.handle, shop, &Grant::Background, None)
+            .grant(app, &shopify_app.handle, shop, &Grant::Background)
             .await
         {
             Ok(granted) => granted,

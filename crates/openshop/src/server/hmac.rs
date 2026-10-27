@@ -1,7 +1,9 @@
-//! Shopify request signatures.
+//! Signatures openshop makes itself (OAuth states, operator sessions), and
+//! what it checks of a signed app proxy request beyond its signature, which
+//! `shopify_api` verifies ([`ShopifyApp::verify_app_proxy`]).
+//!
+//! [`ShopifyApp::verify_app_proxy`]: shopify_api::oauth::ShopifyApp::verify_app_proxy
 
-use base64::Engine;
-use base64::engine::general_purpose::STANDARD;
 use hmac::{Hmac, Mac};
 use indexmap::IndexMap;
 use sha2::Sha256;
@@ -21,45 +23,6 @@ pub(crate) fn hmac_sha256(secret: &str, message: &[u8]) -> Vec<u8> {
 pub fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
     left.len() == right.len() && bool::from(left.ct_eq(right))
 }
-
-fn sorted_message(query: &IndexMap<String, String>, excluded: &str, separator: &str) -> String {
-    let mut keys: Vec<&String> = query.keys().filter(|key| key.as_str() != excluded).collect();
-    keys.sort();
-    keys.into_iter()
-        .map(|key| format!("{key}={}", query[key]))
-        .collect::<Vec<_>>()
-        .join(separator)
-}
-
-/// Verify Shopify OAuth callback HMAC.
-/// Shopify signs the query string (excluding the `hmac` param) with the app secret.
-pub fn verify_query_hmac(query: &IndexMap<String, String>, secret: &str) -> bool {
-    if secret.trim().is_empty() {
-        return false;
-    }
-    let Some(hmac) = query.get("hmac").filter(|hmac| !hmac.is_empty()) else {
-        return false;
-    };
-
-    let computed = hex::encode(hmac_sha256(secret, sorted_message(query, "hmac", "&").as_bytes()));
-    constant_time_eq(computed.as_bytes(), hmac.as_bytes())
-}
-
-/// Verify Shopify webhook HMAC.
-/// Shopify sends the HMAC in the `X-Shopify-Hmac-Sha256` header. The signature
-/// covers the bytes of the body as they were sent, which need not be UTF-8.
-pub fn verify_webhook_hmac(body: &[u8], hmac: &str, secret: &str) -> bool {
-    if secret.trim().is_empty() {
-        return false;
-    }
-    let computed = STANDARD.encode(hmac_sha256(secret, body));
-    constant_time_eq(computed.as_bytes(), hmac.as_bytes())
-}
-
-/// How far, in seconds, the `timestamp` of a signed app proxy request may be
-/// from now, on either side to allow for clock skew. A signed URL is not a
-/// credential for longer than that.
-pub(crate) const PROXY_SIGNATURE_FRESHNESS: u64 = 300;
 
 /// Parameters Shopify itself sets on an app proxy request, besides
 /// `signature`. Each appears once: a copy added by the sender would be joined
@@ -85,47 +48,17 @@ fn proxy_pairs<'a>(pairs: impl IntoIterator<Item = (&'a str, &'a str)>) -> Vec<(
     pairs
 }
 
-/// The message Shopify signs: those pairs written `key=value` with no separator.
-fn proxy_message<'a>(pairs: impl IntoIterator<Item = (&'a str, &'a str)>) -> String {
-    proxy_pairs(pairs)
-        .into_iter()
-        .map(|(key, value)| format!("{key}={value}"))
-        .collect()
-}
-
-/// Hex signature of an app proxy query (sorted `key=value` pairs, no separator).
-pub fn proxy_signature(query: &IndexMap<String, String>, secret: &str) -> String {
-    let message = proxy_message(query.iter().map(|(key, value)| (key.as_str(), value.as_str())));
-    hex::encode(hmac_sha256(secret, message.as_bytes()))
-}
-
-/// Whether the parameters can only be read one way from the message that is
-/// signed, as far as the parameters of Shopify go.
+/// Whether the signed message of an app proxy request can only be cut into
+/// its pairs one way, as far as who the request is for goes.
 ///
-/// The pairs are glued without separator, so a signature stands for every way
-/// to cut the same text in `key=value` pairs. Nothing can be said of what the
-/// visitor chose to send, but the cuts are kept from moving `shop`,
-/// `timestamp` or `logged_in_customer_id`, whatever the visitor sent:
-///
-/// - No key or value holds a `=` and no key is empty. Every `=` of the message
-///   is then the one of a pair, and the cuts that remain are those of the
-///   text between two of them, a value followed by a key.
-/// - The parameters of Shopify appear once. A key that is not theirs does not
-///   leave the text it is cut from ending with one of their names: Shopify
-///   signed that name there as a key, so another cut would make it a key
-///   again, or lose it. Since it appears once, no name is made twice.
-/// - `timestamp` is digits, and the key after it sorts after it, so it cannot
-///   begin with a digit: no digit moves from key to value or back. The same
-///   goes for `logged_in_customer_id`, read as a customer when it is digits.
-///   `shop` is a whole domain, see [`proxy_shop`], and no such domain is the
-///   beginning of a longer one.
-///
-/// `path_prefix` is held to a plain path, but its end can still move into the
-/// key that follows: it is no identity, and nothing trusts it.
-///
-/// This relies on Shopify sending all of its parameters, `logged_in_customer_id`
-/// included (empty for a visitor without account).
-fn proxy_params_are_unambiguous(params: &[(String, String)]) -> bool {
+/// Shopify signs the pairs written one after the other, without a separator:
+/// `logged_in_customer_id=path_prefix=/apps/xshop=a.myshopify.com…`. A
+/// visitor who adds parameters of their own could make a message that also
+/// reads as another shop or another customer. So no `=` stands in a key or a
+/// value, the parameters of Shopify appear once with the values they need,
+/// and no key of the visitor, after the value before it, ends with the name
+/// of a parameter of Shopify.
+pub(crate) fn proxy_params_are_unambiguous(params: &[(String, String)]) -> bool {
     let repeated = |name: &str| params.iter().filter(|(key, _)| key == name).count() > 1;
     if params
         .iter()
@@ -141,7 +74,12 @@ fn proxy_params_are_unambiguous(params: &[(String, String)]) -> bool {
     for (key, value) in &pairs {
         let sound = match *key {
             "timestamp" => !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()),
-            "path_prefix" => !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_alphanumeric() || b"/_-".contains(&byte)),
+            "path_prefix" => {
+                !value.is_empty()
+                    && value
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || b"/_-".contains(&byte))
+            }
             "logged_in_customer_id" | "shop" => true,
             _ => {
                 let text = format!("{previous}{key}");
@@ -156,144 +94,46 @@ fn proxy_params_are_unambiguous(params: &[(String, String)]) -> bool {
     true
 }
 
-/// The shop of an app proxy request, when the `shop` parameter is exactly a
-/// `<name>.myshopify.com` domain (in any case). No URL, no user, no port, no
-/// blank: no domain of this form starts another, so the signed text cannot be
-/// cut to make a longer one, nor one that [`normalize_shop_domain`] would read
-/// as another shop.
-///
-/// [`normalize_shop_domain`]: super::shop_domain::normalize_shop_domain
+/// The shop of an app proxy request, exactly a `<name>.myshopify.com` domain.
 pub(crate) fn proxy_shop(params: &[(String, String)]) -> Option<String> {
     let shop = &params.iter().find(|(key, _)| key == "shop")?.1;
     let domain = shop.to_ascii_lowercase();
     (strict_shop_domain(&domain).as_deref() == Some(domain.as_str())).then_some(domain)
 }
 
-/// Whether `timestamp` is a Unix time within [`PROXY_SIGNATURE_FRESHNESS`] of `now`.
-fn proxy_timestamp_is_fresh(timestamp: &str, now: i64) -> bool {
-    timestamp
-        .parse::<i64>()
-        .is_ok_and(|timestamp| now.abs_diff(timestamp) <= PROXY_SIGNATURE_FRESHNESS)
-}
-
-/// Verify the `signature` param Shopify adds to app proxy requests.
-///
-/// `params` are the query pairs as received, repeated keys included, and `now`
-/// is the Unix time in seconds. A request is refused when its `timestamp` is
-/// missing or too far from `now`, so that a signed URL cannot be replayed
-/// later, and when its parameters could be split another way, see
-/// [`proxy_params_are_unambiguous`]. The signature covers neither the path, nor
-/// the method, nor the body.
-pub fn verify_proxy_signature(params: &[(String, String)], secret: &str, now: i64) -> bool {
-    if secret.trim().is_empty() || !proxy_params_are_unambiguous(params) {
-        return false;
-    }
-    let value = |name: &str| params.iter().find(|(key, _)| key == name).map(|(_, value)| value.as_str());
-    let Some(signature) = value("signature").filter(|signature| !signature.is_empty()) else {
-        return false;
-    };
-    if !value("timestamp").is_some_and(|timestamp| proxy_timestamp_is_fresh(timestamp, now)) {
-        return false;
-    }
-    let Ok(provided) = hex::decode(signature) else {
-        return false;
-    };
-    let message = proxy_message(params.iter().map(|(key, value)| (key.as_str(), value.as_str())));
-    constant_time_eq(&hmac_sha256(secret, message.as_bytes()), &provided)
-}
-
 #[cfg(test)]
-pub(crate) mod tests {
+mod tests {
+    use std::sync::LazyLock;
+
+    use shopify_api::oauth::ShopifyApp;
+
     use super::*;
 
     const SECRET: &str = "test-hmac-secret";
 
-    pub(crate) fn sign_query(params: &[(&str, &str)], secret: &str) -> IndexMap<String, String> {
-        let mut query: IndexMap<String, String> = params
-            .iter()
-            .map(|(key, value)| (key.to_string(), value.to_string()))
-            .collect();
-        let hmac = hex::encode(hmac_sha256(secret, sorted_message(&query, "hmac", "&").as_bytes()));
-        query.insert("hmac".into(), hmac);
-        query
+    /// A timestamp `shopify_api` takes as fresh while the tests run.
+    static TIMESTAMP: LazyLock<String> = LazyLock::new(|| chrono::Utc::now().timestamp().to_string());
+
+    /// The message Shopify signs for an app proxy request.
+    fn proxy_message<'a>(pairs: impl IntoIterator<Item = (&'a str, &'a str)>) -> String {
+        proxy_pairs(pairs)
+            .into_iter()
+            .map(|(key, value)| format!("{key}={value}"))
+            .collect()
     }
 
-    pub(crate) fn sign_body(body: &str, secret: &str) -> String {
-        STANDARD.encode(hmac_sha256(secret, body.as_bytes()))
+    fn query_of(params: &[(String, String)]) -> String {
+        serde_urlencoded::to_string(params).unwrap()
     }
 
-    #[test]
-    fn valid_signed_query_returns_true() {
-        let query = sign_query(&[("shop", "test.myshopify.com"), ("timestamp", "123456")], SECRET);
-        assert!(verify_query_hmac(&query, SECRET));
+    /// What the proxy routes check: the pairs, then their signature with `shopify_api`.
+    fn verify_proxy_signature(params: &[(String, String)], secret: &str) -> bool {
+        proxy_params_are_unambiguous(params)
+            && ShopifyApp::new("api-key", secret)
+                .verify_app_proxy(&query_of(params))
+                .is_ok()
     }
 
-    #[test]
-    fn missing_hmac_returns_false() {
-        let query: IndexMap<String, String> = [("shop".to_string(), "test.myshopify.com".to_string())].into();
-        assert!(!verify_query_hmac(&query, SECRET));
-    }
-
-    #[test]
-    fn empty_secret_returns_false_even_when_query_is_signed_with_an_empty_secret() {
-        let query = sign_query(&[("shop", "test.myshopify.com"), ("timestamp", "123456")], "");
-        assert!(!verify_query_hmac(&query, ""));
-        assert!(!verify_query_hmac(&query, "   "));
-    }
-
-    #[test]
-    fn wrong_hmac_returns_false() {
-        let mut query = sign_query(&[("shop", "test.myshopify.com")], SECRET);
-        query.insert("hmac".into(), "deadbeef".into());
-        assert!(!verify_query_hmac(&query, SECRET));
-    }
-
-    #[test]
-    fn param_order_does_not_matter() {
-        let query = sign_query(&[("z", "1"), ("a", "2"), ("m", "3")], SECRET);
-        assert!(verify_query_hmac(&query, SECRET));
-    }
-
-    #[test]
-    fn valid_body_hmac_returns_true() {
-        let body = r#"{"id":123,"name":"order"}"#;
-        assert!(verify_webhook_hmac(body.as_bytes(), &sign_body(body, SECRET), SECRET));
-    }
-
-    #[test]
-    fn wrong_body_hmac_returns_false() {
-        assert!(!verify_webhook_hmac(br#"{"id":123}"#, "wrong-hmac", SECRET));
-    }
-
-    #[test]
-    fn different_body_returns_false() {
-        let hmac = sign_body(r#"{"id":456}"#, SECRET);
-        assert!(!verify_webhook_hmac(br#"{"id":123}"#, &hmac, SECRET));
-    }
-
-    #[test]
-    fn the_signature_covers_the_bytes_that_were_sent() {
-        // Not UTF-8: a lossy conversion would replace the bytes with U+FFFD.
-        let body: &[u8] = b"{\"note\":\"caf\xe9\"}";
-        let hmac = STANDARD.encode(hmac_sha256(SECRET, body));
-        assert!(verify_webhook_hmac(body, &hmac, SECRET));
-        // What a lossy conversion of that body would have been signed as.
-        let mangled = String::from_utf8_lossy(body).into_owned();
-        assert_ne!(mangled.as_bytes(), body);
-        assert!(!verify_webhook_hmac(mangled.as_bytes(), &hmac, SECRET));
-        let hmac_of_mangled = sign_body(&mangled, SECRET);
-        assert!(!verify_webhook_hmac(body, &hmac_of_mangled, SECRET));
-    }
-
-    #[test]
-    fn empty_secret_returns_false_even_when_body_is_signed_with_an_empty_secret() {
-        let body = r#"{"id":123}"#;
-        let hmac = sign_body(body, "");
-        assert!(!verify_webhook_hmac(body.as_bytes(), &hmac, ""));
-        assert!(!verify_webhook_hmac(body.as_bytes(), &hmac, "   "));
-    }
-
-    const NOW: i64 = 1_780_000_000;
 
     fn pairs(params: &[(&str, &str)]) -> Vec<(String, String)> {
         params
@@ -305,19 +145,19 @@ pub(crate) mod tests {
     /// The pairs as Shopify sends them: with the signature of the others.
     fn signed_pairs(params: &[(&str, &str)], secret: &str) -> Vec<(String, String)> {
         let mut signed = pairs(params);
-        let message = proxy_message(params.iter().copied());
-        signed.push(("signature".to_string(), hex::encode(hmac_sha256(secret, message.as_bytes()))));
+        let signature = ShopifyApp::new("api-key", secret).sign_app_proxy(&query_of(&signed)).unwrap();
+        signed.push(("signature".to_string(), signature));
         signed
     }
 
     fn verifies(params: &[(&str, &str)]) -> bool {
-        verify_proxy_signature(&signed_pairs(params, SECRET), SECRET, NOW)
+        verify_proxy_signature(&signed_pairs(params, SECRET), SECRET)
     }
 
-    fn shop_at(timestamp: i64, now: i64) -> bool {
+    fn shop_at(timestamp: i64) -> bool {
         let timestamp = timestamp.to_string();
         let params = [("shop", "test.myshopify.com"), ("timestamp", timestamp.as_str())];
-        verify_proxy_signature(&signed_pairs(&params, SECRET), SECRET, now)
+        verify_proxy_signature(&signed_pairs(&params, SECRET), SECRET)
     }
 
     #[test]
@@ -325,49 +165,43 @@ pub(crate) mod tests {
         let params = [
             ("shop", "test.myshopify.com"),
             ("path_prefix", "/apps/openshop"),
-            ("timestamp", "1780000000"),
+            ("timestamp", TIMESTAMP.as_str()),
         ];
         let signed = signed_pairs(&params, SECRET);
-        assert!(verify_proxy_signature(&signed, SECRET, NOW));
-        assert!(!verify_proxy_signature(&signed, "other-secret", NOW));
-        assert!(!verify_proxy_signature(&signed, "", NOW));
-        assert!(!verify_proxy_signature(&signed, "  ", NOW));
+        assert!(verify_proxy_signature(&signed, SECRET));
+        assert!(!verify_proxy_signature(&signed, "other-secret"));
+        assert!(!verify_proxy_signature(&signed, ""));
+        assert!(!verify_proxy_signature(&signed, "  "));
 
         let mut bad = signed.clone();
         bad[3].1.push_str("zz");
-        assert!(!verify_proxy_signature(&bad, SECRET, NOW));
+        assert!(!verify_proxy_signature(&bad, SECRET));
         bad[3].1 = String::new();
-        assert!(!verify_proxy_signature(&bad, SECRET, NOW));
+        assert!(!verify_proxy_signature(&bad, SECRET));
 
         let mut other_shop = signed.clone();
         other_shop[0].1 = "other.myshopify.com".to_string();
-        assert!(!verify_proxy_signature(&other_shop, SECRET, NOW));
+        assert!(!verify_proxy_signature(&other_shop, SECRET));
 
         // The order of the parameters does not matter, nor does where the signature is.
         let mut shuffled = signed.clone();
         shuffled.reverse();
-        assert!(verify_proxy_signature(&shuffled, SECRET, NOW));
-
-        // The map form signs the same message.
-        let query: IndexMap<String, String> = signed[..3].iter().cloned().collect();
-        assert_eq!(proxy_signature(&query, SECRET), signed[3].1);
+        assert!(verify_proxy_signature(&shuffled, SECRET));
     }
 
     #[test]
     fn a_proxy_signature_is_only_fresh_for_a_few_minutes() {
-        let window = PROXY_SIGNATURE_FRESHNESS as i64;
-        assert_eq!(window, 300);
-
-        // Either side of now, within the window.
-        assert!(shop_at(NOW, NOW));
-        assert!(shop_at(NOW - window, NOW));
-        assert!(shop_at(NOW + window, NOW));
+        let now = chrono::Utc::now().timestamp();
+        // Either side of now, within the 90 seconds of `shopify_api`.
+        assert!(shop_at(now));
+        assert!(shop_at(now - 60));
+        assert!(shop_at(now + 60));
         // Replayed later, or signed by a clock that is ahead.
-        assert!(!shop_at(NOW - window - 1, NOW));
-        assert!(!shop_at(NOW + window + 1, NOW));
-        assert!(!shop_at(NOW - 86_400, NOW));
-        assert!(!shop_at(i64::MIN, NOW));
-        assert!(!shop_at(i64::MAX, NOW));
+        assert!(!shop_at(now - 120));
+        assert!(!shop_at(now + 120));
+        assert!(!shop_at(now - 86_400));
+        assert!(!shop_at(i64::MIN));
+        assert!(!shop_at(i64::MAX));
     }
 
     #[test]
@@ -377,31 +211,31 @@ pub(crate) mod tests {
         for timestamp in ["", "soon", "1780000000.5", "0x6a0b3c00", " 1780000000"] {
             assert!(!verifies(&[shop, ("timestamp", timestamp)]), "{timestamp}");
         }
-        assert!(verifies(&[shop, ("timestamp", "1780000000")]));
+        assert!(verifies(&[shop, ("timestamp", TIMESTAMP.as_str())]));
     }
 
     #[test]
     fn a_parameter_sent_several_times_is_signed_with_its_values_joined() {
         // Shopify signs `extra=1,2` for `extra=1&extra=2`.
         let joined = signed_pairs(
-            &[("shop", "test.myshopify.com"), ("extra", "1,2"), ("timestamp", "1780000000")],
+            &[("shop", "test.myshopify.com"), ("extra", "1,2"), ("timestamp", TIMESTAMP.as_str())],
             SECRET,
         );
         let signature = joined[3].clone();
         let mut repeated = pairs(&[
             ("shop", "test.myshopify.com"),
             ("extra", "1"),
-            ("timestamp", "1780000000"),
+            ("timestamp", TIMESTAMP.as_str()),
             ("extra", "2"),
         ]);
         repeated.push(signature);
-        assert!(verify_proxy_signature(&joined, SECRET, NOW));
-        assert!(verify_proxy_signature(&repeated, SECRET, NOW));
+        assert!(verify_proxy_signature(&joined, SECRET));
+        assert!(verify_proxy_signature(&repeated, SECRET));
 
         // The order of the values is part of what is signed.
         repeated[1].1 = "2".to_string();
         repeated[3].1 = "1".to_string();
-        assert!(!verify_proxy_signature(&repeated, SECRET, NOW));
+        assert!(!verify_proxy_signature(&repeated, SECRET));
     }
 
     #[test]
@@ -414,7 +248,7 @@ pub(crate) mod tests {
 
     #[test]
     fn the_pairs_of_a_proxy_signature_cannot_be_split_again() {
-        let timestamp = NOW.to_string();
+        let timestamp = TIMESTAMP.clone();
         // The request for a shop of the sender's, whose parameter `m` carries the
         // text of the request for another shop.
         let note = format!("1path_prefix=/apps/xshop=victim.myshopify.comtimestamp={timestamp}");
@@ -438,13 +272,13 @@ pub(crate) mod tests {
         let signed = signed_pairs(&own, SECRET);
         let mut resplit = pairs(&forged);
         resplit.push(signed[4].clone());
-        assert!(!verify_proxy_signature(&signed, SECRET, NOW));
-        assert!(!verify_proxy_signature(&resplit, SECRET, NOW));
+        assert!(!verify_proxy_signature(&signed, SECRET));
+        assert!(!verify_proxy_signature(&resplit, SECRET));
     }
 
     #[test]
     fn a_proxy_parameter_with_an_equal_sign_is_refused_whatever_its_timestamp() {
-        let timestamp = NOW.to_string();
+        let timestamp = TIMESTAMP.clone();
         let shop = ("shop", "a.myshopify.com");
         let at = ("timestamp", timestamp.as_str());
         assert!(verifies(&[shop, at, ("q", "shoes")]));
@@ -456,7 +290,7 @@ pub(crate) mod tests {
 
     #[test]
     fn a_parameter_of_shopify_is_not_repeated() {
-        let timestamp = NOW.to_string();
+        let timestamp = TIMESTAMP.clone();
         let shop = ("shop", "a.myshopify.com");
         let at = ("timestamp", timestamp.as_str());
         assert!(verifies(&[shop, at, ("tag", "a"), ("tag", "b")]));
@@ -470,7 +304,7 @@ pub(crate) mod tests {
         // A second `signature` leaves no telling which one signs.
         let mut twice = signed_pairs(&[shop, at], SECRET);
         twice.push(twice[2].clone());
-        assert!(!verify_proxy_signature(&twice, SECRET, NOW));
+        assert!(!verify_proxy_signature(&twice, SECRET));
     }
 
     #[test]
@@ -497,7 +331,7 @@ pub(crate) mod tests {
 
     #[test]
     fn a_key_cannot_end_where_a_parameter_of_shopify_does() {
-        let timestamp = NOW.to_string();
+        let timestamp = TIMESTAMP.clone();
         let shop = ("shop", "a.myshopify.com");
         let at = ("timestamp", timestamp.as_str());
         assert!(verifies(&[shop, at, ("customer_id", "1"), ("id", "2"), ("p", "3")]));
@@ -512,7 +346,7 @@ pub(crate) mod tests {
 
     #[test]
     fn the_parameters_of_shopify_have_the_values_they_need() {
-        let timestamp = NOW.to_string();
+        let timestamp = TIMESTAMP.clone();
         let shop = ("shop", "a.myshopify.com");
         let at = ("timestamp", timestamp.as_str());
         assert!(verifies(&[shop, at, ("path_prefix", "/apps/openshop-2"), ("logged_in_customer_id", "")]));
@@ -586,7 +420,7 @@ pub(crate) mod tests {
         recut(&message, &mut |pairs| {
             let mut presented = self::pairs(pairs);
             presented.push(signature.clone());
-            if !verify_proxy_signature(&presented, SECRET, NOW) || proxy_shop(&presented).is_none() {
+            if !verify_proxy_signature(&presented, SECRET) || proxy_shop(&presented).is_none() {
                 return;
             }
             accepted += 1;
@@ -602,12 +436,10 @@ pub(crate) mod tests {
 
     /// The parameters of a request as Shopify sends them, then the visitor's own.
     fn shopify_request<'a>(customer: &'a str, shop: &'a str, prefix: &'a str, rest: &[(&'a str, &'a str)]) -> Vec<(&'a str, &'a str)> {
-        let mut params = vec![("logged_in_customer_id", customer), ("path_prefix", prefix), ("shop", shop), ("timestamp", TIMESTAMP)];
+        let mut params = vec![("logged_in_customer_id", customer), ("path_prefix", prefix), ("shop", shop), ("timestamp", TIMESTAMP.as_str())];
         params.extend_from_slice(rest);
         params
     }
-
-    const TIMESTAMP: &str = "1780000000";
 
     #[test]
     fn no_other_cut_of_a_signed_proxy_query_changes_who_it_is_for() {
@@ -626,7 +458,7 @@ pub(crate) mod tests {
                 ("ologged_in_customer_id", ""),
                 ("path_prefix", "/apps/x"),
                 ("shop", "a.myshopify.com"),
-                ("timestamp", TIMESTAMP),
+                ("timestamp", TIMESTAMP.as_str()),
             ],
             SECRET,
         );
@@ -634,7 +466,7 @@ pub(crate) mod tests {
             proxy_message(reviewed.iter().copied()),
             proxy_message(forged.iter().map(|(key, value)| (key.as_str(), value.as_str())))
         );
-        assert!(!verify_proxy_signature(&forged, SECRET, NOW));
+        assert!(!verify_proxy_signature(&forged, SECRET));
         assert_eq!(accepted_recuts(&reviewed), 0);
 
     }
@@ -651,7 +483,7 @@ pub(crate) mod tests {
             for customer in ["", "4", "42"] {
                 let params = shopify_request(customer, "A.myshopify.com", "/apps/x", rest);
                 let signed = signed_pairs(&params, SECRET);
-                assert!(verify_proxy_signature(&signed, SECRET, NOW), "{params:?}");
+                assert!(verify_proxy_signature(&signed, SECRET), "{params:?}");
                 assert!(proxy_shop(&signed).is_some(), "{params:?}");
             }
         }
@@ -738,12 +570,12 @@ pub(crate) mod tests {
                 ("path_prefix", "/apps/xq"),
                 ("r", "price"),
                 ("shop", "a.myshopify.com"),
-                ("timestamp", TIMESTAMP),
+                ("timestamp", TIMESTAMP.as_str()),
             ],
             SECRET,
         );
         let mut presented: Vec<_> = moved[..5].to_vec();
         presented.push(original.last().unwrap().clone());
-        assert!(verify_proxy_signature(&presented, SECRET, NOW));
+        assert!(verify_proxy_signature(&presented, SECRET));
     }
 }

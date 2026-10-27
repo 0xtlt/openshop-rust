@@ -1,31 +1,42 @@
-//! Shopify Admin GraphQL client for an installed shop.
+//! The Shopify Admin API of an installed shop, through `shopify_api`.
 
 use std::collections::HashMap;
+use std::future::Future;
 use std::sync::Arc;
 
-use anyhow::{Result, bail};
+use anyhow::{Result, anyhow, bail};
+use serde::Serialize;
 use serde::de::DeserializeOwned;
-use serde_json::{Value, json};
+use serde_json::Value;
+use shopify_api::{ApiVersion, Operation, Shopify};
 use tokio::sync::Mutex;
 
-use super::client_credentials::Grant;
+use super::client_credentials::{Grant, GrantClient, stored};
 use crate::app::OpenShop;
-use crate::runtime::{OutboundRequest, OutboundResponse, logger};
+use crate::runtime::transport::USER_AGENT;
 use crate::server::shop_domain::strict_shop_domain;
 
-pub const SHOPIFY_API_VERSION: &str = "2026-04";
-
-/// Whether `value` is written like a dated Shopify API version: `2026-04`.
-pub fn is_api_version(value: &str) -> bool {
-    let bytes = value.as_bytes();
-    bytes.len() == 7 && bytes[4] == b'-' && bytes[..4].iter().chain(&bytes[5..]).all(u8::is_ascii_digit)
+/// The `shopify_api` client of an app and shop, as a client and its clones
+/// resolved it.
+#[derive(Clone)]
+enum Resolved {
+    /// The shop has no token, and none may be asked for.
+    None,
+    /// The stored token, sent as it is.
+    Stored(Shopify),
+    /// The shared client that renews the token with the client credentials
+    /// grant, for a caller of this kind.
+    Granted(GrantClient, Grant),
 }
 
-/// The access tokens a client and its clones read, per Shopify app and shop:
-/// `None` when the shop has none.
-type Tokens = Arc<Mutex<HashMap<(String, String), Option<String>>>>;
+type Clients = Arc<Mutex<HashMap<(String, String), Resolved>>>;
 
 /// The Shopify Admin API of one shop.
+///
+/// It runs on a [`shopify_api::Shopify`] client: its typed operations
+/// ([`execute`](Self::execute) with [`graphql!`](crate::graphql)), its
+/// retries of throttled requests, and the rest of its API through
+/// [`api`](Self::api): pagination, bulk operations, webhook subscriptions.
 ///
 /// Creating a client reads nothing: the access token of the installation is
 /// read from the database at the first request, then kept for that Shopify
@@ -35,11 +46,11 @@ type Tokens = Arc<Mutex<HashMap<(String, String), Option<String>>>>;
 /// The shop is checked at each request: `<name>.myshopify.com` or `<name>`,
 /// nothing else, and the address the token goes to is built from it.
 ///
-/// For the shop of the `client_credentials_shop` setting, a shop without a token
-/// gets one with the client credentials grant. A token this process obtained
-/// that way is renewed five minutes before it expires, and a token the Admin
-/// API refuses with a `401` is renewed once and the request sent again once,
-/// for any shop whose installation row holds it. The client of an Admin API
+/// For the shop of the `client_credentials_shop` setting, a shop without a
+/// token gets one with the client credentials grant. A token obtained that
+/// way is renewed five minutes before it expires, and a token the Admin API
+/// refuses with a `401` is renewed once and the request sent again once, for
+/// any shop whose installation row holds it. The client of an Admin API
 /// request also asks for the shop and app of its verified session token when
 /// it has no token, and for those only: a clone pointed at another shop or
 /// app may do what background work may.
@@ -47,12 +58,12 @@ type Tokens = Arc<Mutex<HashMap<(String, String), Option<String>>>>;
 pub struct ShopifyClient {
     pub shop: String,
     pub shopify_app: String,
-    pub api_version: String,
+    api_version: Option<ApiVersion>,
     app: OpenShop,
     /// What lets this client ask Shopify for a token: background work, or
     /// the shop and app Shopify vouched for.
     grant: Option<Grant>,
-    tokens: Tokens,
+    clients: Clients,
 }
 
 impl ShopifyClient {
@@ -61,16 +72,17 @@ impl ShopifyClient {
         Self {
             shop: shop.into(),
             shopify_app: shopify_app.into(),
-            api_version: SHOPIFY_API_VERSION.to_string(),
+            api_version: None,
             app: app.clone(),
             grant: Some(Grant::Background),
-            tokens: Arc::new(Mutex::new(HashMap::new())),
+            clients: Arc::default(),
         }
     }
 
-    /// Calls another version of the Admin API than [`SHOPIFY_API_VERSION`].
-    pub fn with_api_version(mut self, api_version: impl Into<String>) -> Self {
-        self.api_version = api_version.into();
+    /// Sends every request to `api_version` instead of the version each
+    /// operation was checked against.
+    pub fn with_api_version(mut self, api_version: ApiVersion) -> Self {
+        self.api_version = Some(api_version);
         self
     }
 
@@ -80,113 +92,181 @@ impl ShopifyClient {
         self
     }
 
-    /// The access token of the installation, if there is one: read once and
-    /// kept for this app and shop, unless this client may ask Shopify for a
-    /// token of the shop and the shop has none, the token is about to expire,
-    /// or it was `rejected`.
-    async fn access_token(&self, shop: &str, rejected: Option<&str>) -> Result<Option<String>> {
-        let credentials = self.app.client_credentials();
-        let grant = self.grant.as_ref();
-        let key = (self.shopify_app.clone(), shop.to_string());
-        // The tokens of every app and shop are not held while one is asked for.
-        if let Some(kept) = self.tokens.lock().await.get(&key) {
-            let reusable = match kept {
-                None => !credentials.may_ask_without_token(grant, &self.shopify_app, shop),
-                Some(token) => {
-                    rejected != Some(token.as_str())
-                        && !(grant.is_some() && credentials.expiring(&self.shopify_app, shop, token))
-                }
-            };
-            if reusable {
-                return Ok(kept.clone());
-            }
-        }
-        let token = credentials
-            .token(&self.app, &self.shopify_app, shop, grant, rejected)
-            .await?;
-        self.tokens.lock().await.insert(key, token.clone());
-        Ok(token)
-    }
-
-    async fn post(&self, shop: &str, access_token: &str, body: &Value) -> Result<OutboundResponse> {
-        self.app
-            .transport()
-            .post_json(OutboundRequest {
-                url: format!("https://{shop}/admin/api/{}/graphql.json", self.api_version),
-                headers: vec![
-                    ("Content-Type".to_string(), "application/json".to_string()),
-                    ("X-Shopify-Access-Token".to_string(), access_token.to_string()),
-                ],
-                body: body.clone(),
-            })
-            .await
-    }
-
-    /// Sends `body` to the Admin GraphQL API of the shop and returns
-    /// Shopify's answer as it is: `None` when the shop has no access token.
-    /// A token the Admin API refuses with a `401` is renewed once, where this
-    /// client may ask for one, and the request sent again once; when Shopify
-    /// gives no other token, the `401` is the answer.
-    pub(crate) async fn send(&self, body: &Value) -> Result<Option<OutboundResponse>> {
-        let Some(shop) = strict_shop_domain(&self.shop) else {
-            bail!(
+    /// The shop, checked.
+    fn domain(&self) -> Result<String> {
+        strict_shop_domain(&self.shop).ok_or_else(|| {
+            anyhow!(
                 "[openshop] Invalid shop domain for app \"{}\": expected <name>.myshopify.com",
                 self.shopify_app
-            );
-        };
-        let Some(access_token) = self.access_token(&shop, None).await? else {
-            return Ok(None);
-        };
-        let mut response = self.post(&shop, &access_token, body).await?;
-        if response.status == 401 && self.grant.is_some() {
-            // A renewal that fails leaves Shopify's answer as it is.
-            match self.access_token(&shop, Some(&access_token)).await {
-                Ok(Some(renewed)) if renewed != access_token => response = self.post(&shop, &renewed, body).await?,
-                Ok(_) => {}
-                Err(error) => logger::warn(format!("{error:#}")),
-            }
-        }
-        Ok(Some(response))
+            )
+        })
     }
 
-    /// Runs a query or mutation and returns the `data` object.
-    pub async fn graphql(&self, query: &str, variables: Option<Value>) -> Result<Value> {
-        let mut body = json!({ "query": query });
-        if let Some(variables) = variables {
-            body["variables"] = variables;
+    /// The `shopify_api` client of the shop, resolved at the first request
+    /// and kept for this app and shop.
+    async fn resolved(&self) -> Result<Resolved> {
+        let shop = self.domain()?;
+        let key = (self.shopify_app.clone(), shop.clone());
+        if let Some(resolved) = self.clients.lock().await.get(&key) {
+            return Ok(resolved.clone());
         }
-        let Some(response) = self.send(&body).await? else {
-            bail!(
+        let stored = stored(&self.app, &self.shopify_app, &shop).await?;
+        let granted = match &self.grant {
+            Some(grant) => self
+                .app
+                .client_credentials()
+                .client(&self.app, &self.shopify_app, &shop, grant, stored.as_ref())
+                .await?
+                .map(|client| Resolved::Granted(client, grant.clone())),
+            None => None,
+        };
+        let resolved = match (granted, stored.and_then(|stored| stored.token)) {
+            (Some(granted), _) => granted,
+            (None, Some(token)) => Resolved::Stored(
+                Shopify::builder(&shop)
+                    .shared_transport(self.app.transport().clone())
+                    .user_agent(USER_AGENT)
+                    .access_token(token)
+                    .build()?,
+            ),
+            (None, None) => Resolved::None,
+        };
+        // A shop without a token may have one at the next request: a grant
+        // held back no longer is, a merchant installed the app.
+        if !matches!(resolved, Resolved::None) {
+            self.clients.lock().await.insert(key, resolved.clone());
+        }
+        Ok(resolved)
+    }
+
+    /// The `shopify_api` client of `resolved`, pinned to the version of this
+    /// client if it has one.
+    fn client_of(&self, resolved: &Resolved) -> Result<Shopify> {
+        let client = match resolved {
+            Resolved::None => bail!(
                 "[openshop] No access token found for app \"{}\" and shop \"{}\". Is the app installed?",
                 self.shopify_app,
-                strict_shop_domain(&self.shop).unwrap_or_default(),
-            );
+                self.domain()?,
+            ),
+            Resolved::Stored(client) => client.clone(),
+            Resolved::Granted(granted, _) => granted.client.clone(),
         };
-
-        if !response.ok() {
-            bail!(
-                "[openshop] Shopify GraphQL error ({}): {}",
-                response.status,
-                response.body
-            );
-        }
-
-        let mut payload = response.json()?;
-        if let Some(errors) = payload.get("errors").and_then(Value::as_array)
-            && !errors.is_empty()
-        {
-            let messages: Vec<&str> = errors
-                .iter()
-                .filter_map(|error| error.get("message").and_then(Value::as_str))
-                .collect();
-            bail!("[openshop] GraphQL errors: {}", messages.join("; "));
-        }
-
-        Ok(payload.get_mut("data").map(Value::take).unwrap_or(Value::Null))
+        Ok(match self.api_version {
+            Some(version) => client.with_api_version(version),
+            None => client,
+        })
     }
 
-    /// Runs a query and deserializes the `data` object.
-    pub async fn graphql_as<T: DeserializeOwned>(&self, query: &str, variables: Option<Value>) -> Result<T> {
-        Ok(serde_json::from_value(self.graphql(query, variables).await?)?)
+    /// The `shopify_api` client of the shop, for what this client does not
+    /// wrap: [`Shopify::paginate`], the bulk operations, the webhook
+    /// subscriptions, [`Shopify::execute_response`]. Fails when the shop has
+    /// no access token.
+    ///
+    /// A failure of the client credentials grant under it is not remembered,
+    /// and nothing is sent again without the grant, as the methods of this
+    /// client do.
+    pub async fn api(&self) -> Result<Shopify> {
+        self.client_of(&self.resolved().await?)
+    }
+
+    /// Runs `call` with the client of the shop. When the client credentials
+    /// grant fails under it (a refusal, a failure, another token stored
+    /// meanwhile), the failure is remembered and `call` runs once more as it
+    /// would without the grant: with the token of the row, or none.
+    async fn run<T, F, Fut>(&self, call: F) -> Result<T>
+    where
+        F: Fn(Shopify) -> Fut,
+        Fut: Future<Output = shopify_api::Result<T>>,
+    {
+        let resolved = self.resolved().await?;
+        let error = match call(self.client_of(&resolved)?).await {
+            Ok(value) => return Ok(value),
+            Err(error) => error,
+        };
+        let Resolved::Granted(granted, grant) = &resolved else {
+            return Err(error.into());
+        };
+        let shop = self.domain()?;
+        if !self
+            .app
+            .client_credentials()
+            .failed(&self.shopify_app, &shop, grant, granted, &error)
+        {
+            return Err(error.into());
+        }
+        self.clients
+            .lock()
+            .await
+            .remove(&(self.shopify_app.clone(), shop));
+        match self.resolved().await? {
+            // A token Shopify gave that could not be stored: that is the answer.
+            Resolved::None if matches!(error, shopify_api::Error::TokenStore(_)) => Err(error.into()),
+            resolved => Ok(call(self.client_of(&resolved)?).await?),
+        }
+    }
+
+    /// Runs an operation of [`graphql!`](crate::graphql), checked against
+    /// Shopify's schema while the crate compiled, and returns its typed `data`.
+    ///
+    /// Fails when Shopify answers with `errors`, with a status other than
+    /// 2xx, or with data that does not fit the operation.
+    pub async fn execute<D: DeserializeOwned>(&self, operation: impl Into<Operation<D>>) -> Result<D> {
+        let operation = operation.into();
+        self.run(|client| {
+            let operation = operation.clone();
+            async move { client.execute(operation).await }
+        })
+        .await
+    }
+
+    /// Runs any query or mutation and returns its `data`. Nothing checks the
+    /// text: prefer [`execute`](Self::execute) with [`graphql!`](crate::graphql).
+    ///
+    /// `variables` is anything that serializes to an object, or `()` for none.
+    pub async fn graphql(&self, query: &str, variables: impl Serialize) -> Result<Value> {
+        let variables = serde_json::to_value(variables)?;
+        self.run(|client| {
+            let variables = &variables;
+            async move { client.graphql(query, variables).await }
+        })
+        .await
+    }
+
+    /// [`graphql`](Self::graphql), with `data` read as `T`.
+    pub async fn graphql_as<T: DeserializeOwned>(&self, query: &str, variables: impl Serialize) -> Result<T> {
+        let variables = serde_json::to_value(variables)?;
+        self.run(|client| {
+            let variables = &variables;
+            async move { client.graphql_as(query, variables).await }
+        })
+        .await
+    }
+
+    /// Runs any query or mutation and returns Shopify's answer as it is,
+    /// `errors` included; `None` when the shop has no access token. A status
+    /// other than 2xx is an error, [`shopify_api::Error::Http`].
+    pub(crate) async fn graphql_raw(
+        &self,
+        query: &str,
+        variables: impl Serialize,
+    ) -> Result<Option<shopify_api::Result<shopify_api::RawResponse>>> {
+        if matches!(self.resolved().await?, Resolved::None) {
+            return Ok(None);
+        }
+        let variables = serde_json::to_value(variables)?;
+        let outcome = self
+            .run(|client| {
+                let variables = &variables;
+                async move { client.graphql_raw(query, variables).await }
+            })
+            .await;
+        match outcome {
+            Ok(answer) => Ok(Some(Ok(answer))),
+            // What Shopify answered is the caller's to read; anything else is an error.
+            Err(error) => match error.downcast::<shopify_api::Error>() {
+                Ok(error) => Ok(Some(Err(error))),
+                Err(error) => Err(error),
+            },
+        }
     }
 }

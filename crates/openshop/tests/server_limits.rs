@@ -189,10 +189,7 @@ async fn serves_a_ui_bundle_compiled_into_the_application() {
     .await
     .unwrap();
 
-    let query = to_query_string(&sign_query(
-        &[("shop", ctx.shop.as_str()), ("timestamp", "1780000000")],
-        &ctx.secret,
-    ));
+    let query = to_query_string(&sign_query(&[("shop", ctx.shop.as_str())], &ctx.secret));
     let shell = ctx.http.get(ctx.url_for(&format!("/?{query}"))).send().await.unwrap();
     assert_eq!(shell.status(), 200);
     let html = shell.text().await.unwrap();

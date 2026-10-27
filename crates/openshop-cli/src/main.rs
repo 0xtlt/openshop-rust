@@ -2,7 +2,6 @@
 #![forbid(unsafe_code)]
 
 mod bundle;
-mod codegen;
 mod dev;
 mod init;
 mod metadata;
@@ -24,8 +23,6 @@ const USAGE: &str = "
                                 --openshop-branch=<name> or --openshop-path=<dir>
     init-ui                     Scaffold a custom admin page with its view
     dev                         Start the app in dev mode and restart it when sources change
-    codegen                     Download the Shopify Admin GraphQL schema of another API version
-                                for graphql! (--api-version=YYYY-MM, --out=<file>)
     worker [--concurrency=N]    Start worker only (production, scalable)
     migrate                     Apply client-owned migrations from ./migrations
     migrate generate            Generate a new client-owned migration
@@ -48,7 +45,7 @@ const USAGE: &str = "
     openshop test
     openshop build && openshop start
 
-  Everything except `init`, `init-ui`, `dev`, `build-ui` and `codegen` runs the
+  Everything except `init`, `init-ui`, `dev` and `build-ui` runs the
   application binary through cargo in the current project.
 ";
 
@@ -70,7 +67,6 @@ async fn run(args: &[String]) -> Result<()> {
         }
         Some("init-ui") => init::run_init_ui(&std::env::current_dir()?),
         Some("dev") => dev::start_dev(rest).await,
-        Some("codegen") => codegen::run_codegen(&std::env::current_dir()?, rest).await,
         Some("build") => {
             bundle::build(&std::env::current_dir()?).await?;
             cargo(&["build", "--release"], rest).await

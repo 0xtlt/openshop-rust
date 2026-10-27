@@ -1,9 +1,25 @@
-//! Shopify Admin API access.
+//! Shopify Admin API access, through `shopify_api`.
 
 pub mod client;
 pub(crate) mod client_credentials;
-pub mod operation;
 pub(crate) mod token_exchange;
 
-pub use client::{SHOPIFY_API_VERSION, ShopifyClient, is_api_version};
-pub use operation::{GraphqlOperation, IntoVariable};
+pub use client::ShopifyClient;
+pub use shopify_api::{ApiVersion, IntoVariable, Operation, Page};
+
+/// An input object of the Admin API built ahead of an operation, in a loop
+/// for instance: `shopify_api`'s [`input!`](shopify_api::input), with the
+/// code it generates pointed at [`openshop::shopify_api`](mod@crate::shopify_api).
+///
+/// ```ignore
+/// use openshop::shopify::input;
+///
+/// let metafields: Vec<_> = rows
+///     .iter()
+///     .map(|row| input!(MetafieldsSetInput {
+///         ownerId: &row.product_id, namespace: "custom", key: "color", value: &row.color,
+///         type: "single_line_text_field",
+///     }))
+///     .collect();
+/// ```
+pub use crate::__shopify_input as input;

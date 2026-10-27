@@ -13,7 +13,7 @@ use crate::runtime::time::to_iso;
 use crate::server::api::run_logs::{RunLogOptions, get_filtered_run_logs};
 use crate::server::http::public_error;
 use crate::server::shop_domain::normalize_shop_domain;
-use crate::shopify::is_api_version;
+use crate::shopify::ApiVersion;
 use crate::types::{JsonMap, McpContext, McpResource, McpResourceContent, McpRiskLevel, McpTool};
 
 #[derive(sqlx::FromRow)]
@@ -99,15 +99,18 @@ pub fn latest_stable_shopify_admin_api_version(now: DateTime<Utc>) -> String {
     format!("{}-10", year - 1)
 }
 
-fn api_version_input(input: &JsonMap) -> Result<String> {
+fn api_version_input(input: &JsonMap) -> Result<ApiVersion> {
     let value = match string_input(input, "apiVersion") {
         None | Some("latest") => latest_stable_shopify_admin_api_version(Utc::now()),
         Some(requested) => requested.to_string(),
     };
-    if !is_api_version(&value) {
-        return Err(public_error("apiVersion must use YYYY-MM format or \"latest\""));
+    match ApiVersion::new(&value) {
+        Ok(version) if !version.is_unstable() => Ok(version),
+        _ => Err(public_error(format!(
+            "apiVersion must be \"latest\" or a YYYY-MM version from {}",
+            ApiVersion::MINIMUM
+        ))),
     }
-    Ok(value)
 }
 
 /// The installation of the shop of the token. A token never sees another shop.
@@ -171,21 +174,38 @@ async fn run_admin_graphql(ctx: McpContext, input: JsonMap) -> Result<Value> {
     let client = ctx
         .app
         .shopify_client(&shop, &ctx.shopify_app)
-        .with_api_version(api_version.clone());
-    let body = json!({ "query": query, "variables": variables });
-    let Some(response) = client.send(&body).await? else {
+        .with_api_version(api_version);
+    let Some(answer) = client.graphql_raw(query, &variables).await? else {
         return Err(not_installed());
     };
 
     let mut result = JsonMap::new();
     result.insert("shop".into(), Value::from(shop));
-    result.insert("apiVersion".into(), Value::from(api_version));
-    result.insert("status".into(), Value::from(response.status));
-    result.insert("ok".into(), Value::from(response.ok()));
-    match serde_json::from_str::<Value>(&response.body) {
-        Ok(Value::Object(parsed)) => result.extend(parsed),
-        _ => {
-            result.insert("responseText".into(), Value::from(response.body));
+    result.insert("apiVersion".into(), Value::from(api_version.to_string()));
+    match answer {
+        Ok(answer) => {
+            result.insert("status".into(), Value::from(200));
+            result.insert("ok".into(), Value::from(true));
+            // As Shopify sent it: `errors` when there are some.
+            if let Ok(Value::Object(parsed)) = serde_json::to_value(answer) {
+                result.extend(parsed.into_iter().filter(|(name, value)| {
+                    !value.is_null() && !(name == "errors" && value.as_array().is_some_and(Vec::is_empty))
+                }));
+            }
+        }
+        Err(error) => {
+            let Some(status) = error.status() else {
+                return Err(error.into());
+            };
+            let body = String::from_utf8_lossy(error.raw_http_body().unwrap_or_default()).into_owned();
+            result.insert("status".into(), Value::from(status));
+            result.insert("ok".into(), Value::from(false));
+            match serde_json::from_str::<Value>(&body) {
+                Ok(Value::Object(parsed)) => result.extend(parsed),
+                _ => {
+                    result.insert("responseText".into(), Value::from(body));
+                }
+            }
         }
     }
     Ok(structured_result(Value::Object(result)))
@@ -421,7 +441,7 @@ pub fn create_core_mcp_capabilities() -> CoreCapabilities {
                     "shop": { "type": "string", "description": "Optional. Must be the shop domain of the token: calls for any other shop are refused." },
                     "query": { "type": "string", "description": "Shopify Admin GraphQL query or mutation." },
                     "variables": { "type": "object", "description": "GraphQL variables object." },
-                    "apiVersion": { "type": "string", "description": "Shopify Admin API version, for example 2026-04. Defaults to the latest stable version when omitted or set to \"latest\"." },
+                    "apiVersion": { "type": "string", "description": "Shopify Admin API version, for example 2026-10. Defaults to the latest stable version when omitted or set to \"latest\"." },
                 },
             }),
             run_admin_graphql,
@@ -632,14 +652,15 @@ mod tests {
     fn validates_api_version_input() {
         let input = |value: Value| value.as_object().cloned().unwrap();
         assert_eq!(
-            api_version_input(&input(json!({ "apiVersion": "2025-10" }))).unwrap(),
-            "2025-10"
+            api_version_input(&input(json!({ "apiVersion": "2026-07" }))).unwrap().to_string(),
+            "2026-07"
         );
-        assert!(is_api_version(&api_version_input(&input(json!({}))).unwrap()));
-        assert!(is_api_version(
-            &api_version_input(&input(json!({ "apiVersion": "latest" }))).unwrap()
-        ));
+        // Older than the versions `shopify_api` calls.
+        assert!(api_version_input(&input(json!({ "apiVersion": "2025-10" }))).is_err());
+        assert!(api_version_input(&input(json!({}))).is_ok());
+        assert!(api_version_input(&input(json!({ "apiVersion": "latest" }))).is_ok());
         assert!(api_version_input(&input(json!({ "apiVersion": "unstable" }))).is_err());
+        assert!(api_version_input(&input(json!({ "apiVersion": "2025-13" }))).is_err());
     }
 
     #[test]

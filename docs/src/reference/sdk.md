@@ -42,8 +42,9 @@ framework and its tests and can change without notice.
 | `openshop::response` | Helpers and re-exports for building HTTP responses | [Public server routes](server-routes.md) |
 | `openshop::server` | `router`, `listen`, and `serve`, to embed the HTTP server | [Server, worker, and scheduler](#server-worker-and-scheduler) |
 | `openshop::validators` | Ready-made field validators | [Providers](providers.md#validators) |
-| `openshop::runtime` | `RuntimeEnv`, the runtime logger, and the `HttpTransport` trait | [Logging](logging.md) |
-| `openshop::shopify` | `SHOPIFY_API_VERSION`, and `IntoVariable`, the values a `graphql!` variable accepts | [Typed GraphQL](graphql.md) |
+| `openshop::runtime` | `RuntimeEnv`, the runtime logger, and `Transport`, what Shopify requests go through | [Logging](logging.md) |
+| `openshop::shopify` | `ShopifyClient`, the `shopify_api` types it takes: `ApiVersion`, `Operation`, `IntoVariable`, `Page`, and `input!` | [Typed GraphQL](graphql.md) |
+| `openshop::shopify_api` | The `shopify_api` crate, which the code of `graphql!` names: `Error`, `Shopify`… | [Typed GraphQL](graphql.md) |
 | `openshop::testing` | Contexts, provider fakes, factories, and signing helpers (cargo feature `testing`) | [Testing](testing.md) |
 
 `openshop::ui` (cargo feature `ui`) is what the view of a custom admin page
@@ -257,7 +258,7 @@ carries one as `ctx.app`.
 | --- | --- |
 | `OpenShop::connect(config).await` | Connects to `DATABASE_URL` and reads settings from the environment. |
 | `OpenShop::new(config, db, env)` | Uses an existing `PgPool` and `RuntimeEnv`. |
-| `OpenShop::with_transport(config, db, env, transport)` | Same, with a custom `HttpTransport` for Shopify HTTP calls. It must not follow redirections: every call carries a secret, a token or a code, and a `3xx` is returned as the answer, as the default `ReqwestTransport` does. |
+| `OpenShop::with_transport(config, db, env, transport)` | Same, with another `shopify_api` `Transport` for every exchange with Shopify, such as `testing::MockTransport`. It must not follow redirections: every call carries a secret, a token or a code, and a `3xx` is returned as the answer, as the default `ReqwestTransport` does. |
 
 All three validate the configuration and resolve the Shopify apps, and fail
 when either is invalid. `APP.main()` and `APP.run()` create the handle for
@@ -359,7 +360,8 @@ without an `OpenShop` handle.
 
 ## `ShopifyClient`
 
-A Shopify Admin GraphQL client for one installed shop. It reads the offline
+A Shopify Admin GraphQL client for one installed shop, on the
+[`shopify_api`](https://docs.rs/shopify_api) client. It reads the offline
 access token from the installations table and decrypts it, at the first
 request. Every context that belongs to a shop has one as `ctx.shopify`.
 
@@ -388,13 +390,13 @@ const PRODUCT_TITLE: &str = "#graphql
 
 async fn product_title(ctx: &WebhookContext, id: &str) -> Result<Option<String>> {
     // Untyped: the `data` object as a `serde_json::Value`.
-    let data = ctx.shopify.graphql(PRODUCT_TITLE, Some(json!({ "id": id }))).await?;
+    let data = ctx.shopify.graphql(PRODUCT_TITLE, json!({ "id": id })).await?;
     let untyped = data["product"]["title"].as_str().map(str::to_string);
 
     // Typed: the `data` object deserialized into your own type.
     let typed: ProductTitle = ctx
         .shopify
-        .graphql_as(PRODUCT_TITLE, Some(json!({ "id": id })))
+        .graphql_as(PRODUCT_TITLE, json!({ "id": id }))
         .await?;
 
     Ok(typed.product.map(|product| product.title).or(untyped))
@@ -406,11 +408,12 @@ async fn product_title(ctx: &WebhookContext, id: &str) -> Result<Option<String>>
 | `ctx.shopify` | The client of the shop of a context: a flow, a webhook, an app proxy, an admin function, an MCP tool or resource, and what `ctx.for_shop(…)` returns in a server route. |
 | `app.shopify_client(shop, shopify_app)` | The client of a shop, for code without a context. Returns the `ShopifyClient` itself: nothing is read before the first request. |
 | `ShopifyClient::new(&app, shop, shopify_app)` | Same, from an `&OpenShop`. |
-| `client.with_api_version(version)` | The client for another version of the Admin API than `openshop::shopify::SHOPIFY_API_VERSION`, currently `2026-04`. |
-| `client.graphql(query, variables)` | `variables: Option<Value>`. Returns Shopify's `data` object as a `Value`. |
+| `client.with_api_version(version)` | Sends every request to `version`, a `shopify_api::ApiVersion`, instead of the version each operation was checked against. |
+| `client.graphql(query, variables)` | `variables`: anything that serializes to an object, or `()` for none. Returns Shopify's `data` object as a `Value`. |
 | `client.graphql_as::<T>(query, variables)` | Same, deserialized into `T: DeserializeOwned`. |
 | `client.execute(graphql!(…))` | An operation checked against Shopify's schema at compile time, with typed variables and a typed result. See [Typed GraphQL](graphql.md). |
-| `client.shop`, `client.shopify_app`, `client.api_version` | Public fields. |
+| `client.api().await?` | The `shopify_api::Shopify` client of the shop: `paginate`, bulk operations, webhook subscriptions, `execute_response`. |
+| `client.shop`, `client.shopify_app` | Public fields. |
 
 `graphql()`:
 
@@ -430,11 +433,13 @@ async fn product_title(ctx: &WebhookContext, id: &str) -> Result<Option<String>>
   of its own shop, and does not carry the right of an admin request's session
   to another shop or app;
 - POSTs to `https://<shop>/admin/api/<version>/graphql.json` with the
-  `X-Shopify-Access-Token` header;
-- fails on non-2xx HTTP responses with
-  `[openshop] Shopify GraphQL error (<status>): <body>`;
-- fails when the top-level GraphQL `errors` array is non-empty, with
-  `[openshop] GraphQL errors: <messages>`;
+  `X-Shopify-Access-Token` header, `<version>` the one of the schema of the
+  crate (`[package.metadata.shopify_api]`), or the one the client pins;
+- waits and retries when Shopify throttles the request, and retries a query
+  after a server error; a mutation never runs twice;
+- fails on non-2xx HTTP responses, and when the top-level GraphQL `errors`
+  array is non-empty, with a `shopify_api::Error` (`Http`, `Graphql`) that
+  `error.downcast_ref::<openshop::shopify_api::Error>()` reads;
 - returns the contents of `data` otherwise. Do not read `data["data"]`.
 
 Mutation-specific `userErrors` live inside `data` and are not raised
@@ -618,6 +623,6 @@ code uses.
 | A block built by hand: `Flow`, `Provider`, `Field`, `Proxy`, `Route`, `Webhook`, `Function`, `McpTool`, `McpResource`, `AdminPage`, `Table`, `InputSchema`, and `OpenShopBuilder` | `openshop::builder` |
 | `Worker`, `Scheduler`, `run_flow`, `RunFlowOptions`, `cancel_run`, `dispatch_flow`, `StepExecutor`, `RunOwner`, `SleepSignal`, `LeaseLostError` | `openshop::engine` |
 | `router`, `listen`, `serve`, `ServerOptions`, `ShopSession` | `openshop::server` |
-| `RuntimeEnv`, `HttpTransport` | `openshop::runtime` |
-| `IntoVariable`, `SHOPIFY_API_VERSION` | `openshop::shopify` |
+| `RuntimeEnv`, `Transport`, `ReqwestTransport` | `openshop::runtime` |
+| `ApiVersion`, `IntoVariable`, `Operation`, `Page` | `openshop::shopify` |
 | `Declared`, the trait of a declared block | `openshop::declare` |
