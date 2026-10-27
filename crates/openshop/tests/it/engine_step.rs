@@ -807,9 +807,12 @@ async fn a_step_write_that_waits_for_its_row_blocks_the_takeover_of_the_run() {
     within(locked.notified()).await;
     within(async {
         loop {
+            // The table of this test's schema: the tests running next to it
+            // have their own.
             let (waiting,): (i64,) = sqlx::query_as(
                 "SELECT count(*) FROM pg_stat_activity \
-                 WHERE wait_event_type = 'Lock' AND query LIKE 'UPDATE step_results SET status = $1%'",
+                 WHERE wait_event_type = 'Lock' AND query LIKE 'UPDATE step_results SET status = $1%' \
+                 AND pid IN (SELECT pid FROM pg_locks WHERE relation = 'step_results'::regclass)",
             )
             .fetch_one(&db)
             .await
