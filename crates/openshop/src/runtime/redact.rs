@@ -171,19 +171,9 @@ mod tests {
         use chrono::Utc;
         use uuid::Uuid;
 
-        use crate::db::schema::{InstallationRow, McpToken, ProviderConfigRow};
+        use crate::db::schema::{McpToken, ProviderConfigRow};
 
         let now = Utc::now();
-        let installation = InstallationRow {
-            id: Uuid::nil(),
-            app_handle: "default".into(),
-            shop: "a.myshopify.com".into(),
-            access_token: Some("access-token-value".into()),
-            scopes: None,
-            nonce: Some("nonce-value".into()),
-            installed_at: now,
-            uninstalled_at: None,
-        };
         let provider = ProviderConfigRow {
             id: Uuid::nil(),
             app_handle: "default".into(),
@@ -209,7 +199,7 @@ mod tests {
             created_at: now,
             updated_at: now,
         };
-        let shown = format!("{installation:?} {provider:?} {token:?}");
+        let shown = format!("{provider:?} {token:?}");
         assert_hidden(&shown);
         assert!(shown.contains("a.myshopify.com") && shown.contains("mtk_abc"), "{shown}");
     }

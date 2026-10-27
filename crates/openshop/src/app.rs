@@ -508,11 +508,6 @@ impl OpenShop {
         })
     }
 
-    /// Connects to `DATABASE_URL` and reads settings from the environment.
-    pub async fn connect(config: OpenShopConfig) -> Result<Self> {
-        Self::new(config, crate::db::connect().await?, RuntimeEnv::from_env())
-    }
-
     pub fn config(&self) -> &OpenShopConfig {
         &self.inner.config
     }

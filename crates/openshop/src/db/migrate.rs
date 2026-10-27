@@ -12,14 +12,13 @@
 //! models with it, so it needs no database.
 
 use std::path::{Path, PathBuf};
-use std::sync::LazyLock;
 
 use anyhow::{Context, Result, bail};
 use chrono::Utc;
 use sha2::{Digest, Sha256};
 use sqlx::{Executor, PgPool};
 
-use super::diff::{self, MANUAL_TODO, SNAPSHOT_FILE, SchemaSnapshot};
+use super::diff::{self, SNAPSHOT_FILE, SchemaSnapshot};
 use super::model::Table;
 
 pub const MIGRATIONS_DIR: &str = "migrations";
@@ -282,16 +281,6 @@ fn covered_framework_ids(files: &[MigrationFile]) -> Vec<String> {
         .collect()
 }
 
-/// The changes to write by hand that the files already list as a `-- TODO:` line.
-fn listed_todos(files: &[MigrationFile]) -> Vec<String> {
-    files
-        .iter()
-        .flat_map(|file| file.sql.lines())
-        .filter_map(|line| line.trim().strip_prefix(MANUAL_TODO))
-        .map(|explanation| explanation.trim().to_string())
-        .collect()
-}
-
 fn missing_framework_migrations(files: &[MigrationFile]) -> Vec<&'static FrameworkMigration> {
     let covered = covered_framework_ids(files);
     FRAMEWORK_MIGRATIONS
@@ -322,36 +311,6 @@ fn sanitize_name(name: &str) -> String {
 
 const GENERATE_THEN_MIGRATE: &str =
     "Run `openshop migrate generate`, review and commit the generated SQL, then run `openshop migrate`.";
-
-/// The names, in lower case, of the tables the migration files create.
-fn created_tables(files: &[MigrationFile]) -> Vec<String> {
-    static CREATE_TABLE: LazyLock<regex::Regex> = LazyLock::new(|| {
-        regex::Regex::new(r#"(?i)create\s+table\s+(?:if\s+not\s+exists\s+)?"?([a-z_][a-z0-9_$]*)"?[\s(]"#)
-            .expect("valid regex")
-    });
-    files
-        .iter()
-        .flat_map(|file| CREATE_TABLE.captures_iter(&file.sql))
-        .map(|captures| captures[1].to_lowercase())
-        .collect()
-}
-
-/// The snapshot the models are compared with, and whether the project has
-/// recorded one. A project that has none yet starts from the tables its
-/// migrations already create, generated or written by hand, taken as the
-/// models describe them today.
-fn baseline(folder: &Path, files: &[MigrationFile], models: &[Table]) -> Result<(SchemaSnapshot, bool)> {
-    if let Some(recorded) = SchemaSnapshot::read(folder)? {
-        return Ok((recorded, true));
-    }
-    let created = created_tables(files);
-    let existing: Vec<Table> = models
-        .iter()
-        .filter(|model| created.contains(&model.table.to_lowercase()))
-        .cloned()
-        .collect();
-    Ok((SchemaSnapshot::of(&existing), false))
-}
 
 /// What `migrate generate` wrote.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -399,25 +358,10 @@ pub fn generate_migrations(
     let folder = cwd.join(MIGRATIONS_DIR);
     let files = read_migration_files(&folder)?;
     let missing = missing_framework_migrations(&files);
-    let (previous, recorded) = baseline(&folder, &files, models)?;
-    // A change to write by hand is not recorded until the author says the
-    // migrations write it, with `--manual-done`. It is not written to a file
-    // twice: a file already lists it.
-    let accepted = args.iter().any(|arg| arg == "--manual-done");
-    let listed = listed_todos(&files);
-    let all = diff::diff(&previous, models);
-    let changes = diff::without_manual(all.clone(), |explanation| {
-        accepted || listed.iter().any(|todo| todo == explanation)
-    });
-    let waiting: Vec<String> = if accepted {
-        Vec::new()
-    } else {
-        all.iter()
-            .filter(|change| !changes.contains(change))
-            .filter_map(|change| change.warning())
-            .map(|warning| format!("still to write by hand: {warning}"))
-            .collect()
-    };
+    // Without a recorded snapshot, every model is new.
+    let recorded = SchemaSnapshot::read(&folder)?;
+    let previous = recorded.clone().unwrap_or_else(|| SchemaSnapshot::of(&[]));
+    let changes = diff::diff(&previous, models);
     let destructive = diff::destructive(&changes);
     if !allow_destructive && !destructive.is_empty() {
         let statements: String = destructive.iter().map(|change| format!("\n  - {change}")).collect();
@@ -428,14 +372,11 @@ pub fn generate_migrations(
         );
     }
     // A project without models and without snapshot does not get one.
-    let new_snapshot = (recorded || !models.is_empty())
-        .then(|| diff::recorded(&previous, models, accepted).to_json())
-        .filter(|json| !recorded || *json != previous.to_json());
+    let new_snapshot = (recorded.is_some() || !models.is_empty())
+        .then(|| SchemaSnapshot::of(models).to_json())
+        .filter(|json| recorded.is_none() || *json != previous.to_json());
 
-    let mut generated = GeneratedMigrations {
-        warnings: waiting,
-        ..Default::default()
-    };
+    let mut generated = GeneratedMigrations::default();
     if missing.is_empty() && changes.is_empty() && name.is_none() && new_snapshot.is_none() {
         return Ok(generated);
     }
@@ -472,9 +413,7 @@ pub fn generate_migrations(
             ),
         )?;
         generated.files.push(path);
-        generated
-            .warnings
-            .extend(changes.iter().filter_map(|change| change.warning().map(str::to_string)));
+        generated.warnings = changes.iter().filter_map(|change| change.warning.clone()).collect();
     } else if let Some(name) = name {
         let path = next_path(&name);
         std::fs::write(&path, format!("-- {name}\n-- Write your schema changes below.\n"))?;
@@ -497,34 +436,17 @@ pub fn check_migrations(cwd: &Path, models: &[Table]) -> Result<()> {
         bail!("[openshop] The current OpenShop schema is not covered by ./migrations. {GENERATE_THEN_MIGRATE}");
     }
 
-    let (previous, recorded) = baseline(&folder, &files, models)?;
+    let previous = SchemaSnapshot::read(&folder)?.unwrap_or_else(|| SchemaSnapshot::of(&[]));
     let pending = diff::diff(&previous, models);
     if pending.is_empty() {
         return Ok(());
-    }
-    if !recorded {
-        // Without a snapshot, the only possible difference is a table no migration creates.
-        let tables: Vec<&str> = models
-            .iter()
-            .filter(|model| !previous.tables.iter().any(|table| table.table == model.table))
-            .map(|model| model.table.as_str())
-            .collect();
-        bail!(
-            "[openshop] No migration creates the table of these models: {}. {GENERATE_THEN_MIGRATE}",
-            tables.join(", ")
-        );
     }
     let changes: Vec<String> = diff::summarize(&pending)
         .into_iter()
         .map(|change| format!("\n  - {change}"))
         .collect();
-    let by_hand = if pending.iter().any(|change| matches!(change, diff::Change::Manual(_))) {
-        "\nA change to write by hand stays pending until the migrations write it and `migrate generate --manual-done` records it."
-    } else {
-        ""
-    };
     bail!(
-        "[openshop] The models changed since the last generated migration:{}\n{GENERATE_THEN_MIGRATE}{by_hand}",
+        "[openshop] The models changed since the last generated migration:{}\n{GENERATE_THEN_MIGRATE}",
         changes.concat()
     );
 }
@@ -613,6 +535,8 @@ impl PushStep {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::ColumnDef;
+    use crate::db::model::conventional;
 
     /// Generates for an application without models and returns the files.
     fn generate_framework(dir: &Path, args: &[String], production: bool) -> Result<Vec<PathBuf>> {
@@ -703,18 +627,19 @@ mod tests {
 
     #[test]
     fn generates_tables_for_models_without_a_migration() {
-        use crate::db::Table;
-
         let dir = temp_dir("models");
         let models = [
-            Table::conventional("reviews").column("rating", "integer NOT NULL"),
-            Table::conventional("review_votes")
-                .without_shop()
-                .column("value", "integer NOT NULL"),
+            conventional("reviews").with_column(ColumnDef::new("rating", "integer")),
+            Table::new("review_votes")
+                .with_column(ColumnDef::id())
+                .with_column(ColumnDef::new("value", "integer")),
         ];
         generate_framework(&dir, &[], false).unwrap();
         let error = check_migrations(&dir, &models).unwrap_err().to_string();
-        assert!(error.contains("these models: reviews, review_votes"), "{error}");
+        assert!(
+            error.contains("\n  - CREATE TABLE IF NOT EXISTS \"reviews\"\n  - CREATE TABLE IF NOT EXISTS \"review_votes\"\n"),
+            "{error}"
+        );
 
         let created = generate(&dir, &models).files;
         assert_eq!(created.len(), 1);
@@ -733,7 +658,7 @@ mod tests {
         )
         .unwrap();
         let mut more = models.to_vec();
-        more.extend([Table::conventional("orders"), Table::conventional("order_lines")]);
+        more.extend([conventional("orders"), conventional("order_lines")]);
         let created = generate_migrations(&dir, &["--name=orders".to_string()], false, &more)
             .unwrap()
             .files;
@@ -753,20 +678,18 @@ mod tests {
 
     #[test]
     fn refuses_a_migration_that_loses_data_without_the_flag() {
-        use crate::db::{ColumnDef, Table};
-
         let dir = temp_dir("destructive");
         let folder = dir.join(MIGRATIONS_DIR);
-        let wide = Table::conventional("reviews")
+        let wide = conventional("reviews")
             .with_column(ColumnDef::new("rating", "integer"))
             .with_column(ColumnDef::new("legacy", "text").nullable(true));
-        let votes = Table::conventional("votes");
+        let votes = conventional("votes");
         generate(&dir, &[wide.clone(), votes.clone()]);
         let files = folder_listing(&dir);
         let snapshot = std::fs::read_to_string(folder.join(SNAPSHOT_FILE)).unwrap();
 
         // A column and a table that are gone, and a conversion that can truncate.
-        let narrow = Table::conventional("reviews").with_column(ColumnDef::new("rating", "smallint"));
+        let narrow = conventional("reviews").with_column(ColumnDef::new("rating", "smallint"));
         let error = generate_migrations(&dir, &[], false, std::slice::from_ref(&narrow))
             .unwrap_err()
             .to_string();
@@ -792,21 +715,19 @@ mod tests {
 
     #[test]
     fn generates_what_does_not_lose_data_without_the_flag() {
-        use crate::db::{ColumnDef, Table};
-
         let dir = temp_dir("not-destructive");
-        let reviews = Table::conventional("reviews")
+        let reviews = conventional("reviews")
             .with_column(ColumnDef::new("rating", "integer"))
             .with_column(ColumnDef::new("note", "text").nullable(true))
             .index("reviews_rating_idx", &["rating"]);
         generate(&dir, std::slice::from_ref(&reviews));
 
         // Wider type, tighter or looser nullability, another index, a renamed column and a new table.
-        let next = Table::conventional("reviews")
+        let next = conventional("reviews")
             .with_column(ColumnDef::new("rating", "bigint"))
             .with_column(ColumnDef::new("remark", "text").renamed_from("note"))
             .index("reviews_remark_idx", &["remark"]);
-        let created = generate(&dir, &[next, Table::conventional("votes")]);
+        let created = generate(&dir, &[next, conventional("votes")]);
         assert_eq!(created.files.len(), 1);
         std::fs::remove_dir_all(dir).ok();
     }
@@ -821,11 +742,9 @@ mod tests {
 
     #[test]
     fn records_the_models_and_generates_what_changed_since() {
-        use crate::db::{ColumnDef, Table};
-
         let dir = temp_dir("diff");
         let folder = dir.join(MIGRATIONS_DIR);
-        let reviews = Table::conventional("reviews").with_column(ColumnDef::new("rating", "integer"));
+        let reviews = conventional("reviews").with_column(ColumnDef::new("rating", "integer"));
 
         // The first generation creates the table and records the models.
         let first = generate(&dir, std::slice::from_ref(&reviews));
@@ -845,7 +764,7 @@ mod tests {
         );
 
         // A changed model is refused by `check` until a migration covers it.
-        let changed = Table::conventional("reviews")
+        let changed = conventional("reviews")
             .with_column(ColumnDef::new("rating", "integer"))
             .with_column(ColumnDef::new("note", "text").nullable(true))
             .with_column(ColumnDef::new("author", "text"))
@@ -917,47 +836,19 @@ mod tests {
     }
 
     #[test]
-    fn a_project_without_a_snapshot_starts_from_its_existing_tables() {
-        use crate::db::{ColumnDef, Table};
-
-        // As generated before snapshots existed: a migration creates the table.
-        let dir = temp_dir("adopt");
+    fn a_project_without_a_snapshot_creates_every_model() {
+        let dir = temp_dir("no-snapshot");
         let folder = dir.join(MIGRATIONS_DIR);
         generate_framework(&dir, &[], false).unwrap();
-        let reviews = Table::conventional("reviews").with_column(ColumnDef::new("rating", "integer"));
-        std::fs::write(
-            folder.join("99990101000000_models.sql"),
-            format!("{}\n", reviews.create_sql()),
-        )
-        .unwrap();
-        // A table created by hand counts too, whatever its casing or quoting.
-        std::fs::write(
-            folder.join("99990102000000_orders.sql"),
-            "create table Orders (id uuid);",
-        )
-        .unwrap();
-        let orders = Table::conventional("orders");
-        let models = [reviews.clone(), orders.clone()];
-        assert_eq!(SchemaSnapshot::read(&folder).unwrap(), None);
-        check_migrations(&dir, &models).unwrap();
+        let reviews = conventional("reviews").with_column(ColumnDef::new("rating", "integer"));
 
-        // Generating records the models without writing a migration.
-        let adopted = generate(&dir, &models);
-        assert!(adopted.files.is_empty());
-        assert_eq!(adopted.snapshot, Some(folder.join(SNAPSHOT_FILE)));
-
-        // From then on, changes are found by comparison.
-        let changed = Table::conventional("reviews")
-            .with_column(ColumnDef::new("rating", "bigint").renamed_from("stars"))
-            .with_column(ColumnDef::new("note", "text").nullable(true));
-        let next = generate(&dir, &[changed, orders]);
-        let sql = std::fs::read_to_string(&next.files[0]).unwrap();
-        assert!(
-            sql.contains("ALTER COLUMN \"rating\" TYPE bigint USING \"rating\"::bigint;"),
-            "{sql}"
-        );
-        assert!(sql.contains("ADD COLUMN IF NOT EXISTS \"note\" text;"), "{sql}");
-        assert!(!sql.contains("RENAME"), "{sql}");
+        let generated = generate(&dir, std::slice::from_ref(&reviews));
+        let [path] = &generated.files[..] else {
+            panic!("{:?}", generated.files)
+        };
+        assert!(std::fs::read_to_string(path).unwrap().contains("CREATE TABLE IF NOT EXISTS \"reviews\""));
+        assert_eq!(generated.snapshot, Some(folder.join(SNAPSHOT_FILE)));
+        check_migrations(&dir, &[reviews]).unwrap();
         std::fs::remove_dir_all(dir).ok();
     }
 
@@ -1014,52 +905,4 @@ mod tests {
         assert!(error.to_string().contains("was modified after it was applied"));
     }
 
-
-    #[test]
-    fn a_change_to_write_by_hand_is_not_recorded_until_the_author_accepts_it() {
-        use crate::db::{ColumnDef, Table};
-
-        let dir = temp_dir("manual");
-        let folder = dir.join(MIGRATIONS_DIR);
-        let plain = Table::conventional("reviews").with_column(ColumnDef::new("code", "text"));
-        let keyed = Table::conventional("reviews").with_column(ColumnDef::new("code", "text").primary_key());
-        let recorded = |dir: &Path| std::fs::read_to_string(dir.join(MIGRATIONS_DIR).join(SNAPSHOT_FILE)).unwrap();
-        generate(&dir, std::slice::from_ref(&plain));
-        let first = recorded(&dir);
-
-        // The migration tells what to write, and the snapshot keeps the old key.
-        let second = generate(&dir, std::slice::from_ref(&keyed));
-        let [path] = &second.files[..] else {
-            panic!("{:?}", second.files)
-        };
-        assert!(std::fs::read_to_string(path).unwrap().contains("-- TODO: the primary key of reviews changed: code is now part of the primary key"));
-        assert_eq!(recorded(&dir), first);
-        let error = check_migrations(&dir, std::slice::from_ref(&keyed)).unwrap_err().to_string();
-        assert!(error.contains("the primary key of reviews changed: code is now part of the primary key"), "{error}");
-        assert!(error.contains("--manual-done"), "{error}");
-
-        // Asked again, it does not write the same TODO twice, and says what is left.
-        let third = generate(&dir, std::slice::from_ref(&keyed));
-        assert!(third.files.is_empty() && third.snapshot.is_none(), "{third:?}");
-        assert!(third.warnings[0].starts_with("still to write by hand: the primary key of reviews"));
-        assert!(check_migrations(&dir, std::slice::from_ref(&keyed)).is_err());
-
-        // Written by the author, who says so: the models are recorded.
-        let accepted = generate_migrations(&dir, &["--manual-done".to_string()], false, std::slice::from_ref(&keyed))
-            .unwrap();
-        assert!(accepted.files.is_empty() && accepted.warnings.is_empty(), "{accepted:?}");
-        assert_eq!(accepted.snapshot, Some(folder.join(SNAPSHOT_FILE)));
-        check_migrations(&dir, std::slice::from_ref(&keyed)).unwrap();
-        assert_eq!(generate(&dir, std::slice::from_ref(&keyed)), GeneratedMigrations::default());
-
-        // The same change again later is a new change: what was accepted before does not cover it.
-        let back = generate(&dir, std::slice::from_ref(&plain));
-        assert_eq!(back.files.len(), 1, "{back:?}");
-        generate_migrations(&dir, &["--manual-done".to_string()], false, std::slice::from_ref(&plain)).unwrap();
-        check_migrations(&dir, std::slice::from_ref(&plain)).unwrap();
-        let again = generate(&dir, std::slice::from_ref(&keyed));
-        assert!(again.snapshot.is_none(), "{again:?}");
-        assert!(check_migrations(&dir, std::slice::from_ref(&keyed)).is_err());
-        std::fs::remove_dir_all(dir).ok();
-    }
 }

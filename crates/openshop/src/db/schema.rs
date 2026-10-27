@@ -92,39 +92,6 @@ impl Installation {
     }
 }
 
-/// A whole row of `installations`, with the stored access token. `Debug` does
-/// not show the token, nor the nonce.
-#[derive(Clone, PartialEq, Serialize, FromRow)]
-#[serde(rename_all = "camelCase")]
-pub struct InstallationRow {
-    pub id: Uuid,
-    pub app_handle: String,
-    pub shop: String,
-    pub access_token: Option<String>,
-    pub scopes: Option<String>,
-    pub nonce: Option<String>,
-    #[serde(serialize_with = "iso::serialize")]
-    pub installed_at: DateTime<Utc>,
-    #[serde(serialize_with = "iso_option::serialize")]
-    pub uninstalled_at: Option<DateTime<Utc>>,
-}
-
-impl std::fmt::Debug for InstallationRow {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        use crate::runtime::redact::redacted_option;
-        f.debug_struct("InstallationRow")
-            .field("id", &self.id)
-            .field("app_handle", &self.app_handle)
-            .field("shop", &self.shop)
-            .field("access_token", &redacted_option(&self.access_token))
-            .field("scopes", &self.scopes)
-            .field("nonce", &redacted_option(&self.nonce))
-            .field("installed_at", &self.installed_at)
-            .field("uninstalled_at", &self.uninstalled_at)
-            .finish()
-    }
-}
-
 /// A run of a flow for a shop. `status` is `pending`, `sleeping`, `running`,
 /// `completed`, `failed` or `canceled`.
 #[derive(Debug, Clone, PartialEq, Serialize, FromRow)]
@@ -249,19 +216,6 @@ impl std::fmt::Debug for ProviderConfigRow {
             .field("updated_at", &self.updated_at)
             .finish()
     }
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, FromRow)]
-#[serde(rename_all = "camelCase")]
-pub struct CronOverride {
-    pub id: Uuid,
-    pub app_handle: String,
-    pub shop: String,
-    /// `flow:schedule`
-    pub cron_key: String,
-    pub enabled: bool,
-    #[serde(serialize_with = "iso::serialize")]
-    pub updated_at: DateTime<Utc>,
 }
 
 /// A line a flow wrote to its logger.

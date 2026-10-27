@@ -5,13 +5,12 @@ mod common;
 
 use std::time::Duration;
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use common::noop_flow;
-use openshop::db::schema::InstallationRow;
 use openshop::testing::{
     MockTransport, TestContext, TestOptions, session_token, sign_query, sign_webhook_body, to_query_string,
 };
-use openshop::{IndexMap, OpenShopConfig, ShopifyAppConfig, ShopifyConfig, Value, anyhow, json};
+use openshop::{IndexMap, OpenShopConfig, ShopifyAppConfig, ShopifyConfig, Uuid, Value, anyhow, json};
 use reqwest::Response;
 
 const ENCRYPTION_KEY: &str = "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2";
@@ -77,6 +76,16 @@ async fn seed_installation(
         .execute(&ctx.db)
         .await
         .unwrap();
+}
+
+/// What these tests read of a row of `installations`, the stored access token included.
+#[derive(sqlx::FromRow)]
+struct InstallationRow {
+    id: Uuid,
+    access_token: Option<String>,
+    scopes: Option<String>,
+    nonce: Option<String>,
+    uninstalled_at: Option<DateTime<Utc>>,
 }
 
 async fn find_installation(ctx: &TestContext, app_handle: &str, shop: &str) -> Option<InstallationRow> {

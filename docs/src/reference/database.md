@@ -8,8 +8,6 @@ OpenShop uses PostgreSQL through [`sqlx`](https://docs.rs/sqlx).
 
 The CLI commands connect to `DATABASE_URL` and fall back to
 `postgresql://openshop:openshop@localhost:5432/openshop` when it is unset.
-`OpenShop::connect` and `openshop::db::connect` require the variable and fail
-with `[openshop] DATABASE_URL not set` when it is absent.
 
 | Environment variable | Default | `0` |
 | --- | --- | --- |
@@ -30,7 +28,6 @@ as long as the outage lasted to notice that PostgreSQL is back.
 
 | Function | Purpose |
 | --- | --- |
-| `openshop::db::connect()` | Pool for `DATABASE_URL`. |
 | `openshop::db::connect_to(url)` | Pool for an explicit URL. |
 | `openshop::db::pool_options()` | `PgPoolOptions` with the `PGPOOL_*` settings and the [idle connection check](#idle-connection-check) applied. |
 
@@ -271,39 +268,6 @@ let votes = ReviewVote::of(&ctx)
 
 and write joins in SQL, [checked at compile time](#checked-sql) if you want.
 
-### Tables without a struct
-
-A `Table` describes a table without typed rows. It is what
-`#[derive(Model)]` builds from a struct, and can be built directly for a table
-that is only known at run time:
-
-```rust,ignore
-use openshop::builder::Table;
-
-pub fn reviews() -> Table {
-    Table::conventional("reviews")
-        .column("title", "text NOT NULL")
-        .column("rating", "integer NOT NULL")
-        .index("reviews_shop_rating_idx", &["shop", "rating"])
-        .unique_index("reviews_shop_title_unique", &["shop", "title"])
-}
-```
-
-`Table::conventional(table)` starts with the conventional columns: `id`,
-`shop`, `created_at` and `updated_at`. `.without_shop()`,
-`.without_created_at()` and `.without_updated_at()` omit them.
-`Table::new(table)` starts without any column. `.column(name, definition)`
-takes the SQL definition of the column, and `.create_sql()` returns the
-idempotent `CREATE TABLE IF NOT EXISTS` and index statements. Register it with
-`.model(…)` on the builder, for example `APP.builder()?.model(reviews())`; a
-table registered twice is refused when the configuration is built.
-Migrations are generated for it like for a struct: the type,
-nullability and default of each definition are read; a change to another
-constraint written in a definition, such as `CHECK`, is left for you to
-write. Declare a foreign key with
-`.with_foreign_key(ForeignKeyDef::new("review_id", "reviews").on_delete("cascade"))`
-rather than in the definition.
-
 `updated_at` has a creation default. `save` updates it; an `UPDATE` written
 with `sqlx` does not, unless it sets the column.
 
@@ -463,9 +427,8 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS flow_runs_id_text_idx ON flow_runs ((id:
 lines past an age, in batches of 5,000 selected `FOR UPDATE SKIP LOCKED`;
 without it nothing is removed.
 
-The row types are exported from `openshop::db::schema` (`InstallationRow`,
-`FlowRun`, `StepResult`, `ProviderConfigRow`, `CronOverride`, `LogRow`,
-`McpToken`, `McpAuditLog`) and implement `sqlx::FromRow` and `Serialize`.
+The row types are exported from `openshop::db::schema` (`FlowRun`,
+`StepResult`, `ProviderConfigRow`, `LogRow`, `McpToken`, `McpAuditLog`) and implement `sqlx::FromRow` and `Serialize`.
 
 ### Read the framework tables
 
@@ -631,16 +594,9 @@ The next generation writes `ALTER TABLE "reviews" RENAME TO "product_reviews"`
 and `RENAME COLUMN "stars" TO "rating"`. Once the snapshot has the new names
 the attribute does nothing, and can be removed.
 
-### Projects without a snapshot
-
-A project whose migrations predate the snapshot has none. Its first
-`migrate generate` takes the tables that a migration already creates as the
-models describe them today, records them, and writes nothing for them. Run it
-before changing a model. A table created by a hand-written migration is taken
-the same way, whatever the casing or quoting of its `CREATE TABLE`.
-
-Once the snapshot exists, it is the only reference: a model it does not record
-gets a `CREATE TABLE IF NOT EXISTS`, whatever the migration files contain.
+The snapshot is the only reference: a model it does not record, or every
+model when there is no snapshot yet, gets a `CREATE TABLE IF NOT EXISTS`,
+whatever the migration files contain.
 
 `migrate generate` refuses to run in production mode unless
 `--allow-generate-in-production` is given.
