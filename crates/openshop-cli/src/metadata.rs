@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use openshop::serde_json::{self, Value};
+use serde_json::Value;
 use tokio::process::Command;
 
 /// Runs `cargo metadata` in the project.

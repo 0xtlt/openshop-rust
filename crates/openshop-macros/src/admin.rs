@@ -8,7 +8,7 @@ use syn::{
     parse_quote,
 };
 
-use crate::util::{Argument, Arguments, camel_case, constant_ident, plain_name, set_once, text};
+use crate::util::{Argument, Arguments, camel_case, constant_ident, declared, own_names, plain_name, set_once, text};
 
 const MARKERS: [&str; 4] = ["access", "loader", "action", "view"];
 
@@ -119,7 +119,6 @@ struct Reference {
 }
 
 pub fn admin_page(arguments: Arguments, mut item: ItemImpl) -> syn::Result<TokenStream> {
-    let krate = quote!(::openshop);
     let mut path: Option<LitStr> = None;
     let mut nav: Option<LitStr> = None;
     for argument in &arguments.0 {
@@ -227,15 +226,17 @@ pub fn admin_page(arguments: Arguments, mut item: ItemImpl) -> syn::Result<Token
 
         // Without an input the function answers whatever it is sent.
         let untyped = quote! {
-            |ctx: #krate::AdminContext, _input: #krate::Value| async move {
-                #krate::Result::<#krate::Value>::Ok(#krate::serde_json::to_value(Self::#ident(ctx).await?)?)
+            |ctx: ::openshop::AdminContext, _input: ::openshop::Value| async move {
+                ::openshop::Result::<::openshop::Value>::Ok(::openshop::serde_json::to_value(Self::#ident(ctx).await?)?)
             }
         };
         let definition = match (marker.as_str(), input.is_some()) {
-            ("loader", true) => quote!(#krate::builder::AdminFunction::typed_loader(Self::#ident)),
-            ("loader", false) => quote!(#krate::builder::AdminFunction::loader(#untyped)),
-            (_, true) => quote!(#krate::builder::AdminFunction::typed_action(Self::#ident)),
-            (_, false) => quote!(#krate::builder::AdminFunction::action(#krate::builder::InputSchema::any(), #untyped)),
+            ("loader", true) => quote!(::openshop::builder::AdminFunction::typed_loader(Self::#ident)),
+            ("loader", false) => quote!(::openshop::builder::AdminFunction::loader(#untyped)),
+            (_, true) => quote!(::openshop::builder::AdminFunction::typed_action(Self::#ident)),
+            (_, false) => {
+                quote!(::openshop::builder::AdminFunction::action(::openshop::builder::InputSchema::any(), #untyped))
+            }
         };
         let authorize = authorize.map(|authorize| quote!(.authorize(#authorize)));
         functions.push(quote!(.function(#name, #definition #authorize)));
@@ -257,15 +258,7 @@ pub fn admin_page(arguments: Arguments, mut item: ItemImpl) -> syn::Result<Token
     // constant each, which carries what they take and what they return.
     let mut constants = Vec::new();
     // The expansion declares `PATH`, and a constant per function: not twice.
-    let own: Vec<&Ident> = item
-        .items
-        .iter()
-        .filter_map(|implemented| match implemented {
-            ImplItem::Fn(function) => Some(&function.sig.ident),
-            ImplItem::Const(constant) => Some(&constant.ident),
-            _ => None,
-        })
-        .collect();
+    let own = own_names(&item);
     if let Some(taken) = own.iter().find(|ident| *ident == &"PATH") {
         return Err(syn::Error::new(
             taken.span(),
@@ -311,28 +304,36 @@ pub fn admin_page(arguments: Arguments, mut item: ItemImpl) -> syn::Result<Token
             constants.push(quote! {
                 #[doc = #doc]
                 #[allow(dead_code)]
-                pub const #constant: #krate::ui::AdminFunctionRef<#input, #output> =
-                    #krate::ui::AdminFunctionRef::#kind(#name);
+                pub const #constant: ::openshop::ui::AdminFunctionRef<#input, #output> =
+                    ::openshop::ui::AdminFunctionRef::#kind(#name);
             });
         }
     }
+    // The paths of the framework keep the span of the attribute, which an
+    // error about what the view is given points at too.
+    let openshop = quote!(::openshop);
     let page_view = match &view {
         // Refused with one message when the application has not enabled the feature `ui`.
         Some(view) => quote_spanned! {view.span()=>
-            #krate::__view! {
+            #openshop::__view! {
                 impl #self_type {
                     #(#constants)*
                 }
 
-                impl #krate::ui::PageView for #self_type {
-                    fn page_view() -> ::core::option::Option<#krate::ui::BundlePage> {
-                        ::core::option::Option::Some(#krate::ui::page_view(Self::PATH, Self::#view))
+                impl #openshop::ui::PageView for #self_type {
+                    fn page_view() -> ::core::option::Option<#openshop::ui::BundlePage> {
+                        ::core::option::Option::Some(#openshop::ui::page_view(Self::PATH, Self::#view))
                     }
                 }
             }
         },
         None => TokenStream::new(),
     };
+    let declared = declared(
+        &self_type,
+        "AdminPage",
+        quote!(app.admin_page(::openshop::builder::AdminPage::new(Self::PATH) #nav #access #(#functions)*)),
+    );
 
     Ok(quote! {
         #item
@@ -343,13 +344,7 @@ pub fn admin_page(arguments: Arguments, mut item: ItemImpl) -> syn::Result<Token
         }
 
         #[cfg(not(target_arch = "wasm32"))]
-        impl #krate::declare::Declared for #self_type {
-            type Kind = #krate::declare::kind::AdminPage;
-
-            fn register(app: #krate::builder::OpenShopBuilder) -> #krate::builder::OpenShopBuilder {
-                app.admin_page(#krate::builder::AdminPage::new(Self::PATH) #nav #access #(#functions)*)
-            }
-        }
+        #declared
 
         #page_view
     })

@@ -3,14 +3,14 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use tokio::process::{Child, Command};
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::{Mutex, mpsc, watch};
 
-use crate::restart::{RestartCoordinator, Restartable};
 use crate::{bundle, metadata};
 
 /// Directories watched recursively, including ones created after startup.
@@ -234,17 +234,28 @@ impl DevProcess {
             Self::stop(&mut child).await;
         }
     }
-}
 
-impl Restartable for DevProcess {
     async fn restart(&self, reason: String) {
         println!("[openshop] {reason} changed — restarting...");
         self.shutdown().await;
         self.start().await;
     }
+}
 
-    fn queued(&self, reason: &str) {
-        println!("[openshop] Reload already in progress — queued one more restart for {reason}");
+/// Restarts `process` for each change `changed` receives, one restart at a
+/// time: the changes made during a restart become one more restart, for the
+/// last of them. `restarting` is set while a restart runs, and taken back by
+/// the first change that queues another.
+async fn restart_on_change(
+    process: Arc<DevProcess>,
+    mut changed: watch::Receiver<String>,
+    restarting: Arc<AtomicBool>,
+) {
+    while changed.changed().await.is_ok() {
+        let reason = changed.borrow_and_update().clone();
+        restarting.store(true, Ordering::SeqCst);
+        process.restart(reason).await;
+        restarting.store(false, Ordering::SeqCst);
     }
 }
 
@@ -312,7 +323,9 @@ pub async fn start_dev(cargo_args: &[String]) -> Result<()> {
     });
     let mut local = LocalCrates::read(&cwd, cargo_args).await.unwrap_or_default();
     process.start().await;
-    let coordinator = RestartCoordinator::new(process.clone());
+    let (restart, restarts) = watch::channel(String::new());
+    let restarting = Arc::new(AtomicBool::new(false));
+    let restarter = tokio::spawn(restart_on_change(process.clone(), restarts, restarting.clone()));
 
     let (changes, mut changed) = mpsc::unbounded_channel::<PathBuf>();
     let mut watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
@@ -375,13 +388,19 @@ pub async fn start_dev(cargo_args: &[String]) -> Result<()> {
                     if change.pages || change.dependencies {
                         process.serve(ui_dir(bundle.refresh().await));
                     }
-                    let coordinator = coordinator.clone();
-                    tokio::spawn(async move { coordinator.request_restart(change.source).await });
+                    if restarting.swap(false, Ordering::SeqCst) {
+                        println!(
+                            "[openshop] Reload already in progress — queued one more restart for {}",
+                            change.source
+                        );
+                    }
+                    restart.send_replace(change.source);
                 }
             }
         }
     }
 
+    restarter.abort();
     process.shutdown().await;
     bundle.stop().await;
     Ok(())

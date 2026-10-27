@@ -92,7 +92,6 @@ static APP: App = app! {
     // MCP is off: `POST /mcp` is refused and the admin has no MCP page.
     // Remove this line to turn it on.
     mcp: McpConfig::disabled(),
-    on_error: report_failure,
 };
 ```
 

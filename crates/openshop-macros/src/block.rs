@@ -9,7 +9,7 @@ use quote::{format_ident, quote};
 use syn::spanned::Spanned;
 use syn::{Expr, FnArg, Ident, ItemFn, LitStr, ReturnType, Type};
 
-use crate::util::{Argument, Arguments, camel_case, doc_text, plain_name, set_once, text, values};
+use crate::util::{Argument, Arguments, camel_case, declared, doc_text, plain_name, set_once, text, values};
 
 /// Checks that a block is `async fn(context, …) -> Result<…>` and returns the
 /// types of the arguments after the context, of which there are at most `extra`.
@@ -40,10 +40,9 @@ fn extra_arguments<'a>(item: &'a ItemFn, attribute: &str, shape: &str, extra: us
 
 /// The function, and the type of the same name that declares it as a block.
 fn declare(item: &ItemFn, kind: &str, doc: String, constants: TokenStream, register: TokenStream) -> TokenStream {
-    let krate = quote!(::openshop);
     let name = &item.sig.ident;
     let visibility = &item.vis;
-    let kind = format_ident!("{}", kind);
+    let declared = declared(name, kind, register);
     quote! {
         #item
 
@@ -55,13 +54,7 @@ fn declare(item: &ItemFn, kind: &str, doc: String, constants: TokenStream, regis
             #constants
         }
 
-        impl #krate::declare::Declared for #name {
-            type Kind = #krate::declare::kind::#kind;
-
-            fn register(app: #krate::builder::OpenShopBuilder) -> #krate::builder::OpenShopBuilder {
-                #register
-            }
-        }
+        #declared
     }
 }
 
@@ -129,7 +122,6 @@ fn concurrency(value: &Expr) -> TokenStream {
 }
 
 pub fn flow(arguments: Arguments, item: ItemFn) -> syn::Result<TokenStream> {
-    let krate = quote!(::openshop);
     let extra = extra_arguments(
         &item,
         "flow",
@@ -176,14 +168,14 @@ pub fn flow(arguments: Arguments, item: ItemFn) -> syn::Result<TokenStream> {
 
     let flow = match extra.first() {
         Some(input) => quote! {
-            #krate::builder::Flow::new(Self::NAME, |ctx: #krate::FlowContext| async move {
+            ::openshop::builder::Flow::new(Self::NAME, |ctx: ::openshop::FlowContext| async move {
                 let input = ctx.input::<#input>()?;
                 ::core::result::Result::map_err(#ident(ctx, input).await, ::core::convert::Into::into)
             })
             .input::<#input>()
         },
         None => quote! {
-            #krate::builder::Flow::new(Self::NAME, |ctx: #krate::FlowContext| async move {
+            ::openshop::builder::Flow::new(Self::NAME, |ctx: ::openshop::FlowContext| async move {
                 ::core::result::Result::map_err(#ident(ctx).await, ::core::convert::Into::into)
             })
         },
@@ -195,21 +187,21 @@ pub fn flow(arguments: Arguments, item: ItemFn) -> syn::Result<TokenStream> {
             /// Queues a run of the flow for the shop of `scope`: the context
             /// of a webhook, of a proxy request, of another flow…
             pub async fn dispatch<OpenshopFlowInput>(
-                scope: &impl #krate::ShopScope,
+                scope: &impl ::openshop::ShopScope,
                 input: OpenshopFlowInput,
-            ) -> #krate::Result<#krate::QueuedRun>
+            ) -> ::openshop::Result<::openshop::QueuedRun>
             where
-                OpenshopFlowInput: #krate::serde::Serialize + #krate::declare::Is<#input>,
+                OpenshopFlowInput: ::openshop::serde::Serialize + ::openshop::declare::Is<#input>,
             {
-                let input = #krate::serde_json::to_value(&input)?;
-                #krate::declare::dispatch(scope, Self::NAME, ::core::option::Option::Some(input)).await
+                let input = ::openshop::serde_json::to_value(&input)?;
+                ::openshop::declare::dispatch(scope, Self::NAME, ::core::option::Option::Some(input)).await
             }
         },
         None => quote! {
             /// Queues a run of the flow for the shop of `scope`: the context
             /// of a webhook, of a proxy request, of another flow…
-            pub async fn dispatch(scope: &impl #krate::ShopScope) -> #krate::Result<#krate::QueuedRun> {
-                #krate::declare::dispatch(scope, Self::NAME, ::core::option::Option::None).await
+            pub async fn dispatch(scope: &impl ::openshop::ShopScope) -> ::openshop::Result<::openshop::QueuedRun> {
+                ::openshop::declare::dispatch(scope, Self::NAME, ::core::option::Option::None).await
             }
         },
     };
@@ -231,7 +223,6 @@ pub fn flow(arguments: Arguments, item: ItemFn) -> syn::Result<TokenStream> {
 // ─── #[webhook] ──────────────────────────────────────────────────────
 
 pub fn webhook(arguments: Arguments, item: ItemFn) -> syn::Result<TokenStream> {
-    let krate = quote!(::openshop);
     let extra = extra_arguments(
         &item,
         "webhook",
@@ -261,13 +252,13 @@ pub fn webhook(arguments: Arguments, item: ItemFn) -> syn::Result<TokenStream> {
 
     let run = match extra.first() {
         Some(payload) => quote! {
-            |ctx: #krate::WebhookContext| async move {
-                let payload: #payload = #krate::serde_json::from_value(ctx.payload.clone())?;
+            |ctx: ::openshop::WebhookContext| async move {
+                let payload: #payload = ::openshop::serde_json::from_value(ctx.payload.clone())?;
                 ::core::result::Result::map_err(#ident(ctx, payload).await, ::core::convert::Into::into)
             }
         },
         None => quote! {
-            |ctx: #krate::WebhookContext| async move {
+            |ctx: ::openshop::WebhookContext| async move {
                 ::core::result::Result::map_err(#ident(ctx).await, ::core::convert::Into::into)
             }
         },
@@ -286,7 +277,7 @@ pub fn webhook(arguments: Arguments, item: ItemFn) -> syn::Result<TokenStream> {
             /// The topics the webhook handles.
             pub const TOPICS: &'static [&'static str] = &[#(#topics),*];
         },
-        quote!(app #(.webhook(#topics, #krate::builder::Webhook::new(#run)))*),
+        quote!(app #(.webhook(#topics, ::openshop::builder::Webhook::new(#run)))*),
     ))
 }
 
@@ -347,7 +338,6 @@ fn endpoint_constants(endpoint: &Endpoint) -> TokenStream {
 }
 
 pub fn proxy(arguments: Arguments, item: ItemFn) -> syn::Result<TokenStream> {
-    let krate = quote!(::openshop);
     let extra = extra_arguments(
         &item,
         "proxy",
@@ -379,7 +369,7 @@ pub fn proxy(arguments: Arguments, item: ItemFn) -> syn::Result<TokenStream> {
         Some(input) => {
             let from_query = endpoint.reads_query();
             quote! {
-                let input: #input = #krate::declare::proxy_input(&ctx, #from_query)?;
+                let input: #input = ::openshop::declare::proxy_input(&ctx, #from_query)?;
                 #ident(ctx, input).await?
             }
         }
@@ -398,9 +388,9 @@ pub fn proxy(arguments: Arguments, item: ItemFn) -> syn::Result<TokenStream> {
         quote! {
             app.proxy(
                 Self::PATH,
-                #krate::builder::Proxy::new(#krate::builder::ProxyResponseType::#response).#setter(
-                    |ctx: #krate::ProxyContext| async move {
-                        #krate::Result::<#krate::Value>::Ok(#krate::serde_json::to_value({ #call })?)
+                ::openshop::builder::Proxy::new(::openshop::builder::ProxyResponseType::#response).#setter(
+                    |ctx: ::openshop::ProxyContext| async move {
+                        ::openshop::Result::<::openshop::Value>::Ok(::openshop::serde_json::to_value({ #call })?)
                     },
                 ),
             )
@@ -409,7 +399,6 @@ pub fn proxy(arguments: Arguments, item: ItemFn) -> syn::Result<TokenStream> {
 }
 
 pub fn route(arguments: Arguments, item: ItemFn) -> syn::Result<TokenStream> {
-    let krate = quote!(::openshop);
     let extra = extra_arguments(
         &item,
         "route",
@@ -436,9 +425,9 @@ pub fn route(arguments: Arguments, item: ItemFn) -> syn::Result<TokenStream> {
     let input = extra.first().map(|input| {
         let from_query = endpoint.reads_query();
         quote! {
-            let input: #input = match #krate::declare::route_input(&ctx, #from_query) {
+            let input: #input = match ::openshop::declare::route_input(&ctx, #from_query) {
                 ::core::result::Result::Ok(input) => input,
-                ::core::result::Result::Err(refusal) => return #krate::Result::Ok(*refusal),
+                ::core::result::Result::Err(refusal) => return ::openshop::Result::Ok(*refusal),
             };
         }
     });
@@ -448,13 +437,13 @@ pub fn route(arguments: Arguments, item: ItemFn) -> syn::Result<TokenStream> {
     };
     // With `json`, the function returns anything that serializes, like a proxy.
     let answer = if json {
-        quote!(#krate::response::json(#call))
+        quote!(::openshop::response::json(#call))
     } else {
-        quote!(#krate::response::IntoResponse::into_response(#call))
+        quote!(::openshop::response::IntoResponse::into_response(#call))
     };
     let definition = match auth {
-        Some(auth) => quote!(#krate::builder::Route::authenticated(#auth)),
-        None => quote!(#krate::builder::Route::public()),
+        Some(auth) => quote!(::openshop::builder::Route::authenticated(#auth)),
+        None => quote!(::openshop::builder::Route::public()),
     };
     let setter = &endpoint.setter;
 
@@ -471,9 +460,9 @@ pub fn route(arguments: Arguments, item: ItemFn) -> syn::Result<TokenStream> {
             app.route(
                 Self::PATH,
                 // The authentication value has the type the handler takes: `auth` must return it.
-                #definition.#setter(|ctx: #krate::RouteContext<_>| async move {
+                #definition.#setter(|ctx: ::openshop::RouteContext<_>| async move {
                     #input
-                    #krate::Result::<#krate::response::Response>::Ok(#answer)
+                    ::openshop::Result::<::openshop::response::Response>::Ok(#answer)
                 }),
             )
         },
@@ -526,7 +515,6 @@ fn description(stated: Option<LitStr>, item: &ItemFn) -> Option<LitStr> {
 }
 
 pub fn mcp_tool(arguments: Arguments, item: ItemFn) -> syn::Result<TokenStream> {
-    let krate = quote!(::openshop);
     let extra = extra_arguments(
         &item,
         "mcp_tool",
@@ -570,23 +558,23 @@ pub fn mcp_tool(arguments: Arguments, item: ItemFn) -> syn::Result<TokenStream> 
 
     let tool = match extra.first() {
         Some(input) => quote! {
-            #krate::builder::McpTool::new(
+            ::openshop::builder::McpTool::new(
                 #description,
-                |ctx: #krate::McpContext, input: #krate::JsonMap| async move {
-                    let input: #input = #krate::serde_json::from_value(#krate::Value::Object(input))?;
-                    #krate::Result::<#krate::Value>::Ok(#krate::serde_json::to_value(#ident(ctx, input).await?)?)
+                |ctx: ::openshop::McpContext, input: ::openshop::JsonMap| async move {
+                    let input: #input = ::openshop::serde_json::from_value(::openshop::Value::Object(input))?;
+                    ::openshop::Result::<::openshop::Value>::Ok(::openshop::serde_json::to_value(#ident(ctx, input).await?)?)
                 },
             )
-            .input_schema(#krate::builder::InputSchema::of::<#input>().json_schema)
+            .input_schema(::openshop::builder::InputSchema::of::<#input>().json_schema)
         },
         None => quote! {
-            #krate::builder::McpTool::new(
+            ::openshop::builder::McpTool::new(
                 #description,
-                |ctx: #krate::McpContext, _input: #krate::JsonMap| async move {
-                    #krate::Result::<#krate::Value>::Ok(#krate::serde_json::to_value(#ident(ctx).await?)?)
+                |ctx: ::openshop::McpContext, _input: ::openshop::JsonMap| async move {
+                    ::openshop::Result::<::openshop::Value>::Ok(::openshop::serde_json::to_value(#ident(ctx).await?)?)
                 },
             )
-            .input_schema(#krate::json!({ "type": "object", "additionalProperties": false, "properties": {} }))
+            .input_schema(::openshop::json!({ "type": "object", "additionalProperties": false, "properties": {} }))
         },
     };
 
@@ -603,7 +591,6 @@ pub fn mcp_tool(arguments: Arguments, item: ItemFn) -> syn::Result<TokenStream> 
 }
 
 pub fn mcp_resource(arguments: Arguments, item: ItemFn) -> syn::Result<TokenStream> {
-    let krate = quote!(::openshop);
     extra_arguments(&item, "mcp_resource", "async fn(ctx: McpContext) -> Result<…>", 0)?;
     let ident = &item.sig.ident;
 
@@ -654,8 +641,8 @@ pub fn mcp_resource(arguments: Arguments, item: ItemFn) -> syn::Result<TokenStre
         quote! {
             app.mcp_resource(
                 Self::URI,
-                #krate::builder::McpResource::new(#name, |ctx: #krate::McpContext| async move {
-                    #krate::Result::<#krate::McpResourceContent>::Ok(::core::convert::Into::into(#ident(ctx).await?))
+                ::openshop::builder::McpResource::new(#name, |ctx: ::openshop::McpContext| async move {
+                    ::openshop::Result::<::openshop::McpResourceContent>::Ok(::core::convert::Into::into(#ident(ctx).await?))
                 })
                 #description
                 #(#options)*,
