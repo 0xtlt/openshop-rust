@@ -8,6 +8,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use anyhow::Context;
 use futures::StreamExt;
 use shopify_api::transport::{BoxFuture, StreamingResponse};
 pub use shopify_api::transport::{HttpRequest, HttpResponse, Method, Transport, TransportError};
@@ -19,12 +20,7 @@ pub(crate) const USER_AGENT: &str = concat!("openshop-rust/", env!("CARGO_PKG_VE
 /// Shopify or a token are far below. A server that sends more is broken or
 /// hostile, and the body of such an answer is held in memory. The results of
 /// a bulk operation are streamed, whatever their size.
-pub const MAX_RESPONSE_BYTES: usize = 10 * 1024 * 1024;
-
-/// The transport of an application that names none.
-pub fn default_transport() -> anyhow::Result<Arc<dyn Transport>> {
-    Ok(Arc::new(ReqwestTransport::new()))
-}
+const MAX_RESPONSE_BYTES: usize = 10 * 1024 * 1024;
 
 /// The transport of an application, as `shopify_api` takes one by value: each
 /// app of `shopify_api` shares the one [`Arc`].
@@ -53,15 +49,17 @@ pub struct ReqwestTransport {
 }
 
 impl ReqwestTransport {
-    pub fn new() -> Self {
+    /// Fails when `reqwest` cannot build the client, rather than fall back
+    /// to one that follows redirections and never times out.
+    pub fn new() -> anyhow::Result<Self> {
         let client = reqwest::Client::builder()
             .user_agent(USER_AGENT)
             .connect_timeout(Duration::from_secs(10))
             .timeout(Duration::from_secs(60))
             .redirect(reqwest::redirect::Policy::none())
             .build()
-            .unwrap_or_default();
-        Self { client }
+            .context("[openshop] Failed to build the HTTP client of Shopify requests")?;
+        Ok(Self { client })
     }
 
     fn builder(&self, request: &HttpRequest) -> reqwest::RequestBuilder {
@@ -76,12 +74,6 @@ impl ReqwestTransport {
             builder = builder.body(request.body.clone());
         }
         builder
-    }
-}
-
-impl Default for ReqwestTransport {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
@@ -218,7 +210,7 @@ mod tests {
         let head = format!("HTTP/1.1 307 Temporary Redirect\r\nlocation: {location}\r\ncontent-length: 0\r\n\r\n");
         let url = answering(head, Vec::new()).await;
 
-        let response = ReqwestTransport::new().send(post(&url)).await.unwrap();
+        let response = ReqwestTransport::new().unwrap().send(post(&url)).await.unwrap();
         assert_eq!(response.status, 307);
         let reached = tokio::time::timeout(Duration::from_millis(300), elsewhere.accept())
             .await
@@ -231,7 +223,7 @@ mod tests {
         assert_eq!(MAX_RESPONSE_BYTES, 10 * 1024 * 1024);
         let head = format!("HTTP/1.1 200 OK\r\ncontent-length: {}\r\n\r\n", MAX_RESPONSE_BYTES + 1);
         let url = answering(head, Vec::new()).await;
-        let error = ReqwestTransport::new().send(post(&url)).await.unwrap_err();
+        let error = ReqwestTransport::new().unwrap().send(post(&url)).await.unwrap_err();
         assert!(error.to_string().contains("larger than 10485760 bytes"), "{error}");
 
         // A body without a length that goes on is counted.
@@ -248,6 +240,7 @@ mod tests {
         )
         .await;
         let mut response = ReqwestTransport::new()
+            .unwrap()
             .send_streaming(HttpRequest::new(Method::Get, &url))
             .await
             .unwrap();

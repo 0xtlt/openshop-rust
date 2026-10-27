@@ -153,7 +153,7 @@ static APP: App = app! {
 | Method | Value | Default when not called |
 | --- | --- | --- |
 | `SentryConfig::new(dsn)` | `Option<String>` or `String` | — |
-| `.environment(name)` | The environment of the events | `production` with `OPENSHOP_ENV=production`, `development` otherwise |
+| `.environment(name)` | The environment of the events | `production` with `OPENSHOP_ENV=production` or `NODE_ENV=production`, `development` otherwise |
 | `.release(name)` | The release of the events: a version, the hash of a commit | No release |
 | `.configure(\|options\| …)` | A function from the `ClientOptions` of the Sentry SDK to the options to use | The defaults of the SDK |
 

@@ -32,13 +32,23 @@ pub(crate) fn redacted_option(secret: &Option<String>) -> Option<Redacted<'_>> {
     secret.as_deref().map(Redacted)
 }
 
-/// Whether the name of a header or of a field says that it holds a secret.
-#[cfg(any(test, feature = "testing"))]
+/// Whether the name of a header, a field or a variable says that it holds a secret.
+#[cfg(any(test, feature = "testing", feature = "sentry"))]
 pub(crate) fn is_secret_name(name: &str) -> bool {
     let name = name.to_ascii_lowercase();
-    ["secret", "token", "password", "authorization", "cookie", "code", "signature", "key"]
-        .iter()
-        .any(|word| name.contains(word))
+    [
+        "secret",
+        "token",
+        "password",
+        "authorization",
+        "cookie",
+        "code",
+        "signature",
+        "hmac",
+        "key",
+    ]
+    .iter()
+    .any(|word| name.contains(word))
 }
 
 /// A JSON value for display, with the fields that hold a secret hidden at any depth.

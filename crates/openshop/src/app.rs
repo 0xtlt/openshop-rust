@@ -15,7 +15,7 @@ use crate::declare::Declared;
 use crate::engine::dispatch::{DispatchOptions, QueuedRun, dispatch_flow};
 #[cfg(feature = "sentry")]
 use crate::runtime::SentryConfig;
-use crate::runtime::{RuntimeEnv, Transport, default_transport};
+use crate::runtime::{ReqwestTransport, RuntimeEnv, Transport};
 use crate::server::connectors::Connectors;
 use crate::server::crypto::Crypto;
 use crate::server::mcp::core::create_core_mcp_capabilities;
@@ -473,7 +473,7 @@ pub struct OpenShop {
 
 impl OpenShop {
     pub fn new(config: OpenShopConfig, db: PgPool, env: RuntimeEnv) -> Result<Self> {
-        Self::with_transport(config, db, env, default_transport()?)
+        Self::with_transport(config, db, env, Arc::new(ReqwestTransport::new()?))
     }
 
     /// Like [`OpenShop::new`] with another transport for every exchange with

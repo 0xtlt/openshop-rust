@@ -82,9 +82,8 @@ never the token.
 ## Outbound responses
 
 The body of an answer to a request OpenShop sends (Shopify, token exchanges,
-provider checks) is read as it arrives and refused beyond 10 MiB
-(`MAX_RESPONSE_BYTES`), by its `Content-Length` when it has one and by counting
-when it has not. A server that streams without end cannot fill the memory of the
+provider checks) is read as it arrives and refused beyond 10 MiB, by its
+`Content-Length` when it has one and by counting when it has not. A server that streams without end cannot fill the memory of the
 process.
 
 ## Authentication boundaries
