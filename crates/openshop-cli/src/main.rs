@@ -24,12 +24,12 @@ const USAGE: &str = "
     dev                         Start the app in dev mode and restart it when sources change
     worker [--concurrency=N]    Start worker only (production, scalable)
     migrate                     Apply client-owned migrations from ./migrations
-    migrate generate            Generate a new client-owned migration
-    migrate check               Check generated migration history
+    migrate generate            Generate migrations for the schema ./migrations does not cover yet
+    migrate check               Check that ./migrations covers the current schema
     migrate status              Show client migration status
     build                       Build for production: the admin UI bundle, if any, then the app
     build-ui                    Build the admin UI bundle alone, into dist/
-    start                       Start production server (API + UI, no worker)
+    start                       Start production server (API + UI + scheduler, no worker)
     test [args]                 Run tests
 
   Usage:
