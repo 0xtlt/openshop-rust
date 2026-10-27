@@ -26,10 +26,11 @@ The dependency is named `openshop`: under another name, the generated code
 does not find it.
 
 `api-version` is the Admin API version the operations are checked against and
-sent to. The first build downloads the schema of that version into
-`graphql/admin.schema.json`, next to `Cargo.toml`: commit it, so that builds
-without network access have it. To move to another version, change
-`api-version`; the next build downloads its schema.
+sent to. Its schema is `graphql/admin.schema.json`, next to `Cargo.toml`,
+which `openshop init` writes: commit it. To move to another version, change
+`api-version` and run `shopify-api schema download` in that directory
+(`cargo install shopify_api --features cli`). The build does not download it:
+until the file matches `api-version`, it stops and says so.
 
 ## Inline operations
 

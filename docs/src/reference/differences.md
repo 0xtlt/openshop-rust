@@ -276,8 +276,8 @@ larger configurations easier to split:
 - GraphQL code generation as a separate step. `graphql!` checks an operation
   against Shopify's schema and types it when the crate compiles, so there is
   no `.graphqlrc.ts`, no generated file and no watch mode, and `dev` has
-  nothing to generate. The first build downloads the schema of the version of
-  `[package.metadata.shopify_api]`. Enum values are strings, and the types of
+  nothing to generate. The schema of the version of
+  `[package.metadata.shopify_api]` is a committed file. Enum values are strings, and the types of
   an inline operation have no name. See [Typed GraphQL](graphql.md).
 - `openshop build` and `openshop test` map to `cargo build --release` and
   `cargo test`.

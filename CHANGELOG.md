@@ -55,14 +55,16 @@
   print a failed flow themselves (the runner logs it), and `docker compose` no
   longer creates the unused `openshop_test` database.
 
-- Shopify is reached through `shopify_api` 1.0.0-rc.2 instead of a client of
+- Shopify is reached through `shopify_api` 1.0.0-rc.3 instead of a client of
   OpenShop's own. Breaking changes:
   - `graphql!` is `shopify_api`'s, wrapped as `openshop::graphql!` and in the
     prelude so that its code names `openshop::shopify_api`: an application
     depends on `openshop` alone. The crate that writes an operation names its
     Admin API version in `[package.metadata.shopify_api]`
-    `api-version` (the templates say `2026-10`), and commits the schema the
-    first build downloads into `graphql/admin.schema.json`. Input objects are
+    `api-version` (the templates say `2026-10`), and commits its schema,
+    `graphql/admin.schema.json`: `openshop init` writes it, `shopify-api
+    schema download` replaces it, and a build that finds it missing or for
+    another version stops. Input objects are
     literals checked field by field, or `openshop::shopify::input!`. The
     `openshop-graphql` crate, `openshop codegen`, `OPENSHOP_GRAPHQL_SCHEMA`,
     `GraphqlOperation`, `SHOPIFY_API_VERSION` and `is_api_version` are gone.

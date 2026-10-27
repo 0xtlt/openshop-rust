@@ -375,9 +375,9 @@ pub use shopify_api;
 /// ```
 ///
 /// The schema is the one of `graphql/admin.schema.json`, next to the
-/// `Cargo.toml` of the crate that writes the operation, which the first
-/// build downloads for the version of `[package.metadata.shopify_api]`
-/// `api-version`; each operation is sent to that version. The application
+/// `Cargo.toml` of the crate that writes the operation, for the version of
+/// `[package.metadata.shopify_api]` `api-version`; each operation is sent to
+/// that version. The application
 /// names the crate `openshop` in its `Cargo.toml`, not another name. See the
 /// [documentation of `shopify_api`](https://docs.rs/shopify_api) for the
 /// module form, input objects, bulk operations and other versions.

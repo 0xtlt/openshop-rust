@@ -206,7 +206,7 @@ the crate compiles, without writing files. The generated files are the SQL
 migrations written by `openshop init` and `migrate generate`, to review and
 commit with `migrations/schema.snapshot.json`, and `graphql/admin.schema.json`,
 the schema [`graphql!`](graphql.md#setup) checks operations against, which
-the first build downloads.
+`openshop init` writes and `shopify-api schema download` replaces.
 
 ## Modules
 

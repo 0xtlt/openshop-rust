@@ -8,7 +8,8 @@ license.workspace = true
 publish = false
 
 # The Admin API version `graphql!` checks the operations against and sends
-# them to. The first build downloads its schema into `graphql/admin.schema.json`.
+# them to. Its schema is `graphql/admin.schema.json`: after a change, run
+# `shopify-api schema download` here (`cargo install shopify_api --features cli`).
 [package.metadata.shopify_api]
 api-version = "2026-10"
 
