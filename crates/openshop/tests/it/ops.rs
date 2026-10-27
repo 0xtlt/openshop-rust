@@ -1,9 +1,7 @@
 //! The operator dashboard under `/ops`: served only with a password, read-only,
 //! and showing every shop.
 
-mod common;
-
-use common::noop_flow;
+use crate::common::{install, noop_flow};
 use openshop::builder::{Field, OpenShopBuilder, Provider};
 use openshop::server::{ServerOptions, UiSource};
 use openshop::testing::{TestContext, TestOptions};
@@ -80,19 +78,6 @@ async fn page(ctx: &TestContext, path: &str, cookie: &str) -> String {
     let response = get(ctx, path, Some(cookie)).await;
     assert_eq!(response.status(), StatusCode::OK, "{path}");
     response.text().await.unwrap()
-}
-
-async fn install(db: &PgPool, shop: &str, access_token: Option<&str>, uninstalled: bool) {
-    sqlx::query(
-        "INSERT INTO installations (shop, access_token, scopes, uninstalled_at) \
-         VALUES ($1, $2, 'read_orders', CASE WHEN $3 THEN now() END)",
-    )
-    .bind(shop)
-    .bind(access_token)
-    .bind(uninstalled)
-    .execute(db)
-    .await
-    .unwrap();
 }
 
 async fn run(db: &PgPool, shop: &str, status: &str, error: Option<&str>) -> Uuid {
@@ -302,9 +287,9 @@ fn assert_has(page: &str, expected: &[&str]) {
 /// third that did not finish installing. Returns the ids of the completed
 /// run and of the failed one.
 async fn seed(ctx: &TestContext) -> (Uuid, Uuid) {
-    install(&ctx.db, SHOP, Some("shpat_one"), false).await;
-    install(&ctx.db, OTHER_SHOP, Some("shpat_two"), true).await;
-    install(&ctx.db, "pending.myshopify.com", None, false).await;
+    install(&ctx.db, "default", SHOP, Some("shpat_one"), false).await;
+    install(&ctx.db, "default", OTHER_SHOP, Some("shpat_two"), true).await;
+    install(&ctx.db, "default", "pending.myshopify.com", None, false).await;
     let completed = run(&ctx.db, SHOP, "completed", None).await;
     let failed = run(&ctx.db, OTHER_SHOP, "failed", Some("<script>alert(1)</script>")).await;
     sqlx::query(

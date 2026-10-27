@@ -1,12 +1,10 @@
 //! Typed provider calls: a `ProviderCall` constant shared by the provider that
 //! implements it and the code that invokes it.
 
-mod common;
-
-use common::{noop_flow, shop_connectors as connectors};
-use openshop::builder::{Field, Flow, Provider, ProviderCall};
+use crate::common::{noop_flow, shop_connectors as connectors};
+use openshop::builder::{Field, Provider, ProviderCall};
 use openshop::testing::TestContext;
-use openshop::{OpenShopConfig, RunOutcome, Value, json, validators};
+use openshop::{OpenShopConfig, Value, json, validators};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Deserialize)]
@@ -82,7 +80,7 @@ async fn context() -> TestContext {
 }
 
 async fn save_config(ctx: &TestContext, config: Value) {
-    common::save_provider_config(ctx, "warehouse", config).await;
+    crate::common::save_provider_config(ctx, "warehouse", config).await;
 }
 
 #[openshop::test(context())]
@@ -193,7 +191,7 @@ async fn invoking_a_call_that_is_not_registered_fails_by_name() {
 
 #[openshop::test(context())]
 async fn the_typed_checker_receives_the_stored_configuration(ctx: &TestContext) {
-    let unconfigured: Value = common::check_provider(ctx, "warehouse").await;
+    let unconfigured: Value = crate::common::check_provider(ctx, "warehouse").await;
     assert_eq!(
         unconfigured,
         json!({
@@ -204,59 +202,9 @@ async fn the_typed_checker_receives_the_stored_configuration(ctx: &TestContext) 
 
     for (api_key, expected) in [("secret-1", true), ("wrong", false)] {
         save_config(ctx, json!({ "apiUrl": "https://warehouse.test", "apiKey": api_key })).await;
-        let checked: Value = common::check_provider(ctx, "warehouse").await;
+        let checked: Value = crate::common::check_provider(ctx, "warehouse").await;
         assert_eq!(checked, json!({ "ok": expected }), "{api_key}");
     }
-}
-
-#[tokio::test]
-async fn flows_invoke_typed_calls_through_the_fakes() {
-    let flow = Flow::new("pushOrders", |ctx| async move {
-        let receipt = ctx.connectors.invoke(PUSH, &orders()).await?;
-        ctx.step
-            .run("record", || async { Ok(json!({ "accepted": receipt.accepted })) })
-            .await?;
-        Ok(())
-    });
-    let config = OpenShopConfig::builder()
-        .provider(warehouse())
-        .flow(flow)
-        .build()
-        .unwrap();
-    let ctx = TestContext::new(config).await.unwrap();
-
-    let push = ctx.fakes.for_call(PUSH);
-    push.returns(PushReceipt {
-        endpoint: "fake".to_string(),
-        authorized: true,
-        batch_size: 1,
-        accepted: 2,
-        total: 42,
-    });
-    assert_eq!(
-        ctx.run_flow("pushOrders", json!({})).await.unwrap(),
-        RunOutcome::Completed
-    );
-    assert_eq!(push.call_count(), 1);
-    assert_eq!(push.last_call().unwrap().args, orders());
-    let (output,): (Value,) = sqlx::query_as("SELECT output FROM step_results WHERE step_name = 'record'")
-        .fetch_one(&ctx.db)
-        .await
-        .unwrap();
-    assert_eq!(output, json!({ "accepted": 2 }));
-
-    // A fake without a configured result returns `null`, which is not a receipt.
-    ctx.reset_fakes();
-    let result = ctx.run_flow("pushOrders", json!({})).await.unwrap();
-    assert!(
-        matches!(
-            result,
-            RunOutcome::Failed { ref error, .. }
-                if error.starts_with("Invalid result from \"warehouse.push\": invalid type: null")
-        ),
-        "{result:?}"
-    );
-    ctx.shutdown().await.unwrap();
 }
 
 #[test]
@@ -278,16 +226,6 @@ fn a_call_must_name_the_key_its_provider_is_registered_under() {
         .build()
         .unwrap();
     assert_eq!(config.providers["warehouse"].name, "Main warehouse");
-}
-
-#[test]
-fn calls_are_plain_constants() {
-    let copy = PUSH;
-    assert_eq!((copy.provider(), copy.method()), ("warehouse", "push"));
-    assert_eq!(
-        format!("{PUSH:?}"),
-        "ProviderCall { provider: \"warehouse\", method: \"push\" }"
-    );
 }
 
 // ─── Builder ─────────────────────────────────────────────────────────

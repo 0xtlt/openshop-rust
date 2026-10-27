@@ -1,9 +1,7 @@
-mod common;
-
 use std::borrow::Cow;
 use std::time::Duration;
 
-use common::noop_flow;
+use crate::common::noop_flow;
 use openshop::builder::Route;
 use openshop::server::{DEFAULT_MAX_REQUEST_BODY_BYTES, ServerOptions};
 use openshop::testing::{TestContext, TestOptions, sign_query, to_query_string};

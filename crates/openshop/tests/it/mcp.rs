@@ -5,17 +5,16 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use crate::common::{LogCapture, graphql_requests, install, send, two_shopify_apps};
 use chrono::{DateTime, Utc};
 use openshop::builder::{Flow, InputSchema, McpResource, McpTool};
 use openshop::db::schema::McpAuditLog;
 use openshop::engine::{RunFlowOptions, run_flow};
 use openshop::server::mcp::core::latest_stable_shopify_admin_api_version;
-use openshop::testing::OutboundRequest;
 use openshop::testing::{MockTransport, TestContext, TestOptions, session_token};
 use openshop::{
-    AdminPageId, AdminPageMode, CancellationToken, Cron, DispatchOptions, FlowContext, IndexMap, McpConfig, McpContext,
-    McpPermission, McpResourceContent, OpenShopConfig, PublicError, ShopifyAppConfig, ShopifyConfig, Value, anyhow,
-    json,
+    AdminPageId, AdminPageMode, CancellationToken, Cron, DispatchOptions, FlowContext, McpConfig, McpContext,
+    McpPermission, McpResourceContent, OpenShopConfig, PublicError, Value, anyhow, json,
 };
 use reqwest::{Method, RequestBuilder};
 use uuid::Uuid;
@@ -89,31 +88,17 @@ async fn context() -> TestContext {
     TestContext::new(config_with(demo_mcp())).await.unwrap()
 }
 
-/// Two Shopify apps served by one instance; the context's own session belongs to `client-a`.
+/// The two Shopify apps of [`two_shopify_apps`]; the context's own session belongs to `clientA`.
 async fn multi_app_context() -> TestContext {
-    let apps: IndexMap<String, ShopifyAppConfig> = ["a", "b"]
-        .into_iter()
-        .map(|suffix| {
-            let app = ShopifyAppConfig::Keys {
-                api_key: format!("key-{suffix}"),
-                api_secret: format!("secret-{suffix}"),
-                app_url: None,
-            };
-            (format!("client-{suffix}"), app)
-        })
-        .collect();
     let config = OpenShopConfig::builder()
-        .shopify(ShopifyConfig {
-            scopes: Some("read_products".to_string()),
-            apps: Some(apps),
-        })
+        .shopify(two_shopify_apps())
         .flow(log_flow())
         .cron(Cron::new("0 * * * *", "log-flow"))
         .build()
         .unwrap();
     let options = TestOptions {
-        api_key: "key-a".to_string(),
-        secret: "secret-a".to_string(),
+        api_key: "client-a-key".to_string(),
+        secret: "client-a-secret".to_string(),
         ..Default::default()
     };
     TestContext::with_options(config, options).await.unwrap()
@@ -121,24 +106,11 @@ async fn multi_app_context() -> TestContext {
 
 // ─── HTTP helpers ────────────────────────────────────────────────────
 
-async fn send(request: RequestBuilder) -> (u16, Value) {
-    let response = request.send().await.expect("response");
-    let status = response.status().as_u16();
-    let text = response.text().await.expect("response body");
-    let body = serde_json::from_str(&text).unwrap_or(Value::String(text));
-    (status, body)
-}
-
 /// An Admin API request carrying the given Shopify session token.
 fn admin_with(ctx: &TestContext, method: Method, path: &str, session_token: &str) -> RequestBuilder {
     ctx.http
         .request(method, format!("{}{path}", ctx.url))
         .header("Authorization", format!("Bearer {session_token}"))
-}
-
-/// An Admin API request authenticated as another shop of the context's app.
-fn admin_as(ctx: &TestContext, method: Method, path: &str, shop: &str) -> RequestBuilder {
-    admin_with(ctx, method, path, &ctx.session_token_for(shop, "1"))
 }
 
 struct IssuedToken {
@@ -300,19 +272,6 @@ async fn audits(ctx: &TestContext, token_id: &str) -> Vec<McpAuditLog> {
         .unwrap()
 }
 
-async fn install(ctx: &TestContext, app_handle: &str, shop: &str, access_token: Option<&str>) {
-    let stored = access_token.map(|token| ctx.app.crypto().encrypt_string(token).unwrap());
-    sqlx::query(
-        "INSERT INTO installations (app_handle, shop, access_token, scopes) VALUES ($1, $2, $3, 'read_products')",
-    )
-    .bind(app_handle)
-    .bind(shop)
-    .bind(stored)
-    .execute(&ctx.db)
-    .await
-    .unwrap();
-}
-
 async fn uninstall(ctx: &TestContext, shop: &str) {
     sqlx::query("UPDATE installations SET uninstalled_at = now() WHERE shop = $1")
         .bind(shop)
@@ -336,22 +295,6 @@ async fn logged_run(ctx: &TestContext, app_handle: &str, shop: &str) -> Uuid {
     .unwrap();
     assert_eq!(result, openshop::RunOutcome::Completed);
     dispatched.run_id
-}
-
-fn graphql_requests(ctx: &TestContext) -> Vec<OutboundRequest> {
-    ctx.transport
-        .requests()
-        .into_iter()
-        .filter(|request| request.url.ends_with("/graphql.json"))
-        .collect()
-}
-
-fn header<'a>(request: &'a OutboundRequest, name: &str) -> Option<&'a str> {
-    request
-        .headers
-        .iter()
-        .find(|(key, _)| key.eq_ignore_ascii_case(name))
-        .map(|(_, value)| value.as_str())
 }
 
 /// Answers Admin GraphQL calls with `body`; anything else (token exchange) is not mocked.
@@ -1007,7 +950,7 @@ async fn admin_token_list_is_isolated_by_shop(ctx: &TestContext) {
 
     let (_, list_a) = send(ctx.get("/api/mcp/tokens")).await;
     assert!(!contains(&list_a));
-    let (_, list_b) = send(admin_as(ctx, Method::GET, "/api/mcp/tokens", SHOP_B)).await;
+    let (_, list_b) = send(ctx.request_as(Method::GET, "/api/mcp/tokens", SHOP_B, "1")).await;
     assert!(contains(&list_b));
 
     // Another shop can neither read nor change the token.
@@ -1028,7 +971,7 @@ async fn admin_token_list_is_isolated_by_shop(ctx: &TestContext) {
         assert_eq!(error, json!({ "error": "Token not found" }));
     }
 
-    let (status, detail) = send(admin_as(ctx, Method::GET, &shop_b.path(""), SHOP_B)).await;
+    let (status, detail) = send(ctx.request_as(Method::GET, &shop_b.path(""), SHOP_B, "1")).await;
     assert_eq!(status, 200);
     assert_eq!(detail["name"], "test token");
     assert_eq!(detail["status"], "active");
@@ -2134,18 +2077,18 @@ async fn a_client_disconnect_drops_the_running_tool_and_cancels_its_signal() {
 #[openshop::test(context())]
 async fn openshop_shops_list_returns_the_installation_of_the_token_shop_only(ctx: &TestContext) {
     let shop = ctx.shop.clone();
-    install(ctx, "default", &shop, Some("token-a")).await;
-    install(ctx, "default", SHOP_B, Some("token-b")).await;
-    install(ctx, "default", "uninstalled.myshopify.com", Some("token-c")).await;
+    install(&ctx.db, "default", &shop, Some("token-a"), false).await;
+    install(&ctx.db, "default", SHOP_B, Some("token-b"), false).await;
+    install(&ctx.db, "default", "uninstalled.myshopify.com", Some("token-c"), false).await;
     uninstall(ctx, "uninstalled.myshopify.com").await;
-    install(ctx, "default", "pending.myshopify.com", None).await;
-    install(ctx, "other", "hidden.myshopify.com", Some("token-d")).await;
+    install(&ctx.db, "default", "pending.myshopify.com", None, false).await;
+    install(&ctx.db, "other", "hidden.myshopify.com", Some("token-d"), false).await;
     let issued = create_token(ctx, &["shopify_admin_graphql"]).await;
 
     let body = call_tool(ctx, &issued.token, "openshop.shops.list", json!({})).await;
     let listed = &body["result"]["structuredContent"]["shops"];
     assert_eq!(strings(listed, "shop"), [shop.as_str()]);
-    assert_eq!(listed[0]["scopes"], "read_products");
+    assert_eq!(listed[0]["scopes"], "read_orders");
     timestamp(&listed[0]["installedAt"]);
     // Access tokens never leave the server.
     let text = body["result"]["content"][0]["text"].as_str().unwrap();
@@ -2164,8 +2107,8 @@ async fn openshop_shops_list_returns_the_installation_of_the_token_shop_only(ctx
 #[openshop::test(context())]
 async fn openshop_shops_list_requires_a_permission_and_only_shows_the_shop_of_the_token(ctx: &TestContext) {
     let shop = ctx.shop.clone();
-    install(ctx, "default", &shop, Some("token-a")).await;
-    install(ctx, "default", SHOP_B, Some("token-b")).await;
+    install(&ctx.db, "default", &shop, Some("token-a"), false).await;
+    install(&ctx.db, "default", SHOP_B, Some("token-b"), false).await;
 
     // Without the permission the tool is refused, and absent from the listing.
     let bare = create_token(ctx, &[]).await;
@@ -2200,8 +2143,8 @@ async fn openshop_shops_list_requires_a_permission_and_only_shows_the_shop_of_th
 #[openshop::test(context())]
 async fn openshop_admin_graphql_refuses_another_shop_of_the_app_and_sends_nothing_to_shopify(ctx: &TestContext) {
     let shop = ctx.shop.clone();
-    install(ctx, "default", &shop, Some("token-a")).await;
-    install(ctx, "default", SHOP_B, Some("token-b")).await;
+    install(&ctx.db, "default", &shop, Some("token-a"), false).await;
+    install(&ctx.db, "default", SHOP_B, Some("token-b"), false).await;
     respond_to_graphql(ctx, 200, json!({ "data": { "shop": { "name": "Leaked" } } }));
     let issued = create_token(ctx, &["shopify_admin_graphql"]).await;
 
@@ -2250,7 +2193,7 @@ async fn openshop_admin_graphql_refuses_another_shop_of_the_app_and_sends_nothin
         requests[0].url,
         format!("https://{shop}/admin/api/2026-04/graphql.json")
     );
-    assert_eq!(header(&requests[0], "X-Shopify-Access-Token"), Some("token-a"));
+    assert_eq!(requests[0].header("X-Shopify-Access-Token"), Some("token-a"));
 
     // The token of the other shop reaches that shop with its own installation.
     let token_b = create_token_as(ctx, SHOP_B, &["shopify_admin_graphql"], json!({})).await;
@@ -2264,13 +2207,13 @@ async fn openshop_admin_graphql_refuses_another_shop_of_the_app_and_sends_nothin
     assert_eq!(body["result"]["structuredContent"]["shop"], SHOP_B);
     let requests = graphql_requests(ctx);
     assert_eq!(requests.len(), 2);
-    assert_eq!(header(&requests[1], "X-Shopify-Access-Token"), Some("token-b"));
+    assert_eq!(requests[1].header("X-Shopify-Access-Token"), Some("token-b"));
 }
 
 #[openshop::test(context())]
 async fn openshop_admin_graphql_requires_its_explicit_permission(ctx: &TestContext) {
     let shop = ctx.shop.clone();
-    install(ctx, "default", &shop, Some("offline-admin-token")).await;
+    install(&ctx.db, "default", &shop, Some("offline-admin-token"), false).await;
     respond_to_graphql(ctx, 200, json!({ "data": { "shop": { "name": "Forbidden" } } }));
     let issued = create_token(ctx, &CORE_PERMISSIONS[..5]).await;
 
@@ -2323,7 +2266,7 @@ async fn openshop_admin_graphql_gets_the_token_of_the_client_credentials_shop_an
             return Ok(MockTransport::json(404, json!({})));
         }
         // The first token is refused, as one Shopify no longer takes.
-        match header(request, "X-Shopify-Access-Token") {
+        match request.header("X-Shopify-Access-Token") {
             Some("cc-token-1") => Ok(MockTransport::json(401, json!({ "errors": "Invalid access token" }))),
             _ => Ok(MockTransport::json(
                 200,
@@ -2346,8 +2289,8 @@ async fn openshop_admin_graphql_gets_the_token_of_the_client_credentials_shop_an
     assert_eq!(issued_tokens.load(Ordering::SeqCst), 2);
     let requests = graphql_requests(ctx);
     assert_eq!(requests.len(), 2);
-    assert_eq!(header(&requests[0], "X-Shopify-Access-Token"), Some("cc-token-1"));
-    assert_eq!(header(&requests[1], "X-Shopify-Access-Token"), Some("cc-token-2"));
+    assert_eq!(requests[0].header("X-Shopify-Access-Token"), Some("cc-token-1"));
+    assert_eq!(requests[1].header("X-Shopify-Access-Token"), Some("cc-token-2"));
 
     // Another shop is out of reach of the token, whatever the mode.
     let body = call_tool(
@@ -2377,7 +2320,7 @@ async fn openshop_admin_graphql_gets_the_token_of_the_client_credentials_shop_an
 #[openshop::test(context())]
 async fn openshop_admin_graphql_defaults_omitted_api_version_to_the_latest_stable_version(ctx: &TestContext) {
     let shop = ctx.shop.clone();
-    install(ctx, "default", &shop, Some("offline-admin-token")).await;
+    install(&ctx.db, "default", &shop, Some("offline-admin-token"), false).await;
     respond_to_graphql(ctx, 200, json!({ "data": { "shop": { "name": "Latest Shop" } } }));
     let issued = create_token(ctx, &["shopify_admin_graphql"]).await;
     let latest = latest_stable_shopify_admin_api_version(Utc::now());
@@ -2405,7 +2348,7 @@ async fn openshop_admin_graphql_defaults_omitted_api_version_to_the_latest_stabl
             format!("https://{shop}/admin/api/{version}/graphql.json")
         );
         assert_eq!(
-            header(&requests[0], "X-Shopify-Access-Token"),
+            requests[0].header("X-Shopify-Access-Token"),
             Some("offline-admin-token")
         );
     }
@@ -2415,7 +2358,7 @@ async fn openshop_admin_graphql_defaults_omitted_api_version_to_the_latest_stabl
 async fn openshop_admin_graphql_runs_against_an_installed_shop_returns_raw_shopify_json_and_audits_the_target_shop(
     ctx: &TestContext,
 ) {
-    install(ctx, "default", SHOP_B, Some("offline-admin-token")).await;
+    install(&ctx.db, "default", SHOP_B, Some("offline-admin-token"), false).await;
     respond_to_graphql(
         ctx,
         200,
@@ -2455,10 +2398,10 @@ async fn openshop_admin_graphql_runs_against_an_installed_shop_returns_raw_shopi
         format!("https://{SHOP_B}/admin/api/2026-04/graphql.json")
     );
     assert_eq!(
-        header(&requests[0], "X-Shopify-Access-Token"),
+        requests[0].header("X-Shopify-Access-Token"),
         Some("offline-admin-token")
     );
-    assert_eq!(header(&requests[0], "Content-Type"), Some("application/json"));
+    assert_eq!(requests[0].header("Content-Type"), Some("application/json"));
     assert_eq!(requests[0].body, json!({ "query": query, "variables": { "first": 1 } }));
 
     // The shop may be given as a URL; without variables, none are sent.
@@ -2489,10 +2432,10 @@ async fn openshop_admin_graphql_runs_against_an_installed_shop_returns_raw_shopi
 
 #[openshop::test(context())]
 async fn openshop_admin_graphql_refuses_a_token_shop_that_is_not_installed_for_the_token_app(ctx: &TestContext) {
-    install(ctx, "default", "uninstalled.myshopify.com", Some("token-c")).await;
+    install(&ctx.db, "default", "uninstalled.myshopify.com", Some("token-c"), false).await;
     uninstall(ctx, "uninstalled.myshopify.com").await;
-    install(ctx, "default", "pending.myshopify.com", None).await;
-    install(ctx, "other", "hidden.myshopify.com", Some("token-d")).await;
+    install(&ctx.db, "default", "pending.myshopify.com", None, false).await;
+    install(&ctx.db, "other", "hidden.myshopify.com", Some("token-d"), false).await;
     respond_to_graphql(ctx, 200, json!({ "data": {} }));
 
     for shop in [
@@ -2518,7 +2461,7 @@ async fn openshop_admin_graphql_refuses_a_token_shop_that_is_not_installed_for_t
         assert!(recorded.iter().all(|audit| audit.target_shop.as_deref() == Some(shop)));
     }
 
-    install(ctx, "default", &ctx.shop.clone(), Some("token-a")).await;
+    install(&ctx.db, "default", &ctx.shop.clone(), Some("token-a"), false).await;
     let issued = create_token(ctx, &["shopify_admin_graphql"]).await;
     let invalid = [
         (
@@ -2546,7 +2489,7 @@ async fn openshop_admin_graphql_refuses_a_token_shop_that_is_not_installed_for_t
 
 #[openshop::test(context())]
 async fn openshop_admin_graphql_reports_shopify_failures_without_hiding_them(ctx: &TestContext) {
-    install(ctx, "default", SHOP_B, Some("token-b")).await;
+    install(&ctx.db, "default", SHOP_B, Some("token-b"), false).await;
     let issued = create_token_as(ctx, SHOP_B, &["shopify_admin_graphql"], json!({})).await;
     let arguments = json!({ "shop": SHOP_B, "apiVersion": "2026-04", "query": "{ shop { name } }" });
 
@@ -2594,13 +2537,9 @@ async fn openshop_admin_graphql_decrypts_the_stored_access_token() {
     let ctx = TestContext::with_options(config_with(demo_mcp()), options)
         .await
         .unwrap();
-    install(&ctx, "default", &ctx.shop, Some("offline-admin-token")).await;
-    let (stored,): (String,) = sqlx::query_as("SELECT access_token FROM installations WHERE shop = $1")
-        .bind(&ctx.shop)
-        .fetch_one(&ctx.db)
-        .await
-        .unwrap();
+    let stored = ctx.app.crypto().encrypt_string("offline-admin-token").unwrap();
     assert!(stored.starts_with("enc:aes-256-gcm:"));
+    install(&ctx.db, "default", &ctx.shop, Some(&stored), false).await;
     respond_to_graphql(&ctx, 200, json!({ "data": { "shop": { "name": "Encrypted" } } }));
     let issued = create_token(&ctx, &["shopify_admin_graphql"]).await;
 
@@ -2614,7 +2553,7 @@ async fn openshop_admin_graphql_decrypts_the_stored_access_token() {
     assert_eq!(body["result"]["structuredContent"]["data"]["shop"]["name"], "Encrypted");
     let requests = graphql_requests(&ctx);
     assert_eq!(
-        header(&requests[0], "X-Shopify-Access-Token"),
+        requests[0].header("X-Shopify-Access-Token"),
         Some("offline-admin-token")
     );
     ctx.shutdown().await.unwrap();
@@ -3135,14 +3074,14 @@ async fn crons_and_flows_only_show_what_applies_to_the_token_shop(ctx: &TestCont
 #[openshop::test(multi_app_context())]
 async fn mcp_tokens_only_reach_the_data_of_their_own_shopify_app(ctx: &TestContext) {
     let shop = ctx.shop.clone();
-    let session_b = session_token(&shop, "secret-b", "key-b", "1");
-    install(ctx, "client-a", &shop, Some("token-a")).await;
-    install(ctx, "client-a", SHOP_B, Some("token-a2")).await;
-    install(ctx, "client-b", &shop, Some("token-b")).await;
-    install(ctx, "client-b", "only-b.myshopify.com", Some("token-b2")).await;
+    let session_b = session_token(&shop, "client-b-secret", "client-b-key", "1");
+    install(&ctx.db, "clientA", &shop, Some("token-a"), false).await;
+    install(&ctx.db, "clientA", SHOP_B, Some("token-a2"), false).await;
+    install(&ctx.db, "clientB", &shop, Some("token-b"), false).await;
+    install(&ctx.db, "clientB", "only-b.myshopify.com", Some("token-b2"), false).await;
     respond_to_graphql(ctx, 200, json!({ "data": { "shop": { "name": "Leaked" } } }));
-    let run_a = logged_run(ctx, "client-a", &shop).await;
-    let run_b = logged_run(ctx, "client-b", &shop).await;
+    let run_a = logged_run(ctx, "clientA", &shop).await;
+    let run_b = logged_run(ctx, "clientB", &shop).await;
 
     let permissions = [
         "read_logs",
@@ -3185,7 +3124,7 @@ async fn mcp_tokens_only_reach_the_data_of_their_own_shopify_app(ctx: &TestConte
             .fetch_one(&ctx.db)
             .await
             .unwrap();
-    assert_eq!((app_handle.as_str(), run_shop.as_str()), ("client-a", shop.as_str()));
+    assert_eq!((app_handle.as_str(), run_shop.as_str()), ("clientA", shop.as_str()));
 
     // Cron overrides belong to the app that set them.
     let hourly = "log-flow:0 * * * *";
@@ -3202,7 +3141,7 @@ async fn mcp_tokens_only_reach_the_data_of_their_own_shopify_app(ctx: &TestConte
         .fetch_all(&ctx.db)
         .await
         .unwrap();
-    assert_eq!(overrides, [("client-a".to_string(), shop.clone())]);
+    assert_eq!(overrides, [("clientA".to_string(), shop.clone())]);
 
     // Another shop of the app, and a shop installed for another app only, are out of reach.
     let body = call_tool(
@@ -3240,14 +3179,14 @@ async fn mcp_tokens_only_reach_the_data_of_their_own_shopify_app(ctx: &TestConte
     assert_eq!(body["result"]["structuredContent"]["ok"], true);
     let requests = graphql_requests(ctx);
     assert_eq!(requests.len(), 1);
-    assert_eq!(header(&requests[0], "X-Shopify-Access-Token"), Some("token-a"));
+    assert_eq!(requests[0].header("X-Shopify-Access-Token"), Some("token-a"));
 
     let recorded = audits(ctx, &token_a.token_id).await;
     assert!(!recorded.is_empty());
     assert!(
         recorded
             .iter()
-            .all(|audit| audit.app_handle == "client-a" && audit.shop == shop)
+            .all(|audit| audit.app_handle == "clientA" && audit.shop == shop)
     );
 }
 
@@ -3347,38 +3286,12 @@ fn mcp_config_is_validated_when_the_config_is_built() {
     }
 }
 
-/// What the process logger was given: the level, the message and its context.
-#[derive(Default)]
-struct LoggedLines(std::sync::Mutex<Vec<(&'static str, String, Option<Value>)>>);
-
-impl openshop::runtime::RuntimeLogger for LoggedLines {
-    fn info(&self, message: &str, context: Option<&Value>) {
-        self.0
-            .lock()
-            .unwrap()
-            .push(("info", message.to_string(), context.cloned()));
-    }
-    fn warn(&self, message: &str, context: Option<&Value>) {
-        self.0
-            .lock()
-            .unwrap()
-            .push(("warn", message.to_string(), context.cloned()));
-    }
-    fn error(&self, message: &str, context: Option<&Value>) {
-        self.0
-            .lock()
-            .unwrap()
-            .push(("error", message.to_string(), context.cloned()));
-    }
-}
-
 #[openshop::test(context())]
 async fn mcp_logs_the_tokens_it_refuses_without_their_secret(ctx: &TestContext) {
     let initialize = json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize" }).to_string();
     let issued = create_token(ctx, &[]).await;
     let secret = issued.token.split_once('.').unwrap().1.to_string();
-    let lines = std::sync::Arc::new(LoggedLines::default());
-    let previous = openshop::runtime::logger::set_logger(lines.clone());
+    let logs = LogCapture::start().await;
 
     let wrong = format!("{}x", issued.token);
     let (status, _) = mcp_send(ctx, Some(&bearer(&wrong)), initialize.clone()).await;
@@ -3394,12 +3307,11 @@ async fn mcp_logs_the_tokens_it_refuses_without_their_secret(ctx: &TestContext) 
     let (status, _) = mcp_send(ctx, Some(&bearer(&issued.token)), initialize.clone()).await;
     assert_eq!(status, 403);
 
-    openshop::runtime::logger::set_logger(previous);
-    let logged = lines.0.lock().unwrap().clone();
+    let logged = logs.lines();
     let refusals: Vec<&Value> = logged
         .iter()
-        .filter(|(level, message, _)| *level == "warn" && message == "[openshop] MCP token refused")
-        .filter_map(|(_, _, context)| context.as_ref())
+        .filter(|line| line.level == "warn" && line.message == "[openshop] MCP token refused")
+        .filter_map(|line| line.context.as_ref())
         .collect();
     let reason_of = |token_id: &str| -> Vec<(&str, u64)> {
         refusals

@@ -1,9 +1,7 @@
 //! A provider written as a struct: `#[derive(ProviderConfig)]` for the form,
 //! `#[provider]` on its `impl` block for the methods.
 
-mod common;
-
-use common::shop_connectors as connectors;
+use crate::common::shop_connectors as connectors;
 use openshop::builder::{Field, FieldOption, Flow, Provider};
 use openshop::testing::TestContext;
 use openshop::{OpenShopConfig, ProviderConfig, Result, RunOutcome, Value, json, provider, validators};
@@ -110,14 +108,14 @@ async fn context() -> TestContext {
     let config = OpenShopConfig::builder()
         .provider(Warehouse::provider())
         .provider(Clock::provider())
-        .flow(common::noop_flow("sync"))
+        .flow(crate::common::noop_flow("sync"))
         .build()
         .expect("valid config");
     TestContext::new(config).await.expect("test context")
 }
 
 async fn save_config(ctx: &TestContext, config: Value) {
-    common::save_provider_config(ctx, "warehouse", config).await;
+    crate::common::save_provider_config(ctx, "warehouse", config).await;
 }
 
 /// The same form, written with the builder.
@@ -358,7 +356,7 @@ async fn the_form_validates_what_the_struct_expects(ctx: &TestContext) {
             json!({ "apiUrl": "https://warehouse.test", "apiKey": api_key, "useSandbox": false }),
         )
         .await;
-        let checked: Value = common::check_provider(ctx, "warehouse").await;
+        let checked: Value = crate::common::check_provider(ctx, "warehouse").await;
         assert_eq!(checked, json!({ "ok": expected }), "{api_key}");
     }
 
@@ -408,6 +406,18 @@ async fn flows_call_the_provider_and_tests_fake_it() {
         .await
         .unwrap();
     assert_eq!(output, json!({ "batches": 7 }));
+
+    // A fake without a configured result returns `null`, which is not a receipt.
+    ctx.reset_fakes();
+    let result = ctx.run_flow("pushOrders", json!({})).await.unwrap();
+    assert!(
+        matches!(
+            result,
+            RunOutcome::Failed { ref error, .. }
+                if error.starts_with("Invalid result from \"warehouse.push\": invalid type: null")
+        ),
+        "{result:?}"
+    );
     ctx.shutdown().await.unwrap();
 }
 

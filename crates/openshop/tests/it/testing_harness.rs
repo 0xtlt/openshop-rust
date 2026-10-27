@@ -1,8 +1,6 @@
-mod common;
-
 use std::str::FromStr;
 
-use common::noop_flow;
+use crate::common::noop_flow;
 use openshop::testing::{TestContext, TestDb};
 use openshop::{OpenShopConfig, json};
 use sqlx::postgres::PgConnectOptions;

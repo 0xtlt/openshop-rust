@@ -1,28 +1,13 @@
 //! The rows of the framework tables, read across shops: installations, runs,
 //! their steps and their logs.
 
-mod common;
-
+use crate::common::{TestApp, create_config, install, noop_flow};
 use chrono::{Duration, Utc};
-use common::{TestApp, create_config, noop_flow};
 use openshop::testing::{AdminTestOptions, admin_context};
 use openshop::{FlowRun, Installation, LogRow, PgPool, Record, StepResult, Uuid, json};
 
 const SHOP: &str = "one.myshopify.com";
 const OTHER_SHOP: &str = "two.myshopify.com";
-
-async fn install(db: &PgPool, app_handle: &str, shop: &str, uninstalled: bool) {
-    sqlx::query(
-        "INSERT INTO installations (app_handle, shop, access_token, scopes, nonce, uninstalled_at) \
-         VALUES ($1, $2, 'shpat_secret', 'read_orders', 'nonce', CASE WHEN $3 THEN now() END)",
-    )
-    .bind(app_handle)
-    .bind(shop)
-    .bind(uninstalled)
-    .execute(db)
-    .await
-    .unwrap();
-}
 
 /// Inserts a run created `minutes_ago` and returns its id.
 async fn run(db: &PgPool, app_handle: &str, shop: &str, status: &str, minutes_ago: i64) -> Uuid {
@@ -43,9 +28,9 @@ async fn run(db: &PgPool, app_handle: &str, shop: &str, status: &str, minutes_ag
 #[tokio::test]
 async fn installations_are_read_across_shops_without_their_access_token() {
     let test = TestApp::new(create_config([noop_flow("sync")])).await;
-    install(&test.db, "default", SHOP, false).await;
-    install(&test.db, "default", OTHER_SHOP, true).await;
-    install(&test.db, "second", SHOP, false).await;
+    install(&test.db, "default", SHOP, Some("shpat_secret"), false).await;
+    install(&test.db, "default", OTHER_SHOP, Some("shpat_secret"), true).await;
+    install(&test.db, "second", SHOP, Some("shpat_secret"), false).await;
 
     // A shop that started the installation without finishing it.
     sqlx::query("INSERT INTO installations (shop, nonce) VALUES ('pending.myshopify.com', 'nonce')")

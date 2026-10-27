@@ -1,14 +1,13 @@
 //! App proxy routes under `/proxy` and their extension-direct twins under `/ext`.
 
+use crate::common::{assert_error, json_body, now, two_shopify_apps, two_shopify_apps_with_one_secret};
 use openshop::builder::{Proxy, ProxyResponseType};
 use openshop::server::proxy::create_proxy_routes;
 use openshop::testing::{
     TestContext, TestOptions, proxy_signature, session_token as signed_session_token, sign_session_token,
     to_query_string,
 };
-use openshop::{
-    IndexMap, OpenShopConfig, ProxyAuthKind, ProxyContext, Result, ShopifyAppConfig, ShopifyConfig, Value, anyhow, json,
-};
+use openshop::{IndexMap, OpenShopConfig, ProxyAuthKind, ProxyContext, Result, ShopifyConfig, Value, anyhow, json};
 use reqwest::{Method, RequestBuilder, Response};
 
 const CUSTOMER_GID: &str = "gid://shopify/Customer/123";
@@ -57,44 +56,16 @@ fn echo_config() -> OpenShopConfig {
         .expect("valid config")
 }
 
-fn app_keys(api_key: &str, api_secret: &str, app_url: &str) -> ShopifyAppConfig {
-    ShopifyAppConfig::Keys {
-        api_key: api_key.to_string(),
-        api_secret: api_secret.to_string(),
-        app_url: Some(app_url.to_string()),
-    }
-}
-
-fn multi_app_config(apps: &[(&str, ShopifyAppConfig)]) -> OpenShopConfig {
+fn multi_app_config(shopify: ShopifyConfig) -> OpenShopConfig {
     OpenShopConfig::builder()
-        .shopify(ShopifyConfig {
-            scopes: Some("read_products".to_string()),
-            apps: Some(
-                apps.iter()
-                    .map(|(handle, app)| (handle.to_string(), app.clone()))
-                    .collect(),
-            ),
-        })
+        .shopify(shopify)
         .proxy("/ping", Proxy::default().get(ping))
         .build()
         .expect("valid config")
 }
 
 fn client_apps() -> OpenShopConfig {
-    multi_app_config(&[
-        (
-            "clientA",
-            app_keys("client-a-key", "client-a-secret", "https://client-a.example.test"),
-        ),
-        (
-            "clientB",
-            app_keys("client-b-key", "client-b-secret", "https://client-b.example.test"),
-        ),
-    ])
-}
-
-fn now() -> i64 {
-    chrono::Utc::now().timestamp()
+    multi_app_config(two_shopify_apps())
 }
 
 /// A query string signed the way Shopify's app proxy signs it, with the
@@ -147,15 +118,6 @@ fn request(ctx: &TestContext, method: Method, path: &str) -> RequestBuilder {
 
 fn get(ctx: &TestContext, path: &str) -> RequestBuilder {
     request(ctx, Method::GET, path)
-}
-
-async fn json_body(response: Response) -> Value {
-    response.json().await.expect("JSON body")
-}
-
-async fn assert_error(response: Response, status: u16, message: &str) {
-    assert_eq!(response.status(), status);
-    assert_eq!(json_body(response).await, json!({ "error": message }));
 }
 
 fn header<'a>(response: &'a Response, name: &str) -> Option<&'a str> {
@@ -693,16 +655,7 @@ async fn get_with_app_proxy_signature_resolves_the_matching_shopify_app(ctx: &Te
 
 #[tokio::test]
 async fn proxy_signature_matching_several_shopify_apps_is_rejected() {
-    let config = multi_app_config(&[
-        (
-            "clientA",
-            app_keys("client-a-key", "shared-secret", "https://client-a.example.test"),
-        ),
-        (
-            "clientB",
-            app_keys("client-b-key", "shared-secret", "https://client-b.example.test"),
-        ),
-    ]);
+    let config = multi_app_config(two_shopify_apps_with_one_secret());
     let ctx = TestContext::new(config).await.unwrap();
 
     let query = signed_query(&[("shop", "test.myshopify.com")], "shared-secret");

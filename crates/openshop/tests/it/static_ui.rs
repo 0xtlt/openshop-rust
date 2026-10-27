@@ -1,19 +1,17 @@
 //! Serving the admin UI (shell, assets, launch gate) and the server lifecycle.
 
-mod common;
-
 use std::borrow::Cow;
 use std::io::ErrorKind;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crate::common::{TestApp, create_config, install, noop_flow, two_shopify_apps};
 use axum::Router;
-use common::{TestApp, create_config, noop_flow};
 use openshop::server::ServerOptions;
 use openshop::server::{listen, serve};
 use openshop::testing::{TestContext, TestOptions, sign_query, to_query_string};
-use openshop::{IndexMap, OpenShopConfig, PgPool, ShopifyAppConfig, ShopifyConfig, UiSource, Value, json};
+use openshop::{OpenShopConfig, UiSource, Value, json};
 use reqwest::header::{CACHE_CONTROL, CONTENT_SECURITY_POLICY, CONTENT_TYPE, HOST, HeaderMap, LOCATION, REFERER};
 use reqwest::{Method, RequestBuilder, StatusCode};
 use tokio::net::{TcpListener, TcpStream};
@@ -89,19 +87,8 @@ fn static_config() -> OpenShopConfig {
 }
 
 fn multi_app_config() -> OpenShopConfig {
-    let app = |handle: &str| ShopifyAppConfig::Keys {
-        api_key: format!("client-{handle}-key"),
-        api_secret: format!("client-{handle}-secret"),
-        app_url: Some(format!("https://client-{handle}.example.test")),
-    };
     OpenShopConfig::builder()
-        .shopify(ShopifyConfig {
-            scopes: Some("read_products".to_string()),
-            apps: Some(IndexMap::from([
-                ("clientA".to_string(), app("a")),
-                ("clientB".to_string(), app("b")),
-            ])),
-        })
+        .shopify(two_shopify_apps())
         .flow(noop_flow("static-flow"))
         .build()
         .unwrap()
@@ -125,18 +112,6 @@ async fn context_with(config: OpenShopConfig, server: ServerOptions) -> TestCont
 /// The UI behind the signed-launch gate.
 async fn ui_context(ui: &UiDir) -> TestContext {
     context_with(static_config(), ui.server(false)).await
-}
-
-async fn install(db: &PgPool, app_handle: &str, shop: &str) {
-    sqlx::query(
-        "INSERT INTO installations (app_handle, shop, access_token, scopes) \
-         VALUES ($1, $2, 'offline-token', 'read_products')",
-    )
-    .bind(app_handle)
-    .bind(shop)
-    .execute(db)
-    .await
-    .unwrap();
 }
 
 /// The path Shopify admin opens: launch parameters signed with the app
@@ -489,20 +464,13 @@ async fn get_robots_txt_disallows_all_crawlers() {
 }
 
 #[tokio::test]
-async fn get_root_without_a_valid_shopify_launch_does_not_serve_the_app_shell() {
-    let ui = UiDir::new();
-    let ctx = ui_context(&ui).await;
-
-    assert_unauthorized_ui(&get(&ctx, "/").await);
-    ctx.shutdown().await.unwrap();
-}
-
-#[tokio::test]
-async fn get_unknown_path_without_a_valid_shopify_launch_does_not_serve_spa_fallback() {
+async fn without_a_valid_shopify_launch_neither_the_app_shell_nor_the_spa_fallback_is_served() {
     let ui = UiDir::new();
     let ctx = ui_context(&ui).await;
 
     for path in [
+        "/",
+        "/runs/550e8400-e29b-41d4-a716-446655440000",
         "/admin/deep/route",
         "/flows",
         "/flows/",
@@ -512,15 +480,6 @@ async fn get_unknown_path_without_a_valid_shopify_launch_does_not_serve_spa_fall
     ] {
         assert_unauthorized_ui(&get(&ctx, path).await);
     }
-    ctx.shutdown().await.unwrap();
-}
-
-#[tokio::test]
-async fn get_run_deep_link_without_a_valid_shopify_launch_does_not_serve_spa_fallback() {
-    let ui = UiDir::new();
-    let ctx = ui_context(&ui).await;
-
-    assert_unauthorized_ui(&get(&ctx, "/runs/550e8400-e29b-41d4-a716-446655440000").await);
     ctx.shutdown().await.unwrap();
 }
 
@@ -571,7 +530,7 @@ async fn get_with_signed_shopify_launch_injects_the_matching_app_bridge_api_key(
     .await
     .unwrap();
     let shop = "static-client-b.myshopify.com";
-    install(&ctx.db, "clientB", shop).await;
+    install(&ctx.db, "clientB", shop, Some("offline-token"), false).await;
 
     let reply = get(&ctx, &signed_launch("/", shop, "client-b-secret")).await;
     assert_shell(&reply, "client-b-key");

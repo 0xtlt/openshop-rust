@@ -1,14 +1,12 @@
 //! `POST /webhooks`: HMAC verification, topic dispatch and the handler context.
 
-mod common;
-
 use std::sync::{Arc, Mutex};
 
-use common::noop_flow;
+use crate::common::{assert_error, noop_flow, two_shopify_apps, two_shopify_apps_with_one_secret};
 use openshop::builder::{OpenShopBuilder, Webhook};
 use openshop::db::schema::FlowRun;
 use openshop::testing::{TestContext, TestOptions, sign_webhook_body};
-use openshop::{DispatchOptions, OpenShopConfig, ShopifyAppConfig, ShopifyConfig, Value, WebhookContext, bail, json};
+use openshop::{DispatchOptions, OpenShopConfig, Value, WebhookContext, bail, json};
 use reqwest::Response;
 
 const SECRET: &str = "test-secret";
@@ -62,27 +60,9 @@ fn orders_create_config(recorder: &Recorder) -> OpenShopConfig {
     builder().webhook("ORDERS_CREATE", recorder.webhook()).build().unwrap()
 }
 
-fn multi_shopify(secret_a: &str, secret_b: &str) -> ShopifyConfig {
-    let apps = [("clientA", "client-a", secret_a), ("clientB", "client-b", secret_b)]
-        .into_iter()
-        .map(|(handle, slug, secret)| {
-            let app = ShopifyAppConfig::Keys {
-                api_key: format!("{slug}-key"),
-                api_secret: secret.to_string(),
-                app_url: Some(format!("https://{slug}.example.test")),
-            };
-            (handle.to_string(), app)
-        })
-        .collect();
-    ShopifyConfig {
-        scopes: Some("read_products".to_string()),
-        apps: Some(apps),
-    }
-}
-
 fn multi_app_config(recorder: &Recorder) -> OpenShopConfig {
     builder()
-        .shopify(multi_shopify("client-a-secret", "client-b-secret"))
+        .shopify(two_shopify_apps())
         .webhook("ORDERS_CREATE", recorder.webhook())
         .build()
         .unwrap()
@@ -112,27 +92,11 @@ async fn assert_ok(response: Response) {
     assert_eq!(response.json::<Value>().await.unwrap(), json!({ "ok": true }));
 }
 
-async fn assert_error(response: Response, status: u16, error: &str) {
-    assert_eq!(response.status().as_u16(), status);
-    assert_eq!(response.json::<Value>().await.unwrap(), json!({ "error": error }));
-}
-
 async fn flow_runs(ctx: &TestContext) -> Vec<FlowRun> {
     sqlx::query_as("SELECT * FROM flow_runs ORDER BY created_at")
         .fetch_all(&ctx.db)
         .await
         .unwrap()
-}
-
-#[tokio::test]
-async fn post_webhooks_with_invalid_hmac_returns_401() {
-    let recorder = Recorder::default();
-    let ctx = TestContext::new(orders_create_config(&recorder)).await.unwrap();
-
-    let response = post_webhook(&ctx, "orders/create", "test.myshopify.com", "{}", "invalid").await;
-    assert_error(response, 401, "Invalid webhook HMAC").await;
-    assert_eq!(recorder.count(), 0);
-    ctx.shutdown().await.unwrap();
 }
 
 #[tokio::test]
@@ -155,6 +119,7 @@ async fn post_webhooks_rejects_missing_forged_or_mismatched_signatures() {
 
     for hmac in [
         String::new(),
+        "invalid".to_string(),
         sign_webhook_body(body, "another-secret"),
         sign_webhook_body(body, ""),
         // Signature of another payload.
@@ -485,7 +450,7 @@ async fn post_webhooks_in_multi_app_mode_rejects_signatures_matching_no_app() {
 async fn post_webhooks_in_multi_app_mode_rejects_a_signature_matching_several_apps() {
     let recorder = Recorder::default();
     let config = builder()
-        .shopify(multi_shopify("shared-secret", "shared-secret"))
+        .shopify(two_shopify_apps_with_one_secret())
         .webhook("ORDERS_CREATE", recorder.webhook())
         .build()
         .unwrap();
@@ -502,7 +467,7 @@ async fn post_webhooks_in_multi_app_mode_rejects_a_signature_matching_several_ap
 #[tokio::test]
 async fn post_webhooks_handler_dispatches_flows_for_the_resolved_app() {
     let config = builder()
-        .shopify(multi_shopify("client-a-secret", "client-b-secret"))
+        .shopify(two_shopify_apps())
         .webhook(
             "ORDERS_CREATE",
             Webhook::new(|ctx: WebhookContext| async move {

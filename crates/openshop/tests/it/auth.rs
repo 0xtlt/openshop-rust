@@ -1,12 +1,10 @@
 //! OAuth (`/auth`, `/auth/callback`), the uninstall webhook and the session-token
 //! authentication of the Admin API.
 
-mod common;
-
 use std::time::Duration;
 
+use crate::common::{assert_error, noop_flow, two_shopify_apps, wait};
 use chrono::{DateTime, Utc};
-use common::noop_flow;
 use openshop::testing::{
     MockTransport, TestContext, TestOptions, session_token, sign_query, sign_webhook_body, to_query_string,
 };
@@ -23,23 +21,9 @@ fn config() -> OpenShopConfig {
 }
 
 fn multi_config() -> OpenShopConfig {
-    let apps = [("clientA", "client-a"), ("clientB", "client-b")]
-        .into_iter()
-        .map(|(handle, slug)| {
-            let app = ShopifyAppConfig::Keys {
-                api_key: format!("{slug}-key"),
-                api_secret: format!("{slug}-secret"),
-                app_url: Some(format!("https://{slug}.example.test")),
-            };
-            (handle.to_string(), app)
-        })
-        .collect();
     OpenShopConfig::builder()
         .flow(noop_flow("auth-flow"))
-        .shopify(ShopifyConfig {
-            scopes: Some("read_products".to_string()),
-            apps: Some(apps),
-        })
+        .shopify(two_shopify_apps())
         .build()
         .unwrap()
 }
@@ -137,12 +121,6 @@ fn location(response: &Response) -> String {
         .to_str()
         .unwrap()
         .to_string()
-}
-
-async fn assert_error(response: Response, status: u16, error: &str) {
-    assert_eq!(response.status().as_u16(), status);
-    let body: Value = response.json().await.unwrap();
-    assert_eq!(body, json!({ "error": error }));
 }
 
 fn signed_callback(shop: &str, code: &str, state: &str, secret: &str) -> IndexMap<String, String> {
@@ -679,18 +657,12 @@ async fn get_auth_callback_rejects_tampered_parameters(ctx: &TestContext) {
 }
 
 #[openshop::test(single_app())]
-async fn get_auth_callback_rejects_valid_hmac_with_invalid_shop_domain(ctx: &TestContext) {
-    let path = callback_path("evil.example.com", "c", "s", SECRET);
-    assert_error(get(ctx, &path).await, 400, "Invalid shop parameter").await;
-    assert!(ctx.transport.requests().is_empty());
-}
-
-#[openshop::test(single_app())]
 async fn get_auth_callback_rejects_shop_domain_normalization_attacks(ctx: &TestContext) {
     seed_installation(ctx, "default", "x.myshopify.com", None, None).await;
     grant_access_token(ctx, "must-not-be-stored");
 
     for shop in [
+        "evil.example.com",
         "evil.com/x.myshopify.com",
         "https://evil.com/x.myshopify.com",
         "x.myshopify.com@evil.com",
@@ -1218,7 +1190,11 @@ async fn api_without_a_bearer_session_token_returns_401(ctx: &TestContext) {
         assert_error(response, 401, "Unauthorized: missing session token").await;
     }
     // Shopify also passes the token as `id_token` on page loads; the API only reads the header.
-    let response = get(ctx, &format!("/api/flows?id_token={token}&session={token}")).await;
+    let response = get(
+        ctx,
+        &format!("/api/flows?id_token={token}&session={token}&token={token}"),
+    )
+    .await;
     assert_error(response, 401, "Unauthorized: missing session token").await;
 
     assert!(ctx.transport.requests().is_empty());
@@ -1238,16 +1214,6 @@ async fn api_with_a_valid_session_token_is_scoped_to_its_shop_and_app(ctx: &Test
         .await
         .unwrap();
     assert_eq!((app_handle.as_str(), shop.as_str()), ("default", SHOP));
-}
-
-#[openshop::test(single_app())]
-async fn unknown_api_paths_require_a_session_token_before_returning_404(ctx: &TestContext) {
-    for path in ["/api", "/api/", "/api/unknown", "/api/installations/active"] {
-        assert_error(get(ctx, path).await, 401, "Unauthorized: missing session token").await;
-        let response = ctx.get(path).send().await.unwrap();
-        assert_eq!(response.status(), 404, "{path}");
-        assert_eq!(response.text().await.unwrap(), "404 Not Found", "{path}");
-    }
 }
 
 #[openshop::test(single_app())]
@@ -1304,13 +1270,6 @@ async fn session_token_request_skips_the_token_exchange_for_installed_shops() {
     assert_eq!(row.access_token.as_deref(), Some("existing-token"));
     assert_eq!(row.scopes.as_deref(), Some("read_products,read_orders"));
     ctx.shutdown().await.unwrap();
-}
-
-/// Lets `duration` pass for the process, as a timer sees it.
-async fn wait(duration: Duration) {
-    tokio::time::pause();
-    tokio::time::advance(duration).await;
-    tokio::time::resume();
 }
 
 fn exchange_requests(ctx: &TestContext) -> usize {

@@ -3,13 +3,14 @@
 
 use std::sync::{Arc, Mutex};
 
+use crate::common::{graphql_requests, install, send, two_shopify_apps};
 use chrono::{DateTime, Utc};
 use openshop::builder::{
     CombinesWith, DiscountMode, Field, FieldOption, Function, FunctionOwner, FunctionType, OpenShopBuilder,
 };
 use openshop::testing::OutboundRequest;
 use openshop::testing::{MockTransport, TestContext, TestOptions, session_token};
-use openshop::{IndexMap, OpenShopConfig, ShopifyAppConfig, ShopifyConfig, Value, json, validators};
+use openshop::{OpenShopConfig, Value, json, validators};
 use reqwest::{Method, RequestBuilder};
 
 const ACCESS_TOKEN: &str = "shpat_test";
@@ -260,58 +261,18 @@ async fn setup() -> (TestContext, Shopify) {
 
 // ─── Helpers ─────────────────────────────────────────────────────────
 
-async fn send(request: RequestBuilder) -> (u16, Value) {
-    let response = request.send().await.expect("response");
-    let status = response.status().as_u16();
-    let text = response.text().await.expect("response body");
-    let body = serde_json::from_str(&text).unwrap_or(Value::String(text));
-    (status, body)
-}
-
 fn with_session(ctx: &TestContext, method: Method, path: &str, session_token: &str) -> RequestBuilder {
     ctx.http
         .request(method, format!("{}{path}", ctx.url))
         .header("Authorization", format!("Bearer {session_token}"))
 }
 
-/// A request authenticated as another shop of the same app.
-fn as_shop(ctx: &TestContext, shop: &str, method: Method, path: &str) -> RequestBuilder {
-    with_session(ctx, method, path, &ctx.session_token_for(shop, "1"))
-}
-
-async fn install(ctx: &TestContext, app_handle: &str, shop: &str, access_token: &str) {
-    sqlx::query(
-        "INSERT INTO installations (app_handle, shop, access_token, scopes) VALUES ($1, $2, $3, 'write_discounts')",
-    )
-    .bind(app_handle)
-    .bind(shop)
-    .bind(access_token)
-    .execute(&ctx.db)
-    .await
-    .unwrap();
-}
-
-fn graphql_calls(ctx: &TestContext) -> Vec<OutboundRequest> {
-    ctx.transport
-        .requests()
-        .into_iter()
-        .filter(|request| request.url.ends_with("/graphql.json"))
-        .collect()
-}
-
 fn last_call(ctx: &TestContext) -> OutboundRequest {
-    graphql_calls(ctx).pop().expect("a GraphQL call")
+    graphql_requests(ctx).pop().expect("a GraphQL call")
 }
 
 fn query_of(call: &OutboundRequest) -> &str {
     call.body["query"].as_str().expect("GraphQL document")
-}
-
-fn access_token_of(call: &OutboundRequest) -> Option<&str> {
-    call.headers
-        .iter()
-        .find(|(name, _)| name.eq_ignore_ascii_case("X-Shopify-Access-Token"))
-        .map(|(_, value)| value.as_str())
 }
 
 fn metafields(handle: &str, config: Value) -> Value {
@@ -399,7 +360,7 @@ async fn lists_function_definitions_without_calling_shopify() {
             },
         ])
     );
-    assert!(graphql_calls(&ctx).is_empty());
+    assert!(graphql_requests(&ctx).is_empty());
     ctx.shutdown().await.unwrap();
 }
 
@@ -486,7 +447,7 @@ async fn function_routes_require_a_session_token() {
         let (status, _) = send(request).await;
         assert_eq!(status, 401, "{method} {path}");
     }
-    assert!(graphql_calls(&ctx).is_empty());
+    assert!(graphql_requests(&ctx).is_empty());
     ctx.shutdown().await.unwrap();
 }
 
@@ -521,7 +482,7 @@ async fn lists_discount_instances_from_shopify() {
         ])
     );
 
-    let calls = graphql_calls(&ctx);
+    let calls = graphql_requests(&ctx);
     assert_eq!(calls.len(), 1);
     let query = query_of(&calls[0]);
     assert!(query.contains("ListDiscountInstances"));
@@ -534,7 +495,7 @@ async fn lists_discount_instances_from_shopify() {
         calls[0].url,
         format!("https://{}/admin/api/{API_VERSION}/graphql.json", ctx.shop)
     );
-    assert_eq!(access_token_of(&calls[0]), Some(ACCESS_TOKEN));
+    assert_eq!(calls[0].header("X-Shopify-Access-Token"), Some(ACCESS_TOKEN));
     ctx.shutdown().await.unwrap();
 }
 
@@ -703,7 +664,7 @@ async fn lists_every_page_of_discount_instances() {
             .as_slice()
     );
 
-    let calls = graphql_calls(&ctx);
+    let calls = graphql_requests(&ctx);
     assert_eq!(calls.len(), 3);
     assert_eq!(
         calls[0].body["variables"],
@@ -729,7 +690,7 @@ async fn lists_every_page_of_generic_and_cart_transform_instances() {
     let (status, data) = send(ctx.get("/api/functions/delivery-rules/instances")).await;
     assert_eq!(status, 200);
     assert_eq!(data.as_array().unwrap().len(), 2);
-    assert_eq!(graphql_calls(&ctx).len(), 2);
+    assert_eq!(graphql_requests(&ctx).len(), 2);
 
     // The functions of the app, and then its cart transforms.
     let cart = |id: usize| json!({ "id": format!("gid://shopify/CartTransform/{id}"), "functionId": "function-cart" });
@@ -772,8 +733,8 @@ async fn a_listing_stops_at_a_bounded_number_of_pages() {
     });
     let (status, data) = send(ctx.get("/api/functions/volume-discount/instances")).await;
     assert_eq!(status, 200);
-    assert_eq!(data.as_array().unwrap().len(), graphql_calls(&ctx).len());
-    assert_eq!(graphql_calls(&ctx).len(), 20);
+    assert_eq!(data.as_array().unwrap().len(), graphql_requests(&ctx).len());
+    assert_eq!(graphql_requests(&ctx).len(), 20);
 
     ctx.transport.respond_with(|_| {
         Ok(MockTransport::json(
@@ -784,11 +745,11 @@ async fn a_listing_stops_at_a_bounded_number_of_pages() {
             } } }),
         ))
     });
-    let before = graphql_calls(&ctx).len();
+    let before = graphql_requests(&ctx).len();
     let (status, data) = send(ctx.get("/api/functions/volume-discount/instances")).await;
     assert_eq!(status, 200);
     assert_eq!(data.as_array().unwrap().len(), 2);
-    assert_eq!(graphql_calls(&ctx).len() - before, 2);
+    assert_eq!(graphql_requests(&ctx).len() - before, 2);
     ctx.shutdown().await.unwrap();
 }
 
@@ -797,97 +758,76 @@ async fn a_listing_stops_at_a_bounded_number_of_pages() {
 #[tokio::test]
 async fn uses_the_jwt_shop_installation_for_shopify_function_reads_and_writes() {
     let (ctx, _shopify) = setup().await;
-    install(&ctx, "default", SHOP_B, "token-b").await;
+    install(&ctx.db, "default", SHOP_B, Some("token-b"), false).await;
     let shop_b_api = format!("https://{SHOP_B}/admin/api/");
 
-    let (status, _) = send(as_shop(
-        &ctx,
-        SHOP_B,
-        Method::GET,
-        "/api/functions/volume-discount/instances",
-    ))
-    .await;
+    let (status, _) = send(ctx.request_as(Method::GET, "/api/functions/volume-discount/instances", SHOP_B, "1")).await;
     assert_eq!(status, 200);
     let call = last_call(&ctx);
     assert!(call.url.starts_with(&shop_b_api), "{}", call.url);
-    assert_eq!(access_token_of(&call), Some("token-b"));
+    assert_eq!(call.header("X-Shopify-Access-Token"), Some("token-b"));
 
     let foreign_id = "gid://shopify/DiscountNode/other-shop";
     let path = format!("/api/functions/volume-discount/instances/{}?mode=code", gid(foreign_id));
-    let (status, _) =
-        send(as_shop(&ctx, SHOP_B, Method::PUT, &path).json(&json!({ "mode": "code", "config": { "percent": 20 } })))
-            .await;
+    let (status, _) = send(
+        ctx.request_as(Method::PUT, &path, SHOP_B, "1")
+            .json(&json!({ "mode": "code", "config": { "percent": 20 } })),
+    )
+    .await;
     assert_eq!(status, 200);
     let call = last_call(&ctx);
     assert!(query_of(&call).contains("discountCodeAppUpdate"));
     assert!(call.url.starts_with(&shop_b_api), "{}", call.url);
-    assert_eq!(access_token_of(&call), Some("token-b"));
+    assert_eq!(call.header("X-Shopify-Access-Token"), Some("token-b"));
     assert_eq!(call.body["variables"]["id"], foreign_id);
 
-    let (status, _) = send(as_shop(&ctx, SHOP_B, Method::DELETE, &path)).await;
+    let (status, _) = send(ctx.request_as(Method::DELETE, &path, SHOP_B, "1")).await;
     assert_eq!(status, 200);
     let call = last_call(&ctx);
     assert!(query_of(&call).contains("discountCodeDelete"));
     assert!(call.url.starts_with(&shop_b_api), "{}", call.url);
-    assert_eq!(access_token_of(&call), Some("token-b"));
+    assert_eq!(call.header("X-Shopify-Access-Token"), Some("token-b"));
     assert_eq!(call.body["variables"], json!({ "id": foreign_id }));
 
     let (status, _) = send(
-        as_shop(&ctx, SHOP_B, Method::POST, "/api/functions/delivery-rules/instances")
+        ctx.request_as(Method::POST, "/api/functions/delivery-rules/instances", SHOP_B, "1")
             .json(&json!({ "config": { "message": "shop b" } })),
     )
     .await;
     assert_eq!(status, 201);
-    assert_eq!(access_token_of(&last_call(&ctx)), Some("token-b"));
+    assert_eq!(last_call(&ctx).header("X-Shopify-Access-Token"), Some("token-b"));
 
     // The context's own shop keeps using its own installation.
     send(ctx.get("/api/functions/volume-discount/instances")).await;
     let call = last_call(&ctx);
     assert!(call.url.starts_with(&format!("https://{}/admin/api/", ctx.shop)));
-    assert_eq!(access_token_of(&call), Some(ACCESS_TOKEN));
+    assert_eq!(call.header("X-Shopify-Access-Token"), Some(ACCESS_TOKEN));
     ctx.shutdown().await.unwrap();
 }
 
 #[tokio::test]
 async fn uses_the_installation_of_the_session_shopify_app() {
-    let apps: IndexMap<String, ShopifyAppConfig> = ["a", "b"]
-        .into_iter()
-        .map(|suffix| {
-            let app = ShopifyAppConfig::Keys {
-                api_key: format!("key-{suffix}"),
-                api_secret: format!("secret-{suffix}"),
-                app_url: None,
-            };
-            (format!("client-{suffix}"), app)
-        })
-        .collect();
-    let config = functions_builder()
-        .shopify(ShopifyConfig {
-            scopes: Some("write_discounts".to_string()),
-            apps: Some(apps),
-        })
-        .build()
-        .unwrap();
+    let config = functions_builder().shopify(two_shopify_apps()).build().unwrap();
     let options = TestOptions {
-        api_key: "key-a".to_string(),
-        secret: "secret-a".to_string(),
+        api_key: "client-a-key".to_string(),
+        secret: "client-a-secret".to_string(),
         ..Default::default()
     };
     let ctx = TestContext::with_options(config, options).await.unwrap();
     mock_shopify(&ctx);
     let shop = ctx.shop.clone();
-    install(&ctx, "client-a", &shop, "token-a").await;
-    install(&ctx, "client-b", &shop, "token-b").await;
-    let session_b = session_token(&shop, "secret-b", "key-b", "1");
+    install(&ctx.db, "clientA", &shop, Some("token-a"), false).await;
+    install(&ctx.db, "clientB", &shop, Some("token-b"), false).await;
+    let session_b = session_token(&shop, "client-b-secret", "client-b-key", "1");
 
     let (status, _) = send(ctx.get("/api/functions/volume-discount/instances")).await;
     assert_eq!(status, 200);
-    assert_eq!(access_token_of(&last_call(&ctx)), Some("token-a"));
+    assert_eq!(last_call(&ctx).header("X-Shopify-Access-Token"), Some("token-a"));
 
     let path = "/api/functions/volume-discount/instances";
     let (status, _) = send(with_session(&ctx, Method::GET, path, &session_b)).await;
     assert_eq!(status, 200);
-    assert_eq!(access_token_of(&last_call(&ctx)), Some("token-b"));
+    assert_eq!(last_call(&ctx).header("X-Shopify-Access-Token"), Some("token-b"));
 
     let (status, _) = send(
         with_session(&ctx, Method::POST, "/api/functions/payment-rules/instances", &session_b)
@@ -897,7 +837,7 @@ async fn uses_the_installation_of_the_session_shopify_app() {
     assert_eq!(status, 201);
     let call = last_call(&ctx);
     assert!(query_of(&call).contains("paymentCustomizationCreate"));
-    assert_eq!(access_token_of(&call), Some("token-b"));
+    assert_eq!(call.header("X-Shopify-Access-Token"), Some("token-b"));
     ctx.shutdown().await.unwrap();
 }
 
@@ -906,7 +846,7 @@ async fn fails_without_calling_shopify_when_the_shop_has_no_access_token() {
     let (ctx, _shopify) = setup().await;
 
     // Definitions do not need an installation.
-    let (status, _) = send(as_shop(&ctx, SHOP_B, Method::GET, "/api/functions")).await;
+    let (status, _) = send(ctx.request_as(Method::GET, "/api/functions", SHOP_B, "1")).await;
     assert_eq!(status, 200);
 
     let requests = [
@@ -916,12 +856,14 @@ async fn fails_without_calling_shopify_when_the_shop_has_no_access_token() {
         (Method::DELETE, "/api/functions/delivery-rules/instances/delivery-1"),
     ];
     for (method, path) in requests {
-        let request = as_shop(&ctx, SHOP_B, method.clone(), path).json(&json!({ "config": { "message": "none" } }));
+        let request = ctx
+            .request_as(method.clone(), path, SHOP_B, "1")
+            .json(&json!({ "config": { "message": "none" } }));
         let (status, body) = send(request).await;
         assert_eq!(status, 500, "{method} {path}");
         assert_eq!(body, "Internal Server Error");
     }
-    assert!(graphql_calls(&ctx).is_empty());
+    assert!(graphql_requests(&ctx).is_empty());
     ctx.shutdown().await.unwrap();
 }
 
@@ -988,7 +930,7 @@ async fn creates_discount_instances_for_automatic_and_code_modes() {
             },
         })
     );
-    assert_eq!(graphql_calls(&ctx).len(), 2);
+    assert_eq!(graphql_requests(&ctx).len(), 2);
     ctx.shutdown().await.unwrap();
 }
 
@@ -1239,7 +1181,7 @@ async fn rejects_a_second_cart_transform_instance() {
     .await;
     assert_eq!(status, 409);
     assert_eq!(body, json!({ "error": "This Cart Transform already has an instance" }));
-    let calls = graphql_calls(&ctx);
+    let calls = graphql_requests(&ctx);
     assert_eq!(calls.len(), 2);
     assert!(query_of(&calls[0]).contains("ListShopifyFunctions"));
     assert!(query_of(&calls[1]).contains("ListCartTransformInstances"));
@@ -1282,7 +1224,7 @@ async fn maps_shopify_cart_transform_duplicate_races_to_conflict() {
         json!({ "error": "This Cart Transform already has an instance", "userErrors": user_errors })
     );
     assert!(query_of(&last_call(&ctx)).contains("userErrors { field message code }"));
-    assert_eq!(graphql_calls(&ctx).len(), 3);
+    assert_eq!(graphql_requests(&ctx).len(), 3);
 
     // Any other cart transform error stays a plain validation failure.
     shopify.lock().unwrap().next_user_errors = Some(json!([{
@@ -1429,7 +1371,7 @@ async fn updates_supported_instances_from_a_single_parsed_body() {
             },
         })
     );
-    assert_eq!(graphql_calls(&ctx).len(), 5);
+    assert_eq!(graphql_requests(&ctx).len(), 5);
     ctx.shutdown().await.unwrap();
 }
 
@@ -1497,7 +1439,7 @@ async fn rejects_unsupported_updates() {
             format!("Function type \"{function_type}\" does not support update. Delete and recreate instead.")
         );
     }
-    assert!(graphql_calls(&ctx).is_empty());
+    assert!(graphql_requests(&ctx).is_empty());
     ctx.shutdown().await.unwrap();
 }
 
@@ -1532,7 +1474,7 @@ async fn deletes_mapped_function_instances() {
         assert!(query_of(&call).contains(&format!("{mutation}(id: $id)")), "{handle}");
         assert_eq!(call.body["variables"], json!({ "id": id }));
     }
-    assert_eq!(graphql_calls(&ctx).len(), 7);
+    assert_eq!(graphql_requests(&ctx).len(), 7);
     ctx.shutdown().await.unwrap();
 }
 
@@ -1553,7 +1495,7 @@ async fn requires_mode_when_deleting_multi_mode_discounts() {
             json!({ "error": "mode query parameter is required for discount functions with multiple modes" })
         );
     }
-    assert!(graphql_calls(&ctx).is_empty());
+    assert!(graphql_requests(&ctx).is_empty());
     ctx.shutdown().await.unwrap();
 }
 
@@ -1616,7 +1558,7 @@ async fn returns_errors_for_unknown_functions_and_invalid_config() {
         let (status, body) = send(request).await;
         assert_eq!((status, body), (400, required.clone()));
     }
-    assert!(graphql_calls(&ctx).is_empty());
+    assert!(graphql_requests(&ctx).is_empty());
     ctx.shutdown().await.unwrap();
 }
 
@@ -1653,7 +1595,7 @@ async fn validates_and_coerces_instance_config() {
         stored_config(&last_call(&ctx)),
         json!({ "threshold": 2.0, "tier": "silver", "note": "VIP only", "strict": false })
     );
-    let stored = graphql_calls(&ctx).len();
+    let stored = graphql_requests(&ctx).len();
 
     let invalid = [
         (json!({ "tier": "gold" }), "Field \"threshold\" is required"),
@@ -1680,7 +1622,7 @@ async fn validates_and_coerces_instance_config() {
         let (status, body) = create(config).await;
         assert_eq!((status, body), (400, json!({ "error": message })));
     }
-    assert_eq!(graphql_calls(&ctx).len(), stored);
+    assert_eq!(graphql_requests(&ctx).len(), stored);
     ctx.shutdown().await.unwrap();
 }
 

@@ -21,6 +21,14 @@ Integration tests create one PostgreSQL schema per test and drop it afterwards,
 so they run in parallel against a single database. They never touch the
 `public` schema.
 
+The integration tests of `openshop` are one binary, `crates/openshop/tests/it`,
+linked once rather than once per file: a new file is a module of its
+`main.rs`, and `cargo test -p openshop --test it engine_runner::` runs one
+module. Its tests share the process: one that reads the process logger does it
+with `common::LogCapture`, which takes turns with the others. The Sentry tests,
+which bind a client for the whole process, and the `trybuild` tests of the
+macros are binaries of their own.
+
 ## Checks
 
 ```bash

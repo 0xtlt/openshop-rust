@@ -3,14 +3,12 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use openshop::builder::{Field, OpenShopBuilder, Provider, Route};
+use crate::common::{install, json_body, two_shopify_apps, vault_provider};
+use openshop::builder::{OpenShopBuilder, Route};
 use openshop::response::{self, IntoResponse, Response, StatusCode};
 use openshop::server::http::parse_query;
 use openshop::testing::{TestContext, TestOptions};
-use openshop::{
-    IndexMap, OpenShopConfig, Result, RouteAuthOutcome, RouteContext, RouteShopInput, ShopifyAppConfig, ShopifyConfig,
-    Value, anyhow, json,
-};
+use openshop::{IndexMap, OpenShopConfig, Result, RouteAuthOutcome, RouteContext, RouteShopInput, Value, anyhow, json};
 use reqwest::{Method, RequestBuilder};
 
 const ENCRYPTION_KEY: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
@@ -86,42 +84,9 @@ fn shop_context_route() -> Route {
     })
 }
 
-fn vault_provider() -> Provider {
-    Provider::new("Vault")
-        .field("secret", Field::password("Secret"))
-        .typed_method("reveal", |config, prefix: String| async move {
-            let secret = config.get("secret").and_then(Value::as_str).unwrap_or_default();
-            Ok(format!("{prefix}:{secret}"))
-        })
-}
-
-fn multi_shopify() -> ShopifyConfig {
-    let app = |api_key: &str, api_secret: &str, app_url: &str| ShopifyAppConfig::Keys {
-        api_key: api_key.to_string(),
-        api_secret: api_secret.to_string(),
-        app_url: Some(app_url.to_string()),
-    };
-    ShopifyConfig {
-        scopes: Some("read_products".to_string()),
-        apps: Some(
-            [
-                (
-                    "clientA".to_string(),
-                    app("client-a-key", "client-a-secret", "https://client-a.example.test"),
-                ),
-                (
-                    "clientB".to_string(),
-                    app("client-b-key", "client-b-secret", "https://client-b.example.test"),
-                ),
-            ]
-            .into(),
-        ),
-    }
-}
-
 fn config() -> OpenShopConfig {
     OpenShopConfig::builder()
-        .shopify(multi_shopify())
+        .shopify(two_shopify_apps())
         .provider_as("vault", vault_provider())
         .route("/", open_route())
         .route("/authenticated", authenticated_route())
@@ -170,26 +135,8 @@ fn post(ctx: &TestContext, path: &str) -> RequestBuilder {
     request(ctx, Method::POST, path)
 }
 
-async fn json_body(response: reqwest::Response) -> Value {
-    response.json().await.expect("JSON body")
-}
-
 fn header<'a>(response: &'a reqwest::Response, name: &str) -> Option<&'a str> {
     response.headers().get(name).and_then(|value| value.to_str().ok())
-}
-
-async fn install(ctx: &TestContext, app_handle: &str, shop: &str, access_token: Option<&str>, uninstalled: bool) {
-    sqlx::query(
-        "INSERT INTO installations (app_handle, shop, access_token, uninstalled_at) \
-         VALUES ($1, $2, $3, CASE WHEN $4 THEN now() END)",
-    )
-    .bind(app_handle)
-    .bind(shop)
-    .bind(access_token)
-    .bind(uninstalled)
-    .execute(&ctx.db)
-    .await
-    .unwrap();
 }
 
 async fn store_vault_secret(ctx: &TestContext, app_handle: &str, shop: &str, secret: &str) {
@@ -474,9 +421,9 @@ async fn for_shop_loads_only_the_active_app_and_shop_connectors() {
         ..Default::default()
     };
     let ctx = TestContext::with_options(config(), options).await.unwrap();
-    install(&ctx, "clientA", "a.myshopify.com", Some("token-a"), false).await;
-    install(&ctx, "clientB", "b.myshopify.com", Some("token-b"), false).await;
-    install(&ctx, "clientB", "inactive.myshopify.com", None, true).await;
+    install(&ctx.db, "clientA", "a.myshopify.com", Some("token-a"), false).await;
+    install(&ctx.db, "clientB", "b.myshopify.com", Some("token-b"), false).await;
+    install(&ctx.db, "clientB", "inactive.myshopify.com", None, true).await;
     store_vault_secret(&ctx, "clientA", "a.myshopify.com", "secret-a").await;
     store_vault_secret(&ctx, "clientB", "b.myshopify.com", "secret-b").await;
     store_vault_secret(&ctx, "clientB", "inactive.myshopify.com", "stale").await;
@@ -516,9 +463,9 @@ async fn for_shop_loads_only_the_active_app_and_shop_connectors() {
 
 #[openshop::test(TestContext::new(config()))]
 async fn for_shop_requires_a_valid_and_actively_installed_shop(ctx: &TestContext) {
-    install(ctx, "clientB", "b.myshopify.com", Some("token-b"), false).await;
-    install(ctx, "clientB", "uninstalled.myshopify.com", Some("token"), true).await;
-    install(ctx, "clientB", "pending.myshopify.com", None, false).await;
+    install(&ctx.db, "clientB", "b.myshopify.com", Some("token-b"), false).await;
+    install(&ctx.db, "clientB", "uninstalled.myshopify.com", Some("token"), true).await;
+    install(&ctx.db, "clientB", "pending.myshopify.com", None, false).await;
 
     let resolved = get(
         ctx,

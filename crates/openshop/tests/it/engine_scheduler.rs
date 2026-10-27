@@ -1,9 +1,7 @@
-mod common;
-
 use std::collections::BTreeSet;
 use std::time::{Duration, Instant};
 
-use common::{TestApp, noop_flow, test_env};
+use crate::common::{LogCapture, TestApp, install, noop_flow, test_env};
 use openshop::builder::Flow;
 use openshop::db::schema::FlowRun;
 use openshop::engine::Scheduler;
@@ -62,19 +60,6 @@ fn targets(runs: &[FlowRun]) -> BTreeSet<(&str, &str)> {
 
 fn has_shops(shops: &'static [&'static str]) -> impl Fn(&[FlowRun]) -> bool {
     move |runs| shops.iter().all(|shop| runs.iter().any(|run| run.shop == *shop))
-}
-
-async fn install(test: &TestApp, app_handle: &str, shop: &str, uninstalled: bool) {
-    sqlx::query(
-        "INSERT INTO installations (app_handle, shop, access_token, scopes, uninstalled_at) \
-         VALUES ($1, $2, 'token', 'read_products', CASE WHEN $3 THEN now() END)",
-    )
-    .bind(app_handle)
-    .bind(shop)
-    .bind(uninstalled)
-    .execute(&test.db)
-    .await
-    .unwrap();
 }
 
 async fn override_cron(test: &TestApp, shop: &str, cron_key: &str, enabled: bool) {
@@ -190,10 +175,10 @@ async fn resolves_shops_all_from_installations() {
         [Cron::new(EVERY_SECOND, "quick-flow").all_shops()],
     ))
     .await;
-    install(&test, "default", "shop-a.myshopify.com", false).await;
-    install(&test, "default", "shop-b.myshopify.com", false).await;
-    install(&test, "client-b", "shop-c.myshopify.com", false).await;
-    install(&test, "default", "gone.myshopify.com", true).await;
+    install(&test.db, "default", "shop-a.myshopify.com", Some("token"), false).await;
+    install(&test.db, "default", "shop-b.myshopify.com", Some("token"), false).await;
+    install(&test.db, "client-b", "shop-c.myshopify.com", Some("token"), false).await;
+    install(&test.db, "default", "gone.myshopify.com", Some("token"), true).await;
 
     let mut scheduler = Scheduler::start(&test.app).unwrap();
     wait_for_runs(
@@ -231,7 +216,7 @@ async fn shops_all_is_resolved_again_at_every_tick() {
     tokio::time::sleep(ONE_TICK).await;
     assert!(runs_of(&test, "quick-flow").await.is_empty());
 
-    install(&test, "default", "late.myshopify.com", false).await;
+    install(&test.db, "default", "late.myshopify.com", Some("token"), false).await;
     let runs = wait_for_runs(&test, "quick-flow", |runs| !runs.is_empty()).await;
     scheduler.stop();
 
@@ -442,10 +427,10 @@ async fn single_shop_runs_once_per_app_it_is_installed_on() {
         [Cron::new(EVERY_SECOND, "quick-flow").shop("specific.myshopify.com")],
     ))
     .await;
-    install(&test, "client-a", "specific.myshopify.com", false).await;
-    install(&test, "client-b", "specific.myshopify.com", false).await;
-    install(&test, "client-c", "specific.myshopify.com", true).await;
-    install(&test, "client-a", "other.myshopify.com", false).await;
+    install(&test.db, "client-a", "specific.myshopify.com", Some("token"), false).await;
+    install(&test.db, "client-b", "specific.myshopify.com", Some("token"), false).await;
+    install(&test.db, "client-c", "specific.myshopify.com", Some("token"), true).await;
+    install(&test.db, "client-a", "other.myshopify.com", Some("token"), false).await;
 
     let mut scheduler = Scheduler::start(&test.app).unwrap();
     wait_for_runs(&test, "quick-flow", |runs| runs.len() >= 2).await;
@@ -471,7 +456,7 @@ async fn resolves_shops_as_array() {
         [Cron::new(EVERY_SECOND, "quick-flow").shops(shops)],
     ))
     .await;
-    install(&test, "client-a", "shop-y.myshopify.com", false).await;
+    install(&test.db, "client-a", "shop-y.myshopify.com", Some("token"), false).await;
 
     let mut scheduler = Scheduler::start(&test.app).unwrap();
     let runs = wait_for_runs(
@@ -565,17 +550,6 @@ async fn invalid_time_zones_are_rejected_before_the_scheduler_starts() {
         .expect("a known time zone");
 }
 
-/// Keeps what the process logger is told as errors.
-struct Errors(std::sync::Mutex<Vec<String>>);
-
-impl openshop::runtime::RuntimeLogger for Errors {
-    fn info(&self, _message: &str, _context: Option<&openshop::Value>) {}
-    fn warn(&self, _message: &str, _context: Option<&openshop::Value>) {}
-    fn error(&self, message: &str, _context: Option<&openshop::Value>) {
-        self.0.lock().unwrap().push(message.to_string());
-    }
-}
-
 #[tokio::test]
 async fn a_cron_that_stops_is_told_and_started_again() {
     // 30 February: the expression is valid and never comes.
@@ -586,19 +560,16 @@ async fn a_cron_that_stops_is_told_and_started_again() {
     ))
     .await;
 
-    let errors = std::sync::Arc::new(Errors(Default::default()));
-    let previous = openshop::runtime::logger::set_logger(errors.clone());
+    let logs = LogCapture::start().await;
     let mut scheduler = Scheduler::start(&test.app).unwrap();
     // Told once at the start, and again after the wait it announces.
     let deadline = Instant::now() + Duration::from_secs(10);
     let told = loop {
-        let told: Vec<String> = errors
-            .0
-            .lock()
-            .unwrap()
-            .iter()
-            .filter(|line| line.contains("Cron \"Never\" stopped"))
-            .cloned()
+        let told: Vec<String> = logs
+            .at("error")
+            .into_iter()
+            .map(|line| line.message)
+            .filter(|message| message.contains("Cron \"Never\" stopped"))
             .collect();
         if told.len() >= 2 || Instant::now() > deadline {
             break told;
@@ -606,7 +577,6 @@ async fn a_cron_that_stops_is_told_and_started_again() {
         tokio::time::sleep(Duration::from_millis(50)).await;
     };
     scheduler.stop();
-    openshop::runtime::logger::set_logger(previous);
 
     assert_eq!(told.len(), 2, "{told:?}");
     assert_eq!(

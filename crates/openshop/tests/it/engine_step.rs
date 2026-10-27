@@ -1,13 +1,12 @@
-mod common;
-
-use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
+use crate::common::{
+    DropProxy, LogCapture, TEST_SHOP, TestApp, create_config, find_steps, inject_write_fault, noop_flow, within,
+    write_fault_hits,
+};
 use chrono::Utc;
-use common::{DropProxy, TEST_SHOP, TestApp, create_config, inject_write_fault, noop_flow, write_fault_hits};
-use openshop::db::schema::StepResult;
 use openshop::engine::{LeaseLostError, RunOwner, SleepSignal, StepExecutor};
 use openshop::runtime::time::to_iso;
 use openshop::{
@@ -55,20 +54,6 @@ fn executor(test: &TestApp, run_id: Uuid) -> StepExecutor {
     executor_with(test, run_id, None, None, 1)
 }
 
-async fn find_steps(test: &TestApp, run_id: Uuid) -> Vec<StepResult> {
-    sqlx::query_as("SELECT * FROM step_results WHERE flow_run_id = $1 ORDER BY created_at, attempt")
-        .bind(run_id.to_string())
-        .fetch_all(&test.db)
-        .await
-        .unwrap()
-}
-
-async fn within<T>(future: impl Future<Output = T>) -> T {
-    tokio::time::timeout(Duration::from_secs(10), future)
-        .await
-        .expect("condition not reached in time")
-}
-
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
 struct Fetched {
     items: Vec<u32>,
@@ -86,7 +71,7 @@ async fn executes_step_and_stores_result_in_db() {
         .unwrap();
     assert_eq!(result, Fetched { items: vec![1, 2, 3] });
 
-    let stored = find_steps(&test, run_id).await;
+    let stored = find_steps(&test.db, run_id).await;
     assert_eq!(stored.len(), 1);
     assert_eq!(stored[0].flow_run_id, run_id.to_string());
     assert_eq!(stored[0].step_name, "fetch-data");
@@ -116,7 +101,7 @@ async fn deterministic_replay_returns_cached_output() {
     assert_eq!(first, 42);
     assert_eq!(second, 42);
     assert_eq!(calls.load(Ordering::SeqCst), 1);
-    assert_eq!(find_steps(&test, run_id).await.len(), 1);
+    assert_eq!(find_steps(&test.db, run_id).await.len(), 1);
     test.cleanup().await;
 }
 
@@ -169,7 +154,7 @@ async fn step_timeout_returns_step_timeout_error() {
         })
     );
 
-    let stored = find_steps(&test, run_id).await;
+    let stored = find_steps(&test.db, run_id).await;
     assert_eq!(stored[0].status, "failed");
     assert_eq!(stored[0].error.as_deref(), Some("Step \"slow\" timed out after 50ms"));
     assert!(stored[0].duration_ms.is_some_and(|duration| duration >= 50));
@@ -226,7 +211,7 @@ async fn cancellation_via_token_returns_flow_canceled_error() {
         .await
         .unwrap_err();
     assert!(error.downcast_ref::<FlowCanceledError>().is_some());
-    assert!(find_steps(&test, run_id).await.is_empty());
+    assert!(find_steps(&test.db, run_id).await.is_empty());
     test.cleanup().await;
 }
 
@@ -255,7 +240,7 @@ async fn cancellation_interrupts_an_in_flight_step() {
     let error = within(running).await.unwrap().unwrap_err();
     assert!(error.downcast_ref::<FlowCanceledError>().is_some());
 
-    let stored = find_steps(&test, run_id).await;
+    let stored = find_steps(&test.db, run_id).await;
     assert_eq!(stored.len(), 1);
     assert_eq!(stored[0].status, "canceled");
     assert_eq!(stored[0].output, None);
@@ -280,7 +265,7 @@ async fn result_of_a_step_finishing_after_cancellation_is_discarded() {
         .unwrap_err();
     assert!(error.downcast_ref::<FlowCanceledError>().is_some());
 
-    let stored = find_steps(&test, run_id).await;
+    let stored = find_steps(&test.db, run_id).await;
     assert_eq!(stored[0].status, "canceled");
     assert_eq!(stored[0].output, None);
     test.cleanup().await;
@@ -301,7 +286,7 @@ async fn step_records_duration_ms() {
         .unwrap();
     assert_eq!(done, "done");
 
-    let stored = find_steps(&test, run_id).await;
+    let stored = find_steps(&test.db, run_id).await;
     assert!(
         stored[0].duration_ms.is_some_and(|duration| duration > 10),
         "{:?}",
@@ -323,7 +308,7 @@ async fn sleep_raises_sleep_signal_on_first_call() {
     assert!(resume_at <= Utc::now() + chrono::Duration::seconds(60));
     assert_eq!(error.to_string(), format!("Flow sleeping until {}", to_iso(&resume_at)));
 
-    let stored = find_steps(&test, run_id).await;
+    let stored = find_steps(&test.db, run_id).await;
     assert_eq!(stored.len(), 1);
     assert_eq!(stored[0].step_name, "wait-a-bit");
     assert_eq!(stored[0].status, "sleeping");
@@ -350,7 +335,7 @@ async fn sleep_keeps_its_first_resume_time_until_it_has_passed() {
         let again = error.downcast_ref::<SleepSignal>().expect("sleep signal").resume_at;
         assert_eq!(to_iso(&again), to_iso(&resume_at));
     }
-    let stored = find_steps(&test, run_id).await;
+    let stored = find_steps(&test.db, run_id).await;
     assert_eq!(stored.len(), 1);
     assert_eq!(stored[0].status, "sleeping");
 
@@ -363,14 +348,14 @@ async fn sleep_keeps_its_first_resume_time_until_it_has_passed() {
         .unwrap();
 
     retry.sleep("pause", Duration::from_secs(60)).await.unwrap();
-    let stored = find_steps(&test, run_id).await;
+    let stored = find_steps(&test.db, run_id).await;
     assert_eq!(stored.len(), 1);
     assert_eq!(stored[0].status, "completed");
     assert_eq!(stored[0].duration_ms, Some(60_000));
 
     // Once completed, the sleep is skipped like any other checkpoint.
     retry.sleep("pause", Duration::from_secs(60)).await.unwrap();
-    assert_eq!(find_steps(&test, run_id).await.len(), 1);
+    assert_eq!(find_steps(&test.db, run_id).await.len(), 1);
     test.cleanup().await;
 }
 
@@ -387,7 +372,7 @@ async fn sleep_returns_once_the_duration_has_elapsed() {
     tokio::time::sleep(remaining + Duration::from_millis(5)).await;
 
     step.sleep("blink", Duration::from_millis(40)).await.unwrap();
-    assert_eq!(find_steps(&test, run_id).await[0].status, "completed");
+    assert_eq!(find_steps(&test.db, run_id).await[0].status, "completed");
     test.cleanup().await;
 }
 
@@ -414,7 +399,7 @@ async fn step_with_failed_status_is_fenced_within_the_same_attempt() {
         .unwrap_err();
     assert_eq!(error.to_string(), "fail-1");
     assert_eq!(calls.load(Ordering::SeqCst), 0);
-    assert_eq!(find_steps(&test, run_id).await.len(), 1);
+    assert_eq!(find_steps(&test.db, run_id).await.len(), 1);
     test.cleanup().await;
 }
 
@@ -436,7 +421,7 @@ async fn step_with_failed_status_can_run_again_in_a_new_attempt() {
         .unwrap();
     assert_eq!(result, "ok");
 
-    let stored: Vec<(i32, String)> = find_steps(&test, run_id)
+    let stored: Vec<(i32, String)> = find_steps(&test.db, run_id)
         .await
         .into_iter()
         .map(|step| (step.attempt, step.status))
@@ -466,7 +451,7 @@ async fn completed_step_is_replayed_in_later_attempts() {
 
     assert_eq!(first, replayed);
     assert_eq!(calls.load(Ordering::SeqCst), 1);
-    let stored = find_steps(&test, run_id).await;
+    let stored = find_steps(&test.db, run_id).await;
     assert_eq!(stored.len(), 1);
     assert_eq!(stored[0].attempt, 1);
     test.cleanup().await;
@@ -487,7 +472,7 @@ async fn checkpoints_are_scoped_to_their_run() {
         .unwrap();
 
     assert_eq!((a.as_str(), b.as_str()), ("from a", "from b"));
-    assert_eq!(find_steps(&test, run_b).await[0].output, Some(json!("from b")));
+    assert_eq!(find_steps(&test.db, run_b).await[0].output, Some(json!("from b")));
     test.cleanup().await;
 }
 
@@ -505,7 +490,7 @@ async fn failed_step_stores_the_error_with_its_context() {
         .unwrap_err();
     assert_eq!(error.to_string(), "while syncing products");
 
-    let stored = find_steps(&test, run_id).await;
+    let stored = find_steps(&test.db, run_id).await;
     assert_eq!(stored[0].status, "failed");
     assert_eq!(
         stored[0].error.as_deref(),
@@ -702,7 +687,7 @@ async fn an_owner_stores_its_steps_while_it_holds_the_run() {
         .unwrap_err();
     step.sleep("pause", Duration::from_secs(60)).await.unwrap_err();
 
-    let stored: Vec<(String, String)> = find_steps(&test, run_id)
+    let stored: Vec<(String, String)> = find_steps(&test.db, run_id)
         .await
         .into_iter()
         .map(|step| (step.step_name, step.status))
@@ -731,7 +716,7 @@ async fn a_step_of_an_execution_that_lost_its_run_stores_nothing() {
         .unwrap_err();
     assert!(error.downcast_ref::<LeaseLostError>().is_some(), "{error:#}");
     assert!(signal.is_cancelled(), "the flow is told to stop");
-    let stored = find_steps(&test, run_id).await;
+    let stored = find_steps(&test.db, run_id).await;
     assert_eq!(stored.len(), 1);
     assert_eq!(stored[0].status, "running", "the result was not stored");
     assert_eq!(stored[0].output, None);
@@ -743,7 +728,7 @@ async fn a_step_of_an_execution_that_lost_its_run_stores_nothing() {
     let (step, _) = owner_of(&test, run_id);
     let error = step.sleep("pause", Duration::from_secs(60)).await.unwrap_err();
     assert!(error.downcast_ref::<LeaseLostError>().is_some(), "{error:#}");
-    assert_eq!(find_steps(&test, run_id).await.len(), 1);
+    assert_eq!(find_steps(&test.db, run_id).await.len(), 1);
     test.cleanup().await;
 }
 
@@ -766,7 +751,7 @@ async fn retries_storing_a_step_after_a_transient_error() {
     assert_eq!(value, 5);
     assert_eq!(runs.load(Ordering::SeqCst), 1);
     assert_eq!(write_fault_hits(&test.db, "step_results").await, 3);
-    let stored = find_steps(&test, run_id).await;
+    let stored = find_steps(&test.db, run_id).await;
     assert_eq!(stored[0].status, "completed");
     assert_eq!(stored[0].output, Some(json!(5)));
     test.cleanup().await;
@@ -791,7 +776,7 @@ async fn a_step_of_a_run_canceled_from_the_api_still_records_its_cancellation() 
         .unwrap_err();
 
     assert!(error.downcast_ref::<FlowCanceledError>().is_some(), "{error:#}");
-    assert_eq!(find_steps(&test, run_id).await[0].status, "canceled");
+    assert_eq!(find_steps(&test.db, run_id).await[0].status, "canceled");
     test.cleanup().await;
 }
 
@@ -856,7 +841,7 @@ async fn a_step_write_that_waits_for_its_row_blocks_the_takeover_of_the_run() {
     holder.lock().await.take().unwrap().commit().await.unwrap();
     assert_eq!(within(ending).await.unwrap().unwrap(), 7);
     within(takeover).await.unwrap().unwrap();
-    assert_eq!(find_steps(&test, run_id).await[0].status, "completed");
+    assert_eq!(find_steps(&test.db, run_id).await[0].status, "completed");
     test.cleanup().await;
 }
 
@@ -890,7 +875,7 @@ async fn a_step_whose_start_was_stored_but_not_answered_runs_once() {
 
     assert_eq!(proxy.cuts(), 1, "the answer was lost");
     assert_eq!((value, runs.load(Ordering::SeqCst)), (5, 1));
-    let stored = find_steps(&test, run_id).await;
+    let stored = find_steps(&test.db, run_id).await;
     assert_eq!(stored.len(), 1);
     assert_eq!(
         (stored[0].status.as_str(), stored[0].output.clone()),
@@ -950,7 +935,7 @@ async fn a_sleep_stored_but_not_answered_still_suspends_the_run() {
 
     assert_eq!(proxy.cuts(), 1, "the answer was lost");
     assert!(error.downcast_ref::<SleepSignal>().is_some(), "{error:#}");
-    let stored = find_steps(&test, run_id).await;
+    let stored = find_steps(&test.db, run_id).await;
     assert_eq!(stored.len(), 1);
     assert_eq!(stored[0].status, "sleeping");
     test.cleanup().await;
@@ -987,18 +972,8 @@ async fn a_step_is_recognized_when_the_answer_to_the_check_is_lost_too() {
 
     assert_eq!(proxy.cuts(), 2, "both answers were lost");
     assert_eq!((value, runs.load(Ordering::SeqCst)), (5, 1));
-    assert_eq!(find_steps(&test, run_id).await[0].status, "completed");
+    assert_eq!(find_steps(&test.db, run_id).await[0].status, "completed");
     test.cleanup().await;
-}
-
-struct Warnings(std::sync::Mutex<Vec<String>>);
-
-impl openshop::runtime::RuntimeLogger for Warnings {
-    fn info(&self, _message: &str, _context: Option<&openshop::Value>) {}
-    fn warn(&self, message: &str, _context: Option<&openshop::Value>) {
-        self.0.lock().unwrap().push(message.to_string());
-    }
-    fn error(&self, _message: &str, _context: Option<&openshop::Value>) {}
 }
 
 #[tokio::test]
@@ -1014,16 +989,14 @@ async fn a_log_write_that_fails_is_told_to_the_process_logger() {
     let logger = FlowLogger::new(pool.clone(), run_id.to_string());
     pool.close().await;
 
-    let warnings = Arc::new(Warnings(Default::default()));
-    let previous = openshop::runtime::logger::set_logger(warnings.clone());
+    let logs = LogCapture::start().await;
     logger.info("never stored");
     logger.flush().await;
-    openshop::runtime::logger::set_logger(previous);
 
-    let told = warnings.0.lock().unwrap().clone();
-    let told = told.iter().find(|line| line.contains(&run_id.to_string()));
+    let warnings = logs.at("warn");
+    let told = warnings.iter().find(|line| line.message.contains(&run_id.to_string()));
     assert!(
-        told.is_some_and(|line| line.contains("1 log line")),
+        told.is_some_and(|line| line.message.contains("1 log line")),
         "nothing said that the line was lost: {told:?}"
     );
     test.cleanup().await;
@@ -1050,7 +1023,7 @@ async fn a_sleep_is_recognized_when_the_answer_to_the_check_is_lost_too() {
 
     assert_eq!(proxy.cuts(), 2, "both answers were lost");
     assert!(error.downcast_ref::<SleepSignal>().is_some(), "{error:#}");
-    let stored = find_steps(&test, run_id).await;
+    let stored = find_steps(&test.db, run_id).await;
     assert_eq!((stored.len(), stored[0].status.as_str()), (1, "sleeping"));
     test.cleanup().await;
 }
