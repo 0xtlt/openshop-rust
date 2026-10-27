@@ -186,10 +186,4 @@ impl App {
             .build()?
             .block_on(self.run())
     }
-
-    /// Starts the application for a test, with its shop installed.
-    #[cfg(feature = "testing")]
-    pub async fn test(&self) -> Result<crate::testing::TestContext> {
-        crate::testing::TestContext::for_app(self).await
-    }
 }

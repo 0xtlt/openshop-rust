@@ -159,8 +159,7 @@ the schema of the crate.
 
 ## Untyped calls
 
-`graphql(query, variables)` and `graphql_as::<T>(query, variables)` remain for
-operations built at run time. Nothing checks them when the crate compiles.
+`graphql(query, variables)` remains for operations built at run time. Nothing checks them when the crate compiles.
 `variables` is anything that serializes to an object, or `()` for none.
 
 ## Limits

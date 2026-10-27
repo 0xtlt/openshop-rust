@@ -991,7 +991,7 @@ pub(super) async fn crons(State(app): State<OpenShop>) -> ApiResult {
                 .and_then(|_| next_occurrence(cron, now))
                 .map(|next| time(&next))
                 .unwrap_or_else(|| "never: the flow is not registered".to_string());
-            let shops = match cron.shops.clone().unwrap_or_default() {
+            let shops = match cron.shops.clone() {
                 CronShops::Global => "once, without a shop".to_string(),
                 CronShops::All => "every installed shop".to_string(),
                 CronShops::Shop(shop) => shop,

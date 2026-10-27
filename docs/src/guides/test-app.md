@@ -151,9 +151,6 @@ tests.
   shop or app secret.
 - Use `ctx.http` with `ctx.url_for(path)` for requests without a session token,
   such as a server route or an unsigned webhook.
-- Use factories (`Factory::new(create, destroy)` and `ctx.create(..)`) when a
-  test must create resources through the Shopify client and remove them
-  afterwards. Such a test takes `ctx: &mut TestContext`.
 - Start a context by hand with `TestContext::with_options(config, options)`
   for a configuration built in the test or for other options, such as another
   shop. `TestOptions::installed()` is the options of a shop that has installed
@@ -162,4 +159,4 @@ tests.
 - See [custom admin page testing](../reference/custom-admin-pages.md#testing) for
   loader and action helpers.
 
-All helper options and cleanup contracts are in the [testing reference](../reference/testing.md).
+All helper options and lifecycle contracts are in the [testing reference](../reference/testing.md).

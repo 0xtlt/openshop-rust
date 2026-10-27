@@ -7,6 +7,13 @@ pub(crate) mod token_exchange;
 pub use client::ShopifyClient;
 pub use shopify_api::{ApiVersion, IntoVariable, Operation, Page};
 
+/// A Shopify app and a shop, what the process keeps its tokens and clients by.
+type AppShop = (String, String);
+
+fn app_shop(shopify_app: &str, shop: &str) -> AppShop {
+    (shopify_app.to_string(), shop.to_string())
+}
+
 /// An input object of the Admin API built ahead of an operation, in a loop
 /// for instance: `shopify_api`'s [`input!`](shopify_api::input), with the
 /// code it generates pointed at [`openshop::shopify_api`](mod@crate::shopify_api).

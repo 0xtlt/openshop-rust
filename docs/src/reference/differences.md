@@ -54,9 +54,7 @@ larger configurations easier to split:
   `Provider::typed_checker`, for a provider built without a struct. See
   [Typed calls](providers.md#typed-calls).
 - Blocks are declared in the module that writes them and `app!` lists them by
-  name, so a large application has no registration code to split. On the
-  builder underneath, `.providers([…])`, `.flows([…])` and `.with(register)`
-  register several definitions at once.
+  name, so a large application has no registration code to split.
 
 ## Engine
 

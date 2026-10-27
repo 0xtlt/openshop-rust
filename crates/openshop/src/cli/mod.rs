@@ -1,14 +1,4 @@
-//! The command line of an application binary.
-//!
-//! ```text
-//! dev                         Start API, admin UI, worker and scheduler in one process
-//! start                       Start the production web process (API + UI + scheduler, no worker)
-//! worker [--concurrency=N]    Start a worker (production, scalable)
-//! migrate                     Apply client-owned migrations from ./migrations
-//! migrate generate            Generate migrations for schema the project does not cover yet
-//! migrate check               Check that ./migrations covers the framework schema
-//! migrate status              Show migration status
-//! ```
+//! The command line of an application binary: the commands of [`USAGE`].
 
 pub mod dev;
 pub mod env;
@@ -29,10 +19,10 @@ pub const USAGE: &str = "
     dev                         Start dev server (API + UI + worker + scheduler)
     worker [--concurrency=N]    Start worker only (production, scalable)
     migrate                     Apply client-owned migrations from ./migrations
-    migrate generate            Generate a new client-owned migration
-    migrate check               Check generated migration history
+    migrate generate            Generate migrations for the schema ./migrations does not cover yet
+    migrate check               Check that ./migrations covers the current schema
     migrate status              Show client migration status
-    start                       Start production server (API + UI, no worker)
+    start                       Start production server (API + UI + scheduler, no worker)
 
   Usage:
     cargo run -- dev
@@ -94,27 +84,6 @@ pub async fn shutdown_signal() {
     }
 }
 
-/// Where the configuration comes from: a built [`OpenShopConfig`], or a
-/// function that builds it.
-///
-/// Prefer passing the function (`openshop::cli::run(config)`): in `dev`, the
-/// `.env` file is then loaded before the configuration reads the environment.
-pub trait ConfigSource {
-    fn load(self) -> Result<OpenShopConfig>;
-}
-
-impl ConfigSource for OpenShopConfig {
-    fn load(self) -> Result<OpenShopConfig> {
-        Ok(self)
-    }
-}
-
-impl<F: FnOnce() -> Result<OpenShopConfig>> ConfigSource for F {
-    fn load(self) -> Result<OpenShopConfig> {
-        self()
-    }
-}
-
 /// `--concurrency=N` of the `worker` command. Absent, `worker.concurrency`
 /// from the configuration applies.
 fn parse_concurrency(args: &[String]) -> Result<Option<usize>> {
@@ -127,13 +96,15 @@ fn parse_concurrency(args: &[String]) -> Result<Option<usize>> {
     }
 }
 
-/// Runs the command given on the command line.
-pub async fn run(config: impl ConfigSource) -> Result<()> {
+/// Runs the command given on the command line. `config` builds the
+/// configuration once the command is known: in `dev`, after the `.env` file
+/// is loaded, so that it can read the values of the file.
+pub async fn run(config: impl FnOnce() -> Result<OpenShopConfig>) -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     run_with_args(config, &args).await
 }
 
-pub async fn run_with_args(config: impl ConfigSource, args: &[String]) -> Result<()> {
+pub async fn run_with_args(config: impl FnOnce() -> Result<OpenShopConfig>, args: &[String]) -> Result<()> {
     let command = args.first().map(String::as_str);
     // Before logging and the configuration, so that both can read `.env` values.
     // `App::main` has done it before starting the runtime: this finds nothing
@@ -152,7 +123,7 @@ pub async fn run_with_args(config: impl ConfigSource, args: &[String]) -> Result
                 "worker" => parse_concurrency(args)?,
                 _ => None,
             };
-            let config = config.load()?;
+            let config = config()?;
             // Reports to Sentry until the process stops, when the application gives a DSN.
             let _reporting = report::start(&config, process);
             let outcome = match process {
@@ -166,7 +137,7 @@ pub async fn run_with_args(config: impl ConfigSource, args: &[String]) -> Result
             }
             outcome
         }
-        Some("migrate") => migrate::run_migrate(&config.load()?, &args[1..]).await,
+        Some("migrate") => migrate::run_migrate(&config()?, &args[1..]).await,
         _ => {
             println!("{USAGE}");
             Ok(())

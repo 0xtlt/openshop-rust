@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use anyhow::{Result, bail};
+use anyhow::Result;
 use indexmap::IndexMap;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
@@ -12,7 +12,6 @@ use tokio::net::TcpListener;
 use uuid::Uuid;
 
 use super::db::TestDb;
-use super::factory::{Factory, FactoryScope};
 use super::fake::FakeProviders;
 use super::transport::MockTransport;
 use super::{session_token, to_query_string};
@@ -193,9 +192,6 @@ pub struct TestOptions {
     pub cwd: Option<PathBuf>,
     pub server: ServerOptions,
     pub transport: Option<Arc<MockTransport>>,
-    /// Send Shopify requests over the network instead of to the mock transport,
-    /// for tests that create real resources with factories.
-    pub live_shopify: bool,
 }
 
 impl Default for TestOptions {
@@ -213,7 +209,6 @@ impl Default for TestOptions {
             cwd: None,
             server: ServerOptions::default(),
             transport: None,
-            live_shopify: false,
         }
     }
 }
@@ -233,7 +228,6 @@ pub struct TestContext {
     pub transport: Arc<MockTransport>,
     /// HTTP client that does not follow redirects.
     pub http: reqwest::Client,
-    factory_scope: FactoryScope,
     test_db: TestDb,
     server: ServerHandle,
 }
@@ -340,11 +334,7 @@ impl TestContext {
                 .clone()
                 .unwrap_or_else(|| std::env::temp_dir().join("openshop-test-no-toml")),
         };
-        let app = if options.live_shopify {
-            OpenShop::new(config, db.clone(), env)?
-        } else {
-            OpenShop::with_transport(config, db.clone(), env, transport.clone())?
-        };
+        let app = OpenShop::with_transport(config, db.clone(), env, transport.clone())?;
 
         if let Some(access_token) = &options.access_token {
             sqlx::query(
@@ -362,7 +352,6 @@ impl TestContext {
         let server = serve(listener, create_router(&app, options.server.clone(), false)?).await?;
         let port = server.addr.port();
         let fakes = FakeProviders::new(&app.config().providers);
-        let shopify = app.shopify_client(&options.shop, "default");
 
         Ok(Self {
             url: format!("http://127.0.0.1:{port}"),
@@ -372,7 +361,6 @@ impl TestContext {
             http: reqwest::Client::builder()
                 .redirect(reqwest::redirect::Policy::none())
                 .build()?,
-            factory_scope: FactoryScope::new(shopify),
             shop: options.shop,
             secret: options.secret,
             api_key: options.api_key,
@@ -425,12 +413,7 @@ impl TestContext {
 
     /// Proxy test client — auto-signs HMAC
     pub fn proxy(&self) -> ProxyClient {
-        ProxyClient {
-            http: self.http.clone(),
-            base_url: self.url.clone(),
-            shop: self.shop.clone(),
-            secret: self.secret.clone(),
-        }
+        self.proxy_for(&self.shop, &self.secret)
     }
 
     /// Create a signed Shopify session token for authenticated API requests.
@@ -475,9 +458,7 @@ impl TestContext {
 
     /// An authenticated request to the application, e.g. `ctx.request(Method::GET, "/api/flows")`.
     pub fn request(&self, method: reqwest::Method, path: &str) -> reqwest::RequestBuilder {
-        self.http
-            .request(method, format!("{}{path}", self.url))
-            .header("Authorization", self.authorization_header())
+        self.request_as(method, path, &self.shop, "1")
     }
 
     pub fn get(&self, path: &str) -> reqwest::RequestBuilder {
@@ -505,31 +486,8 @@ impl TestContext {
         self.fakes.reset();
     }
 
-    /// Create a resource via a factory, tracked for auto-cleanup
-    pub async fn create<T: Clone + Send + 'static>(&mut self, factory: &Factory<T>, overrides: Value) -> Result<T> {
-        if !self.is_installed().await? {
-            bail!("No Shopify client available. Is the test shop installed?");
-        }
-        self.factory_scope.create(factory, overrides).await
-    }
-
-    async fn is_installed(&self) -> Result<bool> {
-        let installed: Option<(Uuid,)> =
-            sqlx::query_as("SELECT id FROM installations WHERE shop = $1 AND access_token IS NOT NULL LIMIT 1")
-                .bind(&self.shop)
-                .fetch_optional(&self.db)
-                .await?;
-        Ok(installed.is_some())
-    }
-
-    /// Cleanup all factory-created resources
-    pub async fn cleanup(&mut self) {
-        self.factory_scope.cleanup().await;
-    }
-
     /// Shut down the test server and drop the isolated database.
-    pub async fn shutdown(mut self) -> Result<()> {
-        self.factory_scope.cleanup().await;
+    pub async fn shutdown(self) -> Result<()> {
         let _ = self.server.shutdown().await;
         self.test_db.cleanup().await
     }

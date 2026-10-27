@@ -140,7 +140,6 @@ impl AdminFunction {
 
     /// A loader whose input is validated against the schema of `T` and
     /// deserialized into it.
-    #[cfg(feature = "schema")]
     pub fn typed_loader<T, R, F, Fut>(handler: F) -> Self
     where
         T: DeserializeOwned + schemars::JsonSchema + Send + 'static,
@@ -161,7 +160,6 @@ impl AdminFunction {
 
     /// An action whose input is validated against the schema of `T` and
     /// deserialized into it.
-    #[cfg(feature = "schema")]
     pub fn typed_action<T, R, F, Fut>(handler: F) -> Self
     where
         T: DeserializeOwned + schemars::JsonSchema + Send + 'static,

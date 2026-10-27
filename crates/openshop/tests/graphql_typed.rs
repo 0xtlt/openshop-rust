@@ -134,22 +134,14 @@ async fn an_operation_built_at_run_time_returns_its_data(ctx: &TestContext) {
     assert_eq!(data, json!({ "shop": { "name": "Test shop" } }));
     assert_eq!(sent(ctx), json!({ "query": "{ shop { name } }" }));
 
-    #[derive(serde::Deserialize)]
-    struct Shop {
-        name: String,
-    }
-    #[derive(serde::Deserialize)]
-    struct Data {
-        shop: Shop,
-    }
-    let data: Data = shopify
-        .graphql_as(
+    let data = shopify
+        .graphql(
             "query($id: ID!) { shop { name } }",
             json!({ "id": "gid://shopify/Shop/1" }),
         )
         .await
         .unwrap();
-    assert_eq!(data.shop.name, "Test shop");
+    assert_eq!(data["shop"]["name"], "Test shop");
     assert_eq!(sent(ctx)["variables"], json!({ "id": "gid://shopify/Shop/1" }));
 }
 

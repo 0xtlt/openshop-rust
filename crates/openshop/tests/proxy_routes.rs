@@ -1,6 +1,6 @@
 //! App proxy routes under `/proxy` and their extension-direct twins under `/ext`.
 
-use openshop::builder::Proxy;
+use openshop::builder::{Proxy, ProxyResponseType};
 use openshop::server::proxy::create_proxy_routes;
 use openshop::testing::{
     TestContext, TestOptions, proxy_signature, session_token as signed_session_token, sign_session_token,
@@ -42,7 +42,7 @@ async fn echo(ctx: ProxyContext) -> Result<Value> {
 
 fn ping_config() -> OpenShopConfig {
     OpenShopConfig::builder()
-        .proxy("/ping", Proxy::json().get(ping))
+        .proxy("/ping", Proxy::default().get(ping))
         .build()
         .expect("valid config")
 }
@@ -51,7 +51,7 @@ fn echo_config() -> OpenShopConfig {
     OpenShopConfig::builder()
         .proxy(
             "/echo",
-            Proxy::json().get(echo).post(echo).put(echo).patch(echo).delete(echo),
+            Proxy::default().get(echo).post(echo).put(echo).patch(echo).delete(echo),
         )
         .build()
         .expect("valid config")
@@ -75,7 +75,7 @@ fn multi_app_config(apps: &[(&str, ShopifyAppConfig)]) -> OpenShopConfig {
                     .collect(),
             ),
         })
-        .proxy("/ping", Proxy::json().get(ping))
+        .proxy("/ping", Proxy::default().get(ping))
         .build()
         .expect("valid config")
 }
@@ -473,7 +473,7 @@ async fn liquid_html_and_json_routes_set_their_content_type() {
     let config = OpenShopConfig::builder()
         .proxy(
             "/reviews",
-            Proxy::liquid().get(|ctx| async move {
+            Proxy::new(ProxyResponseType::Liquid).get(|ctx| async move {
                 Ok(Value::from(format!(
                     "<h2>Reviews for {{{{ shop.name }}}}</h2><p>{}</p>",
                     ctx.shop
@@ -482,13 +482,13 @@ async fn liquid_html_and_json_routes_set_their_content_type() {
         )
         .proxy(
             "/widget",
-            Proxy::html().get(|_ctx| async move { Ok(json!("<p>Widget</p>")) }),
+            Proxy::new(ProxyResponseType::Html).get(|_ctx| async move { Ok(json!("<p>Widget</p>")) }),
         )
         .proxy(
             "/liquid-data",
-            Proxy::liquid().get(|_ctx| async move { Ok(json!({ "liquid": false })) }),
+            Proxy::new(ProxyResponseType::Liquid).get(|_ctx| async move { Ok(json!({ "liquid": false })) }),
         )
-        .proxy("/text", Proxy::json().get(|_ctx| async move { Ok(json!("plain")) }))
+        .proxy("/text", Proxy::default().get(|_ctx| async move { Ok(json!("plain")) }))
         .proxy(
             "/default",
             Proxy::default().get(|_ctx| async move { Ok(json!([1, 2, 3])) }),
@@ -528,11 +528,11 @@ async fn liquid_html_and_json_routes_set_their_content_type() {
 #[tokio::test]
 async fn dynamic_segments_are_exposed_as_params() {
     let config = OpenShopConfig::builder()
-        .proxy("/api/reviews/:id", Proxy::json().get(echo))
-        .proxy("/orders/[order]/items/[item]", Proxy::json().get(echo))
+        .proxy("/api/reviews/:id", Proxy::default().get(echo))
+        .proxy("/orders/[order]/items/[item]", Proxy::default().get(echo))
         .proxy(
             "/api/reviews/latest",
-            Proxy::json().get(|_ctx| async move { Ok(json!({ "route": "latest" })) }),
+            Proxy::default().get(|_ctx| async move { Ok(json!({ "route": "latest" })) }),
         )
         .build()
         .unwrap();
@@ -558,7 +558,7 @@ async fn dynamic_segments_are_exposed_as_params() {
 #[tokio::test]
 async fn index_route_is_served_at_the_prefix_root() {
     let config = OpenShopConfig::builder()
-        .proxy("/", Proxy::json().get(echo))
+        .proxy("/", Proxy::default().get(echo))
         .build()
         .unwrap();
     let ctx = TestContext::new(config).await.unwrap();
@@ -622,7 +622,7 @@ async fn handler_errors_return_500_without_details() {
     let config = OpenShopConfig::builder()
         .proxy(
             "/fails",
-            Proxy::json()
+            Proxy::default()
                 .get(|_ctx| async move { Err(anyhow!("database password is hunter2")) })
                 .post(|ctx| async move {
                     if ctx.body.is_none() {
@@ -1023,8 +1023,8 @@ async fn missing_shopify_api_secret_fails_closed() {
 #[test]
 fn ambiguous_proxy_routes_are_rejected_when_the_config_is_built() {
     let error = OpenShopConfig::builder()
-        .proxy("/reviews/:id", Proxy::json().get(ping))
-        .proxy("/reviews/[slug]", Proxy::json().get(ping))
+        .proxy("/reviews/:id", Proxy::default().get(ping))
+        .proxy("/reviews/[slug]", Proxy::default().get(ping))
         .build()
         .err()
         .expect("ambiguous routes")

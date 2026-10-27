@@ -289,14 +289,12 @@ async fn get_flows_returns_flow_list(ctx: &TestContext) {
     );
 }
 
-#[cfg(feature = "schema")]
 #[derive(serde::Deserialize, schemars::JsonSchema)]
 struct SyncInput {
     since: String,
     limit: Option<u32>,
 }
 
-#[cfg(feature = "schema")]
 #[tokio::test]
 async fn get_flows_exposes_the_generated_input_schema() {
     let typed = Flow::new("typed-flow", |ctx: FlowContext| async move {
@@ -2507,7 +2505,7 @@ async fn put_providers_validates_coerces_and_transforms_fields() {
         .field("endpoint", Field::text("Endpoint").validate(validators::url()))
         .field(
             "retries",
-            Field::number("Retries").validate(validators::number_range(0.0, 10.0)),
+            Field::number("Retries").validate(validators::range(Some(0.0), Some(10.0))),
         )
         .field("sandbox", Field::checkbox("Sandbox"))
         .transformer(|mut data| {

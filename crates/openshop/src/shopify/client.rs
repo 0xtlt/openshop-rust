@@ -8,12 +8,12 @@ use anyhow::{Result, anyhow, bail};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
-use shopify_api::{ApiVersion, Operation, Shopify};
+use shopify_api::{ApiVersion, Operation, ShopDomain, Shopify};
 use tokio::sync::Mutex;
 
 use super::client_credentials::{Grant, GrantClient, stored};
+use super::{AppShop, app_shop};
 use crate::app::OpenShop;
-use crate::runtime::transport::USER_AGENT;
 use crate::server::shop_domain::strict_shop_domain;
 
 /// The `shopify_api` client of an app and shop, as a client and its clones
@@ -29,7 +29,7 @@ enum Resolved {
     Granted(GrantClient, Grant),
 }
 
-type Clients = Arc<Mutex<HashMap<(String, String), Resolved>>>;
+type Clients = Arc<Mutex<HashMap<AppShop, Resolved>>>;
 
 /// The Shopify Admin API of one shop.
 ///
@@ -106,7 +106,7 @@ impl ShopifyClient {
     /// and kept for this app and shop.
     async fn resolved(&self) -> Result<Resolved> {
         let shop = self.domain()?;
-        let key = (self.shopify_app.clone(), shop.clone());
+        let key = app_shop(&self.shopify_app, &shop);
         if let Some(resolved) = self.clients.lock().await.get(&key) {
             return Ok(resolved.clone());
         }
@@ -122,13 +122,11 @@ impl ShopifyClient {
         };
         let resolved = match (granted, stored.and_then(|stored| stored.token)) {
             (Some(granted), _) => granted,
-            (None, Some(token)) => Resolved::Stored(
-                Shopify::builder(&shop)
-                    .shared_transport(self.app.transport().clone())
-                    .user_agent(USER_AGENT)
-                    .access_token(token)
-                    .build()?,
-            ),
+            (None, Some(token)) => {
+                let apps = self.app.apps();
+                let oauth = apps.oauth(apps.by_handle(Some(&self.shopify_app))?);
+                Resolved::Stored(oauth.builder(&ShopDomain::new(&shop)?).access_token(token).build()?)
+            }
             (None, None) => Resolved::None,
         };
         // A shop without a token may have one at the next request: a grant
@@ -194,10 +192,7 @@ impl ShopifyClient {
         {
             return Err(error.into());
         }
-        self.clients
-            .lock()
-            .await
-            .remove(&(self.shopify_app.clone(), shop));
+        self.clients.lock().await.remove(&app_shop(&self.shopify_app, &shop));
         match self.resolved().await? {
             // A token Shopify gave that could not be stored: that is the answer.
             Resolved::None if matches!(error, shopify_api::Error::TokenStore(_)) => Err(error.into()),
@@ -228,16 +223,6 @@ impl ShopifyClient {
         self.run(|client| {
             let variables = &variables;
             async move { client.graphql(query, variables).await }
-        })
-        .await
-    }
-
-    /// [`graphql`](Self::graphql), with `data` read as `T`.
-    pub async fn graphql_as<T: DeserializeOwned>(&self, query: &str, variables: impl Serialize) -> Result<T> {
-        let variables = serde_json::to_value(variables)?;
-        self.run(|client| {
-            let variables = &variables;
-            async move { client.graphql_as(query, variables).await }
         })
         .await
     }

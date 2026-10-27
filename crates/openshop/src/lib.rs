@@ -61,7 +61,7 @@ not_wasm! {
     mod app;
     pub mod builder;
     pub mod cli;
-    pub mod config;
+    mod config;
     pub mod db;
     pub mod declare;
     pub mod engine;
@@ -106,9 +106,16 @@ macro_rules! __view {
     };
 }
 
+not_wasm! {
+    /// Locks `mutex`, even when a thread panicked while holding it: what it
+    /// guards stays usable.
+    pub(crate) fn locked<T>(mutex: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+        mutex.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
 // The crates whose types appear in the API of an application.
 pub use anyhow::{Context, Error, Result, anyhow, bail};
-#[cfg(feature = "schema")]
 pub use schemars::{self, JsonSchema};
 pub use serde;
 pub use serde_json::{self, Value, json};
@@ -177,7 +184,6 @@ not_wasm! {
 /// [`json!`], [`bail!`], [`graphql!`], [`liquid!`]… The attribute of tests,
 /// `#[openshop::test]`, is not part of it: it would hide `#[test]`.
 pub mod prelude {
-    #[cfg(feature = "schema")]
     pub use crate::input;
     pub use crate::{Context, Result, Value, admin_page, anyhow, app, bail, json};
     not_wasm! {
@@ -439,9 +445,11 @@ macro_rules! __shopify_input {
 /// Every other entry is a setting, written `name: value` and passed to the
 /// method of that name of [`OpenShopBuilder`](builder::OpenShopBuilder): `crons`, `on_error`, `mcp`,
 /// `shopify`, `worker`, `retry_policy`, `builtin_pages`, `admin_menu`, `admin_ui`,
-/// `max_request_body_bytes`, `request_timeout`, `max_concurrent_requests`, `ops_password`, `log_retention`, `sentry`… A value can fail with `?`, such as one read from
-/// the environment (`shopify: shopify_apps()?`): the error is the one
-/// `APP.config()` and `APP.main()` return.
+/// `max_request_body_bytes`, `request_timeout`, `max_concurrent_requests`,
+/// `ops_password`, `log_retention`, `sentry`… The application reads a secret
+/// from the environment itself: `ops_password: std::env::var("OPS_PASSWORD").ok()`.
+/// A value can fail with `?`: the error is the one `APP.config()` and
+/// `APP.main()` return.
 ///
 /// The macro is an expression of type [`App`], usually kept in a `static`
 /// that the binary runs (`fn main() -> Result<()> { APP.main() }`) and the
@@ -842,7 +850,6 @@ pub use openshop_macros::mcp_resource;
 ///
 /// The payload of a webhook is not an input: Shopify names its fields in
 /// snake case, and a plain `#[derive(Deserialize)]` reads it.
-#[cfg(feature = "schema")]
 pub use openshop_macros::input;
 
 /// Makes an `async` function a test of the application:
@@ -863,8 +870,7 @@ pub use openshop_macros::input;
 ///
 /// The test receives a [`TestContext`](testing::TestContext) of the
 /// application, started on an isolated database with its shop installed, and
-/// the context is shut down when the function returns. Take `&mut
-/// TestContext` to create resources with a factory. The function returns
+/// the context is shut down when the function returns. The function returns
 /// nothing, or a `Result` whose error fails the test.
 ///
 /// The argument is what the test starts from: an application, or any

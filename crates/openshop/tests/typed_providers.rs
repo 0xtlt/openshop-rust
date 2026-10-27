@@ -4,7 +4,7 @@
 mod common;
 
 use common::{noop_flow, shop_connectors as connectors};
-use openshop::builder::{Field, Flow, OpenShopBuilder, Provider, ProviderCall};
+use openshop::builder::{Field, Flow, Provider, ProviderCall};
 use openshop::testing::TestContext;
 use openshop::{OpenShopConfig, RunOutcome, Value, json, validators};
 use serde::{Deserialize, Serialize};
@@ -296,21 +296,13 @@ fn erp() -> Provider {
     Provider::new("erp").field("token", Field::password("Token"))
 }
 
-mod reviews {
-    use super::*;
-
-    pub fn register(builder: OpenShopBuilder) -> OpenShopBuilder {
-        builder
-            .flow(noop_flow("moderateReviews"))
-            .provider(Provider::new("moderation"))
-    }
-}
-
 #[test]
-fn providers_and_flows_can_be_registered_several_at_a_time() {
+fn providers_and_flows_keep_the_order_they_are_registered_in() {
     let config = OpenShopConfig::builder()
-        .providers([warehouse(), erp()])
-        .flows([noop_flow("syncOrders"), noop_flow("syncProducts")])
+        .provider(warehouse())
+        .provider(erp())
+        .flow(noop_flow("syncOrders"))
+        .flow(noop_flow("syncProducts"))
         .flow(noop_flow("cleanup"))
         .build()
         .unwrap();
@@ -320,17 +312,4 @@ fn providers_and_flows_can_be_registered_several_at_a_time() {
         config.flows.keys().collect::<Vec<_>>(),
         ["syncOrders", "syncProducts", "cleanup"]
     );
-}
-
-#[test]
-fn with_lets_a_module_register_what_it_defines() {
-    let config = OpenShopConfig::builder()
-        .provider(warehouse())
-        .with(reviews::register)
-        .with(|builder| builder.flow(noop_flow("inline")))
-        .build()
-        .unwrap();
-
-    assert_eq!(config.providers.keys().collect::<Vec<_>>(), ["warehouse", "moderation"]);
-    assert_eq!(config.flows.keys().collect::<Vec<_>>(), ["moderateReviews", "inline"]);
 }

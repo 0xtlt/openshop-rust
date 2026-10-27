@@ -45,7 +45,7 @@ fn a_command_reports_under_its_name_what_stops_it() {
         .enable_all()
         .build()
         .unwrap()
-        .block_on(openshop::cli::run_with_args(config, &["start".to_string()]))
+        .block_on(openshop::cli::run_with_args(|| Ok(config), &["start".to_string()]))
         .unwrap_err();
 
     let events = transport.fetch_and_clear_events();
