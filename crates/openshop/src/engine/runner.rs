@@ -36,7 +36,7 @@ pub const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15);
 /// Extends the lease. Resolves to `false` when this worker no longer owns the run.
 pub type HeartbeatFn = Arc<dyn Fn() -> BoxFuture<'static, Result<bool>> + Send + Sync>;
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct RunFlowOptions {
     pub run_id: Uuid,
     pub flow_name: String,
@@ -75,18 +75,8 @@ impl RunFlowOptions {
         Self {
             run_id,
             flow_name: flow_name.into(),
-            input: None,
             shop: shop.into(),
-            shopify_app: None,
-            worker_id: None,
-            attempt: None,
-            lease_id: None,
-            on_heartbeat: None,
-            heartbeat_interval: None,
-            claimed_at: None,
-            lease_duration: None,
-            interrupt: None,
-            connectors: None,
+            ..Default::default()
         }
     }
 
@@ -136,18 +126,6 @@ pub enum RunOutcome {
     LeaseLost,
 }
 
-impl RunOutcome {
-    pub fn status(&self) -> &'static str {
-        match self {
-            Self::Completed => "completed",
-            Self::Sleeping { .. } => "sleeping",
-            Self::Failed { .. } => "failed",
-            Self::Canceled => "canceled",
-            Self::LeaseLost => "lease_lost",
-        }
-    }
-}
-
 /// Stops the heartbeat and forgets the cancellation token on every exit path.
 struct RunGuard {
     abort: Abort,
@@ -171,74 +149,50 @@ fn expire(run_id: Uuid, halt: &CancellationToken) {
     halt.cancel();
 }
 
-pub(crate) fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
-    if let Some(message) = payload.downcast_ref::<&str>() {
-        (*message).to_string()
-    } else if let Some(message) = payload.downcast_ref::<String>() {
-        message.clone()
-    } else {
-        "unknown panic".to_string()
-    }
+/// The message of a panic, from what it was given.
+pub(crate) fn panic_message(payload: &Box<dyn std::any::Any + Send>) -> &str {
+    payload
+        .downcast_ref::<&str>()
+        .copied()
+        .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+        .unwrap_or("unknown panic")
 }
 
-/// Terminal or intermediate state written at the end of an attempt.
-struct RunUpdate<'a> {
-    status: &'static str,
-    error: Option<&'a str>,
-    available_at: Option<DateTime<Utc>>,
-    completed: bool,
-}
-
-impl<'a> RunUpdate<'a> {
-    fn status(status: &'static str) -> Self {
-        Self {
-            status,
-            error: None,
-            available_at: None,
-            completed: false,
-        }
-    }
-
-    fn completed(mut self) -> Self {
-        self.completed = true;
-        self
-    }
-
-    fn error(mut self, error: &'a str) -> Self {
-        self.error = Some(error);
-        self
-    }
-
-    fn available_at(mut self, available_at: DateTime<Utc>) -> Self {
-        self.available_at = Some(available_at);
-        self
-    }
-}
-
-/// Applies an update only while the run is owned, and reports whether it was.
+/// Writes the state of a run at the end of an attempt: `completed`, `failed`
+/// and `canceled` end it, `pending` and `sleeping` make it wait for
+/// `available_at`. An `error` replaces the previous one; a completed run has
+/// none.
+///
+/// The update applies only while the run is owned, and reports whether it was.
 ///
 /// A transient error is retried; the ownership is checked again by every try,
 /// so one that comes after the run was taken over writes nothing. If the first
 /// try did commit and only its answer was lost, the next one finds the run
 /// finished and reports it as not owned.
-async fn finish_run(db: &PgPool, run_id: Uuid, owner: Option<&RunOwner>, update: RunUpdate<'_>) -> Result<bool> {
+async fn finish_run(
+    db: &PgPool,
+    run_id: Uuid,
+    owner: Option<&RunOwner>,
+    status: &str,
+    error: Option<&str>,
+    available_at: Option<DateTime<Utc>>,
+) -> Result<bool> {
     retry(format!("recording the outcome of run {run_id}"), || async {
         let result = sqlx::query(
         "UPDATE flow_runs SET \
            status = $2, \
            error = CASE WHEN $2 = 'completed' THEN NULL ELSE COALESCE($3, error) END, \
            available_at = COALESCE($4, available_at), \
-           completed_at = CASE WHEN $5 THEN now() ELSE completed_at END, \
+           completed_at = CASE WHEN $2 IN ('completed', 'failed', 'canceled') THEN now() ELSE completed_at END, \
            worker_id = NULL, \
            lease_id = NULL \
-         WHERE id = $1 AND ($6::text IS NULL \
-           OR (worker_id = $6 AND status = 'running' AND ($7::uuid IS NULL OR lease_id = $7)))",
+         WHERE id = $1 AND ($5::text IS NULL \
+           OR (worker_id = $5 AND status = 'running' AND ($6::uuid IS NULL OR lease_id = $6)))",
     )
         .bind(run_id)
-        .bind(update.status)
-        .bind(update.error)
-        .bind(update.available_at)
-        .bind(update.completed)
+        .bind(status)
+        .bind(error)
+        .bind(available_at)
         .bind(owner.map(|owner| owner.worker_id.as_str()))
         .bind(owner.and_then(|owner| owner.lease_id))
         .execute(db)
@@ -459,7 +413,7 @@ async fn run_attempt(app: &OpenShop, opts: RunFlowOptions) -> Result<RunOutcome>
             },
             None => run.await,
         };
-        outcome.unwrap_or_else(|panic| Err(Panicked::of_attempt(format!("Flow panicked: {}", panic_message(panic)))))
+        outcome.unwrap_or_else(|panic| Err(Panicked::of_attempt(format!("Flow panicked: {}", panic_message(&panic)))))
     };
 
     // The execution is raced against the halt, and dropped when it wins.
@@ -478,7 +432,7 @@ async fn run_attempt(app: &OpenShop, opts: RunFlowOptions) -> Result<RunOutcome>
 
     let result = match outcome {
         Ok(()) => {
-            if finish_run(db, run_id, owner, RunUpdate::status("completed").completed()).await? {
+            if finish_run(db, run_id, owner, "completed", None, None).await? {
                 logger.info_with(
                     format!("Flow \"{flow_name}\" completed"),
                     json!({ "flowName": flow_name }),
@@ -494,14 +448,7 @@ async fn run_attempt(app: &OpenShop, opts: RunFlowOptions) -> Result<RunOutcome>
                 RunOutcome::LeaseLost
             } else if let Some(sleep) = error.downcast_ref::<SleepSignal>() {
                 let resume_at = sleep.resume_at;
-                if finish_run(
-                    db,
-                    run_id,
-                    owner,
-                    RunUpdate::status("sleeping").available_at(resume_at),
-                )
-                .await?
-                {
+                if finish_run(db, run_id, owner, "sleeping", None, Some(resume_at)).await? {
                     logger.info_with(
                         format!("Flow \"{flow_name}\" sleeping"),
                         json!({ "flowName": flow_name, "resumeAt": to_iso(&resume_at) }),
@@ -516,7 +463,7 @@ async fn run_attempt(app: &OpenShop, opts: RunFlowOptions) -> Result<RunOutcome>
                 // what comes next.
                 RunOutcome::LeaseLost
             } else if error.downcast_ref::<FlowCanceledError>().is_some() || signal.is_cancelled() {
-                if finish_run(db, run_id, owner, RunUpdate::status("canceled").completed()).await? {
+                if finish_run(db, run_id, owner, "canceled", None, None).await? {
                     logger.info_with(
                         format!("Flow \"{flow_name}\" was canceled"),
                         json!({ "flowName": flow_name }),
@@ -573,11 +520,8 @@ async fn record_failure(
     });
 
     let will_retry = next_at.is_some();
-    let update = match next_at {
-        Some(next_at) => RunUpdate::status("pending").error(&error_message).available_at(next_at),
-        None => RunUpdate::status("failed").error(&error_message).completed(),
-    };
-    let owned = finish_run(db, run_id, owner, update).await?;
+    let status = if will_retry { "pending" } else { "failed" };
+    let owned = finish_run(db, run_id, owner, status, Some(&error_message), next_at).await?;
     if !owned {
         return Ok(RunOutcome::LeaseLost);
     }

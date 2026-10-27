@@ -966,7 +966,7 @@ async fn post_run_retry_resume_keeps_completed_steps_and_reset_discards_them() {
     let run_id = dispatch_without_retries(&ctx, "test-flow").await;
 
     let result = execute(&ctx, run_id, "test-flow").await;
-    assert_eq!(result.status(), "failed");
+    assert!(matches!(result, RunOutcome::Failed { .. }), "{result:?}");
     assert_eq!(run_status(&ctx.db, run_id).await, "failed");
     assert_eq!(step_names(&ctx.db, run_id).await, ["fetch", "push"]);
 
@@ -982,7 +982,8 @@ async fn post_run_retry_resume_keeps_completed_steps_and_reset_discards_them() {
     let deadline_in = (run.deadline_at.expect("deadline from the flow timeout") - before).num_seconds();
     assert!((55..=65).contains(&deadline_in), "{deadline_in}");
 
-    assert_eq!(execute(&ctx, run_id, "test-flow").await.status(), "failed");
+    let result = execute(&ctx, run_id, "test-flow").await;
+    assert!(matches!(result, RunOutcome::Failed { .. }), "{result:?}");
     assert_eq!(step_names(&ctx.db, run_id).await, ["fetch", "push"]);
 
     let (status, body) = send(ctx.post(&format!("/api/runs/{run_id}/retry?mode=reset"))).await;

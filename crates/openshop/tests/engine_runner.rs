@@ -118,7 +118,6 @@ async fn successful_flow_completes() {
 
     let result = run_flow(&test.app, options(run_id)).await.unwrap();
     assert_eq!(result, RunOutcome::Completed);
-    assert_eq!(result.status(), "completed");
 
     let run = find_run(&test, run_id).await;
     assert_eq!(run.status, "completed");
@@ -151,7 +150,6 @@ async fn returns_lease_lost_when_the_worker_no_longer_owns_the_run() {
         .await
         .unwrap();
     assert_eq!(result, RunOutcome::LeaseLost);
-    assert_eq!(result.status(), "lease_lost");
 
     let run = find_run(&test, run_id).await;
     assert_eq!(run.status, "running");
@@ -359,7 +357,6 @@ async fn failing_flow_sets_status_to_failed() {
             will_retry: false
         }
     );
-    assert_eq!(result.status(), "failed");
 
     let run = find_run(&test, run_id).await;
     assert_eq!(run.status, "failed");
@@ -794,7 +791,6 @@ async fn sleeping_flow_resumes_once_the_resume_time_has_passed() {
     let RunOutcome::Sleeping { resume_at } = first else {
         panic!("expected the run to sleep, got {first:?}");
     };
-    assert_eq!(first.status(), "sleeping");
     assert!(resume_at >= before + chrono::Duration::seconds(60));
 
     let run = find_run(&test, run_id).await;
