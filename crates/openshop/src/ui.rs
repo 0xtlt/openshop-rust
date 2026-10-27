@@ -60,9 +60,5 @@ pub fn page_view<Marker>(path: &str, view: impl openshop_ui::CustomPageView<Mark
 #[cfg(target_arch = "wasm32")]
 #[doc(hidden)]
 pub fn mount(pages: impl IntoIterator<Item = Option<BundlePage>>) {
-    pages
-        .into_iter()
-        .flatten()
-        .fold(openshop_ui::App::new(), openshop_ui::App::custom_page)
-        .mount();
+    openshop_ui::mount(pages.into_iter().flatten());
 }

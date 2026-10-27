@@ -9,7 +9,6 @@
 //! was stopped or suspended does not catch up: the occurrences it slept through
 //! are one firing, for the latest of them.
 
-use std::any::Any;
 use std::collections::HashSet;
 use std::panic::AssertUnwindSafe;
 use std::time::Instant;
@@ -22,8 +21,9 @@ use futures::FutureExt;
 use serde_json::Value;
 use tokio::task::JoinHandle;
 
-use super::dispatch::{CronTick, DispatchOptions, dispatch_cron_tick};
+use super::dispatch::{CronTick, DispatchOptions, queue_run};
 use super::errors::FlowConcurrencyError;
+use super::runner::panic_message;
 use super::step::error_message;
 use crate::app::OpenShop;
 use crate::runtime::{logger, report};
@@ -127,7 +127,7 @@ async fn configured_targets(app: &OpenShop) -> Result<Vec<CronTarget>> {
 }
 
 async fn resolve_targets(app: &OpenShop, entry: &Cron) -> Result<Vec<CronTarget>> {
-    match entry.shops.clone().unwrap_or_default() {
+    match entry.shops.clone() {
         CronShops::Global => Ok(vec![default_target("__global__")]),
         CronShops::All => {
             let rows: Vec<(String, String)> =
@@ -260,7 +260,7 @@ const TICK_RETENTION_HOURS: i64 = 24;
 
 /// An occurrence this late is not fired: another process fired it long ago,
 /// and its claim may be pruned any time now. Must stay well under the retention.
-const MAX_TICK_LATENESS_MINUTES: i64 = 60;
+pub(super) const MAX_TICK_LATENESS_MINUTES: i64 = 60;
 const _: () = assert!(MAX_TICK_LATENESS_MINUTES < TICK_RETENTION_HOURS * 60);
 
 /// What names a configured cron in `cron_ticks`: its flow and schedule, as in
@@ -318,12 +318,7 @@ async fn run_entry(app: &OpenShop, entry: &Cron, tick_key: &str, scheduled_at: D
                 "[openshop] Cron \"{flow}\" could not resolve its shops: {}",
                 error_message(&error)
             ));
-            report::detached(
-                |cron| {
-                    cron.unit("cron", flow);
-                },
-                &error,
-            );
+            report_cron(flow, &error);
             return;
         }
     };
@@ -342,7 +337,6 @@ async fn run_entry(app: &OpenShop, entry: &Cron, tick_key: &str, scheduled_at: D
     let tick = CronTick {
         cron_key: tick_key,
         scheduled_at,
-        max_lateness: Duration::minutes(MAX_TICK_LATENESS_MINUTES),
     };
     // The shops that turned the cron off, in one query for all the targets.
     let turned_off: sqlx::Result<Vec<(String, String)>> =
@@ -358,12 +352,7 @@ async fn run_entry(app: &OpenShop, entry: &Cron, tick_key: &str, scheduled_at: D
                 "[openshop] Cron \"{flow}\" could not read its overrides: {}",
                 error_message(&error)
             ));
-            report::detached(
-                |cron| {
-                    cron.unit("cron", flow);
-                },
-                &error,
-            );
+            report_cron(flow, &error);
             return;
         }
     };
@@ -381,7 +370,7 @@ async fn run_entry(app: &OpenShop, entry: &Cron, tick_key: &str, scheduled_at: D
                 params = params.input(input.clone());
             }
             // `None`: another process queued this occurrence.
-            dispatch_cron_tick(app.db(), app.config(), params, &tick).await?;
+            queue_run(app.db(), app.config(), params, Some(&tick)).await?;
             Ok(())
         }
         .await;
@@ -429,24 +418,21 @@ async fn keep_scheduled(app: OpenShop, entry: Cron, tick_key: String, schedule: 
         );
         logger::error(&message);
         if wait == RESTART_AFTER {
-            report::detached(
-                |cron| {
-                    cron.unit("cron", &entry.flow);
-                },
-                &anyhow!(message),
-            );
+            report_cron(&entry.flow, &anyhow!(message));
         }
         tokio::time::sleep(wait).await;
         wait = (wait * 2).min(RESTART_AT_MOST);
     }
 }
 
-fn panic_message(panic: &Box<dyn Any + Send>) -> &str {
-    panic
-        .downcast_ref::<&str>()
-        .copied()
-        .or_else(|| panic.downcast_ref::<String>().map(String::as_str))
-        .unwrap_or("no message")
+/// Reports a failure of a cron, apart from any of its runs.
+fn report_cron(flow: &str, error: &anyhow::Error) {
+    report::detached(
+        |cron| {
+            cron.unit("cron", flow);
+        },
+        error,
+    );
 }
 
 /// Waits for each occurrence of a schedule and fires it. Returns when the
@@ -689,10 +675,9 @@ mod tests {
                 let tick = CronTick {
                     cron_key: "sync",
                     scheduled_at,
-                    max_lateness: Duration::minutes(MAX_TICK_LATENESS_MINUTES),
                 };
                 let options = DispatchOptions::new("sync", "__global__");
-                dispatch_cron_tick(app.db(), app.config(), options, &tick).await.unwrap()
+                queue_run(app.db(), app.config(), options, Some(&tick)).await.unwrap()
             }
         };
 

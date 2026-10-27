@@ -1,7 +1,6 @@
 //! Admin API for custom admin pages: discovery, access checks and the RPC
 //! endpoint behind loaders and actions.
 
-use std::panic::AssertUnwindSafe;
 use std::time::Instant;
 
 use axum::Router;
@@ -11,36 +10,20 @@ use axum::http::header::CONTENT_TYPE;
 use axum::http::{HeaderMap, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
-use futures::FutureExt;
 use indexmap::IndexMap;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
-use super::http::{header, json_response, parse_query};
+use super::http::{catch_panic, header, json_response, parse_query};
 use super::shop::ShopSession;
-use crate::admin::{
-    AdminAuthorize, AdminContext, AdminFunctionKind, AdminPublicError, CustomAdminPage, validate_admin_menu,
-};
+use crate::admin::{AdminAuthorize, AdminContext, AdminFunctionKind, AdminPublicError, CustomAdminPage};
 use crate::app::OpenShop;
 use crate::engine::step::error_message;
-use crate::runtime::report::{self, Panicked};
+use crate::runtime::report;
 use crate::runtime::logger;
 use crate::types::{CustomAdminPageAccess, CustomAdminPagesResponse, JsonMap};
-use openshop_shared::match_custom_admin_path;
 use openshop_shared::rpc::decode_uri_component;
-
-fn extract_params(pattern: &str, pathname: &str) -> Option<IndexMap<String, String>> {
-    if !match_custom_admin_path(pattern, pathname) {
-        return None;
-    }
-    let pattern_segments = pattern.split('/').filter(|segment| !segment.is_empty());
-    let path_segments = pathname.split('/').filter(|segment| !segment.is_empty());
-    pattern_segments
-        .zip(path_segments)
-        .filter_map(|(pattern, path)| Some((pattern.strip_prefix(':')?, path)))
-        .map(|(name, value)| Some((name.to_string(), decode_uri_component(value)?)))
-        .collect()
-}
+use openshop_shared::{custom_admin_route_params, match_custom_admin_path};
 
 /// The most specific page matching a path. Pages are sorted with static
 /// segments first, so `/reviews/new` wins over `/reviews/:id`.
@@ -59,14 +42,14 @@ fn ancestor_access<'a>(pages: &'a [CustomAdminPage], page: &CustomAdminPage) -> 
         .collect()
 }
 
-async fn create_context(
+fn create_context(
     app: &OpenShop,
     session: &ShopSession,
     params: IndexMap<String, String>,
     request_id: String,
     idempotency_key: Option<String>,
-) -> anyhow::Result<AdminContext> {
-    Ok(AdminContext {
+) -> AdminContext {
+    AdminContext {
         shop: session.shop.clone(),
         shopify_app: session.shopify_app.clone(),
         actor: session.actor.clone(),
@@ -77,7 +60,7 @@ async fn create_context(
         request_id,
         idempotency_key,
         app: app.clone(),
-    })
+    }
 }
 
 async fn is_allowed(
@@ -98,16 +81,13 @@ async fn is_allowed(
 
 async fn page_is_allowed(app: &OpenShop, session: &ShopSession, page: &CustomAdminPage, pathname: &str) -> bool {
     let check = async {
-        let Some(params) = extract_params(&page.route_pattern, pathname) else {
+        let Some(params) = custom_admin_route_params(&page.route_pattern, pathname) else {
             return Ok(false);
         };
-        let context = create_context(app, session, params, Uuid::new_v4().to_string(), None).await?;
+        let context = create_context(app, session, params, Uuid::new_v4().to_string(), None);
         is_allowed(&ancestor_access(app.custom_pages(), page), &context, None).await
     };
-    let outcome: anyhow::Result<bool> = AssertUnwindSafe(check)
-        .catch_unwind()
-        .await
-        .unwrap_or_else(|_| Err(anyhow::anyhow!("access rule panicked")));
+    let outcome: anyhow::Result<bool> = catch_panic("access rule", check).await;
 
     outcome.unwrap_or_else(|error| {
         logger::warn_with(
@@ -126,16 +106,6 @@ async fn list_pages(State(app): State<OpenShop>, Extension(session): Extension<S
     }
 
     let pages = app.custom_pages();
-    let navigation = match validate_admin_menu(&config.resolved_admin_menu(), pages) {
-        Ok(navigation) => navigation,
-        Err(error) => {
-            logger::warn_with(
-                "[openshop] Custom admin page bootstrap failed; using built-in pages only",
-                json!({ "error": error_message(&error) }),
-            );
-            return empty();
-        }
-    };
 
     let mut access = Vec::with_capacity(pages.len());
     for page in pages {
@@ -149,7 +119,8 @@ async fn list_pages(State(app): State<OpenShop>, Extension(session): Extension<S
     }
 
     let mut authorized_navigation = Vec::new();
-    for item in navigation {
+    // The menu was checked against the pages with the rest of the config.
+    for item in config.resolved_admin_menu() {
         if let Some(page) = find_matching_page(pages, &item.path)
             && page_is_allowed(&app, &session, page, &item.path).await
         {
@@ -231,7 +202,7 @@ async fn execute_rpc(
 
     let pages = app.custom_pages();
     let page = find_matching_page(pages, page_path).ok_or_else(rpc_not_found)?;
-    let params = extract_params(&page.route_pattern, page_path).ok_or_else(rpc_not_found)?;
+    let params = custom_admin_route_params(&page.route_pattern, page_path).ok_or_else(rpc_not_found)?;
     let definition = page
         .page
         .functions
@@ -243,7 +214,7 @@ async fn execute_rpc(
     });
 
     let idempotency_key = header(headers, "idempotency-key").map(str::to_string);
-    let context = create_context(app, session, params, request_id.to_string(), idempotency_key).await?;
+    let context = create_context(app, session, params, request_id.to_string(), idempotency_key);
     if !is_allowed(&ancestor_access(pages, page), &context, definition.authorize.as_ref()).await? {
         return Err(public_error("FORBIDDEN", "Forbidden", 403));
     }
@@ -265,9 +236,6 @@ async fn execute_rpc(
     }
 
     let output = (definition.handler)(context, input).await?;
-    if let Some(validate) = &definition.output {
-        validate(&output).map_err(|summary| anyhow::anyhow!("Invalid output: {summary}"))?;
-    }
 
     metadata.insert("pageId".into(), Value::from(page.id.clone()));
     metadata.insert("functionName".into(), Value::from(name));
@@ -297,10 +265,7 @@ async fn rpc(
 
     // A panicking access rule or function is an internal error, not a dropped connection.
     let execution = execute_rpc(&app, &session, uri.path(), &headers, &body, &request_id, &mut metadata);
-    let outcome = AssertUnwindSafe(execution)
-        .catch_unwind()
-        .await
-        .unwrap_or_else(|_| Err(Panicked::error("admin function panicked")));
+    let outcome = catch_panic("admin function", execution).await;
     metadata.insert(
         "durationMs".into(),
         Value::from(started_at.elapsed().as_millis() as u64),
@@ -351,16 +316,6 @@ pub fn create_custom_admin_page_routes() -> Router<OpenShop> {
 mod tests {
     use super::*;
     use crate::admin::{AdminPage, resolve_custom_admin_pages};
-
-    #[test]
-    fn extracts_route_params() {
-        let params = extract_params("/reviews/:id/items/:item", "/reviews/42/items/a%20b").unwrap();
-        assert_eq!(params["id"], "42");
-        assert_eq!(params["item"], "a b");
-        assert!(extract_params("/reviews", "/reviews").unwrap().is_empty());
-        assert!(extract_params("/reviews/:id", "/reviews").is_none());
-        assert!(extract_params("/reviews/:id", "/reviews/%zz").is_none());
-    }
 
     #[test]
     fn finds_pages_and_their_ancestors() {

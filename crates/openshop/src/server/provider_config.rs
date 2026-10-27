@@ -2,11 +2,11 @@
 
 use serde_json::Value;
 
-use crate::types::{Field, FieldType, JsonMap, Provider, is_missing};
+use crate::types::{Field, FieldType, Fields, JsonMap, Provider, ProviderTransformer, is_missing};
 use crate::validators::describe;
 
 /// JavaScript's `Number(string)` for the inputs a form can send.
-pub(crate) fn js_number(text: &str) -> Value {
+fn js_number(text: &str) -> Value {
     match text.trim().parse::<f64>() {
         Ok(number) if number.is_finite() => {
             if number.fract() == 0.0 && number.abs() < 9e15 {
@@ -22,7 +22,7 @@ pub(crate) fn js_number(text: &str) -> Value {
 /// The error for a value a validator refused. The summary of a validator may
 /// repeat the value, so for a password it is not forwarded: a secret never
 /// leaves in an error.
-pub(crate) fn validation_error(name: &str, field: &Field, summary: &str) -> String {
+fn validation_error(name: &str, field: &Field, summary: &str) -> String {
     match field.field_type {
         FieldType::Password => format!("Field \"{name}\" is invalid"),
         _ => format!("Field \"{name}\": {summary}"),
@@ -33,7 +33,7 @@ pub(crate) fn validation_error(name: &str, field: &Field, summary: &str) -> Stri
 /// types (`"3"` is 3, `"true"` is true). A value that is not of the type of its
 /// field, even after that, is refused with an error naming the field. A null or
 /// an empty string counts as no value.
-pub(crate) fn coerce_field_value(name: &str, field: &Field, value: Option<Value>) -> Result<Option<Value>, String> {
+fn coerce_field_value(name: &str, field: &Field, value: Option<Value>) -> Result<Option<Value>, String> {
     let refuse = |expected: &str, value: &Value| Err(format!("Field \"{name}\": must be {expected} (was {})", describe(value)));
     let Some(value) = value.filter(|value| !is_missing(Some(value))) else {
         return Ok(None);
@@ -112,9 +112,12 @@ pub fn public_provider_config(provider: &Provider, stored_config: &JsonMap) -> J
         .collect()
 }
 
-/// Validates submitted configuration. A blank password keeps the stored one.
+/// Validates submitted configuration: the one of a provider, or of a Shopify
+/// Function instance, which has no transformer and no stored values. A blank
+/// password keeps the stored one.
 pub fn parse_provider_config(
-    provider: &Provider,
+    fields: &Fields,
+    transformer: Option<&ProviderTransformer>,
     raw_config: Option<&Value>,
     existing_config: &JsonMap,
 ) -> Result<JsonMap, String> {
@@ -123,7 +126,7 @@ pub fn parse_provider_config(
     let mut data = JsonMap::new();
     let mut kept = Vec::new();
 
-    for (name, field) in &provider.fields {
+    for (name, field) in fields {
         let submitted = input.get(name).cloned();
 
         // A blank password keeps the stored value as it is: it was checked and
@@ -143,7 +146,7 @@ pub fn parse_provider_config(
         }
     }
 
-    let mut transformed = match &provider.transformer {
+    let mut transformed = match transformer {
         Some(transformer) => match transformer(data) {
             Value::Object(transformed) => transformed,
             _ => return Err("Provider transformer must return an object".to_string()),
@@ -151,7 +154,7 @@ pub fn parse_provider_config(
         None => data,
     };
 
-    for (name, field) in &provider.fields {
+    for (name, field) in fields {
         let value = transformed.get(name).cloned();
         if field.is_required() && is_missing(value.as_ref()) {
             return Err(format!("Field \"{name}\" is required"));
@@ -180,6 +183,10 @@ mod tests {
         value.as_object().cloned().unwrap()
     }
 
+    fn parse(provider: &Provider, raw_config: Option<&Value>, existing_config: &JsonMap) -> Result<JsonMap, String> {
+        parse_provider_config(&provider.fields, provider.transformer.as_ref(), raw_config, existing_config)
+    }
+
     fn warehouse() -> Provider {
         Provider::new("warehouse")
             .field("endpoint", Field::text("Endpoint").validate(validators::url()))
@@ -188,7 +195,7 @@ mod tests {
             .field("enabled", Field::checkbox("Enabled"))
             .field(
                 "retries",
-                Field::number("Retries").validate(validators::number_range(0.0, 10.0)),
+                Field::number("Retries").validate(validators::range(Some(0.0), Some(10.0))),
             )
     }
 
@@ -252,7 +259,7 @@ mod tests {
 
     #[test]
     fn coerces_form_strings_and_validates() {
-        let parsed = parse_provider_config(
+        let parsed = parse(
             &warehouse(),
             Some(&json!({
                 "endpoint": "https://warehouse.test",
@@ -278,7 +285,7 @@ mod tests {
     #[test]
     fn keeps_the_stored_password_when_left_blank() {
         let existing = object(json!({ "apiKey": "stored-secret" }));
-        let parsed = parse_provider_config(
+        let parsed = parse(
             &warehouse(),
             Some(&json!({ "endpoint": "https://warehouse.test", "apiKey": "", "enabled": false, "retries": 1 })),
             &existing,
@@ -290,13 +297,13 @@ mod tests {
 
     #[test]
     fn reports_missing_and_invalid_fields() {
-        let error = parse_provider_config(&warehouse(), Some(&json!({})), &JsonMap::new()).unwrap_err();
+        let error = parse(&warehouse(), Some(&json!({})), &JsonMap::new()).unwrap_err();
         assert_eq!(error, "Field \"endpoint\" is required");
 
-        let error = parse_provider_config(&warehouse(), None, &JsonMap::new()).unwrap_err();
+        let error = parse(&warehouse(), None, &JsonMap::new()).unwrap_err();
         assert_eq!(error, "Field \"endpoint\" is required");
 
-        let error = parse_provider_config(
+        let error = parse(
             &warehouse(),
             Some(&json!({ "endpoint": "not a url", "apiKey": "k", "enabled": true, "retries": 1 })),
             &JsonMap::new(),
@@ -304,7 +311,7 @@ mod tests {
         .unwrap_err();
         assert!(error.starts_with("Field \"endpoint\": "), "{error}");
 
-        let error = parse_provider_config(
+        let error = parse(
             &warehouse(),
             Some(&json!({ "endpoint": "https://w.test", "apiKey": "k", "enabled": true, "retries": 99 })),
             &JsonMap::new(),
@@ -329,7 +336,7 @@ mod tests {
     }
 
     fn typed_error(config: Value) -> String {
-        parse_provider_config(&typed(), Some(&config), &JsonMap::new()).unwrap_err()
+        parse(&typed(), Some(&config), &JsonMap::new()).unwrap_err()
     }
 
     #[test]
@@ -342,7 +349,7 @@ mod tests {
             typed_error(json!({ "mode": 1 })),
             "Field \"mode\": must be one of \"live\", \"test\" (was 1)"
         );
-        let parsed = parse_provider_config(&typed(), Some(&json!({ "mode": "test" })), &JsonMap::new()).unwrap();
+        let parsed = parse(&typed(), Some(&json!({ "mode": "test" })), &JsonMap::new()).unwrap();
         assert_eq!(parsed["mode"], "test");
     }
 
@@ -360,14 +367,14 @@ mod tests {
             typed_error(json!({ "mode": "live", "retries": true })),
             "Field \"retries\": must be a number (was true)"
         );
-        let parsed = parse_provider_config(
+        let parsed = parse(
             &typed(),
             Some(&json!({ "mode": "live", "retries": " 2.5 " })),
             &JsonMap::new(),
         )
         .unwrap();
         assert_eq!(parsed["retries"], 2.5);
-        let parsed = parse_provider_config(
+        let parsed = parse(
             &typed(),
             Some(&json!({ "mode": "live", "retries": "" })),
             &JsonMap::new(),
@@ -384,7 +391,7 @@ mod tests {
         }
         for (sent, saved) in [(json!(true), true), (json!("true"), true), (json!("false"), false)] {
             let parsed =
-                parse_provider_config(&typed(), Some(&json!({ "mode": "live", "sandbox": sent })), &JsonMap::new())
+                parse(&typed(), Some(&json!({ "mode": "live", "sandbox": sent })), &JsonMap::new())
                     .unwrap();
             assert_eq!(parsed["sandbox"], saved);
         }
@@ -414,12 +421,12 @@ mod tests {
             });
         // The summary of a validator is not forwarded for a password.
         let error =
-            parse_provider_config(&provider, Some(&json!({ "token": "secret-token" })), &JsonMap::new()).unwrap_err();
+            parse(&provider, Some(&json!({ "token": "secret-token" })), &JsonMap::new()).unwrap_err();
         assert_eq!(error, "Field \"token\" is invalid");
 
         // A stored password is neither validated nor transformed again.
         let stored = object(json!({ "token": { "accessToken": "secret-token" } }));
-        let parsed = parse_provider_config(&provider, Some(&json!({ "token": "" })), &stored).unwrap();
+        let parsed = parse(&provider, Some(&json!({ "token": "" })), &stored).unwrap();
         assert_eq!(parsed, stored);
 
         // A validator of the application that repeats the value in its summary.
@@ -430,24 +437,24 @@ mod tests {
                 None => Err(format!("invalid token: {value}")),
             }),
         );
-        let stored = parse_provider_config(&chatty, Some(&json!({ "token": "review-secret" })), &JsonMap::new()).unwrap();
-        assert_eq!(parse_provider_config(&chatty, Some(&json!({})), &stored).unwrap(), stored);
+        let stored = parse(&chatty, Some(&json!({ "token": "review-secret" })), &JsonMap::new()).unwrap();
+        assert_eq!(parse(&chatty, Some(&json!({})), &stored).unwrap(), stored);
         let refusing = Provider::new("custom").field(
             "token",
             Field::password("Token").validate(|value| Err(format!("invalid token: {value}"))),
         );
-        let error = parse_provider_config(&refusing, Some(&json!({ "token": "review-secret" })), &JsonMap::new())
+        let error = parse(&refusing, Some(&json!({ "token": "review-secret" })), &JsonMap::new())
             .unwrap_err();
         assert_eq!(error, "Field \"token\" is invalid");
 
         let plain = Provider::new("erp").field("token", Field::password("Token"));
-        let parsed = parse_provider_config(&plain, Some(&json!({})), &stored).unwrap();
+        let parsed = parse(&plain, Some(&json!({})), &stored).unwrap();
         assert_eq!(parsed, stored);
     }
 
     #[test]
     fn ignores_fields_that_are_not_declared() {
-        let parsed = parse_provider_config(
+        let parsed = parse(
             &typed(),
             Some(&json!({ "mode": "live", "extra": "x", "__proto__": { "a": 1 } })),
             &JsonMap::new(),
@@ -469,7 +476,7 @@ mod tests {
                 }
                 Value::Object(data)
             });
-        let parsed = parse_provider_config(
+        let parsed = parse(
             &provider,
             Some(&json!({ "endpoint": "https://warehouse.test/" })),
             &JsonMap::new(),
@@ -480,7 +487,7 @@ mod tests {
         let broken = Provider::new("warehouse")
             .field("endpoint", Field::text("Endpoint"))
             .transformer(|_| Value::Null);
-        let error = parse_provider_config(&broken, Some(&json!({ "endpoint": "x" })), &JsonMap::new()).unwrap_err();
+        let error = parse(&broken, Some(&json!({ "endpoint": "x" })), &JsonMap::new()).unwrap_err();
         assert_eq!(error, "Provider transformer must return an object");
     }
 }

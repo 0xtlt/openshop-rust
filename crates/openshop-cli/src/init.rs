@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use dialoguer::theme::ColorfulTheme;
 use dialoguer::{Input, Select};
-use toml_edit::{DocumentMut, InlineTable, Item, RawString, Table, Value, value};
+use toml_edit::{Decor, DocumentMut, InlineTable, Item, Key, RawString, Table, Value, value};
 
 const OPENSHOP_VERSION: &str = env!("CARGO_PKG_VERSION");
 const OPENSHOP_REPOSITORY: &str = "https://github.com/0xtlt/openshop-rust";
@@ -186,7 +186,8 @@ fn is_empty_dir(path: &Path) -> bool {
     }
 }
 
-fn toml_string(value: &str) -> String {
+/// `value` as a TOML string: quoted, its quotes and backslashes escaped.
+pub fn toml_string(value: &str) -> String {
     format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
@@ -452,41 +453,60 @@ fn project_file(path: &str, content: &str, template: &Template, project: &Projec
 }
 
 /// The manifest of an application whose pages have a view: `openshop` with its
-/// `ui` feature, and `leptos`. `None` when `openshop` is not declared on one
-/// line of `[dependencies]`, the way `openshop init` writes it.
+/// `ui` feature, and `leptos` after it. `None` when `openshop` is not an inline
+/// table of `[dependencies]`, the way `openshop init` writes it.
 fn manifest_with_views(manifest: &str) -> Option<String> {
-    let mut lines: Vec<String> = Vec::new();
-    let mut in_dependencies = false;
-    let mut declared = false;
-    let has_leptos = manifest.lines().any(|line| line.trim_start().starts_with("leptos"));
-    for line in manifest.lines() {
-        let trimmed = line.trim();
-        if trimmed.starts_with('[') {
-            in_dependencies = trimmed == "[dependencies]";
+    let mut manifest: DocumentMut = manifest.parse().ok()?;
+    let dependencies = manifest.get_mut("dependencies")?.as_table_mut()?;
+    let openshop = dependencies.get_mut("openshop")?.as_inline_table_mut()?;
+    match openshop.get_mut("features") {
+        Some(features) => {
+            let features = features.as_array_mut()?;
+            if !features.iter().any(|feature| feature.as_str() == Some("ui")) {
+                features.insert(0, "ui");
+                features.fmt();
+            }
         }
-        let is_openshop = in_dependencies
-            && trimmed
-                .strip_prefix("openshop")
-                .is_some_and(|rest| rest.trim_start().starts_with('='));
-        if !is_openshop {
-            lines.push(line.to_string());
-            continue;
+        None => {
+            openshop.insert("features", Value::Array(["ui"].into_iter().collect()));
+            openshop.fmt();
         }
-        let table = trimmed.strip_suffix('}')?.trim_end();
-        lines.push(if trimmed.contains("\"ui\"") {
-            line.to_string()
-        } else if let Some((before, after)) = table.split_once("features = [") {
-            format!("{before}features = [\"ui\", {after} }}")
-        } else {
-            format!("{table}, features = [\"ui\"] }}")
-        });
-        if !has_leptos {
-            lines.push("# The views of the admin pages.".to_string());
-            lines.push(format!("leptos = \"{LEPTOS_VERSION}\""));
-        }
-        declared = true;
     }
-    declared.then(|| lines.join("\n") + "\n")
+    if !dependencies.contains_key("leptos") {
+        // The dependencies after `openshop` move after `leptos`.
+        let after: Vec<String> = dependencies
+            .iter()
+            .map(|(name, _)| name.to_string())
+            .skip_while(|name| name != "openshop")
+            .skip(1)
+            .collect();
+        let after: Vec<(Key, Item)> = after
+            .iter()
+            .filter_map(|name| dependencies.remove_entry(name))
+            .collect();
+        let leptos = Key::new("leptos").with_leaf_decor(Decor::new("# The views of the admin pages.\n", " "));
+        dependencies.insert_formatted(&leptos, value(LEPTOS_VERSION));
+        for (name, item) in after {
+            dependencies.insert_formatted(&name, item);
+        }
+    }
+    Some(manifest.to_string())
+}
+
+/// Adds `line` at the end of the file at `path`, created if need be, unless
+/// one of its lines, trimmed, is `present`.
+fn append_line(path: &Path, line: &str, present: impl Fn(&str) -> bool) -> Result<()> {
+    let content = std::fs::read_to_string(path).unwrap_or_default();
+    if content.lines().any(|current| present(current.trim())) {
+        return Ok(());
+    }
+    let separator = if content.is_empty() || content.ends_with('\n') {
+        ""
+    } else {
+        "\n"
+    };
+    std::fs::write(path, format!("{content}{separator}{line}\n"))?;
+    Ok(())
 }
 
 /// `openshop init-ui`: gives a project a first page with a view,
@@ -507,27 +527,12 @@ pub fn run_init_ui(cwd: &Path) -> Result<()> {
     std::fs::write(&page, content)?;
 
     // The page is a module of `admin`, next to the pages the project already has.
-    let pages = cwd.join("src/admin/mod.rs");
-    let declared = std::fs::read_to_string(&pages).unwrap_or_default();
-    if !declared.lines().any(|line| line.trim().ends_with("mod hello;")) {
-        let separator = if declared.is_empty() || declared.ends_with('\n') {
-            ""
-        } else {
-            "\n"
-        };
-        std::fs::write(&pages, format!("{declared}{separator}pub mod hello;\n"))?;
-    }
-
-    let ignored_path = cwd.join(".gitignore");
-    let ignored = std::fs::read_to_string(&ignored_path).unwrap_or_default();
-    if !ignored.lines().any(|line| line.trim().trim_end_matches('/') == "dist") {
-        let separator = if ignored.is_empty() || ignored.ends_with('\n') {
-            ""
-        } else {
-            "\n"
-        };
-        std::fs::write(&ignored_path, format!("{ignored}{separator}dist/\n"))?;
-    }
+    append_line(&cwd.join("src/admin/mod.rs"), "pub mod hello;", |line| {
+        line.ends_with("mod hello;")
+    })?;
+    append_line(&cwd.join(".gitignore"), "dist/", |line| {
+        line.trim_end_matches('/') == "dist"
+    })?;
 
     println!("[openshop] Created {path}");
     match manifest_with_views(&manifest) {

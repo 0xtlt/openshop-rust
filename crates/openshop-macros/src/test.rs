@@ -3,10 +3,9 @@
 use proc_macro2::TokenStream;
 use quote::quote;
 use syn::spanned::Spanned;
-use syn::{Expr, FnArg, ItemFn, Type};
+use syn::{Expr, FnArg, ItemFn, Type, TypeReference};
 
-const SHAPE: &str =
-    "`#[openshop::test]` goes on `async fn(ctx: &TestContext)`, or `&mut TestContext` to create resources";
+const SHAPE: &str = "`#[openshop::test]` goes on `async fn(ctx: &TestContext)`";
 
 pub fn test(arguments: TokenStream, item: ItemFn) -> syn::Result<TokenStream> {
     let krate = quote!(::openshop);
@@ -26,12 +25,8 @@ pub fn test(arguments: TokenStream, item: ItemFn) -> syn::Result<TokenStream> {
     let (Some(FnArg::Typed(context)), None) = (inputs.next(), inputs.next()) else {
         return Err(syn::Error::new(signature.paren_token.span.join(), SHAPE));
     };
-    let Type::Reference(reference) = &*context.ty else {
+    let Type::Reference(TypeReference { mutability: None, .. }) = &*context.ty else {
         return Err(syn::Error::new(context.ty.span(), SHAPE));
-    };
-    let borrow = match reference.mutability {
-        Some(_) => quote!(&mut context),
-        None => quote!(&context),
     };
 
     // The attributes of the test (`#[ignore]`, documentation…) go on the test
@@ -49,12 +44,11 @@ pub fn test(arguments: TokenStream, item: ItemFn) -> syn::Result<TokenStream> {
         #visibility async fn #name() {
             #body
 
-            #[allow(unused_mut)]
-            let mut context = {
+            let context = {
                 use #krate::testing::IntoTestContext as _;
                 (#subject).into_test_context().await.expect("the test context starts")
             };
-            let outcome = #name(#borrow).await;
+            let outcome = #name(&context).await;
             context.shutdown().await.expect("the test context shuts down");
             #krate::testing::TestOutcome::check(outcome);
         }
@@ -98,11 +92,6 @@ mod tests {
         ] {
             assert!(generated.contains(expected), "missing `{expected}` in:\n{generated}");
         }
-
-        let mutable = test(quote!(APP), parse_quote! { async fn creates(ctx: &mut TestContext) {} })
-            .unwrap()
-            .to_string();
-        assert!(mutable.contains("creates (& mut context) . await"), "{mutable}");
     }
 
     #[test]
@@ -115,6 +104,7 @@ mod tests {
             parse_quote! { fn runs(ctx: &TestContext) {} },
             parse_quote! { async fn runs() {} },
             parse_quote! { async fn runs(ctx: TestContext) {} },
+            parse_quote! { async fn runs(ctx: &mut TestContext) {} },
             parse_quote! { async fn runs(ctx: &TestContext, more: u32) {} },
         ] {
             assert_eq!(refusal(quote!(APP), item), SHAPE);

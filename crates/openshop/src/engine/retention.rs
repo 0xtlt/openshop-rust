@@ -11,7 +11,7 @@ use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 
 /// Lines removed by one statement.
-pub const PURGE_BATCH: i64 = 5_000;
+const PURGE_BATCH: i64 = 5_000;
 /// Statements of one sweep. A larger backlog is left to the next one.
 const MAX_BATCHES_PER_SWEEP: usize = 200;
 /// Time between two sweeps.

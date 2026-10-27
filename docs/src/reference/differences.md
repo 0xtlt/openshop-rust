@@ -54,9 +54,7 @@ larger configurations easier to split:
   `Provider::typed_checker`, for a provider built without a struct. See
   [Typed calls](providers.md#typed-calls).
 - Blocks are declared in the module that writes them and `app!` lists them by
-  name, so a large application has no registration code to split. On the
-  builder underneath, `.providers([…])`, `.flows([…])` and `.with(register)`
-  register several definitions at once.
+  name, so a large application has no registration code to split.
 
 ## Engine
 
@@ -127,8 +125,7 @@ larger configurations easier to split:
   a run that changed meanwhile is answered `409`. A retry of a flow that
   rejects concurrent runs answers `409` with `existingRunId` while another
   run of it is active for the shop.
-- Log export uses JSON for any `format` other than `csv`, and only letters and
-  digits are kept in the file extension.
+- Log export uses JSON, in a `.json` file, for any `format` other than `csv`.
 - Run details list steps in creation order.
 - Unknown paths under `/api` return `404` after authentication.
 - Request bodies are limited to 2 MB (`413` above that). Set
@@ -199,7 +196,7 @@ larger configurations easier to split:
 - The UI is written in Rust with Leptos and compiled to WebAssembly. It is
   embedded in the framework crate. An application with custom admin pages
   serves its own bundle with the setting `admin_ui: UiSource::Dir(…)`,
-  `admin_ui: UiSource::assets(…)` for a bundle compiled into the binary, or
+  `admin_ui: UiSource::Assets(…)` for a bundle compiled into the binary, or
   the `OPENSHOP_UI_DIR` environment variable.
 - Assets whose file name carries a content hash are served with
   `Cache-Control: public, max-age=31536000, immutable`; other files with
@@ -279,8 +276,8 @@ larger configurations easier to split:
 - GraphQL code generation as a separate step. `graphql!` checks an operation
   against Shopify's schema and types it when the crate compiles, so there is
   no `.graphqlrc.ts`, no generated file and no watch mode, and `dev` has
-  nothing to generate. The first build downloads the schema of the version of
-  `[package.metadata.shopify_api]`. Enum values are strings, and the types of
+  nothing to generate. The schema of the version of
+  `[package.metadata.shopify_api]` is a committed file. Enum values are strings, and the types of
   an inline operation have no name. See [Typed GraphQL](graphql.md).
 - `openshop build` and `openshop test` map to `cargo build --release` and
   `cargo test`.

@@ -1,8 +1,7 @@
 //! Previews the public app template in a regular browser, without a Shopify store.
 //!
 //! ```bash
-//! DATABASE_URL=postgresql://openshop:openshop@localhost:5432/openshop \
-//!   cargo run -p openshop-template-public --example preview-public
+//! cargo run -p openshop-template-public --example preview-public
 //! ```
 //!
 //! The application runs on `http://localhost:3998`. `apps/preview` is what serves it:

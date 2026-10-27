@@ -1,11 +1,16 @@
 //! Path rules for application-defined admin pages.
 
+use std::cmp::Ordering;
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
+
+use crate::rpc::decode_uri_component;
 
 /// The path of the home of the admin. A page of the application can take it.
 pub const ADMIN_HOME_PATH: &str = "/";
 
-pub const CUSTOM_ADMIN_RESERVED_PREFIXES: [&str; 14] = [
+const CUSTOM_ADMIN_RESERVED_PREFIXES: [&str; 14] = [
     "api",
     "auth",
     "webhooks",
@@ -50,11 +55,13 @@ pub struct CustomAdminPagesResponse {
     pub pages: Vec<CustomAdminPageAccess>,
 }
 
-fn segments(path: &str) -> impl Iterator<Item = &str> {
+/// The segments of a path, empty ones left out: `/reviews//42/` has two.
+pub fn path_segments(path: &str) -> impl Iterator<Item = &str> {
     path.split('/').filter(|segment| !segment.is_empty())
 }
 
-fn is_plain_segment(segment: &str) -> bool {
+/// A segment made of ASCII letters, digits, `_` and `-` only.
+pub fn is_safe_path_segment(segment: &str) -> bool {
     !segment.is_empty()
         && segment
             .bytes()
@@ -71,7 +78,7 @@ fn is_dynamic_segment(segment: &str) -> bool {
 }
 
 pub fn is_reserved_custom_admin_path(path: &str) -> bool {
-    match segments(path).next() {
+    match path_segments(path).next() {
         Some(first) => CUSTOM_ADMIN_RESERVED_PREFIXES.contains(&first),
         None => true,
     }
@@ -81,10 +88,10 @@ pub fn is_safe_custom_admin_path(path: &str, allow_dynamic: bool) -> bool {
     if !path.starts_with('/') || path == "/" || path.ends_with('/') {
         return false;
     }
-    if segments(path).next().is_none() || is_reserved_custom_admin_path(path) {
+    if path_segments(path).next().is_none() || is_reserved_custom_admin_path(path) {
         return false;
     }
-    segments(path).all(|segment| (allow_dynamic && is_dynamic_segment(segment)) || is_plain_segment(segment))
+    path_segments(path).all(|segment| (allow_dynamic && is_dynamic_segment(segment)) || is_safe_path_segment(segment))
 }
 
 /// Whether a page of the application can be served at `pattern`: the home of
@@ -94,17 +101,31 @@ pub fn is_custom_admin_page_pattern(pattern: &str) -> bool {
 }
 
 pub fn match_custom_admin_path(pattern: &str, pathname: &str) -> bool {
-    let pattern_segments: Vec<&str> = segments(pattern).collect();
-    let path_segments: Vec<&str> = segments(pathname).collect();
-    pattern_segments.len() == path_segments.len()
+    let pattern_segments: Vec<&str> = path_segments(pattern).collect();
+    let pathname_segments: Vec<&str> = path_segments(pathname).collect();
+    pattern_segments.len() == pathname_segments.len()
         && pattern_segments
             .iter()
-            .zip(&path_segments)
+            .zip(&pathname_segments)
             .all(|(pattern, path)| pattern.starts_with(':') || pattern == path)
 }
 
-pub fn custom_admin_route_shape_key(pattern: &str) -> String {
-    segments(pattern)
+/// The percent-decoded values of the dynamic segments of `pathname`, by name:
+/// `id` for `/reviews/:id`. `None` when it does not match `pattern`, or when a
+/// value is not a valid escape.
+pub fn custom_admin_route_params<C: FromIterator<(String, String)>>(pattern: &str, pathname: &str) -> Option<C> {
+    if !match_custom_admin_path(pattern, pathname) {
+        return None;
+    }
+    path_segments(pattern)
+        .zip(path_segments(pathname))
+        .filter_map(|(pattern, path)| Some((pattern.strip_prefix(':')?, path)))
+        .map(|(name, value)| Some((name.to_string(), decode_uri_component(value)?)))
+        .collect()
+}
+
+fn custom_admin_route_shape_key(pattern: &str) -> String {
+    path_segments(pattern)
         .map(|segment| {
             if segment.starts_with(':') {
                 ":".to_string()
@@ -114,6 +135,43 @@ pub fn custom_admin_route_shape_key(pattern: &str) -> String {
         })
         .collect::<Vec<_>>()
         .join("/")
+}
+
+/// Static segments sort before dynamic ones, so `/reviews/new` wins over `/reviews/:id`.
+fn compare_patterns(left: &str, right: &str) -> Ordering {
+    let mut left = left.split('/');
+    let mut right = right.split('/');
+    loop {
+        match (left.next(), right.next()) {
+            (None, None) => return Ordering::Equal,
+            (None, Some(_)) => return Ordering::Less,
+            (Some(_), None) => return Ordering::Greater,
+            (Some(left), Some(right)) if left == right => {}
+            (Some(left), Some(right)) => {
+                return match (left.starts_with(':'), right.starts_with(':')) {
+                    (true, false) => Ordering::Greater,
+                    (false, true) => Ordering::Less,
+                    _ => left.cmp(right),
+                };
+            }
+        }
+    }
+}
+
+/// Sorts routes from the most specific, `pattern` giving the route pattern of
+/// one. Fails on two routes that could match the same URL.
+pub fn sort_custom_admin_routes<T>(routes: &mut [T], pattern: impl Fn(&T) -> &str) -> Result<(), String> {
+    routes.sort_by(|left, right| compare_patterns(pattern(left), pattern(right)));
+    let mut routes_by_shape: HashMap<String, &str> = HashMap::with_capacity(routes.len());
+    for route in routes.iter() {
+        let route = pattern(route);
+        if let Some(existing) = routes_by_shape.insert(custom_admin_route_shape_key(route), route) {
+            return Err(format!(
+                "[openshop] Custom admin page routes \"{existing}\" and \"{route}\" have the same route shape"
+            ));
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -171,6 +229,50 @@ mod tests {
         assert!(!match_custom_admin_path("/reviews/:id", "/reviews"));
         assert!(!match_custom_admin_path("/reviews/:id", "/reviews/42/edit"));
         assert!(!match_custom_admin_path("/reviews", "/orders"));
+    }
+
+    #[test]
+    fn extracts_decoded_route_params() {
+        let params: Vec<(String, String)> =
+            custom_admin_route_params("/reviews/:id/items/:item", "/reviews/gid%3A%2F%2Fx%2F1/items/a%20b/").unwrap();
+        assert_eq!(
+            params,
+            [("id".into(), "gid://x/1".into()), ("item".into(), "a b".into())]
+        );
+        assert_eq!(
+            custom_admin_route_params::<Vec<_>>("/reviews", "/reviews"),
+            Some(Vec::new())
+        );
+        assert_eq!(custom_admin_route_params::<Vec<_>>("/reviews/:id", "/reviews"), None);
+        assert_eq!(custom_admin_route_params::<Vec<_>>("/reviews/:id", "/orders/1"), None);
+        assert_eq!(
+            custom_admin_route_params::<Vec<_>>("/reviews/:id", "/reviews/%zz"),
+            None
+        );
+    }
+
+    fn sorted(patterns: &[&'static str]) -> Result<Vec<&'static str>, String> {
+        let mut patterns = patterns.to_vec();
+        sort_custom_admin_routes(&mut patterns, |pattern| pattern)?;
+        Ok(patterns)
+    }
+
+    #[test]
+    fn sorts_static_routes_before_dynamic_ones() {
+        assert_eq!(
+            sorted(&["/reviews/:id", "/reviews/new", "/reviews", "/analytics", "/"]).unwrap(),
+            ["/", "/analytics", "/reviews", "/reviews/new", "/reviews/:id"]
+        );
+    }
+
+    #[test]
+    fn refuses_routes_with_the_same_shape() {
+        let error = sorted(&["/reviews/:id", "/reviews/:id/edit", "/reviews/:slug"]).unwrap_err();
+        assert_eq!(
+            error,
+            "[openshop] Custom admin page routes \"/reviews/:id\" and \"/reviews/:slug\" have the same route shape"
+        );
+        assert!(sorted(&["/", "/"]).is_err());
     }
 
     #[test]

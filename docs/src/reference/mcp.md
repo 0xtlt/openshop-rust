@@ -88,7 +88,7 @@ authentication updates `lastUsedAt`.
 | `401` | `Unauthorized: invalid MCP token` |
 | `403` | `Forbidden: MCP token is not active` |
 | `403` | `Forbidden: MCP token has expired` |
-| `403` | `MCP is disabled` (valid token, endpoint disabled) |
+| `403` | `MCP is disabled` (endpoint disabled, checked before the token) |
 | `503` | `Service Unavailable: too many MCP tokens are being checked, try again` |
 
 A refused token is logged as a warning, `[openshop] MCP token refused`, with the

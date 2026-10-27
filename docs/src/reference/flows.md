@@ -366,8 +366,8 @@ pub fn export(resource: &'static str) -> Flow {
 
 Register it on the [builder](configuration.md#builder-methods), for example
 with `APP.builder()?.flow(export("orders"))`. `.flow(flow)` registers the flow
-under `flow.name`; `.flow_as(key, flow)` sets another key, which is then the
-runtime identifier used by dispatch, crons, runs, and logs.
+under `flow.name`, the runtime identifier used by dispatch, crons, runs, and
+logs.
 
 | Option | Type | Default | Behavior |
 | --- | --- | --- | --- |

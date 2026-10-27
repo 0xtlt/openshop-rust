@@ -7,7 +7,6 @@
 mod admin;
 mod context;
 mod db;
-mod factory;
 mod fake;
 mod transport;
 
@@ -18,12 +17,10 @@ pub use context::{
 pub use db::{TestDb, test_database_url};
 #[cfg(test)]
 pub(crate) use db::connect;
-pub use factory::{Factory, FactoryScope};
 pub use fake::{FakeCall, FakeMethod, FakeProviders, TypedCall, TypedFake};
 pub use transport::{FORM_CONTENT_TYPE, MockTransport, OutboundRequest, OutboundResponse};
 
 pub use crate::admin::invoke_admin_function;
-pub use crate::server::jwt::sign_session_token;
 
 /// The runtime `#[openshop::test]` runs a test on.
 #[doc(hidden)]
@@ -50,6 +47,11 @@ impl<E: std::fmt::Debug> TestOutcome for Result<(), E> {
             panic!("the test returned an error: {error:?}");
         }
     }
+}
+
+/// Signs a session token the way Shopify App Bridge does, with the claims you choose.
+pub fn sign_session_token(claims: &serde_json::Value, secret: &str) -> String {
+    ShopifyApp::new("", secret).sign_session_token(claims)
 }
 
 /// A session token as issued by Shopify App Bridge, valid for one minute.

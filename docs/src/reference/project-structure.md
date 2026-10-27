@@ -121,8 +121,8 @@ and sets its crons, worker settings, retry policy, and admin page visibility;
 [Configuration](configuration.md).
 
 The generated file declares `APP` with `app!`: the sample provider
-`Warehouse`, the sample flow `sync_orders`, a "Quick sync" cron that runs the
-flow every five minutes, and an `on_error` hook that prints failed flows.
+`Warehouse`, the sample flow `sync_orders`, and a "Quick sync" cron that runs
+the flow every five minutes.
 `main` runs it with `APP.main()`. The file also contains the generated tests:
 one checks that the application is valid, the other runs the flow with
 `#[openshop::test(APP)]`. It needs PostgreSQL and is ignored by default: run
@@ -206,7 +206,7 @@ the crate compiles, without writing files. The generated files are the SQL
 migrations written by `openshop init` and `migrate generate`, to review and
 commit with `migrations/schema.snapshot.json`, and `graphql/admin.schema.json`,
 the schema [`graphql!`](graphql.md#setup) checks operations against, which
-the first build downloads.
+`openshop init` writes and `shopify-api schema download` replaces.
 
 ## Modules
 

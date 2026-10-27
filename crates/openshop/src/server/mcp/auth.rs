@@ -13,7 +13,6 @@ pub struct ResolvedMcpToken {
     pub app_handle: String,
     pub shop: String,
     pub token_id: String,
-    pub name: String,
     pub permissions: Vec<String>,
 }
 
@@ -94,7 +93,6 @@ pub async fn resolve_mcp_bearer_token(app: &OpenShop, authorization: Option<&str
         app_handle: stored.app_handle,
         shop: stored.shop,
         token_id: stored.token_id,
-        name: stored.name,
         permissions: grants.into_iter().map(|(key,)| key).collect(),
     }))
 }

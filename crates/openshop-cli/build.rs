@@ -11,7 +11,7 @@ use std::process::Command;
 /// The templates, each a crate of the workspace.
 const TEMPLATES: &[&str] = &["minimal", "custom", "public"];
 /// What a project gets from its template. The rest of the directory, such as
-/// `examples/`, `.gitignore` and `shopify.web.toml`, serves the repository.
+/// `examples/` and `shopify.web.toml`, serves the repository.
 const TEMPLATE_DIRS: &[&str] = &["src", "tests", "migrations"];
 const TEMPLATE_FILES: &[&str] = &["Cargo.toml", "README.md", "shopify.app.toml"];
 
@@ -117,8 +117,9 @@ fn main() {
     files_in(&shared, &mut files);
     files.sort();
     // The schema `graphql!` checks the operations of a project against: the
-    // one of the version every template pins, written once.
-    let schema = templates.join("minimal/graphql/admin.schema.json");
+    // one of the version the framework and every template pin, which the
+    // templates link to.
+    let schema = templates.join("../crates/openshop/graphql/admin.schema.json");
     println!("cargo::rerun-if-changed={}", schema.display());
     let entry = format!(
         "    (\"graphql/admin.schema.json\", include_str!({:?})),\n];\n",

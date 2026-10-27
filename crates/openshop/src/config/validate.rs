@@ -228,14 +228,6 @@ pub fn validate_openshop_config(config: &OpenShopConfig) -> Result<()> {
             fail!("adminPages./.nav: the page at `/` is the home of the admin and has no menu entry");
         }
     }
-    for (index, item) in config.resolved_admin_menu().iter().enumerate() {
-        if item.label.trim().is_empty() {
-            fail!("adminMenu[{index}].label must be a non-empty string");
-        }
-        if item.path.trim().is_empty() {
-            fail!("adminMenu[{index}].path must be a non-empty string");
-        }
-    }
     let admin_pages = config.resolved_admin_pages()?;
     if config.custom_pages_enabled() {
         validate_admin_menu(&config.resolved_admin_menu(), &admin_pages)?;
@@ -247,7 +239,7 @@ pub fn validate_openshop_config(config: &OpenShopConfig) -> Result<()> {
     let closed = ADMIN_PAGE_IDS
         .into_iter()
         .all(|id| builtin_pages.get(id) == AdminPageMode::Disabled);
-    let serves_no_ui = config.admin_ui == Some(UiSource::None);
+    let serves_no_ui = matches!(config.admin_ui, Some(UiSource::None));
     if closed && !serves_no_ui && !admin_pages.iter().any(|page| page.route_pattern == ADMIN_HOME_PATH) {
         fail!(
             "builtinPages disables every built-in page of the admin: declare its home, a page at `/` (`#[admin_page(\"/\")]`)"

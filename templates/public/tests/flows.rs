@@ -52,5 +52,5 @@ fn every_shop_is_checked_on_the_hour() {
     assert_eq!(config.crons.len(), 1);
     assert_eq!(config.crons[0].flow, check_stock::NAME);
     assert_eq!(config.crons[0].schedule, "0 * * * *");
-    assert_eq!(config.crons[0].shops, Some(CronShops::All));
+    assert_eq!(config.crons[0].shops, CronShops::All);
 }

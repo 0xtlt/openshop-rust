@@ -49,7 +49,7 @@ impl SentryConfig {
     }
 
     /// The environment of the events. Without one it is `production` when
-    /// `OPENSHOP_ENV` is, and `development` otherwise.
+    /// `OPENSHOP_ENV` or `NODE_ENV` is, and `development` otherwise.
     pub fn environment(mut self, environment: impl Into<String>) -> Self {
         self.options.environment = Some(environment.into().into());
         self

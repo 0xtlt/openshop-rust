@@ -3,8 +3,6 @@
 //! `/proxy` accepts requests signed by Shopify's app proxy or a customer account
 //! session token; `/ext` only accepts session tokens.
 
-use std::panic::AssertUnwindSafe;
-
 use axum::Router;
 use axum::body::Bytes;
 use axum::extract::{RawPathParams, State};
@@ -12,27 +10,24 @@ use axum::http::header::CONTENT_TYPE;
 use axum::http::{HeaderMap, Method, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{MethodFilter, MethodRouter, on};
-use futures::FutureExt;
 use indexmap::IndexMap;
-use serde_json::{Value, json};
+use serde_json::Value;
 
-use super::file_routes::{resolve_route_paths, to_router_path};
+use super::file_routes::mount_routes;
 use super::hmac::{proxy_params_are_unambiguous, proxy_shop};
-use super::http::{json_error, not_found, parse_query};
-use super::jwt::{customer_id_from_jwt_sub, is_staff_subject, read_jwt_audience, subject};
-use super::shopify_apps::ResolvedShopifyApp;
+use super::http::{catch_panic, json_error, not_found, parse_query, report_failure};
+use super::jwt::{customer_id, is_staff_subject, read_jwt_audience};
 use crate::app::OpenShop;
 use crate::declare::InvalidInput;
-use crate::engine::step::error_message;
-use crate::runtime::report::{self, Panicked};
-use crate::runtime::logger;
+use crate::runtime::report;
 use crate::server::connectors::Connectors;
 use crate::shopify::client::ShopifyClient;
 use crate::types::{ProxyAuthKind, ProxyContext, ProxyHandler, ProxyResponseType};
 
 struct ResolvedProxyAuth {
     kind: ProxyAuthKind,
-    shopify_app: ResolvedShopifyApp,
+    /// The handle of the Shopify app.
+    shopify_app: String,
     shop: String,
     customer_id: Option<String>,
 }
@@ -47,7 +42,6 @@ fn resolve_proxy_auth(
     app: &OpenShop,
     raw_query: &str,
     query: &IndexMap<String, String>,
-    pairs: &[(String, String)],
     headers: &IndexMap<String, String>,
     modes: &[ProxyAuthKind],
 ) -> Result<ResolvedProxyAuth, &'static str> {
@@ -61,39 +55,38 @@ fn resolve_proxy_auth(
         };
         let invalid = "Unauthorized: invalid or expired session token";
         let shopify_app = app.apps().by_api_key(&audience).map_err(|_| invalid)?;
-        let verified = app
-            .apps()
-            .oauth(shopify_app)
+        let verified = shopify_app
+            .oauth
             .verify_extension_session_token(token)
             .map_err(|_| invalid)?;
         // The session token of a staff user opens the admin, not the storefront:
         // only the tokens of customer account and checkout extensions do here.
-        let sub = subject(verified.claims());
+        let sub = verified.claims().get("sub").and_then(Value::as_str).unwrap_or_default();
         if is_staff_subject(sub) {
             return Err("Unauthorized: session token was issued to a staff user");
         }
         return Ok(ResolvedProxyAuth {
             kind: ProxyAuthKind::CustomerAccountJwt,
-            shopify_app: shopify_app.clone(),
+            shopify_app: shopify_app.handle.clone(),
             shop: verified.shop().to_string(),
-            customer_id: customer_id_from_jwt_sub(sub),
+            customer_id: customer_id(sub).map(str::to_string),
         });
     }
 
     if modes.contains(&ProxyAuthKind::AppProxyHmac) {
-        // Who the request is for must read one way only, before its signature counts.
-        if !proxy_params_are_unambiguous(pairs) {
-            return Err("Invalid proxy signature");
-        }
-        let Ok((shopify_app, _)) = app.apps().by_proxy_signature(raw_query) else {
+        let Ok((shopify_app, signed)) = app.apps().by_proxy_signature(raw_query) else {
             return Err("Invalid proxy signature");
         };
-        let Some(shop) = proxy_shop(pairs) else {
+        // Who the request is for must read one way only for its signature to count.
+        if !proxy_params_are_unambiguous(signed.params()) {
+            return Err("Invalid proxy signature");
+        }
+        let Some(shop) = proxy_shop(signed.params()) else {
             return Err("Invalid shop parameter");
         };
         return Ok(ResolvedProxyAuth {
             kind: ProxyAuthKind::AppProxyHmac,
-            shopify_app: shopify_app.clone(),
+            shopify_app: shopify_app.handle.clone(),
             shop,
             customer_id: signed_customer_id(query.get("logged_in_customer_id")),
         });
@@ -157,17 +150,14 @@ async fn handle(
         .filter_map(|(name, value)| Some((name.as_str().to_lowercase(), value.to_str().ok()?.to_string())))
         .collect();
     let query = parse_query(uri.query());
-    let pairs: Vec<(String, String)> = url::form_urlencoded::parse(uri.query().unwrap_or_default().as_bytes())
-        .map(|(key, value)| (key.into_owned(), value.into_owned()))
-        .collect();
-    let auth = match resolve_proxy_auth(&app, uri.query().unwrap_or_default(), &query, &pairs, &headers, route.auth_modes) {
+    let auth = match resolve_proxy_auth(&app, uri.query().unwrap_or_default(), &query, &headers, route.auth_modes) {
         Ok(auth) => auth,
         Err(error) => return json_error(StatusCode::UNAUTHORIZED, error),
     };
     report::describe(|request| {
         request
             .unit("proxy", format_args!("{} {}", route.method, route.route_path))
-            .shop(&auth.shop, &auth.shopify_app.handle);
+            .shop(&auth.shop, &auth.shopify_app);
     });
 
     // Parse body for non-GET methods
@@ -180,10 +170,10 @@ async fn handle(
     let context = ProxyContext {
         query: sanitized_query(&query, &auth),
         db: app.db().clone(),
-        shopify: ShopifyClient::new(&app, &auth.shop, &auth.shopify_app.handle),
-        connectors: Connectors::for_shop(&app, &auth.shop, &auth.shopify_app.handle),
+        shopify: ShopifyClient::new(&app, &auth.shop, &auth.shopify_app),
+        connectors: Connectors::for_shop(&app, &auth.shop, &auth.shopify_app),
         shop: auth.shop,
-        shopify_app: auth.shopify_app.handle,
+        shopify_app: auth.shopify_app,
         customer_id: auth.customer_id,
         auth: auth.kind,
         params: params
@@ -198,19 +188,17 @@ async fn handle(
         app,
     };
 
-    let failure = match AssertUnwindSafe((route.handler)(context)).catch_unwind().await {
-        Ok(Ok(result)) => return send_response(result, route.response_type),
+    let failure = match catch_panic("handler", (route.handler)(context)).await {
+        Ok(result) => return send_response(result, route.response_type),
         // The request does not fit the typed input of the handler.
-        Ok(Err(error)) if error.is::<InvalidInput>() => {
+        Err(error) if error.is::<InvalidInput>() => {
             return json_error(StatusCode::UNPROCESSABLE_ENTITY, error.to_string());
         }
-        Ok(Err(error)) => error,
-        Err(_) => Panicked::error("handler panicked"),
+        Err(error) => error,
     };
-    report::error(&failure);
-    logger::error_with(
+    report_failure(
         format!("[openshop] Proxy {} {} error", route.method, route.route_path),
-        json!({ "error": error_message(&failure) }),
+        &failure,
     );
     json_error(StatusCode::INTERNAL_SERVER_ERROR, "Internal proxy error")
 }
@@ -235,21 +223,15 @@ pub fn create_proxy_routes(
     auth_modes: &'static [ProxyAuthKind],
     log: bool,
 ) -> anyhow::Result<Router<OpenShop>> {
-    let mut router = Router::new();
     let proxies = &app.config().proxies;
-    let routes = resolve_route_paths("proxy", proxies.keys().map(String::as_str))?;
-
-    for (route_path, key) in &routes {
-        let definition = &proxies[*key];
-        let response_type = definition.response_type.unwrap_or_default();
+    mount_routes("Proxy", prefix, proxies.keys().map(String::as_str), log, |route_path, key| {
+        let definition = &proxies[key];
+        let response_type = definition.response_type;
         let mut method_router: MethodRouter<OpenShop> = MethodRouter::new().fallback(|| async { not_found() });
 
-        for (method, handler) in definition.handlers() {
-            let Some(handler) = handler else {
-                continue;
-            };
+        for (&method, handler) in &definition.handlers {
             let route = ProxyRoute {
-                route_path: route_path.clone(),
+                route_path: route_path.to_string(),
                 method,
                 response_type,
                 handler: handler.clone(),
@@ -266,21 +248,6 @@ pub fn create_proxy_routes(
             ));
         }
 
-        let full_path = format!("{prefix}{}", to_router_path(route_path));
-        router = router.route(full_path.trim_end_matches('/'), method_router.clone());
-        if route_path == "/" {
-            router = router.route(&format!("{prefix}/"), method_router);
-        }
-        if log {
-            logger::info(format!(
-                "[openshop] Proxy route: {route_path} ({})",
-                response_type.as_str()
-            ));
-        }
-    }
-
-    if log && !routes.is_empty() {
-        logger::info(format!("[openshop] {} proxy route(s) registered", routes.len()));
-    }
-    Ok(router)
+        (method_router, response_type.as_str().to_string())
+    })
 }

@@ -32,39 +32,6 @@ pub const ADMIN_PAGE_IDS: [AdminPageId; 5] = [
     AdminPageId::Mcp,
 ];
 
-pub const ADMIN_PAGE_MODES: [AdminPageMode; 3] =
-    [AdminPageMode::Visible, AdminPageMode::Hidden, AdminPageMode::Disabled];
-
-impl AdminPageId {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Flows => "flows",
-            Self::Providers => "providers",
-            Self::Crons => "crons",
-            Self::Functions => "functions",
-            Self::Mcp => "mcp",
-        }
-    }
-
-    pub fn parse(value: &str) -> Option<Self> {
-        ADMIN_PAGE_IDS.into_iter().find(|id| id.as_str() == value)
-    }
-}
-
-impl AdminPageMode {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Visible => "visible",
-            Self::Hidden => "hidden",
-            Self::Disabled => "disabled",
-        }
-    }
-
-    pub fn parse(value: &str) -> Option<Self> {
-        ADMIN_PAGE_MODES.into_iter().find(|mode| mode.as_str() == value)
-    }
-}
-
 /// Partial page configuration: unset pages default to `visible`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct AdminPagesConfig {
@@ -191,10 +158,6 @@ fn hide_empty_page(mode: AdminPageMode, has_resources: bool) -> AdminPageMode {
     }
 }
 
-pub fn same_admin_pages(left: &ResolvedAdminPages, right: &ResolvedAdminPages) -> bool {
-    ADMIN_PAGE_IDS.into_iter().all(|id| left.get(id) == right.get(id))
-}
-
 fn page_from_section(section: Option<&str>) -> Option<AdminPageId> {
     match section? {
         "flows" | "runs" => Some(AdminPageId::Flows),
@@ -304,15 +267,6 @@ mod tests {
     }
 
     #[test]
-    fn compares_resolved_pages() {
-        let left = resolve_admin_pages(None, None);
-        let mut right = left;
-        assert!(same_admin_pages(&left, &right));
-        right.mcp = AdminPageMode::Hidden;
-        assert!(!same_admin_pages(&left, &right));
-    }
-
-    #[test]
     fn maps_api_paths_to_gated_pages() {
         assert_eq!(admin_page_from_api_path("/api/flows"), Some(AdminPageId::Flows));
         assert_eq!(
@@ -356,13 +310,5 @@ mod tests {
         assert_eq!(merged.flows, Some(AdminPageMode::Visible));
         assert_eq!(merged.crons, Some(AdminPageMode::Disabled));
         assert_eq!(merged.mcp, None);
-    }
-
-    #[test]
-    fn parses_ids_and_modes() {
-        assert_eq!(AdminPageId::parse("mcp"), Some(AdminPageId::Mcp));
-        assert_eq!(AdminPageId::parse("home"), None);
-        assert_eq!(AdminPageMode::parse("hidden"), Some(AdminPageMode::Hidden));
-        assert_eq!(AdminPageMode::parse("off"), None);
     }
 }

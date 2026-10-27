@@ -16,6 +16,7 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+use super::backoff::{compute_backoff_ms, jitter_ms};
 use super::retention::{SWEEP_INTERVAL, purge_logs};
 use super::runner::{HEARTBEAT_INTERVAL, HeartbeatFn, RunFlowOptions, describe_run, panic_message, run_flow};
 use super::step::error_message;
@@ -617,7 +618,7 @@ impl Inner {
                 return;
             }
             Ok(Err(error)) => error_message(&error),
-            Err(panic) => format!("panicked: {}", panic_message(panic)),
+            Err(panic) => format!("panicked: {}", panic_message(&panic)),
         };
         self.fail_run(claimed.id, claimed.lease_id, format!("Worker error: {failure}")).await;
     }
@@ -647,13 +648,13 @@ impl Inner {
     }
 
     fn backoff_delay(&self, consecutive: u32) -> u64 {
-        let base = self.config.poll_interval_ms as f64
-            * self
-                .config
-                .poll_backoff_coefficient
-                .powi(consecutive.saturating_sub(1).min(64) as i32);
-        let capped = base.min(self.config.poll_max_interval_ms as f64);
-        (capped * (0.5 + rand::rng().random::<f64>() * 0.5)).round() as u64
+        let backoff_ms = compute_backoff_ms(
+            self.config.poll_interval_ms,
+            self.config.poll_backoff_coefficient,
+            self.config.poll_max_interval_ms,
+            consecutive.into(),
+        );
+        jitter_ms(backoff_ms, rand::rng().random())
     }
 
     async fn sleep(&self, ms: u64, stop: &CancellationToken) {

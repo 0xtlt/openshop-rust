@@ -75,20 +75,20 @@ impl Parse for Declaration {
 }
 
 pub fn expand(declaration: Declaration) -> TokenStream {
-    let krate = quote!(::openshop);
     let calls = declaration.0.iter().map(|entry| match entry {
         Entry::Blocks { kind, blocks } => {
             let kind = format_ident!("{}", kind);
+            let kind = quote!(::openshop::declare::kind::#kind);
             let calls = blocks
                 .iter()
-                .map(|block| quote_spanned!(block.span()=> .add_as::<#krate::declare::kind::#kind, #block>()));
+                .map(|block| quote_spanned!(block.span()=> .add_as::<#kind, #block>()));
             quote!(#(#calls)*)
         }
         Entry::Setting { key, value } => quote_spanned!(key.span()=> .#key(#value)),
     });
     // A setting can fail: `shopify: shopify_apps()?`.
     quote! {
-        #krate::App::new(|| #krate::Result::Ok(#krate::OpenShopConfig::builder() #(#calls)*))
+        ::openshop::App::new(|| ::openshop::Result::Ok(::openshop::OpenShopConfig::builder() #(#calls)*))
     }
 }
 

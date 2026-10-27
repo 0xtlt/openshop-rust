@@ -211,12 +211,9 @@ provides the common ones:
 
 | Validator | Accepts | Summary on failure |
 | --- | --- | --- |
-| `validators::string()` | Any string | `must be a string (was …)` |
 | `validators::non_empty()` | A string with at least one character | `must be non-empty`, or `must be a string (was …)` |
 | `validators::url()` | An absolute `http` or `https` URL with a host | `must be a URL string (was …)`, or `must be an http or https URL (was …)` |
 | `validators::public_url()` | Like `url()`, and the host is not on the server's own network | `must be a public http or https URL (was …)`, plus those of `url()` |
-| `validators::number()` | Any finite number | `must be a number (was …)` |
-| `validators::number_range(min, max)` | A number within `min..=max` | `must be at least <min> (was …)`, `must be at most <max> (was …)`, or `must be a number (was …)` |
 | `validators::range(min, max)` | A number within the bounds that are given, each an `Option<f64>` | `must be at least <min> (was …)`, `must be at most <max> (was …)`, or `must be a number (was …)` |
 | `validators::length(min, max)` | A string whose number of characters is within the bounds that are given, each an `Option<usize>` | `must be at least <min> characters (was …)`, `must be at most <max> characters (was …)`, or `must be a string (was …)` |
 | `validators::integer_min(min)` | A whole number greater than or equal to `min` | `must be an integer (was …)`, `must be at least <min> (was …)`, or `must be a number (was …)` |
@@ -249,7 +246,7 @@ use openshop::builder::{Field, FieldOption};
 fn fields() -> Vec<(&'static str, Field)> {
     vec![
         ("apiUrl", Field::text("API URL").validate(validators::url())),
-        ("batchSize", Field::number("Batch size").validate(validators::number_range(1.0, 1000.0))),
+        ("batchSize", Field::number("Batch size").validate(validators::range(Some(1.0), Some(1000.0)))),
         (
             "region",
             Field::select("Region", [FieldOption::new("Europe", "eu"), FieldOption::new("United States", "us")]),
@@ -338,7 +335,7 @@ async fn push(ctx: &FlowContext, rows: &[JsonMap]) -> Result<u64> {
 | --- | --- |
 | `connectors.call(provider, method, args).await` | `Result<Value>` |
 | `connectors.call_as::<T>(provider, method, args).await` | `Result<T>`. A result that is not a `T` fails with `Invalid result from "<provider>.<method>": …`. |
-| `connectors.get(provider).await` | `Result<&Connector>`, with `call(method, args)` and `call_as::<T>(method, args)` plus `has(method)` and `method_names()` |
+| `connectors.get(provider).await` | `Result<&Connector>`, with `call(method, args)` |
 | `connectors.names()` | Iterator over the provider keys |
 
 These are the calls by name. For a [provider struct](#the-methods), prefer

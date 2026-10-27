@@ -11,7 +11,7 @@ use crate::server::mcp::core::{cron_items, set_cron_enabled};
 use crate::server::shop::ShopSession;
 
 async fn list_crons(State(app): State<OpenShop>, Extension(session): Extension<ShopSession>) -> ApiResult {
-    let crons = cron_items(&app, &session.shopify_app, &session.shop, false).await?;
+    let crons = cron_items(&app, &session.shopify_app, &session.shop).await?;
     Ok(json_response(StatusCode::OK, Value::Array(crons)))
 }
 

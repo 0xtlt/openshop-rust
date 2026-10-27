@@ -8,8 +8,7 @@
 use serde_json::Value;
 
 use crate::types::JsonMap;
-
-const JSON_TYPES: [&str; 7] = ["object", "array", "string", "number", "integer", "boolean", "null"];
+use crate::validators::format_number;
 
 fn is_integer(value: &Value) -> bool {
     match value {
@@ -47,14 +46,6 @@ fn same_primitive(left: &Value, right: &Value) -> bool {
         (Value::Number(left), Value::Number(right)) => left.as_f64() == right.as_f64(),
         (Value::Object(_) | Value::Array(_), _) => false,
         _ => left == right,
-    }
-}
-
-fn format_number(number: f64) -> String {
-    if number.fract() == 0.0 && number.abs() < 1e15 {
-        format!("{}", number as i64)
-    } else {
-        number.to_string()
     }
 }
 
@@ -220,11 +211,6 @@ pub fn validate_mcp_tool_arguments(input_schema: Option<&Value>, value: Option<&
     let schema = input_schema.unwrap_or(&default_schema);
     validate_json_schema(&Value::Object(arguments.clone()), schema, "arguments")?;
     Ok(arguments)
-}
-
-/// Known JSON Schema type names.
-pub fn is_json_type(name: &str) -> bool {
-    JSON_TYPES.contains(&name)
 }
 
 #[cfg(test)]

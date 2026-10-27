@@ -32,13 +32,23 @@ pub(crate) fn redacted_option(secret: &Option<String>) -> Option<Redacted<'_>> {
     secret.as_deref().map(Redacted)
 }
 
-/// Whether the name of a header or of a field says that it holds a secret.
-#[cfg(any(test, feature = "testing"))]
+/// Whether the name of a header, a field or a variable says that it holds a secret.
+#[cfg(any(test, feature = "testing", feature = "sentry"))]
 pub(crate) fn is_secret_name(name: &str) -> bool {
     let name = name.to_ascii_lowercase();
-    ["secret", "token", "password", "authorization", "cookie", "code", "signature", "key"]
-        .iter()
-        .any(|word| name.contains(word))
+    [
+        "secret",
+        "token",
+        "password",
+        "authorization",
+        "cookie",
+        "code",
+        "signature",
+        "hmac",
+        "key",
+    ]
+    .iter()
+    .any(|word| name.contains(word))
 }
 
 /// A JSON value for display, with the fields that hold a secret hidden at any depth.
@@ -116,7 +126,7 @@ mod tests {
     #[test]
     fn debug_never_shows_the_secrets_of_a_configuration() {
         use crate::server::mcp::tokens::{create_mcp_token, parse_mcp_token};
-        use crate::server::shopify_apps::{ResolvedShopifyApp, ShopifyAppSource};
+        use crate::server::shopify_apps::ResolvedShopifyApp;
         use crate::types::ShopifyAppConfig;
 
         let keys = ShopifyAppConfig::Keys {
@@ -151,8 +161,7 @@ mod tests {
             api_secret: "api-secret-value".into(),
             app_url: "https://app.example.com".into(),
             scopes: "read_products".into(),
-            source: ShopifyAppSource::Env,
-            toml: None,
+            oauth: shopify_api::oauth::ShopifyApp::new("public-key", "api-secret-value"),
         };
         let shown = format!("{resolved:?} {:?}", [&resolved]);
         assert_hidden(&shown);
@@ -171,19 +180,9 @@ mod tests {
         use chrono::Utc;
         use uuid::Uuid;
 
-        use crate::db::schema::{InstallationRow, McpToken, ProviderConfigRow};
+        use crate::db::schema::{McpToken, ProviderConfigRow};
 
         let now = Utc::now();
-        let installation = InstallationRow {
-            id: Uuid::nil(),
-            app_handle: "default".into(),
-            shop: "a.myshopify.com".into(),
-            access_token: Some("access-token-value".into()),
-            scopes: None,
-            nonce: Some("nonce-value".into()),
-            installed_at: now,
-            uninstalled_at: None,
-        };
         let provider = ProviderConfigRow {
             id: Uuid::nil(),
             app_handle: "default".into(),
@@ -209,7 +208,7 @@ mod tests {
             created_at: now,
             updated_at: now,
         };
-        let shown = format!("{installation:?} {provider:?} {token:?}");
+        let shown = format!("{provider:?} {token:?}");
         assert_hidden(&shown);
         assert!(shown.contains("a.myshopify.com") && shown.contains("mtk_abc"), "{shown}");
     }

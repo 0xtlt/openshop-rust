@@ -51,14 +51,6 @@ pub enum FieldType {
 }
 
 impl FieldType {
-    pub const ALL: [FieldType; 5] = [
-        FieldType::Text,
-        FieldType::Password,
-        FieldType::Number,
-        FieldType::Select,
-        FieldType::Checkbox,
-    ];
-
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Text => "text",
@@ -537,7 +529,7 @@ macro_rules! shop_scope {
     )+};
 }
 
-shop_scope!(FlowContext, WebhookContext, ProxyContext, RouteShopContext, McpContext);
+shop_scope!(FlowContext, WebhookContext, ProxyContext, RouteShopContext, McpContext, crate::admin::AdminContext);
 
 // ─── Flow ────────────────────────────────────────────────────────────
 
@@ -598,7 +590,6 @@ impl InputSchema {
 
     /// Derives the schema from a Rust type: the value must satisfy the generated
     /// JSON Schema and deserialize into `T`.
-    #[cfg(feature = "schema")]
     pub fn of<T: DeserializeOwned + schemars::JsonSchema>() -> Self {
         let json_schema = serde_json::to_value(schemars::schema_for!(T)).unwrap_or(Value::Null);
         let schema = json_schema.clone();
@@ -663,7 +654,6 @@ impl Flow {
         }
     }
 
-    #[cfg(feature = "schema")]
     pub fn input<T: DeserializeOwned + schemars::JsonSchema>(self) -> Self {
         self.input_schema(InputSchema::of::<T>())
     }
@@ -744,12 +734,6 @@ impl CronShops {
     }
 }
 
-impl From<Vec<String>> for CronShops {
-    fn from(value: Vec<String>) -> Self {
-        Self::Shops(value)
-    }
-}
-
 /// A schedule on which a flow runs. Without [`Cron::all_shops`],
 /// [`Cron::shop`] or [`Cron::shops`], the flow runs once, for no shop.
 #[derive(Debug, Clone, PartialEq)]
@@ -758,7 +742,7 @@ pub struct Cron {
     pub schedule: String,
     pub flow: String,
     pub input: Option<Value>,
-    pub shops: Option<CronShops>,
+    pub shops: CronShops,
     /// The IANA time zone the schedule is read in. UTC when unset.
     pub timezone: Option<String>,
 }
@@ -770,7 +754,7 @@ impl Cron {
             schedule: schedule.into(),
             flow: flow.into(),
             input: None,
-            shops: None,
+            shops: CronShops::Global,
             timezone: None,
         }
     }
@@ -794,13 +778,13 @@ impl Cron {
 
     /// Runs once for each shop the application is installed on.
     pub fn all_shops(mut self) -> Self {
-        self.shops = Some(CronShops::All);
+        self.shops = CronShops::All;
         self
     }
 
     /// Runs for this shop only.
     pub fn shop(mut self, shop: impl Into<String>) -> Self {
-        self.shops = Some(CronShops::Shop(shop.into()));
+        self.shops = CronShops::Shop(shop.into());
         self
     }
 
@@ -810,7 +794,7 @@ impl Cron {
         I: IntoIterator<Item = S>,
         S: Into<String>,
     {
-        self.shops = Some(CronShops::Shops(shops.into_iter().map(Into::into).collect()));
+        self.shops = CronShops::Shops(shops.into_iter().map(Into::into).collect());
         self
     }
 
@@ -820,17 +804,17 @@ impl Cron {
     }
 
     pub fn shops_json(&self) -> Value {
-        self.shops.clone().unwrap_or_default().to_json()
+        self.shops.to_json()
     }
 
     /// Whether a shop may see this cron, its input and its shops.
     pub fn is_visible_to(&self, shop: &str) -> bool {
-        self.shops.clone().unwrap_or_default().is_visible_to(shop)
+        self.shops.is_visible_to(shop)
     }
 
     /// The shops of the cron as a shop sees them: only itself among those named.
     pub fn shops_json_for(&self, shop: &str) -> Value {
-        self.shops.clone().unwrap_or_default().to_json_for(shop)
+        self.shops.to_json_for(shop)
     }
 }
 
@@ -1213,31 +1197,20 @@ pub type ProxyHandler = Arc<dyn Fn(ProxyContext) -> BoxFuture<'static, Result<Va
 /// or HTML for those response types; everything else is sent as JSON.
 #[derive(Clone, Default)]
 pub struct Proxy {
-    pub response_type: Option<ProxyResponseType>,
-    pub get: Option<ProxyHandler>,
-    pub post: Option<ProxyHandler>,
-    pub put: Option<ProxyHandler>,
-    pub delete: Option<ProxyHandler>,
-    pub patch: Option<ProxyHandler>,
-}
-
-fn proxy_handler<F, Fut>(handler: F) -> ProxyHandler
-where
-    F: Fn(ProxyContext) -> Fut + Send + Sync + 'static,
-    Fut: Future<Output = Result<Value>> + Send + 'static,
-{
-    Arc::new(move |ctx| Box::pin(handler(ctx)))
+    pub response_type: ProxyResponseType,
+    /// The handler of each method, by its name: `GET`, `POST`…
+    pub handlers: IndexMap<&'static str, ProxyHandler>,
 }
 
 macro_rules! proxy_methods {
-    ($($name:ident),*) => {
+    ($($name:ident => $method:literal),*) => {
         $(
             pub fn $name<F, Fut>(mut self, handler: F) -> Self
             where
                 F: Fn(ProxyContext) -> Fut + Send + Sync + 'static,
                 Fut: Future<Output = Result<Value>> + Send + 'static,
             {
-                self.$name = Some(proxy_handler(handler));
+                self.handlers.insert($method, Arc::new(move |ctx| Box::pin(handler(ctx))));
                 self
             }
         )*
@@ -1247,64 +1220,28 @@ macro_rules! proxy_methods {
 impl Proxy {
     pub fn new(response_type: ProxyResponseType) -> Self {
         Self {
-            response_type: Some(response_type),
-            ..Self::default()
+            response_type,
+            handlers: IndexMap::new(),
         }
     }
 
-    pub fn json() -> Self {
-        Self::new(ProxyResponseType::Json)
-    }
+    proxy_methods!(get => "GET", post => "POST", put => "PUT", delete => "DELETE", patch => "PATCH");
 
-    pub fn liquid() -> Self {
-        Self::new(ProxyResponseType::Liquid)
-    }
-
-    pub fn html() -> Self {
-        Self::new(ProxyResponseType::Html)
-    }
-
-    proxy_methods!(get, post, put, delete, patch);
-
-    pub(crate) fn handlers(&self) -> [(&'static str, Option<&ProxyHandler>); 5] {
-        [
-            ("GET", self.get.as_ref()),
-            ("POST", self.post.as_ref()),
-            ("PUT", self.put.as_ref()),
-            ("DELETE", self.delete.as_ref()),
-            ("PATCH", self.patch.as_ref()),
-        ]
-    }
-
-    /// Adds the handlers of another definition of the same path. Fails when
-    /// both handle a method, or answer with different response types.
+    /// Adds the handlers of another definition of the same path. Fails, and
+    /// adds nothing, when both handle a method or answer with different
+    /// response types.
     pub(crate) fn merge(&mut self, other: Self) -> Result<(), String> {
-        let (ours, theirs) = (
-            self.response_type.unwrap_or_default(),
-            other.response_type.unwrap_or_default(),
-        );
-        if ours != theirs {
+        if self.response_type != other.response_type {
             return Err(format!(
                 "answers with both {} and {}; a path has one response type",
-                ours.as_str(),
-                theirs.as_str()
+                self.response_type.as_str(),
+                other.response_type.as_str()
             ));
         }
-        for (method, slot, handler) in [
-            ("GET", &mut self.get, other.get),
-            ("POST", &mut self.post, other.post),
-            ("PUT", &mut self.put, other.put),
-            ("DELETE", &mut self.delete, other.delete),
-            ("PATCH", &mut self.patch, other.patch),
-        ] {
-            if handler.is_none() {
-                continue;
-            }
-            if slot.is_some() {
-                return Err(format!("handles {method} twice"));
-            }
-            *slot = handler;
+        if let Some(method) = other.handlers.keys().find(|method| self.handlers.contains_key(*method)) {
+            return Err(format!("handles {method} twice"));
         }
+        self.handlers.extend(other.handlers);
         Ok(())
     }
 }
@@ -1405,7 +1342,7 @@ impl RouteAuthContext {
     /// Resolves an installed shop, and gives what a context gives for it:
     /// its database, its Shopify client and its providers.
     pub async fn for_shop(&self, shop: impl Into<RouteShopInput>) -> Result<RouteShopContext> {
-        crate::server::routes::resolve_shop_context(&self.app, shop.into()).await
+        crate::server::connectors::resolve_shop_context(&self.app, shop.into()).await
     }
 }
 
@@ -1426,7 +1363,7 @@ impl<A> RouteContext<A> {
     /// Resolves an installed shop, and gives what a context gives for it:
     /// its database, its Shopify client and its providers.
     pub async fn for_shop(&self, shop: impl Into<RouteShopInput>) -> Result<RouteShopContext> {
-        crate::server::routes::resolve_shop_context(&self.app, shop.into()).await
+        crate::server::connectors::resolve_shop_context(&self.app, shop.into()).await
     }
 }
 
@@ -1637,44 +1574,10 @@ impl<A> Route<A> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub enum McpCapabilityType {
-    Tool,
-    Resource,
-}
-
-impl McpCapabilityType {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Tool => "tool",
-            Self::Resource => "resource",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
 pub enum McpRiskLevel {
     Low,
     Medium,
     High,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum McpAuditStatus {
-    Success,
-    Denied,
-    Error,
-}
-
-impl McpAuditStatus {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Success => "success",
-            Self::Denied => "denied",
-            Self::Error => "error",
-        }
-    }
 }
 
 /// A permission an MCP token can be granted, and that tools and resources

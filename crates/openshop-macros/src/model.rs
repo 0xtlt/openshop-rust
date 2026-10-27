@@ -5,7 +5,7 @@ use quote::{format_ident, quote};
 use syn::spanned::Spanned;
 use syn::{Data, DataStruct, DeriveInput, Fields, Ident, LitStr, Type, Visibility};
 
-use crate::util::{constant_ident, plain_name, set, set_value};
+use crate::util::{constant_ident, declared, plain_name, set, set_value};
 
 /// Identifiers PostgreSQL would truncate are refused: two long names could collide.
 const MAX_IDENTIFIER: usize = 63;
@@ -257,7 +257,6 @@ fn index_name(
 }
 
 pub fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
-    let krate = quote!(::openshop);
     let name = &input.ident;
     let visibility = &input.vis;
 
@@ -365,12 +364,12 @@ pub fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
             // `ColumnDef` has a constructor named after each conventional column.
             conventional if field.is_conventional() => {
                 let constructor = format_ident!("{}", conventional);
-                quote!(#krate::db::ColumnDef::#constructor())
+                quote!(::openshop::db::ColumnDef::#constructor())
             }
             _ => {
                 let sql_type = match &field.options.sql_type {
                     Some(sql_type) => quote!(#sql_type),
-                    None => quote!(<#ty as #krate::db::ColumnType>::SQL_TYPE),
+                    None => quote!(<#ty as ::openshop::db::ColumnType>::SQL_TYPE),
                 };
                 let default = field.options.default.as_ref().map(|default| quote!(.default(#default)));
                 let renamed = field
@@ -379,8 +378,8 @@ pub fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
                     .as_ref()
                     .map(|previous| quote!(.renamed_from(#previous)));
                 quote! {
-                    #krate::db::ColumnDef::new(#column, #sql_type)
-                        .nullable(<#ty as #krate::db::ColumnType>::NULLABLE)
+                    ::openshop::db::ColumnDef::new(#column, #sql_type)
+                        .nullable(<#ty as ::openshop::db::ColumnType>::NULLABLE)
                         #default
                         #renamed
                 }
@@ -424,7 +423,7 @@ pub fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
         let reference = field.options.references.as_ref()?;
         let column = &field.column;
         let table = match &reference.target {
-            Target::Model(model) => quote!(<#model as #krate::db::Record>::TABLE),
+            Target::Model(model) => quote!(<#model as ::openshop::db::Record>::TABLE),
             Target::Table(table) => quote!(#table),
         };
         let referenced = reference.column.as_ref().map(|column| quote!(.references(#column)));
@@ -434,7 +433,7 @@ pub fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
             .as_ref()
             .map(|action| quote!(.on_delete(#action)));
         Some(quote! {
-            .with_foreign_key(#krate::db::ForeignKeyDef::new(#column, #table) #referenced #on_delete)
+            .with_foreign_key(::openshop::db::ForeignKeyDef::new(#column, #table) #referenced #on_delete)
         })
     });
     let renamed_table = options
@@ -446,7 +445,7 @@ pub fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
     let from_row = fields.iter().map(|field| {
         let ident = &field.ident;
         let column = &field.column;
-        quote!(#ident: #krate::sqlx::Row::try_get(row, #column)?)
+        quote!(#ident: ::openshop::sqlx::Row::try_get(row, #column)?)
     });
 
     // ── Typed columns ───────────────────────────────────────────────
@@ -458,8 +457,8 @@ pub fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
         let doc = format!(" The column `{column}`.");
         quote! {
             #[doc = #doc]
-            #field_visibility const #constant: #krate::db::Column<Self, <#ty as #krate::db::ColumnType>::Value> =
-                #krate::db::Column::new(#column);
+            #field_visibility const #constant: ::openshop::db::Column<Self, <#ty as ::openshop::db::ColumnType>::Value> =
+                ::openshop::db::Column::new(#column);
         }
     });
 
@@ -474,7 +473,7 @@ pub fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
             let doc = " `None` leaves the default of the column.";
             quote! {
                 #[doc = #doc]
-                #field_visibility #ident: ::core::option::Option<<#ty as #krate::db::ColumnType>::Value>,
+                #field_visibility #ident: ::core::option::Option<<#ty as ::openshop::db::ColumnType>::Value>,
             }
         } else {
             quote!(#field_visibility #ident: #ty,)
@@ -548,37 +547,42 @@ pub fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
         quote! {
             /// The rows of one shop. Reads, updates and deletions never reach
             /// the rows of another shop, and insertions belong to this one.
-            #visibility fn for_shop<'a>(db: &'a #krate::PgPool, shop: &str) -> #krate::db::Rows<'a, Self> {
-                #krate::db::Rows::new(db, ::core::option::Option::Some(::std::string::ToString::to_string(shop)))
+            #visibility fn for_shop<'a>(db: &'a ::openshop::PgPool, shop: &str) -> ::openshop::db::Rows<'a, Self> {
+                ::openshop::db::Rows::new(db, ::core::option::Option::Some(::std::string::ToString::to_string(shop)))
             }
 
             /// The rows of the shop of a context: a flow, a webhook, an admin
             /// function… Like `for_shop`, with the database and the shop the
             /// context runs for.
-            #visibility fn of(scope: &impl #krate::ShopScope) -> #krate::db::Rows<'_, Self> {
-                #krate::db::Rows::new(
-                    #krate::ShopScope::app(scope).db(),
-                    ::core::option::Option::Some(::std::string::ToString::to_string(#krate::ShopScope::shop(scope))),
+            #visibility fn of(scope: &impl ::openshop::ShopScope) -> ::openshop::db::Rows<'_, Self> {
+                ::openshop::db::Rows::new(
+                    ::openshop::ShopScope::app(scope).db(),
+                    ::core::option::Option::Some(::std::string::ToString::to_string(::openshop::ShopScope::shop(scope))),
                 )
             }
 
             /// The rows of every shop, for maintenance work. Prefer `for_shop`
             /// wherever a shop is known.
-            #visibility fn all_shops(db: &#krate::PgPool) -> #krate::db::Rows<'_, Self> {
-                #krate::db::Rows::new(db, ::core::option::Option::None)
+            #visibility fn all_shops(db: &::openshop::PgPool) -> ::openshop::db::Rows<'_, Self> {
+                ::openshop::db::Rows::new(db, ::core::option::Option::None)
             }
         }
     } else {
         quote! {
             /// The rows of the table.
-            #visibility fn rows(db: &#krate::PgPool) -> #krate::db::Rows<'_, Self> {
-                #krate::db::Rows::new(db, ::core::option::Option::None)
+            #visibility fn rows(db: &::openshop::PgPool) -> ::openshop::db::Rows<'_, Self> {
+                ::openshop::db::Rows::new(db, ::core::option::Option::None)
             }
         }
     };
 
     let new_doc =
         format!(" What inserting a [`{name}`] takes: its fields, without those the database fills and without `shop`.");
+    let declared = declared(
+        name,
+        "Model",
+        quote!(app.model(<Self as ::openshop::db::Model>::table())),
+    );
 
     Ok(quote! {
         #[doc = #new_doc]
@@ -587,52 +591,46 @@ pub fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
             #(#new_fields)*
         }
 
-        impl #krate::declare::Declared for #name {
-            type Kind = #krate::declare::kind::Model;
+        #declared
 
-            fn register(app: #krate::builder::OpenShopBuilder) -> #krate::builder::OpenShopBuilder {
-                app.model(<Self as #krate::db::Model>::table())
-            }
-        }
-
-        impl #krate::db::Record for #name {
+        impl ::openshop::db::Record for #name {
             const TABLE: &'static str = #table;
             const COLUMNS: &'static [&'static str] = &[#(#column_names),*];
         }
 
-        impl #krate::db::Model for #name {
+        impl ::openshop::db::Model for #name {
             type New = #new_name;
 
             const HAS_SHOP: bool = #has_shop;
 
-            fn table() -> #krate::db::Table {
-                #krate::db::Table::new(#table)
+            fn table() -> ::openshop::db::Table {
+                ::openshop::db::Table::new(#table)
                     #(.with_column(#columns))*
                     #(#indexes)*
                     #(#foreign_keys)*
                     #renamed_table
             }
 
-            fn id(&self) -> #krate::sqlx::types::Uuid {
+            fn id(&self) -> ::openshop::sqlx::types::Uuid {
                 self.#id_field
             }
 
             fn push_insert(
                 new: Self::New,
                 shop: ::core::option::Option<::std::string::String>,
-                query: &mut #krate::db::SqlBuilder,
+                query: &mut ::openshop::db::SqlBuilder,
             ) {
                 #push_insert
             }
 
-            fn push_update(&self, query: &mut #krate::db::SqlBuilder) {
+            fn push_update(&self, query: &mut ::openshop::db::SqlBuilder) {
                 let mut assignments = query.separated(", ");
                 #(#assignments)*
             }
         }
 
-        impl<'r> #krate::sqlx::FromRow<'r, #krate::sqlx::postgres::PgRow> for #name {
-            fn from_row(row: &'r #krate::sqlx::postgres::PgRow) -> ::core::result::Result<Self, #krate::sqlx::Error> {
+        impl<'r> ::openshop::sqlx::FromRow<'r, ::openshop::sqlx::postgres::PgRow> for #name {
+            fn from_row(row: &'r ::openshop::sqlx::postgres::PgRow) -> ::core::result::Result<Self, ::openshop::sqlx::Error> {
                 ::core::result::Result::Ok(Self {
                     #(#from_row,)*
                 })

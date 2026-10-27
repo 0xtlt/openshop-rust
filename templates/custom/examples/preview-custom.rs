@@ -1,8 +1,7 @@
 //! Previews the custom app template in a regular browser, without a Shopify store.
 //!
 //! ```bash
-//! DATABASE_URL=postgresql://openshop:openshop@localhost:5432/openshop \
-//!   cargo run -p openshop-template-custom --example preview-custom
+//! cargo run -p openshop-template-custom --example preview-custom
 //! ```
 //!
 //! The application runs on `http://localhost:3999`. `apps/preview` is what serves it:

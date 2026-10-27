@@ -15,7 +15,7 @@ use crate::declare::Declared;
 use crate::engine::dispatch::{DispatchOptions, QueuedRun, dispatch_flow};
 #[cfg(feature = "sentry")]
 use crate::runtime::SentryConfig;
-use crate::runtime::{RuntimeEnv, Transport, default_transport};
+use crate::runtime::{ReqwestTransport, RuntimeEnv, Transport};
 use crate::server::connectors::Connectors;
 use crate::server::crypto::Crypto;
 use crate::server::mcp::core::create_core_mcp_capabilities;
@@ -166,32 +166,11 @@ impl OpenShopBuilder {
         self
     }
 
-    /// Registers several providers, each under its own name.
-    pub fn providers(self, providers: impl IntoIterator<Item = Provider>) -> Self {
-        providers.into_iter().fold(self, Self::provider)
-    }
-
     /// Registers a flow under its own name.
-    pub fn flow(self, flow: Flow) -> Self {
+    pub fn flow(mut self, flow: Flow) -> Self {
         let key = flow.name.clone();
-        self.flow_as(key, flow)
-    }
-
-    pub fn flow_as(mut self, key: impl Into<String>, flow: Flow) -> Self {
-        insert_once(&mut self.config.flows, &mut self.problems, "flows", key.into(), flow);
+        insert_once(&mut self.config.flows, &mut self.problems, "flows", key, flow);
         self
-    }
-
-    /// Registers several flows, each under its own name.
-    pub fn flows(self, flows: impl IntoIterator<Item = Flow>) -> Self {
-        flows.into_iter().fold(self, Self::flow)
-    }
-
-    /// Applies a function to the builder, so that a module can register
-    /// everything it defines (flows, routes, pages…) in one place:
-    /// `.with(reviews::register)`.
-    pub fn with(self, register: impl FnOnce(Self) -> Self) -> Self {
-        register(self)
     }
 
     pub fn function(mut self, key: impl Into<String>, function: Function) -> Self {
@@ -473,7 +452,7 @@ pub struct OpenShop {
 
 impl OpenShop {
     pub fn new(config: OpenShopConfig, db: PgPool, env: RuntimeEnv) -> Result<Self> {
-        Self::with_transport(config, db, env, default_transport()?)
+        Self::with_transport(config, db, env, Arc::new(ReqwestTransport::new()?))
     }
 
     /// Like [`OpenShop::new`] with another transport for every exchange with
@@ -506,11 +485,6 @@ impl OpenShop {
                 webhook_deliveries: WebhookDeliveries::default(),
             }),
         })
-    }
-
-    /// Connects to `DATABASE_URL` and reads settings from the environment.
-    pub async fn connect(config: OpenShopConfig) -> Result<Self> {
-        Self::new(config, crate::db::connect().await?, RuntimeEnv::from_env())
     }
 
     pub fn config(&self) -> &OpenShopConfig {

@@ -45,7 +45,7 @@ framework and its tests and can change without notice.
 | `openshop::runtime` | `RuntimeEnv`, the runtime logger, and `Transport`, what Shopify requests go through | [Logging](logging.md) |
 | `openshop::shopify` | `ShopifyClient`, the `shopify_api` types it takes: `ApiVersion`, `Operation`, `IntoVariable`, `Page`, and `input!` | [Typed GraphQL](graphql.md) |
 | `openshop::shopify_api` | The `shopify_api` crate, which the code of `graphql!` names: `Error`, `Shopify`… | [Typed GraphQL](graphql.md) |
-| `openshop::testing` | Contexts, provider fakes, factories, and signing helpers (cargo feature `testing`) | [Testing](testing.md) |
+| `openshop::testing` | Contexts, provider fakes, and signing helpers (cargo feature `testing`) | [Testing](testing.md) |
 
 `openshop::ui` (cargo feature `ui`) is what the view of a custom admin page
 uses: `use_loader`, `use_action`, and the App Bridge helpers. The modules of
@@ -68,7 +68,7 @@ an application use:
 | Macros | `graphql!`, `liquid!`, `json!` |
 | Modules | `validators`, `response` |
 
-`input` is part of it with the `schema` feature. `#[openshop::test]` is not:
+`#[openshop::test]` is not part of it:
 its name would hide `#[test]`, so it is written with its path. The samples of
 this documentation import the prelude, then name what it lacks, such as
 `use openshop::testing::TestContext;` or `use serde::Deserialize;`.
@@ -78,7 +78,6 @@ this documentation import the prelude, then name what it lacks, such as
 | Feature | Default | Effect |
 | --- | --- | --- |
 | `embedded-ui` | Yes | Embeds the prebuilt admin UI bundle in the binary. Without it, `UiSource::Embedded` serves nothing. |
-| `schema` | Yes | Enables `#[input]` and typed inputs, which derive validation from `schemars`: the input argument of a `#[flow]`, of an `#[mcp_tool]`, and of the loaders and actions of an `#[admin_page]`; underneath, `Flow::input::<T>()`, `InputSchema::of::<T>()`, `AdminFunction::typed_loader` and `AdminFunction::typed_action`. |
 | `sentry` | Yes | Compiles the [Sentry](sentry.md) integration: the `sentry` setting of `app!`, `SentryConfig`, and the SDK re-exported as `openshop::sentry`. Without it the Sentry SDK is not a dependency. |
 | `testing` | No | Compiles `openshop::testing` and `#[openshop::test]`. Enable it under `[dev-dependencies]`. |
 
@@ -98,7 +97,7 @@ app does not need to depend on them directly:
 | `CancellationToken` | `tokio_util` |
 | `chrono` | `chrono` |
 | `serde` | `serde` |
-| `JsonSchema`, `schemars` | `schemars` (feature `schema`) |
+| `JsonSchema`, `schemars` | `schemars` |
 | `sentry` | The Sentry SDK (feature `sentry`); see [Report from your own code](sentry.md#report-from-your-own-code) |
 
 [`#[input]`](flows.md#input) derives `Deserialize`, `Serialize` and
@@ -164,12 +163,11 @@ Crons are data: `Cron::new(schedule, flow)` — see
 
 The attributes are built on definitions that can be created by hand:
 `Flow::new(name, run)`, `Provider::new(name)`,
-`Function::new(function_type, handle)`, `Proxy::json()`,
-`::liquid()` and `::html()`, `Route::public()` and
+`Function::new(function_type, handle)`, `Proxy::new(response_type)` and
+`Proxy::default()`, `Route::public()` and
 `Route::authenticated(auth)`, `Webhook::new(run)`,
 `McpTool::new(description, run)`,
-`McpResource::new(name, read)`, `AdminPage::new(path)`, and
-`Table::conventional(table)`. They are in `openshop::builder`, with
+`McpResource::new(name, read)` and `AdminPage::new(path)`. They are in `openshop::builder`, with
 `OpenShopBuilder`. `OpenShopConfig::builder()` collects them, along with
 declared blocks, and `build()` validates the whole. Use it for tests and for
 blocks built at run time. See [Builder methods](configuration.md#builder-methods).
@@ -256,11 +254,10 @@ carries one as `ctx.app`.
 
 | Constructor | Behavior |
 | --- | --- |
-| `OpenShop::connect(config).await` | Connects to `DATABASE_URL` and reads settings from the environment. |
 | `OpenShop::new(config, db, env)` | Uses an existing `PgPool` and `RuntimeEnv`. |
 | `OpenShop::with_transport(config, db, env, transport)` | Same, with another `shopify_api` `Transport` for every exchange with Shopify, such as `testing::MockTransport`. It must not follow redirections: every call carries a secret, a token or a code, and a `3xx` is returned as the answer, as the default `ReqwestTransport` does. |
 
-All three validate the configuration and resolve the Shopify apps, and fail
+Both validate the configuration and resolve the Shopify apps, and fail
 when either is invalid. `APP.main()` and `APP.run()` create the handle for
 you.
 
@@ -367,17 +364,6 @@ request. Every context that belongs to a shop has one as `ctx.shopify`.
 
 ```rust,ignore
 use openshop::prelude::*;
-use serde::Deserialize;
-
-#[derive(Deserialize)]
-struct ProductTitle {
-    product: Option<Product>,
-}
-
-#[derive(Deserialize)]
-struct Product {
-    title: String,
-}
 
 const PRODUCT_TITLE: &str = "#graphql
   query ProductTitle($id: ID!) {
@@ -389,17 +375,9 @@ const PRODUCT_TITLE: &str = "#graphql
 ";
 
 async fn product_title(ctx: &WebhookContext, id: &str) -> Result<Option<String>> {
-    // Untyped: the `data` object as a `serde_json::Value`.
+    // The `data` object as a `serde_json::Value`.
     let data = ctx.shopify.graphql(PRODUCT_TITLE, json!({ "id": id })).await?;
-    let untyped = data["product"]["title"].as_str().map(str::to_string);
-
-    // Typed: the `data` object deserialized into your own type.
-    let typed: ProductTitle = ctx
-        .shopify
-        .graphql_as(PRODUCT_TITLE, json!({ "id": id }))
-        .await?;
-
-    Ok(typed.product.map(|product| product.title).or(untyped))
+    Ok(data["product"]["title"].as_str().map(str::to_string))
 }
 ```
 
@@ -410,7 +388,6 @@ async fn product_title(ctx: &WebhookContext, id: &str) -> Result<Option<String>>
 | `ShopifyClient::new(&app, shop, shopify_app)` | Same, from an `&OpenShop`. |
 | `client.with_api_version(version)` | Sends every request to `version`, a `shopify_api::ApiVersion`, instead of the version each operation was checked against. |
 | `client.graphql(query, variables)` | `variables`: anything that serializes to an object, or `()` for none. Returns Shopify's `data` object as a `Value`. |
-| `client.graphql_as::<T>(query, variables)` | Same, deserialized into `T: DeserializeOwned`. |
 | `client.execute(graphql!(…))` | An operation checked against Shopify's schema at compile time, with typed variables and a typed result. See [Typed GraphQL](graphql.md). |
 | `client.api().await?` | The `shopify_api::Shopify` client of the shop: `paginate`, bulk operations, webhook subscriptions, `execute_response`. |
 | `client.shop`, `client.shopify_app` | Public fields. |
@@ -445,9 +422,8 @@ async fn product_title(ctx: &WebhookContext, id: &str) -> Result<Option<String>>
 Mutation-specific `userErrors` live inside `data` and are not raised
 automatically. Inspect them in application code.
 
-`graphql()` and `graphql_as()` take any string and are not checked when the
-crate compiles: a response that does not match the type passed to `graphql_as`
-is an error at run time. For an operation known in advance, use
+`graphql()` takes any string and is not checked when the crate compiles. For
+an operation known in advance, use
 [`graphql!`](graphql.md), which checks it against Shopify's schema and types
 its result.
 
@@ -507,13 +483,8 @@ List it in the `models` of `app!`, then read and write through
 `Review::of(&ctx)`, the rows of the shop of a context. `ctx` is any context
 that belongs to a shop. `Review::for_shop(&ctx.db, &ctx.shop)` gives the same
 rows with the database and the shop given. The derive implements the `Model`
-trait, and `Review::table()` returns the `Table` the struct describes.
-
-`Table` describes a table without a struct, with its columns as SQL
-definitions: `Table::conventional(table)` starts with `id`, `shop`,
-`created_at` and `updated_at`, `Table::new(table)` without any column, and
-`.column("product_id", "text NOT NULL")` adds one. It is registered with
-`.model(…)` on the builder. See [App models](database.md#app-models).
+trait, and `Review::table()` returns the `Table` the struct describes. See
+[App models](database.md#app-models).
 
 ## Runtime logging
 
@@ -567,13 +538,15 @@ use std::future::Future;
 use openshop::prelude::*;
 use openshop::server::listen;
 use openshop::engine::{Scheduler, Worker};
+use openshop::runtime::RuntimeEnv;
 use openshop::server::ServerOptions;
-use openshop::{OpenShop, OpenShopConfig};
+use openshop::{OpenShop, OpenShopConfig, UiSource};
 
 async fn serve(config: OpenShopConfig, shutdown: impl Future<Output = ()>) -> Result<()> {
-    let app = OpenShop::connect(config).await?;
+    let db = openshop::db::connect_to(&std::env::var("DATABASE_URL")?).await?;
+    let app = OpenShop::new(config, db, RuntimeEnv::from_env())?;
 
-    let server = listen(&app, 3000, ServerOptions::production()).await?;
+    let server = listen(&app, 3000, ServerOptions { ui: UiSource::Embedded, dev: false }).await?;
     let worker = Worker::new(app.clone(), WorkerConfig::new());
     worker.start().await;
     let mut scheduler = Scheduler::start(&app)?;
@@ -590,10 +563,8 @@ async fn serve(config: OpenShopConfig, shutdown: impl Future<Output = ()>) -> Re
 | --- | --- |
 | `openshop::server::router(&app, options)` | Builds the `axum::Router` without listening. |
 | `openshop::server::listen(&app, port, options)` | Binds `0.0.0.0:<port>` (`0` picks a free port) and returns a handle with `addr` and `shutdown()`. Keep the handle for as long as the server should run: dropping it stops accepting connections and lets requests in flight finish. `shutdown()` also waits for those requests, up to five seconds. After that it returns an error, and the requests still in flight keep running until they finish or the process exits. |
-| `ServerOptions::production()` | Embedded UI behind the signed-launch check. |
-| `ServerOptions::development()` | Embedded UI without the signed-launch check, and CORS on `/api`. The shell reloads the page when the server is started again or its bundle rebuilt: see [Development process](cli.md#development-process). |
+| `ServerOptions { ui, dev }` | `ui` is the admin UI to serve: `UiSource::Embedded`, `UiSource::Dir(path)`, `UiSource::Assets(lookup)`, or `UiSource::None` (see [Serve the bundle](custom-admin-pages.md#serve-the-bundle)). It is served behind the signed-launch check, unless `dev` is set: then the shell reloads the page when the server is started again or its bundle rebuilt (see [Development process](cli.md#development-process)), and CORS is enabled on `/api`. |
 | `ServerOptions::default()` | API only: no UI is served, and CORS is enabled on `/api`. |
-| `.ui(UiSource)` | `UiSource::Embedded`, `UiSource::Dir(path)`, `UiSource::assets(lookup)`, or `UiSource::None`. See [Serve the bundle](custom-admin-pages.md#serve-the-bundle). |
 | `openshop::server::serve(listener, router)` | Serves a router built with `router` on an existing `tokio::net::TcpListener`. Returns the same handle as `listen`: keep it for as long as the server should run. |
 | `openshop::cli::shutdown_signal()` | Resolves when the process receives `SIGINT` or `SIGTERM`: the `shutdown` of the example above, for a process that stops as `dev` and `start` do. |
 | `Worker::new(app, overrides)` | Worker with `start()`, `stop()`, `is_running()`, `active_count()`, and `worker_id()`. `overrides` is a `WorkerConfig`: what it sets replaces the `worker` setting of the application. |
@@ -622,7 +593,7 @@ code uses.
 | --- | --- |
 | A block built by hand: `Flow`, `Provider`, `Field`, `Proxy`, `Route`, `Webhook`, `Function`, `McpTool`, `McpResource`, `AdminPage`, `Table`, `InputSchema`, and `OpenShopBuilder` | `openshop::builder` |
 | `Worker`, `Scheduler`, `run_flow`, `RunFlowOptions`, `cancel_run`, `dispatch_flow`, `StepExecutor`, `RunOwner`, `SleepSignal`, `LeaseLostError` | `openshop::engine` |
-| `router`, `listen`, `serve`, `ServerOptions`, `ShopSession` | `openshop::server` |
+| `router`, `listen`, `serve`, `ServerOptions` | `openshop::server` |
 | `RuntimeEnv`, `Transport`, `ReqwestTransport` | `openshop::runtime` |
 | `ApiVersion`, `IntoVariable`, `Operation`, `Page` | `openshop::shopify` |
 | `Declared`, the trait of a declared block | `openshop::declare` |

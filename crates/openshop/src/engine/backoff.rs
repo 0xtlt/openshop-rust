@@ -33,11 +33,12 @@ pub fn resolve_retry_policy(overrides: &[Option<RetryPolicy>]) -> ResolvedRetryP
     policy
 }
 
-/// The longest delay before the retry that follows `attempt`: the exponential
-/// backoff, capped by `max_interval`. The delay really waited is drawn below it
-/// by [`jitter_ms`].
-pub fn compute_backoff_ms(attempt: i64, policy: &ResolvedRetryPolicy) -> u64 {
-    let delay = policy.initial_interval_ms as f64 * policy.backoff_coefficient.powi((attempt - 1) as i32);
+/// The longest delay before the try that follows the `attempt`-th: `initial_ms`
+/// multiplied by `coefficient` for each attempt after the first, capped by
+/// `max_ms`. The delay really waited is drawn below it by [`jitter_ms`].
+pub(crate) fn compute_backoff_ms(initial_ms: u64, coefficient: f64, max_ms: u64, attempt: i64) -> u64 {
+    let exponent = i32::try_from(attempt - 1).unwrap_or(i32::MAX);
+    let delay = initial_ms as f64 * coefficient.powi(exponent);
     let rounded = if delay.is_finite() && delay > 0.0 {
         delay.round()
     } else if delay.is_infinite() && delay > 0.0 {
@@ -45,14 +46,14 @@ pub fn compute_backoff_ms(attempt: i64, policy: &ResolvedRetryPolicy) -> u64 {
     } else {
         0.0
     };
-    (rounded.min(policy.max_interval_ms as f64)) as u64
+    (rounded.min(max_ms as f64)) as u64
 }
 
 /// Spreads a delay over its upper half: the result is `delay_ms` for a `unit`
 /// of 1 and half of it for 0. Runs that fail together, because a provider went
 /// down, then do not all come back at the same moment, and none of them comes
 /// back sooner than half its backoff. `unit` is drawn in `[0, 1)`.
-pub fn jitter_ms(delay_ms: u64, unit: f64) -> u64 {
+pub(crate) fn jitter_ms(delay_ms: u64, unit: f64) -> u64 {
     let unit = if unit.is_finite() { unit.clamp(0.0, 1.0) } else { 1.0 };
     (delay_ms as f64 * (0.5 + unit * 0.5)).round() as u64
 }
@@ -79,7 +80,13 @@ fn next_retry_at(
     if attempts >= policy.max_attempts as i64 {
         return None;
     }
-    let delay_ms = jitter_ms(compute_backoff_ms(attempts, policy), unit);
+    let backoff_ms = compute_backoff_ms(
+        policy.initial_interval_ms,
+        policy.backoff_coefficient,
+        policy.max_interval_ms,
+        attempts,
+    );
+    let delay_ms = jitter_ms(backoff_ms, unit);
     let next_at = now + Duration::milliseconds(delay_ms.min(i64::MAX as u64) as i64);
     if deadline_at.is_some_and(|deadline| next_at >= deadline) {
         return None;
@@ -120,13 +127,14 @@ mod tests {
 
     #[test]
     fn computes_exponential_backoff() {
-        let policy = DEFAULT_RETRY_POLICY;
-        assert_eq!(compute_backoff_ms(1, &policy), 1_000);
-        assert_eq!(compute_backoff_ms(2, &policy), 2_000);
-        assert_eq!(compute_backoff_ms(5, &policy), 16_000);
-        assert_eq!(compute_backoff_ms(20, &policy), 30_000);
-        assert_eq!(compute_backoff_ms(0, &policy), 500);
-        assert_eq!(compute_backoff_ms(5_000, &policy), 30_000);
+        let backoff = |attempt| compute_backoff_ms(1_000, 2.0, 30_000, attempt);
+        assert_eq!(backoff(1), 1_000);
+        assert_eq!(backoff(2), 2_000);
+        assert_eq!(backoff(5), 16_000);
+        assert_eq!(backoff(20), 30_000);
+        assert_eq!(backoff(0), 500);
+        assert_eq!(backoff(5_000), 30_000);
+        assert_eq!(backoff(i64::MAX), 30_000);
     }
 
     #[test]

@@ -6,8 +6,8 @@ Write an operation known in advance with `graphql!`, the macro of
 `shopify_api` that `openshop` re-exports: it is checked against
 Shopify's Admin schema when the crate compiles, and its variables and its
 result are typed. The crate that writes one depends on `openshop` alone (the
-generated code names `openshop::shopify_api`) and pins its version in `[package.metadata.shopify_api] api-version`; the first build
-downloads `graphql/admin.schema.json`, which is committed. `graphql()` and `graphql_as()` take any string and check
+generated code names `openshop::shopify_api`) and pins its version in `[package.metadata.shopify_api] api-version`; its schema is
+`graphql/admin.schema.json`, which is committed. `graphql()` takes any string and checks
 nothing at compile time; keep them for operations built at run time, and
 follow the rules of the later sections for those.
 
@@ -43,7 +43,7 @@ pub async fn product_title(shopify: &ShopifyClient, id: &str) -> Result<String> 
 - The types of an inline operation have no name. To return them from a function or share an operation, use the module form: `graphql! { pub mod get_product = "…"; }`, then `get_product::Data`, and `get_product::Variables { … }` or `get_product::operation()`, which `execute` takes.
 - Write input objects as literals checked field by field (`product = { id: id, title: title, vendor?: maybe_vendor }`), or build them ahead with `openshop::shopify::input!(ProductUpdateInput { … })`. Reference: https://docs.rs/shopify_api/latest/shopify_api/macro.graphql.html.
 - Do not work around a compile error by switching to `graphql()`: fix the operation. The error names the field, argument or variable and the API version it was checked against.
-- Operations go to the version of the schema they were checked against. To move to another version, change `api-version` and commit the schema the next build downloads. `ShopifyClient::with_api_version(ApiVersion)` pins a client to a version.
+- Operations go to the version of the schema they were checked against. To move to another version, change `api-version`, run `shopify-api schema download` next to that `Cargo.toml`, and commit the schema it writes. `ShopifyClient::with_api_version(ApiVersion)` pins a client to a version.
 - For pagination, bulk operations or webhook subscriptions, use `ctx.shopify.api().await?`, the `shopify_api::Shopify` client of the shop.
 - A test still scripts the answer with `MockTransport`. An answer that leaves out a non-null field fails with a `shopify_api::Error::Decode` that names the path of the mismatch.
 
@@ -51,7 +51,7 @@ Reference: `docs/src/reference/graphql.md`.
 
 ## Untyped Operations
 
-The rest of this page applies to `graphql()` and `graphql_as()`.
+The rest of this page applies to `graphql()`.
 
 ## Expected Pattern
 
@@ -91,7 +91,7 @@ pub async fn product_title(shopify: &ShopifyClient, id: &str) -> Result<String> 
 ## Prefer Typed Responses
 
 When more than one or two fields are read, describe the response with serde
-types and call `graphql_as::<T>()`. It deserializes the `data` object:
+types and deserialize the `data` object `graphql()` returns into them:
 
 ```rust
 use openshop::ShopifyClient;
@@ -112,9 +112,8 @@ pub struct Product {
 }
 
 pub async fn get_product(shopify: &ShopifyClient, id: &str) -> Result<Product> {
-    let data: GetProductData = shopify
-        .graphql_as(GET_PRODUCT, json!({ "id": id }))
-        .await?;
+    let data = shopify.graphql(GET_PRODUCT, json!({ "id": id })).await?;
+    let data: GetProductData = openshop::serde_json::from_value(data)?;
     data.product.ok_or_else(|| anyhow!("Product {id} not found"))
 }
 ```
@@ -212,7 +211,7 @@ async fn reads_a_product(ctx: &TestContext) {
 ## Framework Code
 
 When changing GraphQL support in `crates/openshop`:
-- `graphql!` is `shopify_api`'s; OpenShop only re-exports it. `crates/openshop/tests/graphql_typed.rs` checks it end to end against `crates/openshop/graphql/admin.schema.json`, the schema of the version in `[package.metadata.shopify_api]` of `crates/openshop/Cargo.toml`.
+- `graphql!` is `shopify_api`'s; OpenShop only re-exports it. `crates/openshop/tests/it/graphql_typed.rs` checks it end to end against `crates/openshop/graphql/admin.schema.json`, the schema of the version in `[package.metadata.shopify_api]` of `crates/openshop/Cargo.toml`.
 - The client lives in `crates/openshop/src/shopify/client.rs`: a `ShopifyClient` resolves, at its first request, a `shopify_api::Shopify` client with the stored token, or the shared client of the client credentials grant (`crates/openshop/src/shopify/client_credentials.rs`), which stores what it obtains in `installations`.
 - Do not write a request to Shopify by hand: use `shopify_api` (the client, `oauth::ShopifyApp`, `webhooks::Webhook`). Its requests go through the `Transport` of the application (`crates/openshop/src/runtime/transport.rs`), which tests replace with `MockTransport`.
 - Update `docs/src` and the templates (`templates/minimal`, `templates/custom`, `templates/public`) when user-facing usage changes.

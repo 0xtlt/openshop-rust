@@ -1,18 +1,9 @@
 //! Allow-list for client-side navigation triggered by App Bridge's `shopify:navigate` event.
 
 use crate::url;
+use openshop_shared::{is_reserved_custom_admin_path, is_safe_path_segment, match_custom_admin_path, path_segments};
 
 const NAVIGATION_SELECTOR: &str = "s-link[href], a[href], s-button[href]";
-const RESERVED_PREFIXES: [&str; 8] = [
-    "/api",
-    "/auth",
-    "/webhooks",
-    "/proxy",
-    "/ext",
-    "/routes",
-    "/health",
-    "/ops",
-];
 
 /// An entry of an event's composed path.
 pub trait NavigateTarget {
@@ -39,55 +30,29 @@ fn is_uuid(value: &str) -> bool {
         })
 }
 
-fn is_safe_segment(segment: &str) -> bool {
-    !segment.is_empty()
-        && segment
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
-}
-
-fn is_reserved_path(pathname: &str) -> bool {
-    RESERVED_PREFIXES.iter().any(|prefix| {
-        pathname
-            .strip_prefix(prefix)
-            .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
-    })
-}
-
-fn segments(path: &str) -> Vec<&str> {
-    path.split('/').filter(|segment| !segment.is_empty()).collect()
-}
-
-fn matches_custom_path<P: AsRef<str>>(path_segments: &[&str], custom_patterns: &[P]) -> bool {
-    custom_patterns.iter().any(|pattern| {
-        let pattern_segments = segments(pattern.as_ref());
-        pattern_segments.len() == path_segments.len()
-            && pattern_segments.iter().zip(path_segments).all(|(pattern, segment)| {
-                if pattern.starts_with(':') {
-                    is_safe_segment(segment)
-                } else {
-                    pattern == segment
-                }
-            })
-    })
+/// A path of a custom page: outside the paths of the server and of the
+/// built-in screens, with safe segments only, the values of the dynamic ones
+/// included, and matching one of `custom_patterns`.
+fn matches_custom_path<P: AsRef<str>>(pathname: &str, custom_patterns: &[P]) -> bool {
+    !is_reserved_custom_admin_path(pathname)
+        && path_segments(pathname).all(is_safe_path_segment)
+        && custom_patterns
+            .iter()
+            .any(|pattern| match_custom_admin_path(pattern.as_ref(), pathname))
 }
 
 fn is_allowed_ui_path<P: AsRef<str>>(pathname: &str, custom_patterns: &[P]) -> bool {
     if pathname == "/" {
         return true;
     }
-    if is_reserved_path(pathname) {
-        return false;
-    }
 
-    let segments = segments(pathname);
+    let segments: Vec<&str> = path_segments(pathname).collect();
     match segments.as_slice() {
         ["flows"] | ["crons"] | ["providers"] | ["mcp"] | ["functions"] => true,
-        ["flows", name] => is_safe_segment(name),
+        ["flows", name] => is_safe_path_segment(name),
         ["runs", id] => is_uuid(id),
-        ["functions", handle] | ["functions", handle, _] => is_safe_segment(handle),
-        ["flows" | "runs" | "crons" | "providers" | "mcp" | "functions", ..] => false,
-        [_] | [_, _] | [_, _, _] => matches_custom_path(&segments, custom_patterns),
+        ["functions", handle] | ["functions", handle, _] => is_safe_path_segment(handle),
+        [_] | [_, _] | [_, _, _] => matches_custom_path(pathname, custom_patterns),
         _ => false,
     }
 }
@@ -240,6 +205,24 @@ mod tests {
         );
         assert_eq!(href_to_internal_route("/reviews/123/edit", ORIGIN, &patterns), None);
         assert_eq!(href_to_internal_route("/unknown", ORIGIN, &patterns), None);
+        assert_eq!(href_to_internal_route("/reviews/a%20b", ORIGIN, &patterns), None);
+
+        // A pattern with a dynamic first segment does not open the paths of the server.
+        let patterns = ["/:section", "/:section/:id"];
+        assert_eq!(
+            href_to_internal_route("/reviews/1", ORIGIN, &patterns).as_deref(),
+            Some("/reviews/1")
+        );
+        for href in [
+            "/api",
+            "/auth/callback",
+            "/ops",
+            "/flows/sync/orders",
+            "/runs",
+            "/mcp/x",
+        ] {
+            assert_eq!(href_to_internal_route(href, ORIGIN, &patterns), None, "{href}");
+        }
     }
 
     #[test]

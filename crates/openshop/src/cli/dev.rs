@@ -2,7 +2,6 @@
 
 use anyhow::{Context, Result};
 
-use super::env::load_env_file;
 use super::start::ui_source;
 use super::{database_url, port, shutdown_signal};
 use crate::app::{OpenShop, OpenShopConfig};
@@ -17,8 +16,6 @@ use crate::types::WorkerConfig;
 /// The `openshop dev` command of the CLI wraps this with a file watcher that
 /// rebuilds and restarts the process when sources change.
 pub async fn start_dev(config: OpenShopConfig) -> Result<()> {
-    // Already done by `run`, which found nothing left to set; here for a caller of `start_dev`.
-    load_env_file(&std::env::current_dir()?);
     // The `dev` command is a development environment: secrets may be stored
     // in plaintext without an `ENCRYPTION_KEY`, unless `OPENSHOP_ENV` says production.
     let env = RuntimeEnv {
@@ -39,7 +36,7 @@ pub async fn start_dev(config: OpenShopConfig) -> Result<()> {
     // 2. API server + admin UI
     let ui = ui_source(&config);
     let app = OpenShop::new(config, pool, env)?;
-    let server = listen(&app, port, ServerOptions::development().ui(ui)).await?;
+    let server = listen(&app, port, ServerOptions { ui, dev: true }).await?;
 
     // 3. Worker and scheduler run in-process
     let worker = Worker::new(app.clone(), WorkerConfig::default());

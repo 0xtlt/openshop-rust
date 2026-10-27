@@ -13,7 +13,6 @@ use crate::{
     query::QueryParams,
     router::route,
     types::BannerMessage,
-    url::decode_uri_component,
 };
 use function_instances::FunctionInstances;
 use function_list::FunctionList;
@@ -21,7 +20,7 @@ use indexmap::IndexMap;
 use leptos::{prelude::*, task::spawn_local};
 use leptos_router::hooks::use_params_map;
 use model::has_config_fields;
-use openshop_shared::rpc::encode_uri_component;
+use openshop_shared::rpc::{decode_uri_component, encode_uri_component};
 use serde_json::json;
 use types::{FunctionDef, FunctionInstance, type_label};
 
@@ -98,7 +97,7 @@ fn FunctionForm(handle: String, #[prop(optional)] instance_id: Option<String>) -
             let Some(instances) = api_json_or_report::<Vec<FunctionInstance>>(&url, "the instance").await else {
                 return;
             };
-            let wanted = decode_uri_component(&instance_id);
+            let wanted = decode_uri_component(&instance_id).unwrap_or_else(|| instance_id.clone());
             let Some(instance) = instances.into_iter().find(|instance| instance.id == wanted) else {
                 return;
             };

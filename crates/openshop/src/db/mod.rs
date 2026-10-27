@@ -74,12 +74,6 @@ pub(crate) fn ping_after_idle(options: PgPoolOptions) -> PgPoolOptions {
     })
 }
 
-/// Connects using `DATABASE_URL`.
-pub async fn connect() -> Result<PgPool> {
-    let url = std::env::var("DATABASE_URL").context("[openshop] DATABASE_URL not set")?;
-    connect_to(&url).await
-}
-
 pub async fn connect_to(url: &str) -> Result<PgPool> {
     pool_options()
         .connect(url)

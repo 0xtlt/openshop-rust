@@ -6,6 +6,10 @@
 use std::cmp::Ordering;
 
 use anyhow::{Result, bail};
+use axum::Router;
+use axum::routing::MethodRouter;
+
+use crate::runtime::logger;
 
 /// Normalizes `orders/[id]/` to `/orders/:id`.
 pub fn normalize_route_path(path: &str) -> String {
@@ -50,7 +54,7 @@ pub fn compare_route_specificity(left: &str, right: &str) -> Ordering {
 }
 
 /// Converts `/orders/:id` to the router syntax `/orders/{id}`.
-pub(crate) fn to_router_path(path: &str) -> String {
+fn to_router_path(path: &str) -> String {
     let converted: Vec<String> = segments(path)
         .into_iter()
         .map(|segment| match segment.strip_prefix(':') {
@@ -95,6 +99,37 @@ pub fn resolve_route_paths<'a>(kind: &str, paths: impl IntoIterator<Item = &'a s
         }
     }
     Ok(routes)
+}
+
+/// Mounts routes under `prefix` (`/routes`, `/proxy`, `/ext`), the most
+/// specific first. `route` gives the router of a route from its normalized
+/// path and its key, with what its log line says of it. `title` is `Server`
+/// or `Proxy`.
+pub(crate) fn mount_routes<'a, S: Clone + Send + Sync + 'static>(
+    title: &str,
+    prefix: &str,
+    paths: impl IntoIterator<Item = &'a str>,
+    log: bool,
+    mut route: impl FnMut(&str, &'a str) -> (MethodRouter<S>, String),
+) -> Result<Router<S>> {
+    let kind = title.to_lowercase();
+    let routes = resolve_route_paths(&kind, paths)?;
+    let mut router = Router::new();
+    for (route_path, key) in &routes {
+        let (method_router, detail) = route(route_path, key);
+        let full_path = format!("{prefix}{}", to_router_path(route_path));
+        router = router.route(full_path.trim_end_matches('/'), method_router.clone());
+        if route_path == "/" {
+            router = router.route(&format!("{prefix}/"), method_router);
+        }
+        if log {
+            logger::info(format!("[openshop] {title} route: {route_path} ({detail})"));
+        }
+    }
+    if log && !routes.is_empty() {
+        logger::info(format!("[openshop] {} {kind} route(s) registered", routes.len()));
+    }
+    Ok(router)
 }
 
 #[cfg(test)]

@@ -7,7 +7,15 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  DATABASE_URL: postgresql://openshop:openshop@localhost:5432/openshop
+  # The tools `.github/actions/install-release` installs from their GitHub
+  # release, with the SHA-256 of their archive. Keep trunk and mdbook in step
+  # with mise.toml.
+  TRUNK_VERSION: v0.21.14
+  TRUNK_SHA256: f2b4680cd239693a646a2795e4633c625328d7b2a044fbe749fa3a2fe9e7036b
+  MDBOOK_VERSION: v0.5.4
+  MDBOOK_SHA256: 3f28de05dafca9d0f2eab99c662116b0e37b89b1d96a08f8f430b9eeae958cd7
+  CARGO_DENY_VERSION: 0.20.2
+  CARGO_DENY_SHA256: 9f12ed4c49936e09b48bf862b595cde2fe64fcbd9d74dfacac6131ca824c8d5f
 
 # Nothing here writes to the repository or to GitHub: a job that needs more asks
 # for it on its own.
@@ -18,17 +26,17 @@ permissions:
 # next to it: a tag can be moved, a commit cannot. Dependabot proposes the next
 # one. `dtolnay/rust-toolchain` has no release, its commit is the one of its
 # `master` branch, and the toolchain is the one of `mise.toml`, so that CI runs
-# what a contributor runs. trunk (`.github/actions/install-trunk`) and
-# cargo-deny are not installed by an action that downloads a binary unchecked:
-# their release archive is checked against a SHA-256 written in the repository.
+# what a contributor runs. trunk, mdbook and cargo-deny are not installed by an
+# action that downloads a binary unchecked: their release archive is checked
+# against a SHA-256 written above.
 
 jobs:
   check:
     runs-on: ubuntu-latest
     env:
       # Each test binary is linked with its own copy of the debug info of what
-      # it depends on: `target/` reaches 21 GB with it, and the runner has 14 GB
-      # free. A failed test names its file and line without it.
+      # it depends on, which makes `target/` several times larger and the links
+      # slower. A failed test names its file and line without it.
       CARGO_PROFILE_DEV_DEBUG: 0
     services:
       postgres:
@@ -79,8 +87,6 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --target wasm32-unknown-unknown --locked -- -D warnings
       - run: cargo test --locked
-      - uses: ./.github/actions/install-trunk
-      - run: trunk build --release --locked --dist target/ui-dist
 
   # The custom and public templates have admin pages with a view: `openshop
   # build-ui` compiles them to WebAssembly, into their own admin UI bundle.
@@ -95,7 +101,13 @@ jobs:
           toolchain: "1.98.1"
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-      - uses: ./.github/actions/install-trunk
+      - uses: ./.github/actions/install-release
+        with:
+          repository: trunk-rs/trunk
+          tag: ${{ env.TRUNK_VERSION }}
+          asset: trunk-x86_64-unknown-linux-gnu.tar.gz
+          sha256: ${{ env.TRUNK_SHA256 }}
+          binary: trunk
       - run: cargo run -p openshop-cli --locked -- build-ui
         working-directory: templates/custom
       - run: cargo run -p openshop-cli --locked -- build-ui
@@ -192,22 +204,14 @@ jobs:
         with:
           persist-credentials: false
       # cargo-deny is not installed through its action, whose image fetches an
-      # archive without checking it: the release asset is checked against the
-      # SHA-256 written here (the `.sha256` of the release, confirmed by hashing
-      # the download).
-      - name: Install cargo-deny
-        env:
-          GH_TOKEN: ${{ github.token }}
-          VERSION: 0.20.2
-          SHA256: 9f12ed4c49936e09b48bf862b595cde2fe64fcbd9d74dfacac6131ca824c8d5f
-        run: |
-          set -euo pipefail
-          asset="cargo-deny-$VERSION-x86_64-unknown-linux-musl.tar.gz"
-          gh release download "$VERSION" --repo EmbarkStudios/cargo-deny --pattern "$asset" --dir "$RUNNER_TEMP"
-          echo "$SHA256  $RUNNER_TEMP/$asset" | sha256sum --check -
-          mkdir -p "$HOME/.local/bin"
-          tar -xzf "$RUNNER_TEMP/$asset" -C "$HOME/.local/bin" --strip-components=1 "cargo-deny-$VERSION-x86_64-unknown-linux-musl/cargo-deny"
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      # archive without checking it.
+      - uses: ./.github/actions/install-release
+        with:
+          repository: EmbarkStudios/cargo-deny
+          tag: ${{ env.CARGO_DENY_VERSION }}
+          asset: cargo-deny-${{ env.CARGO_DENY_VERSION }}-x86_64-unknown-linux-musl.tar.gz
+          sha256: ${{ env.CARGO_DENY_SHA256 }}
+          binary: cargo-deny-${{ env.CARGO_DENY_VERSION }}-x86_64-unknown-linux-musl/cargo-deny
       - run: cargo-deny --all-features check
       - run: cargo-deny --all-features --manifest-path crates/openshop-ui/Cargo.toml check
 
@@ -232,7 +236,13 @@ jobs:
         with:
           toolchain: "1.98.1"
           targets: wasm32-unknown-unknown
-      - uses: ./.github/actions/install-trunk
+      - uses: ./.github/actions/install-release
+        with:
+          repository: trunk-rs/trunk
+          tag: ${{ env.TRUNK_VERSION }}
+          asset: trunk-x86_64-unknown-linux-gnu.tar.gz
+          sha256: ${{ env.TRUNK_SHA256 }}
+          binary: trunk
       - run: crates/openshop-ui/build-dist.sh "$RUNNER_TEMP/ui-dist"
 
   # The `Dockerfile` of a generated project is what a deployment builds: one
@@ -284,7 +294,13 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
-      - uses: ./.github/actions/install-mdbook
+      - uses: ./.github/actions/install-release
+        with:
+          repository: rust-lang/mdBook
+          tag: ${{ env.MDBOOK_VERSION }}
+          asset: mdbook-${{ env.MDBOOK_VERSION }}-x86_64-unknown-linux-gnu.tar.gz
+          sha256: ${{ env.MDBOOK_SHA256 }}
+          binary: mdbook
       - run: mdbook build docs
 
   # `openshop dev` is used on Windows too: what is `cfg(unix)` there has a

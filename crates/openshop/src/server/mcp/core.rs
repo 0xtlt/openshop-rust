@@ -2,28 +2,21 @@
 
 use std::future::Future;
 
-use anyhow::{Result, anyhow};
+use anyhow::Result;
 use chrono::{DateTime, Datelike, TimeZone, Utc};
 use indexmap::IndexMap;
 use serde_json::{Value, json};
 
 use super::registry::core_mcp_permissions;
+use crate::app::OpenShop;
+use crate::db::schema::{FlowRun, Installation};
 use crate::engine::dispatch::DispatchOptions;
 use crate::runtime::time::to_iso;
 use crate::server::api::run_logs::{RunLogOptions, get_filtered_run_logs};
 use crate::server::http::public_error;
 use crate::server::shop_domain::normalize_shop_domain;
 use crate::shopify::ApiVersion;
-use crate::types::{JsonMap, McpContext, McpResource, McpResourceContent, McpRiskLevel, McpTool};
-
-#[derive(sqlx::FromRow)]
-struct RecentRun {
-    id: uuid::Uuid,
-    flow_name: String,
-    status: String,
-    created_at: DateTime<Utc>,
-    completed_at: Option<DateTime<Utc>>,
-}
+use crate::types::{Cron, JsonMap, McpContext, McpResource, McpResourceContent, McpRiskLevel, McpTool};
 
 pub struct CoreCapabilities {
     pub tools: IndexMap<String, McpTool>,
@@ -57,33 +50,13 @@ fn number_input(input: &JsonMap, key: &str, fallback: usize, max: usize) -> usiz
 
 async fn assert_run_visible(ctx: &McpContext, run_id: &str) -> Result<()> {
     let visible = match uuid::Uuid::parse_str(run_id) {
-        Ok(run_id) => sqlx::query_as::<_, (uuid::Uuid,)>(
-            "SELECT id FROM flow_runs WHERE id = $1 AND app_handle = $2 AND shop = $3 LIMIT 1",
-        )
-        .bind(run_id)
-        .bind(&ctx.shopify_app)
-        .bind(&ctx.shop)
-        .fetch_optional(&ctx.db)
-        .await?
-        .is_some(),
+        Ok(run_id) => FlowRun::of(ctx).find(run_id).await?.is_some(),
         Err(_) => false,
     };
     if !visible {
         return Err(public_error("Run not found"));
     }
     Ok(())
-}
-
-fn json_text(value: &Value) -> String {
-    serde_json::to_string_pretty(value).unwrap_or_default()
-}
-
-/// Text content plus the same value as structured content.
-fn structured_result(value: Value) -> Value {
-    json!({
-        "content": [{ "type": "text", "text": json_text(&value) }],
-        "structuredContent": value,
-    })
 }
 
 /// Shopify releases a stable Admin API version on the first of January, April,
@@ -115,19 +88,22 @@ fn api_version_input(input: &JsonMap) -> Result<ApiVersion> {
 
 /// The installation of the shop of the token. A token never sees another shop.
 async fn list_installed_shops(ctx: &McpContext) -> Result<Value> {
-    let rows: Vec<(String, Option<String>, DateTime<Utc>)> = sqlx::query_as(
-        "SELECT shop, scopes, installed_at FROM installations \
-         WHERE app_handle = $1 AND shop = $2 AND access_token IS NOT NULL AND uninstalled_at IS NULL \
-         ORDER BY shop ASC",
-    )
-    .bind(&ctx.shopify_app)
-    .bind(&ctx.shop)
-    .fetch_all(&ctx.db)
-    .await?;
+    let installations = Installation::installed(&ctx.db)
+        .filter(Installation::APP_HANDLE.eq(ctx.shopify_app.as_str()))
+        .filter(Installation::SHOP.eq(ctx.shop.as_str()))
+        .order_by(Installation::SHOP.asc())
+        .all()
+        .await?;
 
-    let shops: Vec<Value> = rows
+    let shops: Vec<Value> = installations
         .into_iter()
-        .map(|(shop, scopes, installed_at)| json!({ "shop": shop, "scopes": scopes, "installedAt": to_iso(&installed_at) }))
+        .map(|installation| {
+            json!({
+                "shop": installation.shop,
+                "scopes": installation.scopes,
+                "installedAt": to_iso(&installation.installed_at),
+            })
+        })
         .collect();
     Ok(json!({ "shops": shops }))
 }
@@ -208,7 +184,7 @@ async fn run_admin_graphql(ctx: McpContext, input: JsonMap) -> Result<Value> {
             }
         }
     }
-    Ok(structured_result(Value::Object(result)))
+    Ok(Value::Object(result))
 }
 
 async fn search_logs(ctx: McpContext, input: JsonMap) -> Result<Value> {
@@ -238,20 +214,22 @@ async fn search_logs(ctx: McpContext, input: JsonMap) -> Result<Value> {
     // The tool has a limit and no pages.
     value.as_object_mut().map(|fields| fields.remove("next"));
     value["returned"] = Value::from(returned);
-    Ok(structured_result(value))
+    Ok(value)
 }
 
-fn list_flows(ctx: &McpContext) -> Value {
-    let config = ctx.app.config();
-    let flows: Vec<Value> = config
+/// The flows of the application, each with its input schema and the crons of
+/// the shop that run it, as `cron` renders them.
+pub(crate) fn flow_items(app: &OpenShop, shop: &str, cron: impl Fn(&Cron) -> Value) -> Vec<Value> {
+    let config = app.config();
+    config
         .flows
         .iter()
         .map(|(name, flow)| {
             let crons: Vec<Value> = config
                 .crons
                 .iter()
-                .filter(|cron| cron.flow == *name && cron.is_visible_to(&ctx.shop))
-                .map(|cron| json!({ "name": cron.name, "schedule": cron.schedule, "shops": cron.shops_json_for(&ctx.shop) }))
+                .filter(|entry| entry.flow == *name && entry.is_visible_to(shop))
+                .map(&cron)
                 .collect();
             json!({
                 "name": name,
@@ -259,8 +237,7 @@ fn list_flows(ctx: &McpContext) -> Value {
                 "crons": crons,
             })
         })
-        .collect();
-    json!({ "flows": flows })
+        .collect()
 }
 
 async fn run_flow_tool(ctx: McpContext, input: JsonMap) -> Result<Value> {
@@ -273,20 +250,13 @@ async fn run_flow_tool(ctx: McpContext, input: JsonMap) -> Result<Value> {
     let result = ctx
         .app
         .dispatch_flow(
-            DispatchOptions::new(flow, ctx.shop.clone())
-                .input(object_input(&input, "input"))
-                .shopify_app(ctx.shopify_app.clone()),
+            DispatchOptions::for_scope(flow, &ctx).input(object_input(&input, "input")),
         )
         .await?;
-    Ok(structured_result(serde_json::to_value(result)?))
+    Ok(serde_json::to_value(result)?)
 }
 
-pub(crate) async fn cron_items(
-    app: &crate::app::OpenShop,
-    app_handle: &str,
-    shop: &str,
-    shops_first: bool,
-) -> Result<Vec<Value>> {
+pub(crate) async fn cron_items(app: &OpenShop, app_handle: &str, shop: &str) -> Result<Vec<Value>> {
     let overrides: Vec<(String, bool)> =
         sqlx::query_as("SELECT cron_key, enabled FROM cron_overrides WHERE app_handle = $1 AND shop = $2")
             .bind(app_handle)
@@ -312,13 +282,8 @@ pub(crate) async fn cron_items(
             item.insert("name".into(), json!(cron.name));
             item.insert("flow".into(), Value::from(cron.flow.clone()));
             item.insert("schedule".into(), Value::from(cron.schedule.clone()));
-            if shops_first {
-                item.insert("shops".into(), cron.shops_json_for(shop));
-                item.insert("input".into(), json!(cron.input));
-            } else {
-                item.insert("input".into(), json!(cron.input));
-                item.insert("shops".into(), cron.shops_json_for(shop));
-            }
+            item.insert("input".into(), json!(cron.input));
+            item.insert("shops".into(), cron.shops_json_for(shop));
             item.insert("enabled".into(), Value::from(enabled));
             Value::Object(item)
         })
@@ -328,7 +293,7 @@ pub(crate) async fn cron_items(
 /// Enables or disables a cron of the shop. `false` when no cron of that key is
 /// visible to the shop: nothing is written then.
 pub(crate) async fn set_cron_enabled(
-    app: &crate::app::OpenShop,
+    app: &OpenShop,
     app_handle: &str,
     shop: &str,
     key: &str,
@@ -365,7 +330,7 @@ async fn set_cron_enabled_tool(ctx: McpContext, input: JsonMap) -> Result<Value>
     if !set_cron_enabled(&ctx.app, &ctx.shopify_app, &ctx.shop, key, enabled).await? {
         return Err(public_error(format!("Unknown cron \"{key}\"")));
     }
-    Ok(structured_result(json!({ "ok": true, "key": key, "enabled": enabled })))
+    Ok(json!({ "ok": true, "key": key, "enabled": enabled }))
 }
 
 fn empty_schema() -> Value {
@@ -408,7 +373,7 @@ where
 
 fn json_resource(value: Value) -> McpResourceContent {
     McpResourceContent {
-        text: json_text(&value),
+        text: serde_json::to_string_pretty(&value).unwrap_or_default(),
         mime_type: Some("application/json".to_string()),
     }
 }
@@ -423,7 +388,7 @@ pub fn create_core_mcp_capabilities() -> CoreCapabilities {
             &["shopify_admin_graphql"],
             McpRiskLevel::Low,
             empty_schema(),
-            |ctx, _input| async move { Ok(structured_result(list_installed_shops(&ctx).await?)) },
+            |ctx, _input| async move { list_installed_shops(&ctx).await },
         ),
     );
 
@@ -469,7 +434,12 @@ pub fn create_core_mcp_capabilities() -> CoreCapabilities {
             &["read_flows"],
             McpRiskLevel::Low,
             empty_schema(),
-            |ctx, _input| async move { Ok(structured_result(list_flows(&ctx))) },
+            |ctx, _input| async move {
+                let flows = flow_items(&ctx.app, &ctx.shop, |cron| {
+                    json!({ "name": cron.name, "schedule": cron.schedule, "shops": cron.shops_json_for(&ctx.shop) })
+                });
+                Ok(json!({ "flows": flows }))
+            },
         ),
     );
 
@@ -501,8 +471,8 @@ pub fn create_core_mcp_capabilities() -> CoreCapabilities {
             McpRiskLevel::Low,
             empty_schema(),
             |ctx, _input| async move {
-                let crons = cron_items(&ctx.app, &ctx.shopify_app, &ctx.shop, true).await?;
-                Ok(structured_result(json!({ "crons": crons })))
+                let crons = cron_items(&ctx.app, &ctx.shopify_app, &ctx.shop).await?;
+                Ok(json!({ "crons": crons }))
             },
         ),
     );
@@ -602,15 +572,11 @@ pub fn create_core_mcp_capabilities() -> CoreCapabilities {
     resources.insert(
         "openshop://runs/recent".to_string(),
         McpResource::new("Recent flow runs", |ctx| async move {
-            let rows: Vec<RecentRun> = sqlx::query_as(
-                "SELECT id, flow_name, status, created_at, completed_at FROM flow_runs \
-                 WHERE app_handle = $1 AND shop = $2 ORDER BY created_at DESC LIMIT 20",
-            )
-            .bind(&ctx.shopify_app)
-            .bind(&ctx.shop)
-            .fetch_all(&ctx.db)
-            .await
-            .map_err(|error| anyhow!(error))?;
+            let rows = FlowRun::of(&ctx)
+                .order_by(FlowRun::CREATED_AT.desc())
+                .limit(20)
+                .all()
+                .await?;
 
             let runs: Vec<Value> = rows
                 .into_iter()

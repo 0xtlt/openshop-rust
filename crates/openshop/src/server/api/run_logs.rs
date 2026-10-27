@@ -431,43 +431,40 @@ impl Export {
     }
 }
 
-/// `format` is `csv` or `json`; anything else is exported as JSON. The file
-/// is written as the lines are read: it is never held whole.
+/// `format` is `csv` or `json`; anything else is exported as JSON. `query`
+/// and `levels` are those of [`RunLogOptions`]. The file is written as the
+/// lines are read: it is never held whole.
 pub fn create_log_export_response(
     db: PgPool,
     run_id: &str,
     format: &str,
-    options: RunLogOptions<'_>,
+    query: &str,
+    levels: &str,
 ) -> Result<Response, InvalidLogQuery> {
     // Before the answer starts: a query the engine refuses is a `400`, not a broken file.
-    let (parsed, matcher) = prepare_log_query(options.query)?;
-    let extension = if !format.is_empty() && format.chars().all(|character| character.is_ascii_alphanumeric()) {
-        format
-    } else {
-        "json"
-    };
-    let disposition = format!("attachment; filename=\"run-{run_id}-logs.{extension}\"");
+    let (parsed, matcher) = prepare_log_query(query)?;
     let format = if format == "csv" {
         ExportFormat::Csv
     } else {
         ExportFormat::Json
     };
+    let (content_type, extension) = match format {
+        ExportFormat::Csv => ("text/csv", "csv"),
+        ExportFormat::Json => ("application/json", "json"),
+    };
     let export = Export {
         db,
-        scan: Scan::new(run_id, options.levels, &parsed, None),
+        scan: Scan::new(run_id, levels, &parsed, None),
         matcher: (!parsed.filters.is_empty()).then_some(matcher),
         format,
         started: false,
         finished: false,
         written: 0,
     };
-    let content_type = match format {
-        ExportFormat::Csv => "text/csv",
-        ExportFormat::Json => "application/json",
-    };
     let mut response = Response::new(Body::from_stream(export_stream(export)));
     let headers = response.headers_mut();
     headers.insert(CONTENT_TYPE, content_type.parse().expect("static header"));
+    let disposition = format!("attachment; filename=\"run-{run_id}-logs.{extension}\"");
     if let Ok(value) = disposition.parse() {
         headers.insert(CONTENT_DISPOSITION, value);
     }
@@ -550,16 +547,6 @@ mod tests {
         assert_eq!(serde_json::to_value(matched).unwrap()["_matched"], false);
     }
 
-    fn options() -> RunLogOptions<'static> {
-        RunLogOptions {
-            query: "",
-            levels: "info",
-            include_context: false,
-            limit: DEFAULT_LIMIT,
-            cursor: None,
-        }
-    }
-
     #[test]
     fn a_cursor_survives_its_encoding() {
         let cursor = LogCursor::of(&row(None, None).log);
@@ -585,14 +572,14 @@ mod tests {
     #[tokio::test]
     async fn export_response_sets_download_headers() {
         let db = PgPool::connect_lazy("postgres://localhost/unused").unwrap();
-        let response = create_log_export_response(db.clone(), "abc", "csv", options()).unwrap();
+        let response = create_log_export_response(db.clone(), "abc", "csv", "", "info").unwrap();
         assert_eq!(response.headers()[CONTENT_TYPE], "text/csv");
         assert_eq!(
             response.headers()[CONTENT_DISPOSITION],
             "attachment; filename=\"run-abc-logs.csv\""
         );
 
-        let response = create_log_export_response(db, "abc", "x\"y", options()).unwrap();
+        let response = create_log_export_response(db, "abc", "x\"y", "", "info").unwrap();
         assert_eq!(response.headers()[CONTENT_TYPE], "application/json");
         assert_eq!(
             response.headers()[CONTENT_DISPOSITION],

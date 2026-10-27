@@ -97,12 +97,12 @@ pub fn parse_mcp_token(value: &str) -> Option<ParsedMcpToken> {
 }
 
 /// Short, non-secret identifier shown in the admin UI.
-pub fn fingerprint_mcp_token(token: &str) -> String {
+fn fingerprint_mcp_token(token: &str) -> String {
     let digest = URL_SAFE_NO_PAD.encode(Sha256::digest(token.as_bytes()));
     digest[..16].to_string()
 }
 
-pub fn hash_mcp_token(token: &str) -> String {
+fn hash_mcp_token(token: &str) -> String {
     let salt = random_token_part(16);
     let hash = scrypt_key(token, &salt)
         .map(|key| URL_SAFE_NO_PAD.encode(key))
@@ -110,7 +110,7 @@ pub fn hash_mcp_token(token: &str) -> String {
     format!("{HASH_PREFIX}{salt}:{hash}")
 }
 
-pub fn verify_mcp_token(token: &str, stored_hash: &str) -> bool {
+pub(super) fn verify_mcp_token(token: &str, stored_hash: &str) -> bool {
     let Some(payload) = stored_hash.strip_prefix(HASH_PREFIX) else {
         return false;
     };

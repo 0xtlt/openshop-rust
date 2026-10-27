@@ -1,7 +1,6 @@
 //! Provider connectors: provider methods bound to a shop's stored configuration.
 
 use std::borrow::Borrow;
-use std::future::Future;
 use std::sync::Arc;
 
 use anyhow::{Result, anyhow, bail};
@@ -22,7 +21,7 @@ use crate::types::{ProviderCall, RouteShopContext, RouteShopInput};
 pub type ConnectorMethod = Arc<dyn Fn(Value) -> BoxFuture<'static, Result<Value>> + Send + Sync>;
 
 /// The callable methods of one provider for one shop.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct Connector {
     methods: Arc<IndexMap<String, ConnectorMethod>>,
 }
@@ -34,25 +33,12 @@ impl Connector {
         }
     }
 
-    pub fn method_names(&self) -> impl Iterator<Item = &str> {
-        self.methods.keys().map(String::as_str)
-    }
-
-    pub fn has(&self, method: &str) -> bool {
-        self.methods.contains_key(method)
-    }
-
     /// Calls a method with JSON-serializable arguments.
     pub async fn call(&self, method: &str, args: impl Serialize) -> Result<Value> {
         let Some(function) = self.methods.get(method) else {
             bail!("Unknown provider method \"{method}\"");
         };
         function(serde_json::to_value(args)?).await
-    }
-
-    /// Calls a method and deserializes its result.
-    pub async fn call_as<T: DeserializeOwned>(&self, method: &str, args: impl Serialize) -> Result<T> {
-        Ok(serde_json::from_value(self.call(method, args).await?)?)
     }
 }
 
@@ -76,12 +62,6 @@ enum Source {
 #[derive(Clone)]
 pub struct Connectors {
     source: Arc<Source>,
-}
-
-impl Default for Connectors {
-    fn default() -> Self {
-        Self::new(IndexMap::new())
-    }
 }
 
 impl Connectors {
@@ -158,15 +138,6 @@ impl Connectors {
     {
         self.call_as(call.provider(), call.method(), args).await
     }
-}
-
-/// Wraps a closure as a connector method.
-pub fn connector_method<F, Fut>(method: F) -> ConnectorMethod
-where
-    F: Fn(Value) -> Fut + Send + Sync + 'static,
-    Fut: Future<Output = Result<Value>> + Send + 'static,
-{
-    Arc::new(move |args| Box::pin(method(args)))
 }
 
 /// The connectors of every provider, each method bound to the configuration the shop saved.

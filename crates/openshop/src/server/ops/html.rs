@@ -6,6 +6,8 @@
 use chrono::{DateTime, Utc};
 use serde_json::Value;
 
+use crate::server::http::escape;
+
 /// The longest JSON value a page shows in full.
 const MAX_JSON_CHARS: usize = 20_000;
 
@@ -147,22 +149,6 @@ label { display: flex; flex-direction: column; gap: 4px; color: var(--muted); fo
   dd { margin-bottom: 8px; }
 }
 ";
-
-/// Escapes text for an element or a quoted attribute.
-pub(crate) fn escape(text: &str) -> String {
-    let mut escaped = String::with_capacity(text.len());
-    for character in text.chars() {
-        match character {
-            '&' => escaped.push_str("&amp;"),
-            '<' => escaped.push_str("&lt;"),
-            '>' => escaped.push_str("&gt;"),
-            '"' => escaped.push_str("&quot;"),
-            '\'' => escaped.push_str("&#39;"),
-            other => escaped.push(other),
-        }
-    }
-    escaped
-}
 
 /// The pages of the menu, with their address.
 #[derive(Clone, Copy, PartialEq, Eq)]

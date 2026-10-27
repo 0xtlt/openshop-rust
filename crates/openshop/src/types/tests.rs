@@ -26,7 +26,13 @@ fn a_missing_value_is_absent_null_or_empty() {
 
 #[test]
 fn field_types_are_named_as_they_serialize() {
-    for field_type in FieldType::ALL {
+    for field_type in [
+        FieldType::Text,
+        FieldType::Password,
+        FieldType::Number,
+        FieldType::Select,
+        FieldType::Checkbox,
+    ] {
         assert_eq!(serde_json::to_value(field_type).unwrap(), json!(field_type.as_str()));
         assert_eq!(
             serde_json::from_value::<FieldType>(json!(field_type.as_str())).unwrap(),
@@ -234,7 +240,6 @@ fn a_custom_schema_returns_what_its_parser_returns() {
     assert_eq!(schema.parse(json!("x")).unwrap_err(), "must be an integer");
 }
 
-#[cfg(feature = "schema")]
 #[test]
 fn the_schema_of_a_type_checks_the_input_and_deserializes_it() {
     #[derive(Deserialize, schemars::JsonSchema)]
@@ -290,7 +295,7 @@ fn a_flow_starts_without_options_and_a_concurrency_that_rejects() {
 fn a_cron_runs_once_for_no_shop_unless_told_otherwise() {
     let cron = Cron::new("0 * * * *", "sync");
     assert_eq!(cron.key(), "sync:0 * * * *");
-    assert_eq!(cron.shops, None);
+    assert_eq!(cron.shops, CronShops::Global);
     assert_eq!(cron.shops_json(), json!("global"));
     assert_eq!(CronShops::default(), CronShops::Global);
 }
@@ -307,14 +312,10 @@ fn a_cron_names_the_shops_it_runs_for() {
         cron.clone().shops(["a.myshopify.com", "b.myshopify.com"]).shops_json(),
         json!(["a.myshopify.com", "b.myshopify.com"])
     );
-    assert_eq!(
-        CronShops::from(vec!["a.myshopify.com".to_string()]),
-        CronShops::Shops(vec!["a.myshopify.com".to_string()])
-    );
     // The last choice wins.
     assert_eq!(
         cron.clone().all_shops().shop("a.myshopify.com").shops,
-        Some(CronShops::Shop("a.myshopify.com".into()))
+        CronShops::Shop("a.myshopify.com".into())
     );
 
     let cron = cron.name("hourly").input(json!({ "full": true }));
@@ -443,40 +444,35 @@ fn proxy_types_are_named_for_their_wire_form() {
 }
 
 fn proxy_methods(proxy: &Proxy) -> Vec<&'static str> {
-    proxy
-        .handlers()
-        .into_iter()
-        .filter(|(_, handler)| handler.is_some())
-        .map(|(method, _)| method)
-        .collect()
+    proxy.handlers.keys().copied().collect()
 }
 
 #[test]
 fn proxy_definitions_of_one_path_merge_when_they_do_not_overlap() {
-    let mut proxy = Proxy::json().get(|_ctx| async { Ok(Value::Null) });
+    let mut proxy = Proxy::default().get(|_ctx| async { Ok(Value::Null) });
     proxy
-        .merge(Proxy::json().post(|_ctx| async { Ok(Value::Null) }))
+        .merge(Proxy::default().post(|_ctx| async { Ok(Value::Null) }))
         .unwrap();
     assert_eq!(proxy_methods(&proxy), ["GET", "POST"]);
 
     // Left unset, the response type is the default one.
     let mut unset = Proxy::default().get(|_ctx| async { Ok(Value::Null) });
     unset
-        .merge(Proxy::json().put(|_ctx| async { Ok(Value::Null) }))
+        .merge(Proxy::default().put(|_ctx| async { Ok(Value::Null) }))
         .unwrap();
     assert_eq!(proxy_methods(&unset), ["GET", "PUT"]);
 }
 
 #[test]
 fn proxy_definitions_that_clash_do_not_merge() {
-    let mut proxy = Proxy::json().get(|_ctx| async { Ok(Value::Null) });
+    let mut proxy = Proxy::default().get(|_ctx| async { Ok(Value::Null) });
     let error = proxy
-        .merge(Proxy::json().get(|_ctx| async { Ok(Value::Null) }))
+        .merge(Proxy::default().get(|_ctx| async { Ok(Value::Null) }))
         .unwrap_err();
     assert_eq!(error, "handles GET twice");
 
     let error = proxy
-        .merge(Proxy::liquid().post(|_ctx| async { Ok(Value::Null) }))
+        .merge(Proxy::new(ProxyResponseType::Liquid).post(|_ctx| async { Ok(Value::Null) }))
         .unwrap_err();
     assert_eq!(error, "answers with both json and liquid; a path has one response type");
     // Nothing was added by the one that failed.
@@ -587,13 +583,7 @@ fn each_method_keeps_the_authentication_it_was_declared_under() {
 // ─── MCP ────────────────────────────────────────────────────────────
 
 #[test]
-fn mcp_enums_are_named_as_they_serialize() {
-    for status in [McpAuditStatus::Success, McpAuditStatus::Denied, McpAuditStatus::Error] {
-        assert_eq!(serde_json::to_value(status).unwrap(), json!(status.as_str()));
-    }
-    for kind in [McpCapabilityType::Tool, McpCapabilityType::Resource] {
-        assert_eq!(serde_json::to_value(kind).unwrap(), json!(kind.as_str()));
-    }
+fn mcp_risk_levels_serialize_in_lowercase() {
     assert_eq!(serde_json::to_value(McpRiskLevel::High).unwrap(), json!("high"));
 }
 

@@ -8,7 +8,9 @@ use syn::{
     Type, Visibility,
 };
 
-use crate::util::{camel_case, constant_ident, humanize, lower_initial, plain_name, set, set_value};
+use crate::util::{
+    camel_case, constant_ident, declared, humanize, lower_initial, own_names, plain_name, set, set_value,
+};
 
 // ─── #[derive(ProviderConfig)] ───────────────────────────────────────
 
@@ -134,7 +136,6 @@ pub struct Form {
 /// Reads the form of a struct. `derive` and `what` name the derive and what
 /// the struct is, for the refusals.
 pub fn form(input: &DeriveInput, derive: &str, what: &str) -> syn::Result<Form> {
-    let krate = quote!(::openshop);
     let name = &input.ident;
     if !input.generics.params.is_empty() {
         return Err(syn::Error::new(
@@ -183,21 +184,21 @@ pub fn form(input: &DeriveInput, derive: &str, what: &str) -> syn::Result<Form> 
 
         // A password or a choice is a string in the form; the type says whether it can be left blank.
         let stated = if options.password {
-            Some(quote!(#krate::builder::Field::password(#label)))
+            Some(quote!(::openshop::builder::Field::password(#label)))
         } else {
             options.select.as_ref().map(|choices| {
                 let choices = choices
                     .iter()
-                    .map(|(label, value)| quote!(#krate::builder::FieldOption::new(#label, #value)));
-                quote!(#krate::builder::Field::select(#label, [#(#choices),*]))
+                    .map(|(label, value)| quote!(::openshop::builder::FieldOption::new(#label, #value)));
+                quote!(::openshop::builder::Field::select(#label, [#(#choices),*]))
             })
         };
         let base = match stated {
             Some(field) => quote! {{
                 let field = #field;
-                if <#ty as #krate::builder::ProviderField>::OPTIONAL { field.optional() } else { field }
+                if <#ty as ::openshop::builder::ProviderField>::OPTIONAL { field.optional() } else { field }
             }},
-            None => quote!(<#ty as #krate::builder::ProviderField>::field(#label)),
+            None => quote!(<#ty as ::openshop::builder::ProviderField>::field(#label)),
         };
         let placeholder = options.placeholder.as_ref().map(|text| quote!(.placeholder(#text)));
         // The named constraints first, in the order they are written.
@@ -209,7 +210,7 @@ pub fn form(input: &DeriveInput, derive: &str, what: &str) -> syn::Result<Form> 
         definitions.push(quote! {
             fields.insert(::std::string::String::from(#key), #base #placeholder #(#constraints)* #validate);
         });
-        readers.push(quote!(#ident: #krate::builder::provider_field_value::<#ty>(&mut config, #key)?));
+        readers.push(quote!(#ident: ::openshop::builder::provider_field_value::<#ty>(&mut config, #key)?));
         keys.push(key);
     }
 
@@ -224,31 +225,30 @@ pub fn form(input: &DeriveInput, derive: &str, what: &str) -> syn::Result<Form> 
 }
 
 pub fn derive_config(input: DeriveInput) -> syn::Result<TokenStream> {
-    let krate = quote!(::openshop);
     let name = &input.ident;
     let Form { definitions, construct } = form(&input, "ProviderConfig", "provider configuration")?;
 
     Ok(quote! {
-        impl #krate::ProviderConfig for #name {
-            fn fields() -> #krate::builder::Fields {
-                let mut fields = #krate::builder::Fields::new();
+        impl ::openshop::ProviderConfig for #name {
+            fn fields() -> ::openshop::builder::Fields {
+                let mut fields = ::openshop::builder::Fields::new();
                 #(#definitions)*
                 fields
             }
 
-            fn from_config(mut config: #krate::JsonMap) -> ::core::result::Result<Self, ::std::string::String> {
+            fn from_config(mut config: ::openshop::JsonMap) -> ::core::result::Result<Self, ::std::string::String> {
                 ::core::result::Result::Ok(#construct)
             }
         }
 
         // The saved configuration is the only thing the struct is read from.
-        impl<'de> #krate::serde::Deserialize<'de> for #name {
+        impl<'de> ::openshop::serde::Deserialize<'de> for #name {
             fn deserialize<D>(deserializer: D) -> ::core::result::Result<Self, D::Error>
             where
-                D: #krate::serde::Deserializer<'de>,
+                D: ::openshop::serde::Deserializer<'de>,
             {
-                let config = <#krate::JsonMap as #krate::serde::Deserialize>::deserialize(deserializer)?;
-                <Self as #krate::ProviderConfig>::from_config(config).map_err(#krate::serde::de::Error::custom)
+                let config = <::openshop::JsonMap as ::openshop::serde::Deserialize>::deserialize(deserializer)?;
+                <Self as ::openshop::ProviderConfig>::from_config(config).map_err(::openshop::serde::de::Error::custom)
             }
         }
     })
@@ -332,15 +332,7 @@ const DECLARED: [&str; 3] = ["NAME", "provider", "on"];
 /// Refuses an item of the block, or the constant of a method, that would be
 /// declared twice by the expansion. Rustc would point at the attribute.
 fn check_names(item: &ItemImpl, methods: &[Method]) -> syn::Result<()> {
-    let own: Vec<&Ident> = item
-        .items
-        .iter()
-        .filter_map(|implemented| match implemented {
-            ImplItem::Fn(function) => Some(&function.sig.ident),
-            ImplItem::Const(constant) => Some(&constant.ident),
-            _ => None,
-        })
-        .collect();
+    let own = own_names(item);
     for ident in &own {
         let name = plain_name(ident);
         if DECLARED.contains(&name.as_str()) {
@@ -379,7 +371,6 @@ fn check_names(item: &ItemImpl, methods: &[Method]) -> syn::Result<()> {
 }
 
 pub fn provider(name: Option<LitStr>, mut item: ItemImpl) -> syn::Result<TokenStream> {
-    let krate = quote!(::openshop);
     if let Some((_, path, _)) = &item.trait_ {
         return Err(syn::Error::new(
             path.span(),
@@ -470,7 +461,7 @@ pub fn provider(name: Option<LitStr>, mut item: ItemImpl) -> syn::Result<TokenSt
         let visibility = &function.vis;
         let docs = docs(function);
         let output = method.output;
-        let ok = quote!(<#output as #krate::builder::MethodResult>::Ok);
+        let ok = quote!(<#output as ::openshop::builder::MethodResult>::Ok);
         let names: Vec<&Ident> = method.arguments.iter().map(|(name, _)| name).collect();
         let types: Vec<&Type> = method.arguments.iter().map(|(_, ty)| *ty).collect();
 
@@ -496,12 +487,12 @@ pub fn provider(name: Option<LitStr>, mut item: ItemImpl) -> syn::Result<TokenSt
             format!(" The call of [`{struct_name}::{ident}`]: it names the fake of the method in a test.");
         constants.push(quote! {
             #[doc = #constant_doc]
-            #visibility const #constant: #krate::builder::ProviderCall<#arguments_type, #ok> =
-                #krate::builder::ProviderCall::new(#name, #method_name);
+            #visibility const #constant: ::openshop::builder::ProviderCall<#arguments_type, #ok> =
+                ::openshop::builder::ProviderCall::new(#name, #method_name);
         });
         handlers.push(quote! {
             .handle(Self::#constant, |config: Self, #pattern: #arguments_type| async move {
-                #krate::builder::MethodResult::into_result(config.#ident(#(#names),*).await)
+                ::openshop::builder::MethodResult::into_result(config.#ident(#(#names),*).await)
             })
         });
         calls.push(quote! {
@@ -509,7 +500,7 @@ pub fn provider(name: Option<LitStr>, mut item: ItemImpl) -> syn::Result<TokenSt
             #visibility async fn #ident(
                 &self,
                 #(#names: impl ::core::borrow::Borrow<#types>),*
-            ) -> #krate::Result<#ok> {
+            ) -> ::openshop::Result<#ok> {
                 self.connectors.call_as(#name, #method_name, #sent).await
             }
         });
@@ -518,7 +509,7 @@ pub fn provider(name: Option<LitStr>, mut item: ItemImpl) -> syn::Result<TokenSt
     let checker = checker.map(|check| {
         quote! {
             .typed_checker(|config: Self| async move {
-                #krate::builder::MethodResult::into_result(config.#check().await)
+                ::openshop::builder::MethodResult::into_result(config.#check().await)
             })
         }
     });
@@ -531,6 +522,8 @@ pub fn provider(name: Option<LitStr>, mut item: ItemImpl) -> syn::Result<TokenSt
         name.value()
     );
 
+    let declared = declared(&self_type, "Provider", quote!(app.provider(Self::provider())));
+
     Ok(quote! {
         #item
 
@@ -542,32 +535,26 @@ pub fn provider(name: Option<LitStr>, mut item: ItemImpl) -> syn::Result<TokenSt
             #(#constants)*
 
             #[doc = #provider_doc]
-            pub fn provider() -> #krate::builder::Provider {
-                #krate::builder::Provider::new(#name)
-                    .fields(<Self as #krate::ProviderConfig>::fields())
+            pub fn provider() -> ::openshop::builder::Provider {
+                ::openshop::builder::Provider::new(#name)
+                    .fields(<Self as ::openshop::ProviderConfig>::fields())
                     #checker
                     #(#handlers)*
             }
 
             /// The methods of the provider for a shop: on `ctx.connectors` in a
             /// flow, where they run with the configuration that shop saved.
-            pub fn on(connectors: &#krate::Connectors) -> #connector<'_> {
+            pub fn on(connectors: &::openshop::Connectors) -> #connector<'_> {
                 #connector { connectors }
             }
         }
 
-        impl #krate::declare::Declared for #self_type {
-            type Kind = #krate::declare::kind::Provider;
-
-            fn register(app: #krate::builder::OpenShopBuilder) -> #krate::builder::OpenShopBuilder {
-                app.provider(Self::provider())
-            }
-        }
+        #declared
 
         #[doc = #connector_doc]
         #[allow(private_interfaces)]
         pub struct #connector<'a> {
-            connectors: &'a #krate::Connectors,
+            connectors: &'a ::openshop::Connectors,
         }
 
         #[allow(private_interfaces)]

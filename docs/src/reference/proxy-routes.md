@@ -304,7 +304,7 @@ use openshop::builder::Proxy;
 use openshop::prelude::*;
 
 pub fn reviews() -> Proxy {
-    Proxy::json().get(|ctx| async move {
+    Proxy::default().get(|ctx| async move {
         Ok(json!({ "shop": ctx.shop, "customerId": ctx.customer_id, "query": ctx.query }))
     })
 }
@@ -314,9 +314,9 @@ Register it with `.proxy("/reviews", reviews())` on
 `OpenShopConfig::builder()`, or on `APP.builder()?` to add it to a declared
 application.
 
-`Proxy::json()`, `Proxy::html()`, and
-`Proxy::liquid()` start a definition with its response type;
-`Proxy::default()` answers with JSON. It has one method per
+`Proxy::new(ProxyResponseType::Html)` and
+`Proxy::new(ProxyResponseType::Liquid)` start a definition with its response
+type; `Proxy::default()` answers with JSON. It has one method per
 supported HTTP method: `.get(…)`, `.post(…)`, `.put(…)`, `.delete(…)`, and
 `.patch(…)`. Each takes a handler that returns `Result<serde_json::Value>`; a
 `Value::String` is the body of an HTML or Liquid response. A handler has no

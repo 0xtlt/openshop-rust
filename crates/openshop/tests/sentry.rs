@@ -434,7 +434,7 @@ fn each_request_has_a_scope_of_its_own() {
             )
             .proxy(
                 "/reviews",
-                Proxy::json().get(|_ctx| async { bail!("the reviews are gone") }),
+                Proxy::default().get(|_ctx| async { bail!("the reviews are gone") }),
             )
             .route("/ping", Route::public().get(|_ctx| async { bail!("no answer") }))
             .build()

@@ -367,26 +367,21 @@ impl StepExecutor {
             bail!(FlowCanceledError);
         }
 
-        let completed: Option<(Uuid,)> = sqlx::query_as(
-            "SELECT id FROM step_results \
-             WHERE flow_run_id = $1 AND step_name = $2 AND status = 'completed' LIMIT 1",
+        // A completed sleep wins over one still sleeping.
+        let stored: Option<(Uuid, String, Option<Value>)> = sqlx::query_as(
+            "SELECT id, status, output FROM step_results \
+             WHERE flow_run_id = $1 AND step_name = $2 AND status IN ('completed', 'sleeping') \
+             ORDER BY status = 'completed' DESC LIMIT 1",
         )
         .bind(&self.flow_run_id)
         .bind(name)
         .fetch_optional(&self.db)
         .await?;
-        if completed.is_some() {
-            return Ok(());
-        }
-
-        let sleeping: Option<(Uuid, Option<Value>)> = sqlx::query_as(
-            "SELECT id, output FROM step_results \
-             WHERE flow_run_id = $1 AND step_name = $2 AND status = 'sleeping' LIMIT 1",
-        )
-        .bind(&self.flow_run_id)
-        .bind(name)
-        .fetch_optional(&self.db)
-        .await?;
+        let sleeping = match stored {
+            Some((_, status, _)) if status == "completed" => return Ok(()),
+            Some((id, _, output)) => Some((id, output)),
+            None => None,
+        };
 
         let duration_ms = duration.as_millis().min(i32::MAX as u128) as i32;
         // The wake-up is dated with the clock of the database, the one the workers

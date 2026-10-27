@@ -21,6 +21,14 @@ Integration tests create one PostgreSQL schema per test and drop it afterwards,
 so they run in parallel against a single database. They never touch the
 `public` schema.
 
+The integration tests of `openshop` are one binary, `crates/openshop/tests/it`,
+linked once rather than once per file: a new file is a module of its
+`main.rs`, and `cargo test -p openshop --test it engine_runner::` runs one
+module. Its tests share the process: one that reads the process logger does it
+with `common::LogCapture`, which takes turns with the others. The Sentry tests,
+which bind a client for the whole process, and the `trybuild` tests of the
+macros are binaries of their own.
+
 ## Checks
 
 ```bash
@@ -34,8 +42,7 @@ dependency commits the lockfile with it. It also checks that the workspace
 builds with the oldest Rust it claims (`rust-version` in `Cargo.toml`), and runs
 [cargo-deny](https://embarkstudios.github.io/cargo-deny/) on the dependencies,
 as `deny.toml` configures it (`cargo install --locked cargo-deny`, then
-`cargo deny check`; `cargo audit`, which reads `Cargo.lock` itself, is
-configured in `.cargo/audit.toml`). Every action of the workflows is pinned to a commit;
+`cargo deny check`). Every action of the workflows is pinned to a commit;
 Dependabot proposes the updates. Three jobs check what no test runs: `docker`
 makes a project of the `minimal` and of the `custom` template and builds its
 image, `docs` builds the guide (`mise run docs:build`), and `windows` checks

@@ -16,23 +16,37 @@ use crate::types::{ShopifyAppConfig, ShopifyConfig};
 
 pub const DEFAULT_SHOPIFY_APP_HANDLE: &str = "default";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ShopifyAppSource {
-    Env,
-    Toml,
-    Config,
-}
-
 /// `Debug` does not show `api_secret`.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone)]
 pub struct ResolvedShopifyApp {
     pub handle: String,
     pub api_key: String,
     pub api_secret: String,
     pub app_url: String,
     pub scopes: String,
-    pub source: ShopifyAppSource,
-    pub toml: Option<String>,
+    /// The `shopify_api` app: what verifies the requests Shopify signs for
+    /// this app, and exchanges its codes and session tokens.
+    pub oauth: ShopifyApp,
+}
+
+/// The secret that verifies what Shopify signs for an app: none when it is
+/// blank, which anybody could sign with.
+fn signing_secret(api_secret: &str) -> &str {
+    if api_secret.trim().is_empty() { "" } else { api_secret }
+}
+
+impl ResolvedShopifyApp {
+    fn new(handle: &str, api_key: String, api_secret: String, app_url: String, scopes: String) -> Self {
+        let oauth = ShopifyApp::new(&api_key, signing_secret(&api_secret)).with_user_agent(USER_AGENT);
+        Self {
+            handle: handle.to_string(),
+            api_key,
+            api_secret,
+            app_url,
+            scopes,
+            oauth,
+        }
+    }
 }
 
 impl std::fmt::Debug for ResolvedShopifyApp {
@@ -43,19 +57,11 @@ impl std::fmt::Debug for ResolvedShopifyApp {
             .field("api_secret", &crate::runtime::redact::redacted(&self.api_secret))
             .field("app_url", &self.app_url)
             .field("scopes", &self.scopes)
-            .field("source", &self.source)
-            .field("toml", &self.toml)
             .finish()
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct ShopifyTomlData {
-    pub api_key: Option<String>,
-    pub app_url: Option<String>,
-    pub scopes: Option<String>,
-}
-
+/// The value of `key` in the text of a `shopify.app.toml` file.
 fn read_toml_value(content: &str, key: &str) -> Option<String> {
     let pattern = format!(r#"(?m)^\s*{key}\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s#]+))"#);
     let captures = Regex::new(&pattern).ok()?.captures(content)?;
@@ -66,23 +72,11 @@ fn read_toml_value(content: &str, key: &str) -> Option<String> {
         .map(|value| value.as_str().to_string())
 }
 
-pub fn parse_shopify_toml(content: &str) -> ShopifyTomlData {
-    ShopifyTomlData {
-        api_key: read_toml_value(content, "client_id"),
-        app_url: read_toml_value(content, "application_url"),
-        scopes: read_toml_value(content, "scopes"),
-    }
-}
-
-pub fn read_shopify_toml(path: &Path) -> Result<ShopifyTomlData> {
-    Ok(parse_shopify_toml(&std::fs::read_to_string(path)?))
-}
-
 static TOML_CANDIDATE_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^shopify\.app(?:\..+)?\.toml$").expect("valid regex"));
 
 /// Reads OAuth scopes from `shopify.app.<name>.toml` files, then `shopify.app.toml`.
-pub fn read_scopes_from_toml(cwd: &Path) -> String {
+fn read_scopes_from_toml(cwd: &Path) -> String {
     let mut candidates: Vec<String> = std::fs::read_dir(cwd)
         .map(|entries| {
             entries
@@ -97,13 +91,9 @@ pub fn read_scopes_from_toml(cwd: &Path) -> String {
 
     candidates
         .iter()
-        .filter_map(|file| read_shopify_toml(&cwd.join(file)).ok())
-        .find_map(|toml| toml.scopes.filter(|scopes| !scopes.is_empty()))
+        .filter_map(|file| std::fs::read_to_string(cwd.join(file)).ok())
+        .find_map(|content| read_toml_value(&content, "scopes").filter(|scopes| !scopes.is_empty()))
         .unwrap_or_default()
-}
-
-fn global_scopes(config: Option<&ShopifyConfig>) -> Option<String> {
-    config.and_then(|config| config.scopes.clone())
 }
 
 fn normalize_app(
@@ -122,49 +112,49 @@ fn normalize_app(
             if !path.exists() {
                 bail!("[openshop] Shopify app \"{handle}\" TOML not found: {toml}");
             }
-            let data = read_shopify_toml(&path)?;
-            let Some(api_key) = data.api_key.filter(|key| !key.is_empty()) else {
+            let content = std::fs::read_to_string(&path)?;
+            let Some(api_key) = read_toml_value(&content, "client_id").filter(|key| !key.is_empty()) else {
                 bail!("[openshop] Shopify app \"{handle}\" TOML is missing client_id");
             };
-            Ok(ResolvedShopifyApp {
-                handle: handle.to_string(),
+            Ok(ResolvedShopifyApp::new(
+                handle,
                 api_key,
-                api_secret: api_secret.clone(),
-                app_url: app_url
+                api_secret.clone(),
+                app_url
                     .clone()
-                    .or(data.app_url)
+                    .or_else(|| read_toml_value(&content, "application_url"))
                     .unwrap_or_else(|| env.fallback_app_url()),
-                scopes: config.scopes.clone().or(data.scopes).unwrap_or_default(),
-                source: ShopifyAppSource::Toml,
-                toml: Some(toml.clone()),
-            })
+                config
+                    .scopes
+                    .clone()
+                    .or_else(|| read_toml_value(&content, "scopes"))
+                    .unwrap_or_default(),
+            ))
         }
         ShopifyAppConfig::Keys {
             api_key,
             api_secret,
             app_url,
-        } => Ok(ResolvedShopifyApp {
-            handle: handle.to_string(),
-            api_key: api_key.clone(),
-            api_secret: api_secret.clone(),
-            app_url: app_url.clone().unwrap_or_else(|| env.fallback_app_url()),
-            scopes: config.scopes.clone().unwrap_or_else(|| read_scopes_from_toml(&env.cwd)),
-            source: ShopifyAppSource::Config,
-            toml: None,
-        }),
+        } => Ok(ResolvedShopifyApp::new(
+            handle,
+            api_key.clone(),
+            api_secret.clone(),
+            app_url.clone().unwrap_or_else(|| env.fallback_app_url()),
+            config.scopes.clone().unwrap_or_else(|| read_scopes_from_toml(&env.cwd)),
+        )),
     }
 }
 
 fn normalize_legacy_app(config: Option<&ShopifyConfig>, env: &RuntimeEnv) -> ResolvedShopifyApp {
-    ResolvedShopifyApp {
-        handle: DEFAULT_SHOPIFY_APP_HANDLE.to_string(),
-        api_key: env.shopify_api_key.clone().unwrap_or_default(),
-        api_secret: env.shopify_api_secret.clone().unwrap_or_default(),
-        app_url: env.fallback_app_url(),
-        scopes: global_scopes(config).unwrap_or_else(|| read_scopes_from_toml(&env.cwd)),
-        source: ShopifyAppSource::Env,
-        toml: None,
-    }
+    ResolvedShopifyApp::new(
+        DEFAULT_SHOPIFY_APP_HANDLE,
+        env.shopify_api_key.clone().unwrap_or_default(),
+        env.shopify_api_secret.clone().unwrap_or_default(),
+        env.fallback_app_url(),
+        config
+            .and_then(|config| config.scopes.clone())
+            .unwrap_or_else(|| read_scopes_from_toml(&env.cwd)),
+    )
 }
 
 fn assert_consistent_scopes(apps: &[ResolvedShopifyApp], has_global_scopes: bool) -> Result<()> {
@@ -184,83 +174,43 @@ fn assert_consistent_scopes(apps: &[ResolvedShopifyApp], has_global_scopes: bool
     bail!("[openshop] Shopify app scopes must be identical across all configured apps")
 }
 
-pub fn resolve_shopify_apps(config: Option<&ShopifyConfig>, env: &RuntimeEnv) -> Result<Vec<ResolvedShopifyApp>> {
-    let Some((config, app_configs)) = config.and_then(|config| config.apps.as_ref().map(|apps| (config, apps))) else {
-        return Ok(vec![normalize_legacy_app(config, env)]);
-    };
-
-    let apps = app_configs
-        .iter()
-        .map(|(handle, app)| normalize_app(handle, app, config, env))
-        .collect::<Result<Vec<_>>>()?;
-
-    if apps.is_empty() {
-        bail!("[openshop] shopify.apps must contain at least one app");
-    }
-    assert_consistent_scopes(&apps, config.scopes.as_deref().is_some_and(|scopes| !scopes.is_empty()))?;
-    Ok(apps)
-}
-
-/// The secret that verifies what Shopify signs for `app`: none when it is
-/// blank, which anybody could sign with.
-fn signing_secret(app: &ResolvedShopifyApp) -> &str {
-    if app.api_secret.trim().is_empty() { "" } else { &app.api_secret }
-}
-
-/// The resolved apps of a running instance, each with the `shopify_api` app
-/// that verifies what Shopify signs for it and asks Shopify for its tokens.
+/// The resolved apps of a running instance.
 #[derive(Debug, Clone)]
 pub struct ShopifyApps {
     apps: Vec<ResolvedShopifyApp>,
-    oauth: Vec<ShopifyApp>,
 }
-
-impl PartialEq for ShopifyApps {
-    fn eq(&self, other: &Self) -> bool {
-        self.apps == other.apps
-    }
-}
-
-impl Eq for ShopifyApps {}
 
 impl ShopifyApps {
-    pub fn new(apps: Vec<ResolvedShopifyApp>) -> Self {
-        let oauth = apps
-            .iter()
-            .map(|app| ShopifyApp::new(&app.api_key, signing_secret(app)).with_user_agent(USER_AGENT))
-            .collect();
-        Self { apps, oauth }
-    }
-
     pub fn resolve(config: Option<&ShopifyConfig>, env: &RuntimeEnv) -> Result<Self> {
-        Ok(Self::new(resolve_shopify_apps(config, env)?))
+        let Some((config, app_configs)) = config.and_then(|config| config.apps.as_ref().map(|apps| (config, apps)))
+        else {
+            return Ok(Self {
+                apps: vec![normalize_legacy_app(config, env)],
+            });
+        };
+
+        let apps = app_configs
+            .iter()
+            .map(|(handle, app)| normalize_app(handle, app, config, env))
+            .collect::<Result<Vec<_>>>()?;
+
+        if apps.is_empty() {
+            bail!("[openshop] shopify.apps must contain at least one app");
+        }
+        assert_consistent_scopes(&apps, config.scopes.as_deref().is_some_and(|scopes| !scopes.is_empty()))?;
+        Ok(Self { apps })
     }
 
     /// The same apps, asking Shopify for tokens through `transport`.
     pub(crate) fn with_transport(mut self, transport: Arc<dyn Transport>) -> Self {
-        for oauth in &mut self.oauth {
-            *oauth = oauth.clone().with_transport(SharedTransport(transport.clone()));
+        for app in &mut self.apps {
+            app.oauth = app.oauth.clone().with_transport(SharedTransport(transport.clone()));
         }
         self
     }
 
     pub fn all(&self) -> &[ResolvedShopifyApp] {
         &self.apps
-    }
-
-    /// The `shopify_api` app of one of these apps: what verifies the requests
-    /// Shopify signs for it, and exchanges its codes and session tokens.
-    pub fn oauth(&self, app: &ResolvedShopifyApp) -> &ShopifyApp {
-        let index = self
-            .apps
-            .iter()
-            .position(|known| known.handle == app.handle)
-            .expect("the app is one of these apps");
-        &self.oauth[index]
-    }
-
-    fn pairs(&self) -> impl Iterator<Item = (&ResolvedShopifyApp, &ShopifyApp)> {
-        self.apps.iter().zip(&self.oauth)
     }
 
     pub fn has_configured_secret(&self) -> bool {
@@ -293,44 +243,39 @@ impl ShopifyApps {
         }
     }
 
+    /// The one app `verify` accepts what was signed for, and what it verified.
+    /// `signed` names it in the errors.
+    fn only_signer<T>(
+        &self,
+        signed: &str,
+        verify: impl Fn(&ResolvedShopifyApp) -> Option<T>,
+    ) -> Result<(&ResolvedShopifyApp, T)> {
+        let mut matches = self.apps.iter().filter_map(|app| Some((app, verify(app)?)));
+        match (matches.next(), matches.next()) {
+            (Some(verified), None) => Ok(verified),
+            (None, _) => bail!("[openshop] No Shopify app matched the {signed}"),
+            (Some(_), Some(_)) => bail!("[openshop] Multiple Shopify apps matched the {signed}"),
+        }
+    }
+
     /// The one app whose secret signed `query`, a launch from Shopify admin or
     /// an OAuth callback (`hmac`, and a `timestamp` of the last 90 seconds), and
     /// the query as it verified.
     pub fn by_signed_query(&self, query: &str) -> Result<(&ResolvedShopifyApp, SignedQuery)> {
-        let mut matches = self
-            .pairs()
-            .filter_map(|(app, oauth)| Some((app, oauth.verify_query(query).ok()?)));
-        match (matches.next(), matches.next()) {
-            (Some(verified), None) => Ok(verified),
-            (None, _) => bail!("[openshop] No Shopify app matched the signed request"),
-            (Some(_), Some(_)) => bail!("[openshop] Multiple Shopify apps matched the signed request"),
-        }
+        self.only_signer("signed request", |app| app.oauth.verify_query(query).ok())
     }
 
     /// The one app whose secret signed the app proxy request of `query`
     /// (`signature`, and a `timestamp` of the last 90 seconds).
     pub fn by_proxy_signature(&self, query: &str) -> Result<(&ResolvedShopifyApp, SignedQuery)> {
-        let mut matches = self
-            .pairs()
-            .filter_map(|(app, oauth)| Some((app, oauth.verify_app_proxy(query).ok()?)));
-        match (matches.next(), matches.next()) {
-            (Some(verified), None) => Ok(verified),
-            (None, _) => bail!("[openshop] No Shopify app matched the proxy signature"),
-            (Some(_), Some(_)) => bail!("[openshop] Multiple Shopify apps matched the proxy signature"),
-        }
+        self.only_signer("proxy signature", |app| app.oauth.verify_app_proxy(query).ok())
     }
 
     /// The one app whose secret signed a webhook, and the webhook as it verified.
     pub fn by_webhook(&self, headers: &HeaderMap, body: &[u8]) -> Result<(&ResolvedShopifyApp, Webhook)> {
-        let mut matches = self.apps.iter().filter_map(|app| {
-            let webhook = Webhook::verify(headers, body.to_vec(), signing_secret(app)).ok()?;
-            Some((app, webhook))
-        });
-        match (matches.next(), matches.next()) {
-            (Some(verified), None) => Ok(verified),
-            (None, _) => bail!("[openshop] No Shopify app matched the webhook signature"),
-            (Some(_), Some(_)) => bail!("[openshop] Multiple Shopify apps matched the webhook signature"),
-        }
+        self.only_signer("webhook signature", |app| {
+            Webhook::verify(headers, body.to_vec(), signing_secret(&app.api_secret)).ok()
+        })
     }
 }
 
@@ -381,12 +326,12 @@ mod tests {
             cwd: temp_dir("legacy"),
             ..Default::default()
         };
-        let apps = resolve_shopify_apps(None, &env).unwrap();
+        let apps = ShopifyApps::resolve(None, &env).unwrap();
+        let apps = apps.all();
         assert_eq!(apps.len(), 1);
         assert_eq!(apps[0].handle, DEFAULT_SHOPIFY_APP_HANDLE);
         assert_eq!(apps[0].api_key, "legacy-key");
         assert_eq!(apps[0].api_secret, "legacy-secret");
-        assert_eq!(apps[0].source, ShopifyAppSource::Env);
     }
 
     #[test]
@@ -460,11 +405,11 @@ scopes = "read_products,read_orders"
             ),
         };
 
-        let error = resolve_shopify_apps(Some(&toml_app("nope.toml")), &env).unwrap_err();
+        let error = ShopifyApps::resolve(Some(&toml_app("nope.toml")), &env).unwrap_err();
         assert!(error.to_string().contains("TOML not found: nope.toml"));
 
         std::fs::write(dir.join("empty.toml"), "name = \"x\"\n").unwrap();
-        let error = resolve_shopify_apps(Some(&toml_app("empty.toml")), &env).unwrap_err();
+        let error = ShopifyApps::resolve(Some(&toml_app("empty.toml")), &env).unwrap_err();
         assert!(error.to_string().contains("TOML is missing client_id"));
         std::fs::remove_dir_all(dir).ok();
     }
@@ -502,11 +447,11 @@ scopes = "read_products,read_orders"
             cwd: dir.clone(),
             ..Default::default()
         };
-        let error = resolve_shopify_apps(Some(&config), &env).unwrap_err();
+        let error = ShopifyApps::resolve(Some(&config), &env).unwrap_err();
         assert!(error.to_string().contains("scopes must be identical"));
 
         config.scopes = Some("read_products".into());
-        assert_eq!(resolve_shopify_apps(Some(&config), &env).unwrap().len(), 2);
+        assert_eq!(ShopifyApps::resolve(Some(&config), &env).unwrap().all().len(), 2);
         std::fs::remove_dir_all(dir).ok();
     }
 

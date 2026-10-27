@@ -23,27 +23,17 @@ impl fmt::Display for ApiError {
 
 impl std::error::Error for ApiError {}
 
-/// `Authorization` header for a session token lookup. A missing, empty or failed token sends
-/// the request without one.
-pub fn authorization_header<E>(token: Result<Option<String>, E>) -> Option<String> {
-    token
-        .ok()
-        .flatten()
-        .filter(|token| !token.is_empty())
-        .map(|token| format!("Bearer {token}"))
-}
-
-/// Request headers with `Authorization` set, keeping the caller's other headers.
-pub fn with_authorization(headers: &[(&str, &str)], authorization: Option<String>) -> Vec<(String, String)> {
-    let mut merged: Vec<(String, String)> = headers
-        .iter()
-        .filter(|(name, _)| authorization.is_none() || !name.eq_ignore_ascii_case("authorization"))
-        .map(|(name, value)| (name.to_string(), value.to_string()))
-        .collect();
-    if let Some(authorization) = authorization {
-        merged.push(("Authorization".to_string(), authorization));
+/// The headers of an Admin API request: `Content-Type` when it sends JSON, and
+/// the App Bridge session token as `Authorization` when there is one.
+pub fn session_headers(token: Option<String>, sends_json: bool) -> Vec<(String, String)> {
+    let mut headers = Vec::with_capacity(2);
+    if sends_json {
+        headers.push(("Content-Type".to_string(), "application/json".to_string()));
     }
-    merged
+    if let Some(token) = token.filter(|token| !token.is_empty()) {
+        headers.push(("Authorization".to_string(), format!("Bearer {token}")));
+    }
+    headers
 }
 
 /// The `error` member of a JSON error body, when there is one.
@@ -94,22 +84,18 @@ impl ApiResponse {
 }
 
 async fn send(method: Method, path: &str, body: Option<&Value>) -> Result<http::Response, ApiError> {
-    let content_type: &[(&str, &str)] = match body {
-        Some(_) => &[("Content-Type", "application/json")],
-        None => &[],
-    };
-    let token = shopify::id_token().await;
-    if let Err(error) = &token {
+    let token = shopify::id_token().await.unwrap_or_else(|error| {
         // The request goes without a session, and the server refuses it.
-        log_error("Could not get a session token from App Bridge", error);
-    }
-    let authorization = authorization_header(token);
+        log_error("Could not get a session token from App Bridge", &error);
+        None
+    });
+    let headers = session_headers(token, body.is_some());
     let body = body.map(Value::to_string);
     let writes = method != Method::Get;
     let request = http::Request {
         method,
         url: path,
-        headers: &with_authorization(content_type, authorization),
+        headers: &headers,
         body: body.as_deref(),
         signal: None,
     };
@@ -200,49 +186,22 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    fn header<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a str> {
-        headers
-            .iter()
-            .find(|(key, _)| key.eq_ignore_ascii_case(name))
-            .map(|(_, value)| value.as_str())
-    }
-
     #[test]
-    fn adds_an_app_bridge_session_token_when_available() {
-        let token: Result<_, ()> = Ok(Some("session-token".to_string()));
-        let headers = with_authorization(&[], authorization_header(token));
-        assert_eq!(header(&headers, "Authorization"), Some("Bearer session-token"));
-    }
-
-    #[test]
-    fn preserves_existing_request_headers() {
-        let token: Result<_, ()> = Ok(Some("session-token".to_string()));
-        let headers = with_authorization(&[("X-Test", "kept")], authorization_header(token));
-        assert_eq!(header(&headers, "Authorization"), Some("Bearer session-token"));
-        assert_eq!(header(&headers, "X-Test"), Some("kept"));
-    }
-
-    #[test]
-    fn continues_without_authorization_outside_shopify_admin() {
-        let token: Result<Option<String>, ()> = Ok(None);
-        let headers = with_authorization(&[("X-Test", "kept")], authorization_header(token));
-        assert_eq!(header(&headers, "Authorization"), None);
-        assert_eq!(authorization_header::<()>(Ok(Some(String::new()))), None);
-    }
-
-    #[test]
-    fn continues_without_authorization_when_token_retrieval_fails() {
-        let token: Result<Option<String>, &str> = Err("not ready");
-        let headers = with_authorization(&[], authorization_header(token));
-        assert_eq!(header(&headers, "Authorization"), None);
-    }
-
-    #[test]
-    fn replaces_a_caller_supplied_authorization_header() {
-        let headers = with_authorization(&[("authorization", "Basic x")], Some("Bearer y".to_string()));
-        assert_eq!(headers, vec![("Authorization".to_string(), "Bearer y".to_string())]);
-        let untouched = with_authorization(&[("authorization", "Basic x")], None);
-        assert_eq!(header(&untouched, "Authorization"), Some("Basic x"));
+    fn sends_the_session_token_when_there_is_one() {
+        let header = |name: &str, value: &str| (name.to_string(), value.to_string());
+        assert_eq!(
+            session_headers(Some("session-token".to_string()), true),
+            [
+                header("Content-Type", "application/json"),
+                header("Authorization", "Bearer session-token")
+            ]
+        );
+        assert_eq!(
+            session_headers(Some("session-token".to_string()), false),
+            [header("Authorization", "Bearer session-token")]
+        );
+        assert!(session_headers(None, false).is_empty());
+        assert!(session_headers(Some(String::new()), false).is_empty());
     }
 
     #[test]

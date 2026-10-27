@@ -1,4 +1,4 @@
-//! Application tables with the conventional OpenShop columns.
+//! The tables of the application models, as `#[derive(Model)]` describes them.
 
 use serde::{Deserialize, Serialize};
 
@@ -22,16 +22,10 @@ pub struct ColumnDef {
     pub default: Option<String>,
     #[serde(rename = "primaryKey", default, skip_serializing_if = "is_false")]
     pub primary_key: bool,
-    /// Other constraints written with the column, such as `UNIQUE` or `REFERENCES …`.
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub constraints: String,
     /// The name the column had before, for `migrate generate` to rename it
     /// instead of dropping and adding it.
     #[serde(skip)]
     pub renamed_from: Option<String>,
-    /// The definition as written with [`Table::column`], rendered verbatim.
-    #[serde(skip)]
-    written: Option<String>,
 }
 
 impl ColumnDef {
@@ -43,15 +37,17 @@ impl ColumnDef {
             nullable: false,
             default: None,
             primary_key: false,
-            constraints: String::new(),
             renamed_from: None,
-            written: None,
         }
     }
 
-    /// `id uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL`.
+    /// `id uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL`, the primary
+    /// key of every model.
     pub fn id() -> Self {
-        Self::new("id", "uuid").primary_key().default("gen_random_uuid()")
+        Self {
+            primary_key: true,
+            ..Self::new("id", "uuid").default("gen_random_uuid()")
+        }
     }
 
     /// `shop text NOT NULL`.
@@ -80,12 +76,6 @@ impl ColumnDef {
         self
     }
 
-    pub fn primary_key(mut self) -> Self {
-        self.primary_key = true;
-        self.nullable = false;
-        self
-    }
-
     pub fn renamed_from(mut self, previous: impl Into<String>) -> Self {
         self.renamed_from = Some(previous.into());
         self
@@ -93,9 +83,6 @@ impl ColumnDef {
 
     /// The definition that follows the column name in `CREATE TABLE`.
     pub fn definition_sql(&self) -> String {
-        if let Some(written) = &self.written {
-            return written.clone();
-        }
         let mut sql = self.sql_type.clone();
         if self.primary_key {
             sql.push_str(" PRIMARY KEY");
@@ -105,9 +92,6 @@ impl ColumnDef {
         }
         if !self.nullable {
             sql.push_str(" NOT NULL");
-        }
-        if !self.constraints.is_empty() {
-            sql.push_str(&format!(" {}", self.constraints));
         }
         sql
     }
@@ -242,12 +226,8 @@ impl ForeignKeyDef {
     }
 }
 
-/// A table definition that renders to `CREATE TABLE` SQL.
-///
-/// [`Table::conventional`] starts with `id` (uuid primary key), `shop`,
-/// `created_at` and `updated_at`; [`Table::new`] with no column, which is
-/// what `#[derive(Model)]` builds on. Queries written by hand filter by shop
-/// themselves; the typed rows of a `#[derive(Model)]` struct do it.
+/// A table definition that renders to `CREATE TABLE` SQL: what
+/// `#[derive(Model)]` builds from a struct.
 ///
 /// The serialized form is what the schema snapshot records for the table.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -268,8 +248,7 @@ pub(crate) fn quote(identifier: &str) -> String {
 }
 
 impl Table {
-    /// A table without any column. `#[derive(Model)]` starts from it;
-    /// [`Table::conventional`] adds the conventional columns.
+    /// A table without any column. `#[derive(Model)]` starts from it.
     pub fn new(table: impl Into<String>) -> Self {
         Self {
             table: table.into(),
@@ -280,28 +259,8 @@ impl Table {
         }
     }
 
-    /// A table with the conventional columns:
-    /// - `id` (uuid, primary key)
-    /// - `shop` (text), unless [`Table::without_shop`]
-    /// - `created_at` / `updated_at` (timestamptz, default now)
-    pub fn conventional(table: impl Into<String>) -> Self {
-        Self {
-            columns: vec![
-                ColumnDef::id(),
-                ColumnDef::shop(),
-                ColumnDef::created_at(),
-                ColumnDef::updated_at(),
-            ],
-            ..Self::new(table)
-        }
-    }
-
     pub fn columns(&self) -> &[ColumnDef] {
         &self.columns
-    }
-
-    pub(super) fn columns_mut(&mut self) -> &mut [ColumnDef] {
-        &mut self.columns
     }
 
     pub fn indexes(&self) -> &[IndexDef] {
@@ -317,33 +276,10 @@ impl Table {
         self.renamed_from.as_deref()
     }
 
-    /// Adds a column, e.g. `.column("product_id", "text NOT NULL")`.
-    pub fn column(mut self, name: impl Into<String>, definition: impl Into<String>) -> Self {
-        self.columns.push(parse_definition(name.into(), definition.into()));
-        self
-    }
-
-    /// Adds a column described field by field.
+    /// Adds a column.
     pub fn with_column(mut self, column: ColumnDef) -> Self {
         self.columns.push(column);
         self
-    }
-
-    fn without(mut self, column: &str) -> Self {
-        self.columns.retain(|existing| existing.name != column);
-        self
-    }
-
-    pub fn without_shop(self) -> Self {
-        self.without("shop")
-    }
-
-    pub fn without_created_at(self) -> Self {
-        self.without("created_at")
-    }
-
-    pub fn without_updated_at(self) -> Self {
-        self.without("updated_at")
     }
 
     fn with_index(mut self, name: String, columns: &[&str], unique: bool) -> Self {
@@ -430,126 +366,15 @@ fn collapse_spaces(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// Splits on spaces that are outside parentheses and quotes.
-fn definition_tokens(definition: &str) -> Vec<String> {
-    let mut tokens = Vec::new();
-    let mut current = String::new();
-    let mut depth = 0_usize;
-    let mut quote: Option<char> = None;
-    for character in definition.chars() {
-        match quote {
-            Some(open) => {
-                if character == open {
-                    quote = None;
-                }
-                current.push(character);
-            }
-            None if character == '\'' || character == '"' => {
-                quote = Some(character);
-                current.push(character);
-            }
-            None if character == '(' => {
-                depth += 1;
-                current.push(character);
-            }
-            None if character == ')' => {
-                depth = depth.saturating_sub(1);
-                current.push(character);
-            }
-            None if character.is_whitespace() && depth == 0 => {
-                if !current.is_empty() {
-                    tokens.push(std::mem::take(&mut current));
-                }
-            }
-            None => current.push(character),
-        }
-    }
-    if !current.is_empty() {
-        tokens.push(current);
-    }
-    tokens
-}
-
-/// The words that end the type or the default expression of a column.
-fn is_constraint_keyword(token: &str) -> bool {
-    matches!(
-        token.to_ascii_uppercase().as_str(),
-        "NOT"
-            | "NULL"
-            | "DEFAULT"
-            | "PRIMARY"
-            | "UNIQUE"
-            | "REFERENCES"
-            | "CHECK"
-            | "GENERATED"
-            | "COLLATE"
-            | "CONSTRAINT"
-    )
-}
-
-/// Reads a column definition such as `text NOT NULL DEFAULT ''`: its type,
-/// nullability and default. What is not recognized is kept as `constraints`,
-/// and the definition itself is kept to be rendered as written.
-fn parse_definition(name: String, definition: String) -> ColumnDef {
-    let tokens = definition_tokens(&definition);
-    let type_end = tokens
-        .iter()
-        .position(|token| is_constraint_keyword(token))
-        .unwrap_or(tokens.len());
-    let mut parsed = ColumnDef {
-        name,
-        sql_type: normalize_type(&tokens[..type_end].join(" ")),
-        nullable: true,
-        default: None,
-        primary_key: false,
-        constraints: String::new(),
-        renamed_from: None,
-        written: None,
-    };
-
-    let mut constraints: Vec<&str> = Vec::new();
-    let mut index = type_end;
-    while index < tokens.len() {
-        let token = tokens[index].to_ascii_uppercase();
-        let next = tokens.get(index + 1).map(|next| next.to_ascii_uppercase());
-        match (token.as_str(), next.as_deref()) {
-            ("NOT", Some("NULL")) => {
-                parsed.nullable = false;
-                index += 2;
-            }
-            ("NULL", _) => index += 1,
-            ("PRIMARY", Some("KEY")) => {
-                parsed.primary_key = true;
-                parsed.nullable = false;
-                index += 2;
-            }
-            ("DEFAULT", _) => {
-                let end = tokens[index + 1..]
-                    .iter()
-                    .position(|token| is_constraint_keyword(token))
-                    .map_or(tokens.len(), |offset| index + 1 + offset);
-                parsed.default = Some(tokens[index + 1..end].join(" ")).filter(|default| !default.is_empty());
-                index = end;
-            }
-            _ => {
-                // An unrecognized constraint runs until the next one this parser reads.
-                let end = tokens[index + 1..]
-                    .iter()
-                    .position(|token| {
-                        matches!(
-                            token.to_ascii_uppercase().as_str(),
-                            "NOT" | "NULL" | "DEFAULT" | "PRIMARY"
-                        )
-                    })
-                    .map_or(tokens.len(), |offset| index + 1 + offset);
-                constraints.extend(tokens[index..end].iter().map(String::as_str));
-                index = end;
-            }
-        }
-    }
-    parsed.constraints = constraints.join(" ");
-    parsed.written = Some(definition);
-    parsed
+/// A table with the columns most models have: `id`, `shop`, `created_at` and
+/// `updated_at`.
+#[cfg(test)]
+pub(crate) fn conventional(table: &str) -> Table {
+    Table::new(table)
+        .with_column(ColumnDef::id())
+        .with_column(ColumnDef::shop())
+        .with_column(ColumnDef::created_at())
+        .with_column(ColumnDef::updated_at())
 }
 
 #[cfg(test)]
@@ -557,39 +382,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn includes_the_conventional_columns_by_default() {
-        let sql = Table::conventional("reviews")
-            .column("product_id", "text NOT NULL")
-            .column("approved", "boolean DEFAULT false")
+    fn renders_the_table_and_its_indexes() {
+        let sql = conventional("settings")
+            .with_column(ColumnDef::new("key", "text"))
+            .unique_index("settings_key_unique", &["key"])
+            .index("settings_key_idx", &["key", "id"])
             .create_sql();
         assert_eq!(
             sql,
-            "CREATE TABLE IF NOT EXISTS \"reviews\" (\n\
+            "CREATE TABLE IF NOT EXISTS \"settings\" (\n\
              \x20 \"id\" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,\n\
              \x20 \"shop\" text NOT NULL,\n\
              \x20 \"created_at\" timestamp with time zone DEFAULT now() NOT NULL,\n\
              \x20 \"updated_at\" timestamp with time zone DEFAULT now() NOT NULL,\n\
-             \x20 \"product_id\" text NOT NULL,\n\
-             \x20 \"approved\" boolean DEFAULT false\n\
-             );"
+             \x20 \"key\" text NOT NULL\n\
+             );\n\
+             CREATE UNIQUE INDEX IF NOT EXISTS \"settings_key_unique\" ON \"settings\" (\"key\");\n\
+             CREATE INDEX IF NOT EXISTS \"settings_key_idx\" ON \"settings\" (\"key\", \"id\");"
         );
-    }
-
-    #[test]
-    fn can_drop_conventional_columns_and_add_indexes() {
-        let sql = Table::conventional("settings")
-            .without_shop()
-            .without_created_at()
-            .without_updated_at()
-            .column("key", "text NOT NULL")
-            .unique_index("settings_key_unique", &["key"])
-            .index("settings_key_idx", &["key", "id"])
-            .create_sql();
-        assert!(!sql.contains("\"shop\""));
-        assert!(!sql.contains("created_at"));
-        assert!(!sql.contains("updated_at"));
-        assert!(sql.contains("CREATE UNIQUE INDEX IF NOT EXISTS \"settings_key_unique\" ON \"settings\" (\"key\");"));
-        assert!(sql.contains("CREATE INDEX IF NOT EXISTS \"settings_key_idx\" ON \"settings\" (\"key\", \"id\");"));
     }
 
     #[test]
@@ -610,57 +420,9 @@ mod tests {
         );
     }
 
-    fn written(definition: &str) -> ColumnDef {
-        parse_definition("c".to_string(), definition.to_string())
-    }
-
-    #[test]
-    fn reads_the_facts_of_a_written_definition() {
-        let column = written("text NOT NULL");
-        assert_eq!(
-            (column.sql_type.as_str(), column.nullable, column.default.as_deref()),
-            ("text", false, None)
-        );
-
-        let column = written("boolean DEFAULT false");
-        assert_eq!(
-            (column.sql_type.as_str(), column.nullable, column.default.as_deref()),
-            ("boolean", true, Some("false"))
-        );
-
-        let column = written("TIMESTAMPTZ   default now()  not null");
-        assert_eq!(column.sql_type, "timestamp with time zone");
-        assert_eq!((column.nullable, column.default.as_deref()), (false, Some("now()")));
-
-        let column = written("numeric(10, 2) NOT NULL DEFAULT 0 CHECK (c >= 0)");
-        assert_eq!(column.sql_type, "numeric(10, 2)");
-        assert_eq!((column.nullable, column.default.as_deref()), (false, Some("0")));
-        assert_eq!(column.constraints, "CHECK (c >= 0)");
-
-        let column = written("text DEFAULT 'not null' REFERENCES products(id) ON DELETE CASCADE NOT NULL");
-        assert_eq!(column.default.as_deref(), Some("'not null'"));
-        assert_eq!(column.constraints, "REFERENCES products(id) ON DELETE CASCADE");
-        assert!(!column.nullable);
-
-        let column = written("uuid PRIMARY KEY");
-        assert!(column.primary_key && !column.nullable);
-
-        let column = written("varchar(64) UNIQUE");
-        assert_eq!(
-            (column.sql_type.as_str(), column.constraints.as_str()),
-            ("character varying(64)", "UNIQUE")
-        );
-
-        let column = written("jsonb DEFAULT '{}'::jsonb NOT NULL");
-        assert_eq!(column.default.as_deref(), Some("'{}'::jsonb"));
-
-        // A written definition is rendered as written.
-        assert_eq!(written("TEXT  not null").definition_sql(), "TEXT  not null");
-    }
-
     #[test]
     fn foreign_keys_are_added_once_the_tables_exist() {
-        let votes = Table::conventional("review_votes")
+        let votes = conventional("review_votes")
             .with_column(ColumnDef::new("review_id", "uuid"))
             .with_column(ColumnDef::new("author_code", "text").nullable(true))
             .with_foreign_key(ForeignKeyDef::new("review_id", "reviews").on_delete("cascade"))

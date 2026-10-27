@@ -32,14 +32,12 @@ pub struct RegisteredMcpPermission {
 
 #[derive(Clone)]
 pub struct RegisteredMcpTool {
-    pub name: String,
     pub source: McpSource,
     pub definition: McpTool,
 }
 
 #[derive(Clone)]
 pub struct RegisteredMcpResource {
-    pub uri: String,
     pub source: McpSource,
     pub definition: McpResource,
 }
@@ -189,47 +187,25 @@ fn normalize_tools(
     permissions: &IndexMap<String, RegisteredMcpPermission>,
 ) -> Result<IndexMap<String, RegisteredMcpTool>> {
     let mut tools = IndexMap::new();
-
-    for (name, tool) in core {
-        let mut definition = tool.clone();
-        definition.required_permissions = assert_known_permissions(
-            &format!("mcp.coreTools.{name}"),
-            &tool.required_permissions,
-            permissions,
-        )?;
-        tools.insert(
-            name.clone(),
-            RegisteredMcpTool {
-                name: name.clone(),
-                source: McpSource::Core,
-                definition,
-            },
-        );
-    }
-
-    for (name, tool) in custom {
-        if !TOOL_NAME.is_match(name) {
-            fail!("mcp.tools.{name} has an invalid tool name");
-        }
-        if tools.contains_key(name) {
-            fail!("mcp.tools.{name} conflicts with a core tool");
-        }
-        if tool.description.trim().is_empty() {
-            fail!("mcp.tools.{name}.description must be a non-empty string");
+    let core = core.iter().map(|entry| (entry, McpSource::Core, "coreTools"));
+    let custom = custom.iter().map(|entry| (entry, McpSource::Custom, "tools"));
+    for ((name, tool), source, list) in core.chain(custom) {
+        if source == McpSource::Custom {
+            if !TOOL_NAME.is_match(name) {
+                fail!("mcp.tools.{name} has an invalid tool name");
+            }
+            if tools.contains_key(name) {
+                fail!("mcp.tools.{name} conflicts with a core tool");
+            }
+            if tool.description.trim().is_empty() {
+                fail!("mcp.tools.{name}.description must be a non-empty string");
+            }
         }
         let mut definition = tool.clone();
         definition.required_permissions =
-            assert_known_permissions(&format!("mcp.tools.{name}"), &tool.required_permissions, permissions)?;
-        tools.insert(
-            name.clone(),
-            RegisteredMcpTool {
-                name: name.clone(),
-                source: McpSource::Custom,
-                definition,
-            },
-        );
+            assert_known_permissions(&format!("mcp.{list}.{name}"), &tool.required_permissions, permissions)?;
+        tools.insert(name.clone(), RegisteredMcpTool { source, definition });
     }
-
     Ok(tools)
 }
 
@@ -239,50 +215,25 @@ fn normalize_resources(
     permissions: &IndexMap<String, RegisteredMcpPermission>,
 ) -> Result<IndexMap<String, RegisteredMcpResource>> {
     let mut resources = IndexMap::new();
-
-    for (uri, resource) in core {
-        let mut definition = resource.clone();
-        definition.required_permissions = assert_known_permissions(
-            &format!("mcp.coreResources.{uri}"),
-            &resource.required_permissions,
-            permissions,
-        )?;
-        resources.insert(
-            uri.clone(),
-            RegisteredMcpResource {
-                uri: uri.clone(),
-                source: McpSource::Core,
-                definition,
-            },
-        );
-    }
-
-    for (uri, resource) in custom {
-        if !RESOURCE_URI.is_match(uri) {
-            fail!("mcp.resources.{uri} must be a URI");
-        }
-        if resources.contains_key(uri) {
-            fail!("mcp.resources.{uri} conflicts with a core resource");
-        }
-        if resource.name.trim().is_empty() {
-            fail!("mcp.resources.{uri}.name must be a non-empty string");
+    let core = core.iter().map(|entry| (entry, McpSource::Core, "coreResources"));
+    let custom = custom.iter().map(|entry| (entry, McpSource::Custom, "resources"));
+    for ((uri, resource), source, list) in core.chain(custom) {
+        if source == McpSource::Custom {
+            if !RESOURCE_URI.is_match(uri) {
+                fail!("mcp.resources.{uri} must be a URI");
+            }
+            if resources.contains_key(uri) {
+                fail!("mcp.resources.{uri} conflicts with a core resource");
+            }
+            if resource.name.trim().is_empty() {
+                fail!("mcp.resources.{uri}.name must be a non-empty string");
+            }
         }
         let mut definition = resource.clone();
-        definition.required_permissions = assert_known_permissions(
-            &format!("mcp.resources.{uri}"),
-            &resource.required_permissions,
-            permissions,
-        )?;
-        resources.insert(
-            uri.clone(),
-            RegisteredMcpResource {
-                uri: uri.clone(),
-                source: McpSource::Custom,
-                definition,
-            },
-        );
+        definition.required_permissions =
+            assert_known_permissions(&format!("mcp.{list}.{uri}"), &resource.required_permissions, permissions)?;
+        resources.insert(uri.clone(), RegisteredMcpResource { source, definition });
     }
-
     Ok(resources)
 }
 

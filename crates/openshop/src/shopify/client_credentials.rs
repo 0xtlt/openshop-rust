@@ -55,25 +55,16 @@ use sqlx::PgPool;
 use tokio::sync::Mutex;
 use tokio::time::Instant;
 
+use super::token_exchange::{HOLD_BACK, TIMEOUT, TokenExchanges};
+use super::{AppShop, app_shop};
 use crate::app::OpenShop;
+use crate::locked;
 use crate::runtime::logger;
-use crate::runtime::transport::USER_AGENT;
 use crate::server::crypto::Crypto;
 use crate::server::shop_domain::strict_shop_domain;
-use crate::shopify::token_exchange::TokenExchanges;
 
 /// A token this process obtained is taken as expiring this long before it does.
 const RENEWAL_MARGIN: TimeDelta = TimeDelta::minutes(5);
-
-/// How long [`ClientCredentials::grant`] waits for a token, whatever the
-/// transport allows: a request that waits for it may be an admin page loading.
-/// The request itself goes on, and its token is stored.
-pub(crate) const GRANT_TIMEOUT: Duration = Duration::from_secs(5);
-
-/// How long a failure that may pass (a `5xx`, a `429`, a timeout, a network
-/// error, a token that could not be stored) holds back another request for
-/// the same app and shop.
-pub(crate) const TRANSIENT_BACKOFF: Duration = Duration::from_secs(30);
 
 /// How long a definite refusal (a `4xx` with Shopify's error code, such as
 /// `shop_not_permitted`) holds back another request for the same app and shop.
@@ -160,7 +151,7 @@ impl Entry {
     }
 }
 
-type Entries = Arc<StdMutex<HashMap<(String, String), Entry>>>;
+type Entries = Arc<StdMutex<HashMap<AppShop, Entry>>>;
 
 /// The shared client of an app, a shop, and whether Shopify vouched for it.
 type ClientKey = (String, String, bool);
@@ -178,19 +169,13 @@ pub(crate) struct GrantClient {
     token: HeldToken,
 }
 
-impl GrantClient {
-    fn is(&self, other: &GrantClient) -> bool {
-        Arc::ptr_eq(&self.token, &other.token)
-    }
-}
-
 type Clients = Arc<StdMutex<HashMap<ClientKey, GrantClient>>>;
 
-/// Forgets the shared client of `key` if it is still `client`: one that
-/// replaced it stays.
-fn evict(clients: &StdMutex<HashMap<ClientKey, GrantClient>>, key: &ClientKey, client: &GrantClient) {
+/// Forgets the shared client of `key` if it is still the one that holds
+/// `token`: one that replaced it stays.
+fn evict(clients: &StdMutex<HashMap<ClientKey, GrantClient>>, key: &ClientKey, token: &HeldToken) {
     let mut clients = locked(clients);
-    if clients.get(key).is_some_and(|shared| shared.is(client)) {
+    if clients.get(key).is_some_and(|shared| Arc::ptr_eq(&shared.token, token)) {
         clients.remove(key);
     }
 }
@@ -274,15 +259,11 @@ fn digest(token: &str) -> [u8; 32] {
     Sha256::digest(token.as_bytes()).into()
 }
 
-fn locked<T>(mutex: &StdMutex<T>) -> MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
-}
-
 /// Updates what the process knows of an app and shop it asked Shopify for.
 /// An entry that keeps nothing is dropped, and a new one first drops every
 /// entry that no longer keeps anything.
 fn remember(entries: &Entries, shopify_app: &str, shop: &str, update: impl FnOnce(&mut Entry)) {
-    let key = (shopify_app.to_string(), shop.to_string());
+    let key = app_shop(shopify_app, shop);
     let mut entries = locked(entries);
     if !entries.contains_key(&key) {
         entries.retain(|_, entry| entry.live());
@@ -334,7 +315,7 @@ impl ClientCredentials {
         }
     }
 
-    fn entries(&self) -> MutexGuard<'_, HashMap<(String, String), Entry>> {
+    fn entries(&self) -> MutexGuard<'_, HashMap<AppShop, Entry>> {
         locked(&self.entries)
     }
 
@@ -346,7 +327,7 @@ impl ClientCredentials {
     /// this app and shop.
     fn held_back(&self, shopify_app: &str, shop: &str, grant: &Grant) -> bool {
         self.entries()
-            .get(&(shopify_app.to_string(), shop.to_string()))
+            .get(&app_shop(shopify_app, shop))
             .is_some_and(|entry| entry.holds_back(grant))
     }
 
@@ -365,7 +346,7 @@ impl ClientCredentials {
         let Some(Entry {
             granted: Some((granted, expires_at)),
             ..
-        }) = entries.get(&(shopify_app.to_string(), shop.to_string()))
+        }) = entries.get(&app_shop(shopify_app, shop))
         else {
             return false;
         };
@@ -378,7 +359,7 @@ impl ClientCredentials {
     /// token of about 24 hours when Shopify gives it.
     pub fn exchange_due(&self, shopify_app: &str, shop: &str, token: &str) -> bool {
         let mut entries = self.entries();
-        let Some(entry) = entries.get_mut(&(shopify_app.to_string(), shop.to_string())) else {
+        let Some(entry) = entries.get_mut(&app_shop(shopify_app, shop)) else {
             return false;
         };
         let due = entry.granted.is_some_and(|(granted, _)| granted == digest(token)) && !entry.exchange_tried;
@@ -435,7 +416,7 @@ impl ClientCredentials {
             // When this process obtained it, the client renews it before it expires.
             start.expires_at = self
                 .entries()
-                .get(&(shopify_app.to_string(), shop.clone()))
+                .get(&app_shop(shopify_app, &shop))
                 .and_then(|entry| entry.granted)
                 .filter(|(granted, _)| *granted == digest(token))
                 .map(|(_, expires_at)| expires_at);
@@ -458,9 +439,9 @@ impl ClientCredentials {
                 uninstalled: stored.is_some_and(|stored| stored.uninstalled),
             }),
         };
-        let client = Shopify::builder(&shop)
-            .shared_transport(app.transport().clone())
-            .user_agent(USER_AGENT)
+        let client = resolved
+            .oauth
+            .builder(&ShopDomain::new(&shop)?)
             .auth(auth)
             .token_store(store)
             .build()?;
@@ -496,7 +477,7 @@ impl ClientCredentials {
         let grant = grant.for_shop(shopify_app, &shop);
         let key = (shopify_app.to_string(), shop.clone(), grant.is_vouched());
         if superseded(error) {
-            evict(&self.clients, &key, client);
+            evict(&self.clients, &key, &client.token);
             return true;
         }
         let message = if definite {
@@ -509,16 +490,17 @@ impl ClientCredentials {
         } else {
             logger::warn(&message);
         }
-        let held_until = Instant::now() + if definite { REFUSAL_MEMORY } else { TRANSIENT_BACKOFF };
+        let held_until = Instant::now() + if definite { REFUSAL_MEMORY } else { HOLD_BACK };
         self.remember(shopify_app, &shop, |entry| entry.hold_back(&grant, held_until));
-        evict(&self.clients, &key, client);
+        evict(&self.clients, &key, &client.token);
         true
     }
 
     /// A token of `shop` for the Shopify app `shopify_app`: the stored one
     /// when it is usable, else one obtained now with the client credentials
     /// grant, when `grant` allows it. `None` when Shopify gives none, or
-    /// does not answer within [`GRANT_TIMEOUT`].
+    /// does not answer within [`TIMEOUT`]: the request itself goes on, and
+    /// its token is stored.
     ///
     /// Fails when the token could not be stored encrypted (no usable
     /// `ENCRYPTION_KEY`), or written, with a message that names neither the
@@ -534,7 +516,7 @@ impl ClientCredentials {
         let Some(client) = self.client(app, shopify_app, &shop, grant, stored.as_ref()).await? else {
             return Ok(None);
         };
-        match tokio::time::timeout(GRANT_TIMEOUT, client.client.access_token()).await {
+        match tokio::time::timeout(TIMEOUT, client.client.access_token()).await {
             Ok(Ok(token)) => Ok(Some(token)),
             Ok(Err(error)) => {
                 self.failed(shopify_app, &shop, grant, &client, &error);
@@ -554,7 +536,7 @@ impl ClientCredentials {
             Err(_) => {
                 logger::warn(format!(
                     "[openshop] The client credentials request of app \"{shopify_app}\" for {shop} took more than {} s",
-                    GRANT_TIMEOUT.as_secs()
+                    TIMEOUT.as_secs()
                 ));
                 Ok(None)
             }
@@ -661,20 +643,6 @@ impl InstallationStore {
     }
 }
 
-impl InstallationStore {
-    /// Takes the client out of the registry: once a save failed, `shopify_api`
-    /// tries it again at each request of the client, which no caller should
-    /// get any more.
-    fn leave(&self) {
-        if let Some(clients) = self.clients.upgrade() {
-            let mut clients = locked(&clients);
-            if clients.get(&self.key).is_some_and(|shared| Arc::ptr_eq(&shared.token, &self.held)) {
-                clients.remove(&self.key);
-            }
-        }
-    }
-}
-
 impl TokenStore for InstallationStore {
     fn save<'a>(
         &'a self,
@@ -684,41 +652,41 @@ impl TokenStore for InstallationStore {
         Box::pin(async move {
             let shop = shop.as_str();
             let mut seen = self.seen.lock().await;
-            let written = match self.write(shop, token, &seen).await {
-                Ok(written) => written,
-                Err(error) => {
-                    self.leave();
-                    return Err(error.to_string().into());
-                }
-            };
-            if let Some(ciphertext) = written {
-                *seen = Seen {
-                    read: true,
-                    ciphertext: Some(ciphertext),
-                    uninstalled: false,
-                };
-                *locked(&self.held) = Some(token.access_token.clone());
-                let granted = token.expires_at.map(|expires_at| (digest(&token.access_token), expires_at));
-                remember(&self.entries, &self.shopify_app, shop, |entry| {
-                    *entry = Entry {
-                        granted,
-                        ..Entry::default()
+            let error: Box<dyn std::error::Error + Send + Sync> = match self.write(shop, token, &seen).await {
+                Ok(Some(ciphertext)) => {
+                    *seen = Seen {
+                        read: true,
+                        ciphertext: Some(ciphertext),
+                        uninstalled: false,
                     };
-                });
-                logger::info(format!(
-                    "[openshop] Client credentials token obtained for {shop} (app \"{}\")",
+                    *locked(&self.held) = Some(token.access_token.clone());
+                    let granted = token.expires_at.map(|expires_at| (digest(&token.access_token), expires_at));
+                    remember(&self.entries, &self.shopify_app, shop, |entry| {
+                        *entry = Entry {
+                            granted,
+                            ..Entry::default()
+                        };
+                    });
+                    logger::info(format!(
+                        "[openshop] Client credentials token obtained for {shop} (app \"{}\")",
+                        self.shopify_app
+                    ));
+                    return Ok(());
+                }
+                // Another token was stored in the meantime, or the shop
+                // uninstalled: the row keeps it, and the caller starts again from it.
+                Ok(None) => Box::new(Superseded(format!(
+                    "[openshop] The installation of app \"{}\" for {shop} changed while Shopify was asked for a token",
                     self.shopify_app
-                ));
-                return Ok(());
+                ))),
+                Err(error) => error.to_string().into(),
+            };
+            // Once a save failed, `shopify_api` tries it again at each request
+            // of the client, which no caller should get any more.
+            if let Some(clients) = self.clients.upgrade() {
+                evict(&clients, &self.key, &self.held);
             }
-            // Another token was stored in the meantime, or the shop
-            // uninstalled: the row keeps it, and the caller starts again from it.
-            self.leave();
-            let superseded = Superseded(format!(
-                "[openshop] The installation of app \"{}\" for {shop} changed while Shopify was asked for a token",
-                self.shopify_app
-            ));
-            Err(Box::new(superseded) as Box<dyn std::error::Error + Send + Sync>)
+            Err(error)
         })
     }
 }

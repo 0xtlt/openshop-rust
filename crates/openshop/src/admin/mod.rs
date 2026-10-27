@@ -1,7 +1,6 @@
 //! Server side of application-defined admin pages: page access rules, loaders
 //! and actions called by the WebAssembly admin UI over RPC.
 
-use std::cmp::Ordering;
 use std::future::Future;
 use std::sync::Arc;
 
@@ -16,12 +15,14 @@ use sqlx::PgPool;
 use crate::app::OpenShop;
 use crate::server::connectors::Connectors;
 use crate::shopify::client::ShopifyClient;
-use crate::types::{AdminMenuItem, InputSchema, ShopScope};
+use crate::types::{AdminMenuItem, InputSchema};
 use openshop_shared::{
-    custom_admin_route_shape_key, is_custom_admin_page_pattern, is_safe_custom_admin_path, match_custom_admin_path,
+    is_custom_admin_page_pattern, is_safe_custom_admin_path, match_custom_admin_path, path_segments,
+    sort_custom_admin_routes,
 };
 
 pub use crate::types::{CustomAdminPageAccess, CustomAdminPagesResponse, ResolvedAdminPages};
+pub use openshop_shared::AdminFunctionKind;
 
 /// The Shopify staff member behind the session token.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -46,23 +47,8 @@ pub struct AdminContext {
     pub app: OpenShop,
 }
 
-impl ShopScope for AdminContext {
-    fn shop(&self) -> &str {
-        &self.shop
-    }
-
-    fn shopify_app(&self) -> &str {
-        &self.shopify_app
-    }
-
-    fn app(&self) -> &OpenShop {
-        &self.app
-    }
-}
-
 pub type AdminAuthorize = Arc<dyn Fn(AdminContext) -> BoxFuture<'static, Result<bool>> + Send + Sync>;
 pub type AdminHandler = Arc<dyn Fn(AdminContext, Value) -> BoxFuture<'static, Result<Value>> + Send + Sync>;
-pub type AdminOutputValidator = Arc<dyn Fn(&Value) -> Result<(), String> + Send + Sync>;
 
 fn boxed_authorize<F, Fut>(authorize: F) -> AdminAuthorize
 where
@@ -72,28 +58,12 @@ where
     Arc::new(move |context| Box::pin(authorize(context)))
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AdminFunctionKind {
-    Loader,
-    Action,
-}
-
-impl AdminFunctionKind {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Loader => "loader",
-            Self::Action => "action",
-        }
-    }
-}
-
 /// A loader (read) or action (write) callable from a custom admin page.
 #[derive(Clone)]
 pub struct AdminFunction {
     pub kind: AdminFunctionKind,
     /// Actions must validate their input.
     pub input: Option<InputSchema>,
-    pub output: Option<AdminOutputValidator>,
     pub authorize: Option<AdminAuthorize>,
     pub handler: AdminHandler,
 }
@@ -117,7 +87,6 @@ impl AdminFunction {
         Self {
             kind: AdminFunctionKind::Loader,
             input: None,
-            output: None,
             authorize: None,
             handler: boxed_handler(handler),
         }
@@ -131,16 +100,12 @@ impl AdminFunction {
     {
         Self {
             kind: AdminFunctionKind::Action,
-            input: Some(input),
-            output: None,
-            authorize: None,
-            handler: boxed_handler(handler),
+            ..Self::loader(handler).input(input)
         }
     }
 
     /// A loader whose input is validated against the schema of `T` and
     /// deserialized into it.
-    #[cfg(feature = "schema")]
     pub fn typed_loader<T, R, F, Fut>(handler: F) -> Self
     where
         T: DeserializeOwned + schemars::JsonSchema + Send + 'static,
@@ -161,7 +126,6 @@ impl AdminFunction {
 
     /// An action whose input is validated against the schema of `T` and
     /// deserialized into it.
-    #[cfg(feature = "schema")]
     pub fn typed_action<T, R, F, Fut>(handler: F) -> Self
     where
         T: DeserializeOwned + schemars::JsonSchema + Send + 'static,
@@ -169,23 +133,14 @@ impl AdminFunction {
         F: Fn(AdminContext, T) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Result<R>> + Send + 'static,
     {
-        let handler = Arc::new(handler);
-        Self::action(InputSchema::of::<T>(), move |context, input| {
-            let handler = handler.clone();
-            async move {
-                let input: T = serde_json::from_value(input)?;
-                Ok(serde_json::to_value(handler(context, input).await?)?)
-            }
-        })
+        Self {
+            kind: AdminFunctionKind::Action,
+            ..Self::typed_loader(handler)
+        }
     }
 
     pub fn input(mut self, input: InputSchema) -> Self {
         self.input = Some(input);
-        self
-    }
-
-    pub fn output(mut self, validate: impl Fn(&Value) -> Result<(), String> + Send + Sync + 'static) -> Self {
-        self.output = Some(Arc::new(validate));
         self
     }
 
@@ -325,54 +280,6 @@ pub struct CustomAdminPage {
     pub page: AdminPage,
 }
 
-fn is_param_name(name: &str) -> bool {
-    let mut characters = name.chars();
-    characters.next().is_some_and(|first| first.is_ascii_alphabetic())
-        && characters.all(|character| character.is_ascii_alphanumeric() || character == '_')
-}
-
-fn route_segment(segment: &str) -> Result<(String, String)> {
-    let dynamic = segment
-        .strip_prefix('[')
-        .and_then(|rest| rest.strip_suffix(']'))
-        .or_else(|| segment.strip_prefix(':'));
-    if let Some(name) = dynamic.filter(|name| is_param_name(name)) {
-        return Ok((format!("[{name}]"), format!(":{name}")));
-    }
-    let plain = !segment.is_empty()
-        && segment
-            .chars()
-            .all(|character| character.is_ascii_alphanumeric() || character == '_' || character == '-');
-    if !plain {
-        bail!("[openshop] Invalid custom admin page segment \"{segment}\"");
-    }
-    Ok((segment.to_string(), segment.to_string()))
-}
-
-fn compare_patterns(left: &str, right: &str) -> Ordering {
-    let left_segments: Vec<&str> = left.split('/').collect();
-    let right_segments: Vec<&str> = right.split('/').collect();
-    for index in 0..left_segments.len().max(right_segments.len()) {
-        match (left_segments.get(index), right_segments.get(index)) {
-            (Some(left), Some(right)) if left == right => continue,
-            (None, _) => return Ordering::Less,
-            (_, None) => return Ordering::Greater,
-            (Some(left), Some(right)) => {
-                let left_dynamic = left.starts_with(':');
-                if left_dynamic != right.starts_with(':') {
-                    return if left_dynamic {
-                        Ordering::Greater
-                    } else {
-                        Ordering::Less
-                    };
-                }
-                return left.cmp(right);
-            }
-        }
-    }
-    Ordering::Equal
-}
-
 /// Derives ids and route patterns, sorted by specificity. Fails on reserved
 /// paths and on routes that could match the same URL. A page at `/` is the
 /// home of the admin, in place of the built-in one.
@@ -380,25 +287,23 @@ pub fn resolve_custom_admin_pages(pages: &[AdminPage]) -> Result<Vec<CustomAdmin
     let mut resolved = Vec::with_capacity(pages.len());
 
     for page in pages {
-        let segments: Vec<&str> = page.path.split('/').filter(|segment| !segment.is_empty()).collect();
-        let mapped = segments
-            .iter()
-            .map(|segment| route_segment(segment))
-            .collect::<Result<Vec<_>>>()?;
-        let id = mapped
-            .iter()
-            .map(|(path, _)| path.as_str())
-            .collect::<Vec<_>>()
-            .join("/");
+        // A dynamic segment, written `:name` or `[name]`, is `[name]` in the
+        // id and `:name` in the route pattern, which is checked below.
+        let (id_segments, pattern_segments): (Vec<String>, Vec<String>) = path_segments(&page.path)
+            .map(|segment| {
+                let name = segment
+                    .strip_prefix('[')
+                    .and_then(|rest| rest.strip_suffix(']'))
+                    .or_else(|| segment.strip_prefix(':'));
+                match name {
+                    Some(name) => (format!("[{name}]"), format!(":{name}")),
+                    None => (segment.to_string(), segment.to_string()),
+                }
+            })
+            .unzip();
+        let id = id_segments.join("/");
         let path = format!("/{id}");
-        let route_pattern = format!(
-            "/{}",
-            mapped
-                .iter()
-                .map(|(_, pattern)| pattern.as_str())
-                .collect::<Vec<_>>()
-                .join("/")
-        );
+        let route_pattern = format!("/{}", pattern_segments.join("/"));
         if !is_custom_admin_page_pattern(&route_pattern) {
             bail!("[openshop] Custom admin page path \"{path}\" is reserved or invalid");
         }
@@ -410,31 +315,19 @@ pub fn resolve_custom_admin_pages(pages: &[AdminPage]) -> Result<Vec<CustomAdmin
         });
     }
 
-    resolved.sort_by(|left, right| compare_patterns(&left.route_pattern, &right.route_pattern));
-
-    let mut routes_by_shape: IndexMap<String, &str> = IndexMap::new();
-    for page in &resolved {
-        let shape = custom_admin_route_shape_key(&page.route_pattern);
-        if let Some(existing) = routes_by_shape.get(&shape) {
-            bail!(
-                "[openshop] Custom admin page routes \"{existing}\" and \"{}\" have the same route shape",
-                page.route_pattern
-            );
-        }
-        routes_by_shape.insert(shape, &page.route_pattern);
-    }
+    sort_custom_admin_routes(&mut resolved, |page| &page.route_pattern).map_err(anyhow::Error::msg)?;
     Ok(resolved)
 }
 
 /// Checks that every entry of the admin menu is the static path of a listed page.
-pub fn validate_admin_menu(menu: &[AdminMenuItem], pages: &[CustomAdminPage]) -> Result<Vec<AdminMenuItem>> {
+pub fn validate_admin_menu(menu: &[AdminMenuItem], pages: &[CustomAdminPage]) -> Result<()> {
     let mut seen: Vec<&str> = Vec::new();
 
     for (index, item) in menu.iter().enumerate() {
         if item.label.trim().is_empty() {
             bail!("[openshop] Invalid config: adminMenu[{index}].label must be a non-empty string");
         }
-        if !is_safe_custom_admin_path(&item.path, false) || item.path.contains('[') || item.path.contains(':') {
+        if !is_safe_custom_admin_path(&item.path, false) {
             bail!("[openshop] Invalid config: adminMenu[{index}].path must be a static custom page path");
         }
         if !pages
@@ -454,7 +347,7 @@ pub fn validate_admin_menu(menu: &[AdminMenuItem], pages: &[CustomAdminPage]) ->
         }
         seen.push(&item.path);
     }
-    Ok(menu.to_vec())
+    Ok(())
 }
 
 /// Calls a loader or action directly, applying its authorization and input validation.
@@ -544,13 +437,13 @@ mod tests {
             patterns(&["/reviews/a b"])
                 .unwrap_err()
                 .to_string()
-                .contains("Invalid custom admin page segment \"a b\"")
+                .contains("path \"/reviews/a b\" is reserved or invalid")
         );
         assert!(
             patterns(&["/reviews/:1"])
                 .unwrap_err()
                 .to_string()
-                .contains("Invalid custom admin page segment")
+                .contains("path \"/reviews/[1]\" is reserved or invalid")
         );
     }
 
@@ -568,12 +461,7 @@ mod tests {
             path: path.into(),
         };
 
-        assert_eq!(
-            validate_admin_menu(&[item("Reviews", "/reviews")], &pages)
-                .unwrap()
-                .len(),
-            1
-        );
+        assert!(validate_admin_menu(&[item("Reviews", "/reviews")], &pages).is_ok());
         let error = |menu: &[AdminMenuItem]| validate_admin_menu(menu, &pages).unwrap_err().to_string();
         assert!(error(&[item(" ", "/reviews")]).contains("label must be a non-empty string"));
         assert!(error(&[item("One", "/reviews/:id")]).contains("must be a static custom page path"));

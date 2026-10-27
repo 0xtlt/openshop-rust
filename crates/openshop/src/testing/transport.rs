@@ -7,6 +7,8 @@ use anyhow::Result;
 use serde_json::Value;
 use shopify_api::transport::{BoxFuture, HttpRequest, HttpResponse, Method, Transport, TransportError};
 
+use crate::locked;
+
 /// The `Content-Type` of a request whose body is a URL-encoded form, such as
 /// the client credentials request.
 pub const FORM_CONTENT_TYPE: &str = "application/x-www-form-urlencoded";
@@ -141,13 +143,13 @@ impl MockTransport {
         &self,
         responder: impl Fn(&OutboundRequest) -> Result<OutboundResponse> + Send + Sync + 'static,
     ) {
-        *self.responder.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Arc::new(responder);
+        *locked(&self.responder) = Arc::new(responder);
     }
 
     /// Makes every request wait `delay` before it is answered, as a slow
     /// Shopify would. The request is recorded when it is sent.
     pub fn delay_responses(&self, delay: Duration) {
-        *self.delay.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = delay;
+        *locked(&self.delay) = delay;
     }
 
     /// Answers every request with the same JSON body and status 200.
@@ -156,9 +158,7 @@ impl MockTransport {
     }
 
     pub fn requests(&self) -> Vec<OutboundRequest> {
-        self.requests
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+        locked(&self.requests)
             .clone()
     }
 
@@ -167,26 +167,18 @@ impl MockTransport {
     }
 
     pub fn clear(&self) {
-        self.requests
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+        locked(&self.requests)
             .clear();
     }
 }
 
 impl Transport for MockTransport {
     fn send(&self, request: HttpRequest) -> BoxFuture<'_, std::result::Result<HttpResponse, TransportError>> {
-        let responder = self
-            .responder
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clone();
+        let responder = locked(&self.responder).clone();
         let request = OutboundRequest::of(&request);
-        self.requests
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+        locked(&self.requests)
             .push(request.clone());
-        let delay = *self.delay.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let delay = *locked(&self.delay);
         Box::pin(async move {
             if !delay.is_zero() {
                 tokio::time::sleep(delay).await;

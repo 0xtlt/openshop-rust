@@ -21,12 +21,6 @@ pub struct SchemaSnapshot {
     pub tables: Vec<Table>,
 }
 
-impl Default for SchemaSnapshot {
-    fn default() -> Self {
-        Self::of(&[])
-    }
-}
-
 impl SchemaSnapshot {
     pub fn of(models: &[Table]) -> Self {
         Self {
@@ -66,24 +60,20 @@ impl SchemaSnapshot {
     }
 }
 
-/// One step of a generated migration.
+/// One statement of a generated migration, with the reason it deserves a
+/// second look before it is applied, when there is one.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Change {
-    /// A statement, with the reason it deserves a second look before it is
-    /// applied, when there is one. `destructive` marks a statement that loses
-    /// data the database holds.
-    Statement {
-        sql: String,
-        warning: Option<String>,
-        destructive: bool,
-    },
-    /// A change that cannot be written automatically: what to write by hand.
-    Manual(String),
+pub struct Change {
+    pub sql: String,
+    pub warning: Option<String>,
+    /// Whether applying the statement loses data the database holds:
+    /// `migrate generate` refuses it without `--allow-destructive`.
+    pub destructive: bool,
 }
 
 impl Change {
     fn new(sql: impl Into<String>) -> Self {
-        Self::Statement {
+        Self {
             sql: sql.into(),
             warning: None,
             destructive: false,
@@ -91,70 +81,39 @@ impl Change {
     }
 
     fn risky(sql: impl Into<String>, warning: impl Into<String>) -> Self {
-        Self::Statement {
+        Self {
             sql: sql.into(),
             warning: Some(warning.into()),
             destructive: false,
         }
     }
 
-    /// A statement that loses data: `migrate generate` refuses it without `--allow-destructive`.
     fn destructive(sql: impl Into<String>, warning: impl Into<String>) -> Self {
-        Self::Statement {
+        Self {
             sql: sql.into(),
             warning: Some(warning.into()),
             destructive: true,
         }
     }
 
-    /// Whether applying the change loses data.
-    pub fn is_destructive(&self) -> bool {
-        matches!(
-            self,
-            Self::Statement {
-                destructive: true,
-                ..
-            }
-        )
-    }
-
-    /// What to review before the migration is applied.
-    pub fn warning(&self) -> Option<&str> {
-        match self {
-            Self::Statement { warning, .. } => warning.as_deref(),
-            Self::Manual(explanation) => Some(explanation),
-        }
-    }
-
-    /// The first line of the change, without its terminator: for messages.
+    /// The first line of the statement, without its terminator: for messages.
     fn summary(&self) -> &str {
-        match self {
-            Self::Statement { sql, .. } => sql
-                .lines()
-                .next()
-                .unwrap_or_default()
-                .trim_end_matches([';', '('])
-                .trim(),
-            Self::Manual(explanation) => explanation,
-        }
+        self.sql
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .trim_end_matches([';', '('])
+            .trim()
     }
 }
-
-/// The line of a change to write by hand opens with this, then its explanation.
-pub const MANUAL_TODO: &str = "-- TODO: ";
 
 /// The statements of a migration, each preceded by its warning.
 pub fn render(changes: &[Change]) -> String {
     let rendered: Vec<String> = changes
         .iter()
-        .map(|change| match change {
-            Change::Statement {
-                sql,
-                warning: Some(warning),
-                ..
-            } => format!("-- WARNING: {warning}\n{sql}\n"),
-            Change::Statement { sql, warning: None, .. } => format!("{sql}\n"),
-            Change::Manual(explanation) => format!("{MANUAL_TODO}{explanation}\n"),
+        .map(|change| match &change.warning {
+            Some(warning) => format!("-- WARNING: {warning}\n{}\n", change.sql),
+            None => format!("{}\n", change.sql),
         })
         .collect();
     rendered.join("\n")
@@ -169,8 +128,8 @@ pub fn summarize(changes: &[Change]) -> Vec<String> {
 pub fn destructive(changes: &[Change]) -> Vec<String> {
     changes
         .iter()
-        .filter(|change| change.is_destructive())
-        .map(|change| match change.warning() {
+        .filter(|change| change.destructive)
+        .map(|change| match &change.warning {
             Some(warning) => format!("{}: {warning}", change.summary()),
             None => change.summary().to_string(),
         })
@@ -324,92 +283,6 @@ fn alter_column(table: &str, before: &ColumnDef, after: &ColumnDef, changes: &mu
             )
         });
     }
-    if before.primary_key != after.primary_key {
-        changes.push(Change::Manual(primary_key_note(table, after)));
-    }
-    if before.constraints != after.constraints {
-        changes.push(Change::Manual(constraints_note(&place, before, after)));
-    }
-}
-
-fn primary_key_note(table: &str, after: &ColumnDef) -> String {
-    let now = if after.primary_key {
-        "is now part of the primary key"
-    } else {
-        "is no longer part of the primary key"
-    };
-    format!(
-        "the primary key of {table} changed: {} {now}. Write the constraint change by hand.",
-        after.name
-    )
-}
-
-fn constraints_note(place: &str, before: &ColumnDef, after: &ColumnDef) -> String {
-    let show = |constraints: &str| {
-        if constraints.is_empty() {
-            "none".to_string()
-        } else {
-            format!("`{constraints}`")
-        }
-    };
-    format!(
-        "the constraints of {place} changed from {} to {}. Write the statements by hand.",
-        show(&before.constraints),
-        show(&after.constraints)
-    )
-}
-
-/// The changes that remain once the changes to write by hand that `skip`
-/// accepts, by their explanation, are left out.
-pub fn without_manual(changes: Vec<Change>, skip: impl Fn(&str) -> bool) -> Vec<Change> {
-    changes
-        .into_iter()
-        .filter(|change| match change {
-            Change::Manual(explanation) => !skip(explanation),
-            Change::Statement { .. } => true,
-        })
-        .collect()
-}
-
-/// The snapshot to record for `models`: the models, except that a primary key
-/// or constraints that changed keep their previous state, unless `accepted`:
-/// the author said the migrations write them. Recording them earlier would make
-/// the models and the database look in line while the database was not.
-pub fn recorded(previous: &SchemaSnapshot, models: &[Table], accepted: bool) -> SchemaSnapshot {
-    let mut snapshot = SchemaSnapshot::of(models);
-    if accepted {
-        return snapshot;
-    }
-    for table in &mut snapshot.tables {
-        let Some(before) = continued(
-            &previous.tables,
-            |before| &before.table,
-            &table.table,
-            table.previous_name(),
-            |name| models.iter().any(|other| other.table == name),
-        ) else {
-            continue;
-        };
-        let names = table.columns().to_vec();
-        for (column, current) in table.columns_mut().iter_mut().zip(&names) {
-            let Some(was) = continued(
-                before.columns(),
-                |column| &column.name,
-                &current.name,
-                current.renamed_from.as_deref(),
-                |name| names.iter().any(|other| other.name == name),
-            ) else {
-                continue;
-            };
-            if was.primary_key != column.primary_key {
-                column.primary_key = was.primary_key;
-            }
-            if was.constraints != column.constraints {
-                column.constraints = was.constraints.clone();
-            }
-        }
-    }
-    snapshot
 }
 
 /// The changes of one table, grouped by the place they take in the migration.
@@ -657,10 +530,10 @@ pub fn diff(previous: &SchemaSnapshot, models: &[Table]) -> Vec<Change> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::Table;
+    use crate::db::model::conventional;
 
     fn reviews() -> Table {
-        Table::conventional("reviews")
+        conventional("reviews")
             .with_column(ColumnDef::new("product_id", "text"))
             .with_column(ColumnDef::new("rating", "integer"))
             .index("reviews_shop_product_idx", &["shop", "product_id"])
@@ -673,17 +546,17 @@ mod tests {
     #[test]
     fn identical_models_need_no_statement() {
         assert!(diff(&SchemaSnapshot::of(&[reviews()]), &[reviews()]).is_empty());
-        // A definition written as a string compares on what it means.
-        let written = Table::conventional("reviews")
-            .column("product_id", "TEXT not null")
-            .column("rating", "int NOT NULL")
+        // A type compares on what it means.
+        let aliased = conventional("reviews")
+            .with_column(ColumnDef::new("product_id", "TEXT"))
+            .with_column(ColumnDef::new("rating", "int"))
             .index("reviews_shop_product_idx", &["shop", "product_id"]);
-        assert!(diff(&SchemaSnapshot::of(&[reviews()]), &[written]).is_empty());
+        assert!(diff(&SchemaSnapshot::of(&[reviews()]), &[aliased]).is_empty());
     }
 
     #[test]
     fn new_tables_are_created_and_removed_ones_dropped() {
-        let votes = Table::conventional("review_votes").with_column(ColumnDef::new("value", "integer"));
+        let votes = conventional("review_votes").with_column(ColumnDef::new("value", "integer"));
         assert_eq!(
             sql(&[reviews()], &[reviews(), votes.clone()]),
             format!("{}\n", votes.create_sql())
@@ -724,7 +597,7 @@ mod tests {
     fn what_loses_data_is_told_apart() {
         let destructive = |previous: &[Table], current: &[Table]| destructive(&diff(&SchemaSnapshot::of(previous), current));
 
-        let votes = Table::conventional("review_votes").with_column(ColumnDef::new("value", "integer"));
+        let votes = conventional("review_votes").with_column(ColumnDef::new("value", "integer"));
         assert_eq!(
             destructive(&[reviews(), votes.clone()], &[reviews()]),
             ["DROP TABLE IF EXISTS \"review_votes\": drops the table review_votes and its data."]
@@ -736,7 +609,7 @@ mod tests {
         );
 
         // Created, renamed, indexed, relaxed and widened: nothing is lost.
-        let as_type = |sql_type: &str| Table::conventional("t").with_column(ColumnDef::new("c", sql_type));
+        let as_type = |sql_type: &str| conventional("t").with_column(ColumnDef::new("c", sql_type));
         let loses = |before: &str, after: &str| !destructive(&[as_type(before)], &[as_type(after)]).is_empty();
         for (before, after) in [
             ("smallint", "integer"),
@@ -783,7 +656,7 @@ mod tests {
             assert!(loses(before, after), "{before} to {after}");
         }
 
-        let renamed = Table::conventional("product_reviews")
+        let renamed = conventional("product_reviews")
             .renamed_from("reviews")
             .with_column(ColumnDef::new("product_id", "text"))
             .with_column(ColumnDef::new("score", "integer").renamed_from("rating"))
@@ -793,11 +666,11 @@ mod tests {
 
     #[test]
     fn changed_columns_are_altered_in_place() {
-        let previous = Table::conventional("reviews")
+        let previous = conventional("reviews")
             .with_column(ColumnDef::new("rating", "integer"))
             .with_column(ColumnDef::new("note", "text").nullable(true).default("''"))
             .with_column(ColumnDef::new("approved", "boolean"));
-        let current = Table::conventional("reviews")
+        let current = conventional("reviews")
             .with_column(ColumnDef::new("rating", "bigint").nullable(true))
             .with_column(ColumnDef::new("note", "text"))
             .with_column(ColumnDef::new("approved", "boolean").default("false"));
@@ -819,10 +692,10 @@ mod tests {
 
     #[test]
     fn renames_need_the_previous_name() {
-        let previous = Table::conventional("reviews").with_column(ColumnDef::new("stars", "integer"));
+        let previous = conventional("reviews").with_column(ColumnDef::new("stars", "integer"));
 
         // Without it, a rename is a column dropped and another added.
-        let guessed = Table::conventional("reviews").with_column(ColumnDef::new("rating", "integer"));
+        let guessed = conventional("reviews").with_column(ColumnDef::new("rating", "integer"));
         let statements = sql(std::slice::from_ref(&previous), &[guessed]);
         assert!(
             statements.contains("ADD COLUMN IF NOT EXISTS \"rating\""),
@@ -830,7 +703,7 @@ mod tests {
         );
         assert!(statements.contains("DROP COLUMN IF EXISTS \"stars\""), "{statements}");
 
-        let renamed = Table::conventional("product_reviews")
+        let renamed = conventional("product_reviews")
             .renamed_from("reviews")
             .with_column(ColumnDef::new("rating", "bigint").renamed_from("stars"));
         assert_eq!(
@@ -850,7 +723,7 @@ mod tests {
     #[test]
     fn indexes_are_created_dropped_and_replaced() {
         let previous = reviews().index("reviews_rating_idx", &["rating"]);
-        let current = Table::conventional("reviews")
+        let current = conventional("reviews")
             .with_column(ColumnDef::new("product_id", "text"))
             .with_column(ColumnDef::new("rating", "integer"))
             .index("reviews_shop_product_idx", &["shop", "product_id", "rating"])
@@ -869,7 +742,7 @@ mod tests {
     }
 
     fn votes() -> Table {
-        Table::conventional("review_votes")
+        conventional("review_votes")
             .with_column(ColumnDef::new("review_id", "uuid"))
             .with_foreign_key(ForeignKeyDef::new("review_id", "reviews").on_delete("cascade"))
     }
@@ -895,7 +768,7 @@ mod tests {
 
     #[test]
     fn foreign_keys_are_added_changed_and_dropped_on_existing_tables() {
-        let plain = Table::conventional("review_votes").with_column(ColumnDef::new("review_id", "uuid"));
+        let plain = conventional("review_votes").with_column(ColumnDef::new("review_id", "uuid"));
 
         assert_eq!(
             sql(&[reviews(), plain.clone()], &[reviews(), votes()]),
@@ -905,7 +778,7 @@ mod tests {
         );
 
         // Another action on the same link: the constraint is replaced, without warning.
-        let restricted = Table::conventional("review_votes")
+        let restricted = conventional("review_votes")
             .with_column(ColumnDef::new("review_id", "uuid"))
             .with_foreign_key(ForeignKeyDef::new("review_id", "reviews").on_delete("restrict"));
         assert_eq!(
@@ -924,12 +797,12 @@ mod tests {
 
     #[test]
     fn renames_keep_foreign_keys_and_rename_their_constraints() {
-        let renamed_reviews = Table::conventional("product_reviews")
+        let renamed_reviews = conventional("product_reviews")
             .renamed_from("reviews")
             .with_column(ColumnDef::new("product_id", "text"))
             .with_column(ColumnDef::new("rating", "integer"))
             .index("reviews_shop_product_idx", &["shop", "product_id"]);
-        let renamed_votes = Table::conventional("votes")
+        let renamed_votes = conventional("votes")
             .renamed_from("review_votes")
             .with_column(ColumnDef::new("target_id", "uuid").renamed_from("review_id"))
             .with_foreign_key(ForeignKeyDef::new("target_id", "product_reviews").on_delete("cascade"));
@@ -947,7 +820,7 @@ mod tests {
 
     #[test]
     fn tables_that_reference_others_are_dropped_first() {
-        let replies = Table::conventional("vote_replies")
+        let replies = conventional("vote_replies")
             .with_column(ColumnDef::new("vote_id", "uuid"))
             .with_foreign_key(ForeignKeyDef::new("vote_id", "review_votes"));
         let statements = sql(&[reviews(), votes(), replies], &[]);
@@ -956,30 +829,13 @@ mod tests {
         assert!(position("review_votes") < position("reviews"), "{statements}");
 
         // A column dropped with its foreign key loses the constraint first.
-        let without = Table::conventional("review_votes");
+        let without = conventional("review_votes");
         assert_eq!(
             sql(&[reviews(), votes()], &[reviews(), without]),
             "ALTER TABLE \"review_votes\" DROP CONSTRAINT IF EXISTS \"review_votes_review_id_fkey\";\n\
              \n\
              -- WARNING: drops review_votes.review_id and its data.\n\
              ALTER TABLE \"review_votes\" DROP COLUMN IF EXISTS \"review_id\";\n"
-        );
-    }
-
-    #[test]
-    fn constraints_that_changed_are_left_to_write() {
-        let previous = Table::conventional("reviews").column("product_id", "text NOT NULL");
-        let current = Table::conventional("reviews").column("product_id", "text NOT NULL REFERENCES products(id)");
-        let changes = diff(&SchemaSnapshot::of(&[previous]), &[current]);
-        assert_eq!(
-            render(&changes),
-            "-- TODO: the constraints of reviews.product_id changed from none to `REFERENCES products(id)`. Write the statements by hand.\n"
-        );
-        assert_eq!(
-            summarize(&changes),
-            [
-                "the constraints of reviews.product_id changed from none to `REFERENCES products(id)`. Write the statements by hand."
-            ]
         );
     }
 

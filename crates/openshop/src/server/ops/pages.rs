@@ -10,7 +10,7 @@ use uuid::Uuid;
 
 use super::chart::{Series, area_chart, grouped};
 use super::html::{
-    Cell, Page, Row, Section, body, columns, definitions, duration, empty, error_text, escape, full_time, json_block, kpi,
+    Cell, Page, Row, Section, body, columns, definitions, duration, empty, error_text, full_time, json_block, kpi,
     kpis, legend, level, link, message_page, mono, muted, note, page, panel, row, status, status_as, table, time, wide,
 };
 use super::html_response;
@@ -18,11 +18,10 @@ use super::queries::{self, Counts, Cursor, LogFilter, LogLine, Range, RunFilter,
 use crate::app::OpenShop;
 use crate::db::{FlowRun, Installation, LogRow, StepResult};
 use crate::engine::scheduler::next_occurrence;
-use crate::server::http::{ApiResult, parse_query};
-use crate::types::CronShops;
+use crate::server::http::{ApiResult, escape, parse_query};
+use crate::types::{ALL_RUN_STATUSES, CronShops};
 use openshop_shared::rpc::encode_uri_component;
 
-const RUN_STATUSES: [&str; 6] = ["pending", "sleeping", "running", "completed", "failed", "canceled"];
 const LOG_LEVELS: [&str; 3] = ["error", "warn", "info"];
 /// Rows of a list of the overview, and of the page of a shop.
 const FEW: i64 = 10;
@@ -389,7 +388,7 @@ pub(super) async fn runs(State(app): State<OpenShop>, RawQuery(raw): RawQuery) -
     let range = Range::parse(params.get("range"));
     let now = Utc::now();
     let start = range.start(now);
-    let state = params.get("status").filter(|status| RUN_STATUSES.contains(status));
+    let state = params.get("status").filter(|status| ALL_RUN_STATUSES.contains(status));
     let filter = RunFilter {
         since: Some(start),
         before: params.before(),
@@ -413,7 +412,7 @@ pub(super) async fn runs(State(app): State<OpenShop>, RawQuery(raw): RawQuery) -
         range,
         &[
             search("q", "Search in errors", params.get("q")),
-            select("status", "Status", &RUN_STATUSES, state),
+            select("status", "Status", &ALL_RUN_STATUSES, state),
             select("flow", "Flow", &flows, params.get("flow")),
             search("shop", "Shop", params.get("shop")),
         ],
@@ -991,7 +990,7 @@ pub(super) async fn crons(State(app): State<OpenShop>) -> ApiResult {
                 .and_then(|_| next_occurrence(cron, now))
                 .map(|next| time(&next))
                 .unwrap_or_else(|| "never: the flow is not registered".to_string());
-            let shops = match cron.shops.clone().unwrap_or_default() {
+            let shops = match cron.shops.clone() {
                 CronShops::Global => "once, without a shop".to_string(),
                 CronShops::All => "every installed shop".to_string(),
                 CronShops::Shop(shop) => shop,
