@@ -62,7 +62,7 @@ fn random_token_part(bytes: usize) -> String {
 
 /// Same parameters as Node's `scryptSync` defaults (N=16384, r=8, p=1).
 fn scrypt_key(token: &str, salt: &str) -> Option<[u8; KEY_LENGTH]> {
-    let params = scrypt::Params::new(14, 8, 1, KEY_LENGTH).ok()?;
+    let params = scrypt::Params::new(14, 8, 1).ok()?;
     let mut key = [0u8; KEY_LENGTH];
     scrypt::scrypt(token.as_bytes(), salt.as_bytes(), &params, &mut key).ok()?;
     Some(key)

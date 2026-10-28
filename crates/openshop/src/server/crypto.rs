@@ -84,7 +84,7 @@ impl Crypto {
 
         let cipher = Aes256Gcm::new_from_slice(key).map_err(|_| anyhow!("Invalid encryption key"))?;
         let mut sealed = cipher
-            .encrypt(Nonce::from_slice(&iv), plaintext)
+            .encrypt(&Nonce::from(iv), plaintext)
             .map_err(|_| anyhow!("Encryption failed"))?;
         let tag = sealed.split_off(sealed.len() - TAG_LENGTH);
 
@@ -109,9 +109,10 @@ impl Crypto {
         }
         ciphertext.extend_from_slice(&tag);
 
+        let nonce = Nonce::try_from(iv.as_slice()).map_err(|_| anyhow!("Malformed encrypted payload"))?;
         let cipher = Aes256Gcm::new_from_slice(key).map_err(|_| anyhow!("Invalid encryption key"))?;
         cipher
-            .decrypt(Nonce::from_slice(&iv), ciphertext.as_slice())
+            .decrypt(&nonce, ciphertext.as_slice())
             .map_err(|_| anyhow!("Unable to decrypt: data is corrupted or the key is wrong"))
     }
 
@@ -321,7 +322,7 @@ mod tests {
         // Produced with node:crypto (aes-256-gcm, 12-byte IV, 16-byte tag) and KEY above.
         let iv = [7u8; IV_LENGTH];
         let cipher = Aes256Gcm::new_from_slice(&hex::decode(KEY).unwrap()).unwrap();
-        let mut sealed = cipher.encrypt(Nonce::from_slice(&iv), b"shpat_123".as_ref()).unwrap();
+        let mut sealed = cipher.encrypt(&Nonce::from(iv), b"shpat_123".as_ref()).unwrap();
         let tag = sealed.split_off(sealed.len() - TAG_LENGTH);
         let stored = format!(
             "enc:aes-256-gcm:{}:{}:{}",

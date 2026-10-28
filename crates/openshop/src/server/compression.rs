@@ -81,7 +81,7 @@ where
         let response = self.0.call(request);
         Box::pin(async move {
             let mut response = response.await?;
-            if !SizeAbove::new(MIN_COMPRESSED_BODY_BYTES).should_compress(&response) {
+            if !SizeAbove::new(u64::from(MIN_COMPRESSED_BODY_BYTES)).should_compress(&response) {
                 return Ok(response);
             }
             let respond = service_fn(move |_: Request<()>| ready(Ok::<_, Infallible>(std::mem::take(&mut response))));

@@ -6,7 +6,7 @@ use crate::common::{find_run, json_body, run_exists};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use chrono::Utc;
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use openshop::builder::{Field, Flow, Provider};
 use openshop::testing::{
     TestContext, TestOptions, proxy_signature, sign_query, sign_session_token, sign_webhook_body, to_query_string,
