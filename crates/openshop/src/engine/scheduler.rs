@@ -278,7 +278,7 @@ fn tick_keys(crons: &[Cron]) -> Vec<String> {
             let zone = parse_timezone(entry).map_or_else(|_| entry.timezone.clone().unwrap_or_default(), |zone| zone.name().to_string());
             let identity = serde_json::json!([entry.name, entry.shops_json(), entry.input, zone]).to_string();
             let digest = Sha256::digest(identity.as_bytes());
-            let digest = format!("{digest:x}");
+            let digest = hex::encode(digest);
             let base = format!("{}#{}", entry.key(), &digest[..16]);
             let rank = seen.iter().filter(|key| **key == base).count();
             seen.push(base.clone());

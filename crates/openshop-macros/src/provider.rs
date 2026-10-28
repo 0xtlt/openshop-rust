@@ -4,8 +4,8 @@ use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 use syn::spanned::Spanned;
 use syn::{
-    Attribute, Data, DeriveInput, Expr, Fields, FnArg, Ident, ImplItem, ImplItemFn, ItemImpl, LitStr, Pat, ReturnType,
-    Type, Visibility,
+    Attribute, Data, DeriveInput, Expr, Fields, FnArg, Ident, ImplItem, ImplItemFn, ItemImpl, LitStr, Pat,
+    ReceiverKind, ReturnType, Type, Visibility,
 };
 
 use crate::util::{
@@ -271,7 +271,7 @@ fn has_attribute(attributes: &[Attribute], name: &str) -> bool {
 fn takes_shared_self(function: &ImplItemFn) -> bool {
     matches!(
         function.sig.inputs.first(),
-        Some(FnArg::Receiver(receiver)) if receiver.reference.is_some() && receiver.mutability.is_none()
+        Some(FnArg::Receiver(receiver)) if matches!(receiver.kind, ReceiverKind::Reference(_, _, None))
     )
 }
 
@@ -371,7 +371,7 @@ fn check_names(item: &ItemImpl, methods: &[Method]) -> syn::Result<()> {
 }
 
 pub fn provider(name: Option<LitStr>, mut item: ItemImpl) -> syn::Result<TokenStream> {
-    if let Some((_, path, _)) = &item.trait_ {
+    if let Some((path, _)) = &item.trait_ {
         return Err(syn::Error::new(
             path.span(),
             "`#[provider]` goes on the `impl` block of the configuration struct itself",

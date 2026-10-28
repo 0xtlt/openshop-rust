@@ -4,7 +4,7 @@
 //!
 //! [`ShopifyApp::verify_app_proxy`]: shopify_api::oauth::ShopifyApp::verify_app_proxy
 
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use indexmap::IndexMap;
 use sha2::Sha256;
 use subtle::ConstantTimeEq;

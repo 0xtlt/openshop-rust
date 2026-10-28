@@ -198,7 +198,7 @@ async fn finish(ctx: &TestContext, shop: &str, started: &Started, secret: &str) 
 
 /// A state as `/auth` signs it, with any expiry.
 fn signed_state(secret: &str, app_handle: &str, shop: &str, expiry: i64, nonce: &str, browser: &str) -> String {
-    use hmac::{Hmac, Mac};
+    use hmac::{Hmac, KeyInit, Mac};
     let message = format!("openshop-oauth-state\0{app_handle}\0{shop}\0{expiry}\0{nonce}\0{browser}");
     let mut mac = Hmac::<sha2::Sha256>::new_from_slice(secret.as_bytes()).unwrap();
     mac.update(message.as_bytes());

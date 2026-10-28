@@ -139,7 +139,7 @@ pub fn admin_page(arguments: Arguments, mut item: ItemImpl) -> syn::Result<Token
             "expected the path of the page: `#[admin_page(\"/reviews\")]`",
         ));
     };
-    if let Some((_, implemented, _)) = &item.trait_ {
+    if let Some((implemented, _)) = &item.trait_ {
         return Err(syn::Error::new(
             implemented.span(),
             "`#[admin_page]` goes on the `impl` block of the page type itself",
