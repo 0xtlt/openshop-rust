@@ -106,7 +106,7 @@ pub(crate) async fn shop_middleware(State(app): State<OpenShop>, mut request: Re
 /// One request at a time runs the exchange of a shop, for five seconds at
 /// most; the others wait for it and use its token. A failed exchange is not
 /// tried again for thirty seconds.
-async fn ensure_installation(
+pub(crate) async fn ensure_installation(
     app: &OpenShop,
     shopify_app: &ResolvedShopifyApp,
     shop: &str,
