@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- A fresh install of the `default` app no longer fails with
+  `[openshop] Missing Shopify app handle` when several Shopify apps are
+  configured (0xtlt/OpenShop#36). A launch from Shopify admin of a shop
+  without a token now exchanges the session token Shopify managed
+  installation passes as `id_token` for an offline token, and renders the app
+  without the OAuth redirect. The token must verify for the app that signed
+  the launch, name its shop and a staff user. The client credentials grant
+  and the `/auth` redirect stay the fallbacks, and the redirect now always
+  names the app, `default` included.
 - Less code to build, run and keep up: what nothing used, what was written
   twice and what a dependency already does is gone (about 2,600 lines of Rust,
   and the three copies of the Admin schema in `templates/`, now links to

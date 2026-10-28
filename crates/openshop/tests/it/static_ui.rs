@@ -560,13 +560,19 @@ async fn get_with_signed_shopify_launch_redirects_uninstalled_shops_to_auth() {
 
     let reply = get(&ctx, &signed_launch("/", "uninstalled.myshopify.com", SECRET)).await;
     assert_eq!(reply.status, StatusCode::FOUND);
-    assert_eq!(reply.header(LOCATION), Some("/auth?shop=uninstalled.myshopify.com"));
+    assert_eq!(
+        reply.header(LOCATION),
+        Some("/auth?shop=uninstalled.myshopify.com&app=default")
+    );
     assert_eq!(reply.header("x-robots-tag"), Some(ROBOTS));
     assert!(!reply.body.contains("spa-shell"));
 
     let reply = get(&ctx, &signed_launch("/flows", "uninstalled.myshopify.com", SECRET)).await;
     assert_eq!(reply.status, StatusCode::FOUND);
-    assert_eq!(reply.header(LOCATION), Some("/auth?shop=uninstalled.myshopify.com"));
+    assert_eq!(
+        reply.header(LOCATION),
+        Some("/auth?shop=uninstalled.myshopify.com&app=default")
+    );
 
     // An installation that was removed, or never received a token, does not count.
     sqlx::query("UPDATE installations SET uninstalled_at = now() WHERE shop = $1")
@@ -576,7 +582,10 @@ async fn get_with_signed_shopify_launch_redirects_uninstalled_shops_to_auth() {
         .unwrap();
     let reply = get(&ctx, &signed_launch("/", SHOP, SECRET)).await;
     assert_eq!(reply.status, StatusCode::FOUND);
-    assert_eq!(reply.header(LOCATION), Some("/auth?shop=static-test.myshopify.com"));
+    assert_eq!(
+        reply.header(LOCATION),
+        Some("/auth?shop=static-test.myshopify.com&app=default")
+    );
 
     sqlx::query("INSERT INTO installations (shop, nonce) VALUES ('pending.myshopify.com', 'nonce')")
         .execute(&ctx.db)
@@ -584,7 +593,10 @@ async fn get_with_signed_shopify_launch_redirects_uninstalled_shops_to_auth() {
         .unwrap();
     let reply = get(&ctx, &signed_launch("/", "pending.myshopify.com", SECRET)).await;
     assert_eq!(reply.status, StatusCode::FOUND);
-    assert_eq!(reply.header(LOCATION), Some("/auth?shop=pending.myshopify.com"));
+    assert_eq!(
+        reply.header(LOCATION),
+        Some("/auth?shop=pending.myshopify.com&app=default")
+    );
     ctx.shutdown().await.unwrap();
 }
 

@@ -141,7 +141,7 @@ no usable token for it (no row, no token, or a row marked uninstalled):
 
 | Where | Shop | When Shopify refuses |
 | --- | --- | --- |
-| A launch from Shopify admin (production shell) | The `shop` of the query, whose `hmac` covers it, when its `timestamp` is within 90 seconds of the server's clock | Redirected to `/auth`, as before |
+| A launch from Shopify admin (production shell), once the token exchange of its `id_token`, if it has one, failed | The `shop` of the query, whose `hmac` covers it, when its `timestamp` is within 90 seconds of the server's clock | Redirected to `/auth`, as before |
 | An Admin API request (`/api`), once Shopify refused the token exchange, or it could not run | The `dest` of the verified session token, which must not have expired | The request is served without a token, as before |
 
 A launch from Shopify admin for a development store with an empty database
@@ -282,10 +282,22 @@ launch from Shopify admin: the request must carry a `shop` parameter and a
 query `hmac` that matches exactly one configured app, and a `timestamp`
 within 90 seconds of the server clock. Otherwise the server answers `401` with
 a page that says the app opens from Shopify admin, and shows nothing of the
-application. A valid launch for a shop without an active installation first
-asks Shopify for a token with the
-[client credentials grant](#client-credentials-grant), and is redirected to
-`/auth` when Shopify refuses it.
+application. A valid launch for a shop without an active installation is given a
+token first, and renders the app instead of redirecting to `/auth`, which
+Shopify refuses to frame:
+
+1. Shopify managed installation opens the app with a session token in the
+   `id_token` parameter of the launch, which the `hmac` covers. When it
+   verifies for the app that signed the launch, its `dest` is the launch's
+   `shop` and its subject a staff user, it is exchanged for an offline access
+   token, as the first `/api` request would
+   ([Embedded admin API](#embedded-admin-api)).
+2. When the launch has no such token, or Shopify refuses the exchange, the
+   [client credentials grant](#client-credentials-grant) is asked.
+3. When Shopify refuses both, the launch is redirected to
+   `/auth?shop=<shop>&app=<handle>`. The redirect always names the app that
+   signed the launch, `default` included, so `/auth` installs that app when
+   several are configured.
 
 In development (`dev`), the signature is not checked. A request is still
 refused with `403`, and the same page, unless it comes from a local host, is
@@ -374,7 +386,7 @@ requirements.
 
 | Request | App resolution |
 | --- | --- |
-| Manual OAuth start | `?app=<handle>`; optional when exactly one app exists |
+| Manual OAuth start | `?app=<handle>`; optional when exactly one app exists. The launch fallback always sets it |
 | Signed admin launch or OAuth callback | Query HMAC matches exactly one app secret |
 | App proxy | Query signature matches exactly one app secret |
 | Webhook | Raw-body HMAC matches exactly one app secret |

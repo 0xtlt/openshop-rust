@@ -28,12 +28,14 @@ use super::compression;
 use super::connectors::is_installed_shop;
 use super::ServerOptions;
 use super::http::{escape, header, not_found, parse_query};
+use super::jwt::is_staff_subject;
 use super::reload::Served;
+use super::shop::ensure_installation;
 use super::shop_domain::normalize_shop_domain;
-use super::shopify_apps::DEFAULT_SHOPIFY_APP_HANDLE;
+use super::shopify_apps::ResolvedShopifyApp;
 use crate::app::OpenShop;
 use crate::shopify::client_credentials::Grant;
-use shopify_api::oauth::SignedQuery;
+use shopify_api::oauth::{SessionToken, SignedQuery};
 use openshop_shared::rpc::{decode_uri_component, encode_uri_component};
 
 /// What a launch whose query verified vouches for: its shop, written as a
@@ -42,6 +44,37 @@ use openshop_shared::rpc::{decode_uri_component, encode_uri_component};
 fn launch_grant(query: &SignedQuery, shopify_app: &str, shop: &str) -> Option<Grant> {
     let grant = Grant::vouched(shopify_app, query.get("shop")?)?;
     matches!(&grant, Grant::Vouched { shop: vouched, .. } if vouched == shop).then_some(grant)
+}
+
+/// The session token Shopify managed installation opens the app with, as
+/// `id_token`, when it is valid for the app that signed the launch, for its
+/// shop, and for a staff member.
+fn launch_session(shopify_app: &ResolvedShopifyApp, query: &SignedQuery, shop: &str) -> Option<SessionToken> {
+    let session = shopify_app.oauth.verify_session_token(query.get("id_token")?).ok()?;
+    let staff = is_staff_subject(session.user_id().unwrap_or_default());
+    (staff && session.shop().as_str() == shop).then_some(session)
+}
+
+/// Whether the shop of a verified launch has the app installed, once given a
+/// token when it had none: by the token exchange of the launch's session
+/// token first, as the first `/api` request would, then by the client
+/// credentials grant the launch vouches for. The shop renders without the
+/// OAuth redirect, which Shopify does not display inside the admin frame.
+async fn is_installed_for_launch(
+    app: &OpenShop,
+    shopify_app: &ResolvedShopifyApp,
+    shop: &str,
+    query: &SignedQuery,
+) -> anyhow::Result<bool> {
+    if is_installed_shop(app, &shopify_app.handle, shop, None).await? {
+        return Ok(true);
+    }
+    if let Some(session) = launch_session(shopify_app, query, shop) {
+        // Best-effort, as for an `/api` request: a failure keeps the fallbacks below.
+        let _ = ensure_installation(app, shopify_app, shop, &session).await;
+    }
+    let grant = launch_grant(query, &shopify_app.handle, shop);
+    is_installed_shop(app, &shopify_app.handle, shop, grant.as_ref()).await
 }
 
 /// Where the admin UI assets come from.
@@ -366,16 +399,16 @@ pub(crate) async fn serve_ui(
         let Ok((shopify_app, signed)) = app.apps().by_signed_query(request.uri().query().unwrap_or_default()) else {
             return unauthorized_ui();
         };
-        let grant = launch_grant(&signed, &shopify_app.handle, &shop);
-        match is_installed_shop(&app, &shopify_app.handle, &shop, grant.as_ref()).await {
+        match is_installed_for_launch(&app, shopify_app, &shop, &signed).await {
             Ok(true) => {}
             Ok(false) => {
-                let app_param = if shopify_app.handle == DEFAULT_SHOPIFY_APP_HANDLE {
-                    String::new()
-                } else {
-                    format!("&app={}", encode_uri_component(&shopify_app.handle))
-                };
-                return redirect(&format!("/auth?shop={}{app_param}", encode_uri_component(&shop)));
+                // Always name the app, `default` included: with several apps,
+                // `/auth` cannot tell which one to install otherwise.
+                return redirect(&format!(
+                    "/auth?shop={}&app={}",
+                    encode_uri_component(&shop),
+                    encode_uri_component(&shopify_app.handle)
+                ));
             }
             Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "Internal Server Error").into_response(),
         }

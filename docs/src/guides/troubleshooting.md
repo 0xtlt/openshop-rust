@@ -41,6 +41,10 @@ requests:
    the same `HOST`.
 5. Retry from `/auth?shop=<shop>&app=<handle>`.
 
+A `Missing Shopify app handle` response from `/auth` means the URL has no
+`app` parameter while several apps are configured. Launches from Shopify admin
+always name the app; add `app=<handle>` to a URL you build yourself.
+
 An `Invalid HMAC` response means the request was not signed with the secret of
 a configured app. An `Invalid state/nonce` response means the OAuth callback is
 stale (older than ten minutes, or already used), or belongs to a different

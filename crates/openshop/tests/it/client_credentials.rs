@@ -7,18 +7,18 @@ use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use crate::common::{LogCapture, graphql_requests, install, noop_flow, now, two_shopify_apps, wait};
+use crate::common::{LogCapture, graphql_requests, install, noop_flow, now, shopify_app, two_shopify_apps, wait};
 use futures::StreamExt;
 use openshop::builder::{AdminPage, Flow, Route, Webhook};
 use openshop::engine::Scheduler;
 use openshop::server::http::parse_query;
 use openshop::server::{ServerOptions, UiSource};
 use openshop::testing::{
-    AdminTestOptions, MockTransport, TestContext, TestOptions, admin_context, sign_query, sign_webhook_body,
-    to_query_string,
+    AdminTestOptions, MockTransport, TestContext, TestOptions, admin_context, session_token, sign_query,
+    sign_webhook_body, to_query_string,
 };
 use openshop::testing::{FORM_CONTENT_TYPE, OutboundRequest, OutboundResponse};
-use openshop::{AdminContext, Cron, FlowContext, OpenShopConfig, Value, WebhookContext, json, response};
+use openshop::{AdminContext, Cron, FlowContext, OpenShopConfig, ShopifyConfig, Value, WebhookContext, json, response};
 use openshop_shared::build_admin_function_rpc_url;
 use reqwest::StatusCode;
 use reqwest::header::{CONTENT_SECURITY_POLICY, LOCATION};
@@ -848,7 +848,7 @@ async fn a_signed_launch_shopify_refuses_falls_back_to_oauth(ctx: &TestContext) 
         assert_eq!(reply.status(), StatusCode::FOUND);
         assert_eq!(
             reply.headers()[LOCATION].to_str().unwrap(),
-            "/auth?shop=dev-store-1.myshopify.com"
+            "/auth?shop=dev-store-1.myshopify.com&app=default"
         );
     }
     assert_eq!(grant_requests(ctx).len(), 1);
@@ -1132,6 +1132,138 @@ async fn a_clone_pointed_at_another_shop_sends_that_shop_its_own_token(ctx: &Tes
     third.shop = "dev-store-3.myshopify.com".to_string();
     assert!(third.graphql(QUERY, ()).await.is_err());
     assert_eq!(ctx.transport.requests().len(), 3);
+}
+
+// ─── Shopify managed installation ────────────────────────────────────
+
+/// A launch from Shopify admin signed now by `secret`, with the session
+/// token Shopify managed installation opens the app with, if any.
+async fn launch_with(ctx: &TestContext, shop: &str, secret: &str, id_token: Option<&str>) -> reqwest::Response {
+    let timestamp = now().to_string();
+    let mut params = vec![
+        ("host", "YWRtaW4uc2hvcGlmeS5jb20vc3RvcmUvZGV2"),
+        ("shop", shop),
+        ("timestamp", timestamp.as_str()),
+    ];
+    params.extend(id_token.map(|token| ("id_token", token)));
+    let query = sign_query(&params, secret);
+    ctx.http
+        .get(ctx.url_for(&format!("/?{}", to_query_string(&query))))
+        .send()
+        .await
+        .unwrap()
+}
+
+#[openshop::test(unconfigured())]
+async fn a_launch_with_a_session_token_installs_the_shop_by_the_exchange(ctx: &TestContext) {
+    let shopify = Shopify::install(ctx);
+    shopify.refuse(400, json!({ "error": "shop_not_permitted" }));
+
+    let token = ctx.session_token_for(OTHER_SHOP, "1");
+    let reply = launch_with(ctx, OTHER_SHOP, SECRET, Some(&token)).await;
+    assert_eq!(reply.status(), StatusCode::OK);
+    assert_eq!(token_requests(ctx), [json!(TOKEN_EXCHANGE)]);
+    let exchange = ctx.transport.requests()[0].body.clone();
+    assert_eq!(exchange["subject_token"], json!(token));
+    let row = stored(ctx, OTHER_SHOP).await.unwrap();
+    assert_eq!(decrypted(ctx, &row).as_deref(), Some("exchange-token"));
+    assert!(!row.2);
+
+    // Installed: the next launch asks Shopify for nothing.
+    assert_eq!(launch(ctx, OTHER_SHOP).await.status(), StatusCode::OK);
+    assert_eq!(token_requests(ctx).len(), 1);
+}
+
+#[openshop::test(unconfigured())]
+async fn a_launch_whose_exchange_is_refused_falls_back_to_the_grant_then_to_oauth(ctx: &TestContext) {
+    let shopify = Shopify::install(ctx);
+    shopify.refuse_exchange();
+    shopify.refuse(400, json!({ "error": "shop_not_permitted" }));
+
+    let token = ctx.session_token_for(OTHER_SHOP, "1");
+    let reply = launch_with(ctx, OTHER_SHOP, SECRET, Some(&token)).await;
+    assert_eq!(reply.status(), StatusCode::FOUND);
+    assert_eq!(
+        reply.headers()[LOCATION].to_str().unwrap(),
+        "/auth?shop=dev-store-2.myshopify.com&app=default"
+    );
+    assert_eq!(
+        token_requests(ctx),
+        [json!(TOKEN_EXCHANGE), json!("client_credentials")]
+    );
+    assert!(stored(ctx, OTHER_SHOP).await.is_none());
+}
+
+#[openshop::test(unconfigured())]
+async fn a_launch_session_token_of_another_shop_app_or_user_is_never_exchanged(ctx: &TestContext) {
+    let shopify = Shopify::install(ctx);
+    shopify.refuse(400, json!({ "error": "shop_not_permitted" }));
+
+    for token in [
+        session_token(SHOP, SECRET, API_KEY, "1"),
+        session_token(OTHER_SHOP, "other-secret", API_KEY, "1"),
+        session_token(OTHER_SHOP, SECRET, "other-key", "1"),
+        session_token(OTHER_SHOP, SECRET, API_KEY, "gid://shopify/Customer/1"),
+        "not-a-token".to_string(),
+    ] {
+        let reply = launch_with(ctx, OTHER_SHOP, SECRET, Some(&token)).await;
+        assert_eq!(reply.status(), StatusCode::FOUND);
+        assert_eq!(
+            reply.headers()[LOCATION].to_str().unwrap(),
+            "/auth?shop=dev-store-2.myshopify.com&app=default"
+        );
+    }
+    assert!(!token_requests(ctx).contains(&json!(TOKEN_EXCHANGE)));
+    assert!(stored(ctx, OTHER_SHOP).await.is_none());
+}
+
+/// The `default` app next to another one, as an instance keeps it when it
+/// adds a second app (issue 0xtlt/OpenShop#36).
+async fn default_and_other_app() -> TestContext {
+    let config = OpenShopConfig::builder()
+        .flow(noop_flow("dev-store-flow"))
+        .shopify(ShopifyConfig {
+            scopes: Some("read_products".to_string()),
+            apps: Some(
+                [
+                    ("default".to_string(), shopify_app("default-app")),
+                    ("other".to_string(), shopify_app("other-app")),
+                ]
+                .into(),
+            ),
+        })
+        .build()
+        .expect("valid config");
+    TestContext::with_options(config, options(None)).await.unwrap()
+}
+
+#[openshop::test(default_and_other_app())]
+async fn the_default_app_next_to_another_installs_by_the_exchange_or_names_itself_to_oauth(ctx: &TestContext) {
+    let shopify = Shopify::install(ctx);
+    shopify.refuse(400, json!({ "error": "shop_not_permitted" }));
+
+    // Without a session token, the OAuth fallback names the app, and `/auth` installs it.
+    let reply = launch_with(ctx, OTHER_SHOP, "default-app-secret", None).await;
+    assert_eq!(reply.status(), StatusCode::FOUND);
+    let location = reply.headers()[LOCATION].to_str().unwrap().to_string();
+    assert_eq!(location, "/auth?shop=dev-store-2.myshopify.com&app=default");
+    let oauth = ctx.http.get(ctx.url_for(&location)).send().await.unwrap();
+    assert_eq!(oauth.status(), StatusCode::FOUND);
+    assert!(
+        oauth.headers()[LOCATION]
+            .to_str()
+            .unwrap()
+            .starts_with("https://dev-store-2.myshopify.com/admin/oauth/authorize?client_id=default-app-key&"),
+        "{:?}",
+        oauth.headers()[LOCATION]
+    );
+
+    // With one, the exchange installs the `default` app.
+    let token = session_token(OTHER_SHOP, "default-app-secret", "default-app-key", "1");
+    let reply = launch_with(ctx, OTHER_SHOP, "default-app-secret", Some(&token)).await;
+    assert_eq!(reply.status(), StatusCode::OK);
+    let row = stored(ctx, OTHER_SHOP).await.unwrap();
+    assert_eq!(decrypted(ctx, &row).as_deref(), Some("exchange-token"));
 }
 
 // ─── Paths nothing vouches for ───────────────────────────────────────
@@ -1625,7 +1757,7 @@ async fn a_launch_whose_token_cannot_be_stored_is_sent_to_oauth() {
     assert_eq!(reply.status(), StatusCode::FOUND);
     assert_eq!(
         reply.headers()[LOCATION].to_str().unwrap(),
-        "/auth?shop=dev-store-1.myshopify.com"
+        "/auth?shop=dev-store-1.myshopify.com&app=default"
     );
     assert!(grant_requests(&ctx).is_empty());
     ctx.shutdown().await.unwrap();
