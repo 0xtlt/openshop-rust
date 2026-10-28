@@ -1,6 +1,6 @@
 # The base images are named by digest, the tag only says what it is: a build
 # does not move with the tag. Dependabot proposes the next digest.
-FROM rust:1-bookworm@sha256:e12566d5abc17a0da741628782cdb504b68b8961f5bfcf677936bf3e8b32de29 AS build
+FROM rust:1-bookworm@sha256:48b7f435b8fc6378ce43b44f15e3a47fd8919b2825f835c39bd4bd3da50af5b8 AS build
 # Cargo fetches the `openshop` dependency with git, which reads the optional
 # build secret `gitconfig`: a `url.<base>.insteadOf` that adds a token, for a
 # repository that is private. Without the secret git reads no configuration,
