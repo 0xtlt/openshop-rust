@@ -215,7 +215,7 @@ with `key and enabled are required`.
 | `POST /api/providers/:name/check` | — | `{ ok }`; `{ ok: false, error }` with `500` when the checker fails; `{ ok: false, error }` with `504` when it takes longer than 10 seconds. |
 
 Each entry of `fields` has `type`, `label`, and, when set, `placeholder`,
-`options`, and `required`; password fields also have `hasValue`. Password
+`description`, `options`, and `required`; password fields also have `hasValue`. Password
 values are not returned in plaintext: `config` omits them.
 
 | Status | `error` | Condition |

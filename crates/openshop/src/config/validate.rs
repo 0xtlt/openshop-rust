@@ -105,6 +105,9 @@ fn validate_field(field: &Field, path: &str) -> Result<()> {
     if field.label.trim().is_empty() {
         fail!("{path}.label must be a non-empty string");
     }
+    if field.description.as_deref().is_some_and(|description| description.trim().is_empty()) {
+        fail!("{path}.description must be a non-empty string");
+    }
 
     if field.field_type == FieldType::Select {
         let options = field.options.as_deref().unwrap_or_default();

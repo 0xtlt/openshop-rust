@@ -304,8 +304,9 @@ pub use openshop_macros::Model;
 ///
 /// - `label = "…"`. Without it the field is labeled after its name:
 ///   `batch_size` is "Batch size";
-/// - `placeholder = "…"`, `password`, `select("Label" = "value", …)`, and
-///   `name = "…"` for another key;
+/// - `placeholder = "…"`, `description = "…"` for help text shown below the
+///   input, `password`, `select("Label" = "value", …)`, and `name = "…"` for
+///   another key;
 /// - what a value must satisfy: `url`, `non_empty`, `range(min = …, max = …)`
 ///   for a number, `length(min = …, max = …)` for a text, a bound being
 ///   optional, and `validate = <validator>` for any other rule: one of

@@ -19,7 +19,7 @@ pub struct Order {
 pub struct Warehouse {
     #[field(label = "API URL", placeholder = "https://warehouse.example.com/api", url)]
     api_url: String,
-    #[field(label = "API key", password, non_empty)]
+    #[field(label = "API key", password, non_empty, description = "Found in your warehouse dashboard, under API settings.")]
     api_key: String,
     #[field(range(max = 1000), validate = validators::integer_min(1))]
     batch_size: Option<u32>,
@@ -73,6 +73,7 @@ attribute:
 | --- | --- |
 | `label = "API URL"` | The label of the input. Left out, the field is labeled after its name: `batch_size` is `Batch size`. |
 | `placeholder = "https://…"` | |
+| `description = "Found in your dashboard."` | Help text shown below the input, to give context or instructions. |
 | `password` | A secret: never returned by the Admin API, and kept when the form is saved without it. |
 | `select("Europe" = "eu", "United States" = "us")` | A list of choices, each a label and the value saved. |
 | `url` | The value must be an absolute `http` or `https` URL. |
@@ -176,6 +177,9 @@ non-empty label.
 | `Field::number(label)` | `number` | Number | A non-empty string is converted to a number. A string that is not a number counts as missing. |
 | `Field::select(label, options)` | `select` | Selected string | Requires non-empty, uniquely valued `FieldOption::new(label, value)` options. |
 | `Field::checkbox(label)` | `checkbox` | Boolean | The string `"true"` is true; other strings are false. |
+
+Every field accepts `.description(…)`: help text the admin shows below the
+input, to give context or instructions. When set, it must not be blank.
 
 Fields are required by default. Call `.optional()` or `.required(false)` to
 make a field optional. `.validate(…)` accepts a validator; the value it returns

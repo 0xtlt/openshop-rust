@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- The fields of a provider and of a function accept a description, help text
+  the admin shows below the input to give context or instructions
+  (0xtlt/OpenShop#39): `#[field(description = "…")]`, or
+  `Field::description(…)` with the builder. The Admin API returns it as
+  `description`; a blank one is refused when the configuration is built.
 - A fresh install of the `default` app no longer fails with
   `[openshop] Missing Shopify app handle` when several Shopify apps are
   configured (0xtlt/OpenShop#36). A launch from Shopify admin of a shop

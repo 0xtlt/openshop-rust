@@ -17,7 +17,13 @@ async fn lists_providers_with_their_fields(ctx: &TestContext) {
     assert_eq!(warehouse["config"], json!({}));
     assert_eq!(
         warehouse["fields"]["apiKey"],
-        json!({ "type": "password", "label": "API Key", "placeholder": "wh_live_...", "hasValue": false })
+        json!({
+            "type": "password",
+            "label": "API Key",
+            "placeholder": "wh_live_...",
+            "description": "Found in your warehouse dashboard, under API settings.",
+            "hasValue": false,
+        })
     );
     // A field without a label is called by its name.
     assert_eq!(warehouse["fields"]["batchSize"]["label"], "Batch size");

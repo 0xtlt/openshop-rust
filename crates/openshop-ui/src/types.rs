@@ -138,6 +138,9 @@ pub struct ConfigField {
     pub label: String,
     #[serde(default)]
     pub placeholder: Option<String>,
+    /// Help text shown below the field.
+    #[serde(default)]
+    pub description: Option<String>,
     #[serde(default)]
     pub options: Option<Vec<ConfigFieldOption>>,
     #[serde(default)]
