@@ -17,6 +17,7 @@ pub fn ConfigFieldRenderer(
         kind,
         label,
         placeholder,
+        description,
         options,
         has_value,
     } = field;
@@ -35,6 +36,7 @@ pub fn ConfigFieldRenderer(
             view! {
                 <s-password-field
                     label=label
+                    details=description
                     placeholder=placeholder
                     prop:value=move || value.get()
                     on:input=on_input
@@ -45,6 +47,7 @@ pub fn ConfigFieldRenderer(
         ("number", _) => view! {
             <s-number-field
                 label=label
+                details=description
                 placeholder=placeholder
                 prop:value=move || value.get()
                 on:input=on_input
@@ -54,6 +57,7 @@ pub fn ConfigFieldRenderer(
         ("checkbox", _) => view! {
             <s-checkbox
                 label=label
+                details=description
                 prop:checked=move || value.get() == "true"
                 on:change=move |event: web_sys::Event| {
                     on_change.run((field_key.clone(), event_checked(&event).to_string()))
@@ -62,7 +66,7 @@ pub fn ConfigFieldRenderer(
         }
         .into_any(),
         ("select", Some(options)) => view! {
-            <s-select label=label prop:value=move || value.get() on:change=on_input>
+            <s-select label=label details=description prop:value=move || value.get() on:change=on_input>
                 {options
                     .into_iter()
                     .map(|option| view! { <s-option value=option.value>{option.label}</s-option> })
@@ -73,6 +77,7 @@ pub fn ConfigFieldRenderer(
         _ => view! {
             <s-text-field
                 label=label
+                details=description
                 placeholder=placeholder
                 prop:value=move || value.get()
                 on:input=on_input

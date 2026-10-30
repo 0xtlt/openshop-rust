@@ -97,7 +97,13 @@ fn extras_config() -> OpenShopConfig {
                     )
                     .validate(validators::one_of(["gold", "silver"])),
                 )
-                .field("note", Field::text("Note").placeholder("Shown to staff").optional())
+                .field(
+                    "note",
+                    Field::text("Note")
+                        .placeholder("Shown to staff")
+                        .description("Kept with the rule")
+                        .optional(),
+                )
                 .field("strict", Field::checkbox("Strict").optional()),
         )
         .build()
@@ -408,7 +414,13 @@ async fn lists_default_modes_and_field_metadata() {
                         "label": "Tier",
                         "options": [{ "label": "Gold", "value": "gold" }, { "label": "Silver", "value": "silver" }],
                     },
-                    "note": { "type": "text", "label": "Note", "placeholder": "Shown to staff", "required": false },
+                    "note": {
+                        "type": "text",
+                        "label": "Note",
+                        "placeholder": "Shown to staff",
+                        "description": "Kept with the rule",
+                        "required": false,
+                    },
                     "strict": { "type": "checkbox", "label": "Strict", "required": false },
                 },
             },

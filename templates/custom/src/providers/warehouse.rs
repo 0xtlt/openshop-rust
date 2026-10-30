@@ -7,9 +7,19 @@ use serde::{Deserialize, Serialize};
 pub struct Warehouse {
     #[field(label = "API URL", placeholder = "https://warehouse.example.com/api", url)]
     pub api_url: String,
-    #[field(label = "API Key", password, placeholder = "wh_live_...", non_empty)]
+    #[field(
+        label = "API Key",
+        password,
+        placeholder = "wh_live_...",
+        description = "Found in your warehouse dashboard, under API settings.",
+        non_empty
+    )]
     pub api_key: String,
-    #[field(placeholder = "100", range(min = 1, max = 1000))]
+    #[field(
+        placeholder = "100",
+        description = "Number of records sent per request, between 1 and 1000.",
+        range(min = 1, max = 1000)
+    )]
     pub batch_size: u32,
 }
 

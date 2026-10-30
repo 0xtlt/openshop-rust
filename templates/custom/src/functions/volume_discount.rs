@@ -17,7 +17,11 @@ pub struct VolumeDiscount {
     pub min_quantity: u32,
     #[field(label = "Discount percentage", range(min = 0, max = 100))]
     pub percentage: f64,
-    #[field(label = "Excluded product tags", placeholder = "gift, sample")]
+    #[field(
+        label = "Excluded product tags",
+        placeholder = "gift, sample",
+        description = "Comma-separated list of product tags."
+    )]
     pub excluded_tags: Option<String>,
 }
 

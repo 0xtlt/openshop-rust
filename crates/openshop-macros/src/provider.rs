@@ -19,6 +19,7 @@ struct FieldOptions {
     label: Option<LitStr>,
     name: Option<LitStr>,
     placeholder: Option<LitStr>,
+    description: Option<LitStr>,
     password: bool,
     /// Label and value of each choice.
     select: Option<Vec<(LitStr, LitStr)>>,
@@ -94,6 +95,8 @@ fn field_options(field: &syn::Field) -> syn::Result<FieldOptions> {
                 set_value(&mut options.name, &meta)
             } else if meta.path.is_ident("placeholder") {
                 set_value(&mut options.placeholder, &meta)
+            } else if meta.path.is_ident("description") {
+                set_value(&mut options.description, &meta)
             } else if meta.path.is_ident("password") {
                 options.password = true;
                 Ok(())
@@ -117,7 +120,7 @@ fn field_options(field: &syn::Field) -> syn::Result<FieldOptions> {
                 set_value(&mut options.validate, &meta)
             } else {
                 Err(meta.error(
-                    "unknown field option; expected `label`, `name`, `placeholder`, `password`, `select(…)`, `url`, `non_empty`, `range(…)`, `length(…)` or `validate`",
+                    "unknown field option; expected `label`, `name`, `placeholder`, `description`, `password`, `select(…)`, `url`, `non_empty`, `range(…)`, `length(…)` or `validate`",
                 ))
             }
         })?;
@@ -201,6 +204,7 @@ pub fn form(input: &DeriveInput, derive: &str, what: &str) -> syn::Result<Form> 
             None => quote!(<#ty as ::openshop::builder::ProviderField>::field(#label)),
         };
         let placeholder = options.placeholder.as_ref().map(|text| quote!(.placeholder(#text)));
+        let description = options.description.as_ref().map(|text| quote!(.description(#text)));
         // The named constraints first, in the order they are written.
         let constraints = options
             .constraints
@@ -208,7 +212,7 @@ pub fn form(input: &DeriveInput, derive: &str, what: &str) -> syn::Result<Form> 
             .map(|constraint| quote!(.validate(#constraint)));
         let validate = options.validate.as_ref().map(|validator| quote!(.validate(#validator)));
         definitions.push(quote! {
-            fields.insert(::std::string::String::from(#key), #base #placeholder #(#constraints)* #validate);
+            fields.insert(::std::string::String::from(#key), #base #placeholder #description #(#constraints)* #validate);
         });
         readers.push(quote!(#ident: ::openshop::builder::provider_field_value::<#ty>(&mut config, #key)?));
         keys.push(key);
@@ -594,7 +598,7 @@ mod tests {
             struct Warehouse {
                 #[field(label = "API URL", placeholder = "https://…", validate = validators::url())]
                 api_url: String,
-                #[field(label = "API key", password)]
+                #[field(label = "API key", password, description = "From the dashboard")]
                 api_key: String,
                 #[field(label = "Region", select("Europe" = "eu", "United States" = "us"))]
                 region: Option<String>,
@@ -608,7 +612,7 @@ mod tests {
         for expected in [
             "impl :: openshop :: ProviderConfig for Warehouse",
             "String :: from (\"apiUrl\") , < String as :: openshop :: builder :: ProviderField > :: field (\"API URL\") . placeholder (\"https://…\") . validate (validators :: url ())",
-            "let field = :: openshop :: builder :: Field :: password (\"API key\") ; if < String as :: openshop :: builder :: ProviderField > :: OPTIONAL { field . optional () } else { field }",
+            "let field = :: openshop :: builder :: Field :: password (\"API key\") ; if < String as :: openshop :: builder :: ProviderField > :: OPTIONAL { field . optional () } else { field } } . description (\"From the dashboard\")",
             ":: openshop :: builder :: Field :: select (\"Region\" , [:: openshop :: builder :: FieldOption :: new (\"Europe\" , \"eu\") , :: openshop :: builder :: FieldOption :: new (\"United States\" , \"us\")])",
             "String :: from (\"batch\") , < u32 as :: openshop :: builder :: ProviderField > :: field (\"Batch size\")",
             "batch_size : :: openshop :: builder :: provider_field_value :: < u32 > (& mut config , \"batch\") ?",
@@ -675,7 +679,7 @@ mod tests {
         );
         assert_eq!(
             config_refusal(parse_quote! { struct W { #[field(label = "A", secret)] a: String } }),
-            "unknown field option; expected `label`, `name`, `placeholder`, `password`, `select(…)`, `url`, `non_empty`, `range(…)`, `length(…)` or `validate`"
+            "unknown field option; expected `label`, `name`, `placeholder`, `description`, `password`, `select(…)`, `url`, `non_empty`, `range(…)`, `length(…)` or `validate`"
         );
         assert_eq!(
             config_refusal(parse_quote! { struct W { #[field(label = "A", select())] a: String } }),

@@ -58,6 +58,7 @@ fn the_metadata_of_a_field_leaves_out_what_is_not_set_and_the_validator() {
 
     let select = Field::select("Mode", [FieldOption::new("Live", "live"), FieldOption::new("Test", "test")])
         .placeholder("Pick one")
+        .description("Live charges real cards")
         .optional()
         .validate(|value| Ok(value.clone()));
     assert_eq!(
@@ -66,6 +67,7 @@ fn the_metadata_of_a_field_leaves_out_what_is_not_set_and_the_validator() {
             "type": "select",
             "label": "Mode",
             "placeholder": "Pick one",
+            "description": "Live charges real cards",
             "options": [{ "label": "Live", "value": "live" }, { "label": "Test", "value": "test" }],
             "required": false,
         })

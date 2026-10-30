@@ -87,6 +87,8 @@ pub struct Field {
     pub field_type: FieldType,
     pub label: String,
     pub placeholder: Option<String>,
+    /// Help text shown below the field, to give context or instructions.
+    pub description: Option<String>,
     /// Choices for `select` fields.
     pub options: Option<Vec<FieldOption>>,
     /// Fields are required unless this is `Some(false)`.
@@ -100,6 +102,7 @@ impl Field {
             field_type,
             label: label.into(),
             placeholder: None,
+            description: None,
             options: None,
             required: None,
             validate: None,
@@ -130,6 +133,11 @@ impl Field {
 
     pub fn placeholder(mut self, placeholder: impl Into<String>) -> Self {
         self.placeholder = Some(placeholder.into());
+        self
+    }
+
+    pub fn description(mut self, description: impl Into<String>) -> Self {
+        self.description = Some(description.into());
         self
     }
 
@@ -164,6 +172,9 @@ impl Field {
         if let Some(placeholder) = &self.placeholder {
             metadata.insert("placeholder".into(), Value::from(placeholder.clone()));
         }
+        if let Some(description) = &self.description {
+            metadata.insert("description".into(), Value::from(description.clone()));
+        }
         if let Some(options) = &self.options {
             metadata.insert("options".into(), serde_json::to_value(options).unwrap_or(Value::Null));
         }
@@ -180,6 +191,7 @@ impl std::fmt::Debug for Field {
             .field("field_type", &self.field_type)
             .field("label", &self.label)
             .field("placeholder", &self.placeholder)
+            .field("description", &self.description)
             .field("options", &self.options)
             .field("required", &self.required)
             .field("validate", &self.validate.as_ref().map(|_| "…"))

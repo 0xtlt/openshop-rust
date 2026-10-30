@@ -26,7 +26,7 @@ struct Receipt {
 struct Warehouse {
     #[field(label = "API URL", placeholder = "https://warehouse.example.com", validate = validators::url())]
     api_url: String,
-    #[field(label = "API key", password, validate = validators::non_empty())]
+    #[field(label = "API key", password, description = "From the dashboard", validate = validators::non_empty())]
     api_key: String,
     #[field(label = "Region", select("Europe" = "eu", "United States" = "us"))]
     region: Option<String>,
@@ -127,7 +127,12 @@ fn built_by_hand() -> Provider {
                 .placeholder("https://warehouse.example.com")
                 .validate(validators::url()),
         )
-        .field("apiKey", Field::password("API key").validate(validators::non_empty()))
+        .field(
+            "apiKey",
+            Field::password("API key")
+                .description("From the dashboard")
+                .validate(validators::non_empty()),
+        )
         .field(
             "region",
             Field::select(
@@ -419,6 +424,19 @@ async fn flows_call_the_provider_and_tests_fake_it() {
         "{result:?}"
     );
     ctx.shutdown().await.unwrap();
+}
+
+#[test]
+fn a_blank_description_is_refused() {
+    let error = OpenShopConfig::builder()
+        .provider(Provider::new("warehouse").field("apiUrl", Field::text("API URL").description("  ")))
+        .build()
+        .err()
+        .expect("a blank description");
+    assert_eq!(
+        error.to_string(),
+        "[openshop] Invalid config: providers.warehouse.ui.fields.apiUrl.description must be a non-empty string"
+    );
 }
 
 #[test]
