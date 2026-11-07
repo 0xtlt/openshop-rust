@@ -5,7 +5,7 @@ Rust APIs, configuration, generated template files, database migrations, CLI
 behavior, and documented workflows, without a transition period.
 
 The crates `openshop`, `openshop-shared`, `openshop-cli`, and `openshop-ui`
-share one version number and require Rust 1.88 or newer.
+share one version number and require Rust 1.94 or newer.
 
 ## Pinning policy
 

@@ -12,14 +12,14 @@ ENV CARGO_NET_GIT_FETCH_WITH_CLI=true GIT_CONFIG_GLOBAL=/run/secrets/gitconfig
 # What builds the admin UI bundle: the WebAssembly target, trunk, and the
 # openshop CLI of the tag, branch or rev of openshop that Cargo.toml names.
 RUN rustup target add wasm32-unknown-unknown
-# trunk is checked against the checksums its v0.21.14 release publishes.
+# trunk is checked against the checksums its v0.22.1 release publishes.
 RUN set -eu; \
     case "$(uname -m)" in \
-      x86_64) sha256=f2b4680cd239693a646a2795e4633c625328d7b2a044fbe749fa3a2fe9e7036b ;; \
-      aarch64) sha256=b1d8e60e454f7fc182d9a4d95d1506ffbae947d8ba90f8f6f02da93b60f980f9 ;; \
+      x86_64) sha256=2ab8d548fd5ed9cda50906f61fd8654204e7893bd52ebbfd90533862b7d71ee1 ;; \
+      aarch64) sha256=b4017d1e0bfcffb4f4bee2be37c48def21e6e6896c3d0f503c43c42f714e57ea ;; \
       *) echo "No trunk for $(uname -m)" >&2; exit 1 ;; \
     esac; \
-    curl -fsSL -o /tmp/trunk.tar.gz "https://github.com/trunk-rs/trunk/releases/download/v0.21.14/trunk-$(uname -m)-unknown-linux-gnu.tar.gz"; \
+    curl -fsSL -o /tmp/trunk.tar.gz "https://github.com/trunk-rs/trunk/releases/download/v0.22.1/trunk-$(uname -m)-unknown-linux-gnu.tar.gz"; \
     echo "$sha256  /tmp/trunk.tar.gz" | sha256sum --check --strict -; \
     tar -xzf /tmp/trunk.tar.gz -C /usr/local/bin trunk; \
     rm /tmp/trunk.tar.gz

@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- Dependencies up to date: sqlx 0.9, reqwest 0.13 and gloo-timers 0.4, with
+  Rust 1.99.1 and trunk 0.22.1 in `mise.toml`, CI and the generated
+  `Dockerfile`. Breaking changes:
+  - OpenShop needs Rust 1.94 or newer (was 1.88), the version sqlx 0.9 needs.
+  - TLS goes through rustls with aws-lc-rs, for PostgreSQL and HTTP alike,
+    instead of ring; reqwest checks certificates against the platform's
+    roots.
+  - The `sqlx` an application gets from `openshop::sqlx` is 0.9: a query built
+    at run time is passed as `sqlx::AssertSqlSafe(sql)`, and `QueryBuilder`
+    has no lifetime parameter.
 - The fields of a provider and of a function accept a description, help text
   the admin shows below the input to give context or instructions
   (0xtlt/OpenShop#39): `#[field(description = "…")]`, or

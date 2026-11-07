@@ -170,7 +170,7 @@ async fn insert_grants(
     }
     // Distinct timestamps keep the order in which permissions were selected.
     let now = Utc::now();
-    let mut insert: QueryBuilder<'_, Postgres> = QueryBuilder::new(
+    let mut insert: QueryBuilder<Postgres> = QueryBuilder::new(
         "INSERT INTO mcp_permission_grants (app_handle, shop, token_id, permission_key, granted, created_at) ",
     );
     insert.push_values(permissions.iter().enumerate(), |mut row, (index, permission)| {

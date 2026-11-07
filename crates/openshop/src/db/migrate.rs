@@ -133,13 +133,13 @@ async fn ensure_migrations_table(pool: &PgPool) -> Result<()> {
     // the same time, so concurrent migrators create it under the migration lock.
     let mut tx = pool.begin().await?;
     sqlx::query(MIGRATION_LOCK).execute(&mut *tx).await?;
-    sqlx::query(&format!(
+    sqlx::query(sqlx::AssertSqlSafe(format!(
         "CREATE TABLE IF NOT EXISTS {MIGRATIONS_TABLE} (\
            tag text PRIMARY KEY, \
            checksum text NOT NULL, \
            applied_at timestamp with time zone DEFAULT now() NOT NULL\
          )"
-    ))
+    )))
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;
@@ -149,7 +149,7 @@ async fn ensure_migrations_table(pool: &PgPool) -> Result<()> {
 async fn applied_migrations(pool: &PgPool) -> Result<Vec<(String, String)>> {
     ensure_migrations_table(pool).await?;
     Ok(
-        sqlx::query_as(&format!("SELECT tag, checksum FROM {MIGRATIONS_TABLE} ORDER BY tag"))
+        sqlx::query_as(sqlx::AssertSqlSafe(format!("SELECT tag, checksum FROM {MIGRATIONS_TABLE} ORDER BY tag")))
             .fetch_all(pool)
             .await?,
     )
@@ -204,7 +204,7 @@ pub async fn assert_migrated(pool: &PgPool, cwd: &Path) -> Result<()> {
         );
     }
 
-    let applied: Vec<(String,)> = match sqlx::query_as(&format!("SELECT tag FROM {MIGRATIONS_TABLE}"))
+    let applied: Vec<(String,)> = match sqlx::query_as(sqlx::AssertSqlSafe(format!("SELECT tag FROM {MIGRATIONS_TABLE}")))
         .fetch_all(pool)
         .await
     {
@@ -245,7 +245,7 @@ pub async fn migrate_schema(pool: &PgPool, cwd: &Path) -> Result<Vec<String>> {
         // Serialize concurrent migrators (several replicas deploying at once).
         sqlx::query(MIGRATION_LOCK).execute(&mut *tx).await?;
         let applied: Vec<(String, String)> =
-            sqlx::query_as(&format!("SELECT tag, checksum FROM {MIGRATIONS_TABLE} WHERE tag = $1"))
+            sqlx::query_as(sqlx::AssertSqlSafe(format!("SELECT tag, checksum FROM {MIGRATIONS_TABLE} WHERE tag = $1")))
                 .bind(&file.tag)
                 .fetch_all(&mut *tx)
                 .await?;
@@ -255,12 +255,12 @@ pub async fn migrate_schema(pool: &PgPool, cwd: &Path) -> Result<Vec<String>> {
 
         // Called through `Executor` so that the future of this function stays `Send`.
         (&mut *tx)
-            .execute(sqlx::raw_sql(&file.sql))
+            .execute(sqlx::raw_sql(sqlx::AssertSqlSafe(&*file.sql)))
             .await
             .with_context(|| format!("[openshop] Migration \"{}\" failed", file.tag))?;
-        sqlx::query(&format!(
+        sqlx::query(sqlx::AssertSqlSafe(format!(
             "INSERT INTO {MIGRATIONS_TABLE} (tag, checksum) VALUES ($1, $2)"
-        ))
+        )))
         .bind(&file.tag)
         .bind(&file.checksum)
         .execute(&mut *tx)
@@ -496,12 +496,12 @@ pub async fn push_schema(pool: &PgPool, models: &[Table], production: bool) -> R
 
     // A fresh database, or one that is up to date, takes everything in one round trip.
     let together: Vec<&str> = steps.iter().map(|step| step.sql.as_str()).collect();
-    if sqlx::raw_sql(&together.join("\n")).execute(pool).await.is_ok() {
+    if sqlx::raw_sql(sqlx::AssertSqlSafe(&*together.join("\n"))).execute(pool).await.is_ok() {
         return Ok(());
     }
     // Something cannot be added to an existing table: apply the rest, and say what is left to a migration.
     for step in steps {
-        match (sqlx::raw_sql(&step.sql).execute(pool).await, step.addition) {
+        match (sqlx::raw_sql(sqlx::AssertSqlSafe(&*step.sql)).execute(pool).await, step.addition) {
             (Ok(_), _) => {}
             (Err(error), None) => return Err(error.into()),
             (Err(error), Some((table, what))) => tracing::warn!(

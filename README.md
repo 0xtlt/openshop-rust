@@ -13,7 +13,7 @@ generated files, and workflows change without a transition period before `1.0`.
 
 ## Start here
 
-You need Rust 1.88+, PostgreSQL 17, the Shopify CLI, and access to a
+You need Rust 1.94+, PostgreSQL 17, the Shopify CLI, and access to a
 development store.
 
 ```bash

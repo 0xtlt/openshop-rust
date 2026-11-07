@@ -129,7 +129,7 @@ impl Shopify {
                         .connect_with((*options).clone())
                         .await
                         .unwrap();
-                    sqlx::query(&sql).execute(&pool).await.unwrap();
+                    sqlx::query(sqlx::AssertSqlSafe(&*sql)).execute(&pool).await.unwrap();
                     pool.close().await;
                 });
             })

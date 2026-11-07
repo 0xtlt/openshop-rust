@@ -215,7 +215,11 @@ async fn race_winner(ctx: &TestContext, run_id: Uuid, statement: &str) -> RaceWi
         .fetch_one(&mut *tx)
         .await
         .unwrap();
-    sqlx::query(statement).bind(run_id).execute(&mut *tx).await.unwrap();
+    sqlx::query(sqlx::AssertSqlSafe(statement))
+        .bind(run_id)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
     RaceWinner { tx, pid }
 }
 
@@ -1037,13 +1041,13 @@ async fn post_run_cancel_signals_the_worker_before_the_cancellation_is_visible(c
     let run_id = seed_run(ctx, "test-flow", "running", base_time()).await;
     let abort = register_abort(&run_id.to_string(), None);
     let key = i64::from(Uuid::new_v4().as_u128() as u32);
-    sqlx::raw_sql(&format!(
+    sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
         "CREATE FUNCTION hold_cancellation() RETURNS trigger LANGUAGE plpgsql AS $$ \
          BEGIN PERFORM pg_advisory_lock({key}); PERFORM pg_advisory_unlock({key}); RETURN NULL; END $$; \
          CREATE CONSTRAINT TRIGGER hold_cancellation AFTER UPDATE ON flow_runs \
            DEFERRABLE INITIALLY DEFERRED FOR EACH ROW WHEN (NEW.status = 'canceled') \
            EXECUTE FUNCTION hold_cancellation();"
-    ))
+    )))
     .execute(&ctx.db)
     .await
     .unwrap();
@@ -2248,7 +2252,7 @@ async fn a_malformed_encryption_key_refuses_to_store_secrets() {
 
     // Neither the provider credentials nor the exchanged access token reach the database.
     for table in ["provider_configs", "installations"] {
-        let (rows,): (i64,) = sqlx::query_as(&format!("SELECT count(*) FROM {table}"))
+        let (rows,): (i64,) = sqlx::query_as(sqlx::AssertSqlSafe(format!("SELECT count(*) FROM {table}")))
             .fetch_one(&ctx.db)
             .await
             .unwrap();
