@@ -1,0 +1,35 @@
+name: Bug
+description: Something does not work as the documentation says.
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happens
+      description: What you did, what you expected, and what happened instead. Paste errors and logs as text.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: How to reproduce
+      description: The smallest app or test that shows it, or the steps from `openshop init`.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: OpenShop version or commit
+      placeholder: "0.0.12-beta.0, or the rev in Cargo.toml"
+    validations:
+      required: true
+  - type: dropdown
+    id: template
+    attributes:
+      label: Template
+      options: [minimal, custom, public, not from a template]
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: OS, `rustc --version`, PostgreSQL version.

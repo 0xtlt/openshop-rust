@@ -1,0 +1,16 @@
+name: Feature
+description: Something OpenShop should let an app do.
+labels: [enhancement]
+body:
+  - type: textarea
+    id: need
+    attributes:
+      label: What you need
+      description: The integration you are building and what blocks it today.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What it could look like
+      description: The API or the behavior you have in mind, if any.
