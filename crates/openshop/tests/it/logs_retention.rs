@@ -11,12 +11,12 @@ use sqlx::PgPool;
 
 /// `count` lines created `days` days ago, and the same number now.
 async fn seed(db: &PgPool, count: i32, days: i32) {
-    sqlx::raw_sql(&format!(
+    sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
         "INSERT INTO logs (flow_run_id, level, message, created_at) \
          SELECT 'run-' || n, 'info', 'old', now() - make_interval(days => {days}) FROM generate_series(1, {count}) AS n; \
          INSERT INTO logs (flow_run_id, level, message) \
          SELECT 'run-' || n, 'info', 'recent' FROM generate_series(1, {count}) AS n"
-    ))
+    )))
     .execute(db)
     .await
     .unwrap();

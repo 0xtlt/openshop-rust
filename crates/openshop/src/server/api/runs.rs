@@ -54,7 +54,7 @@ async fn list_runs_for(
     }
     let param = |name: &str| query.get(name).filter(|value| !value.is_empty());
 
-    let mut sql: QueryBuilder<'_, Postgres> = QueryBuilder::new("SELECT * FROM flow_runs WHERE app_handle = ");
+    let mut sql: QueryBuilder<Postgres> = QueryBuilder::new("SELECT * FROM flow_runs WHERE app_handle = ");
     sql.push_bind(&session.shopify_app);
     sql.push(" AND shop = ").push_bind(&session.shop);
     if let Some(flow_name) = flow_name {

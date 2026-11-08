@@ -166,6 +166,8 @@ async fn main() -> Result<()> {
 }
 
 async fn execute(pool: &openshop::PgPool, sql: &str) -> Result<()> {
-    openshop::sqlx::raw_sql(sql).execute(pool).await?;
+    openshop::sqlx::raw_sql(openshop::sqlx::AssertSqlSafe(sql))
+        .execute(pool)
+        .await?;
     Ok(())
 }

@@ -87,7 +87,7 @@ pub trait Bindable: for<'q> Encode<'q, Postgres> + Type<Postgres> + Send + 'stat
 impl<T> Bindable for T where T: for<'q> Encode<'q, Postgres> + Type<Postgres> + Send + 'static {}
 
 /// The query under construction that generated code appends to.
-pub type SqlBuilder = QueryBuilder<'static, Postgres>;
+pub type SqlBuilder = QueryBuilder<Postgres>;
 
 /// A struct read from the rows of a table, each known by its `id`.
 ///

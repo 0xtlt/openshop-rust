@@ -1044,9 +1044,9 @@ async fn expires_runs_past_their_deadline() {
         "status = 'running', worker_id = 'gone', attempts = 1, available_at = now() + interval '1 hour'",
     ] {
         let run_id = dispatch(&test, "guarded-flow").await;
-        sqlx::query(&format!(
+        sqlx::query(sqlx::AssertSqlSafe(format!(
             "UPDATE flow_runs SET deadline_at = now() - interval '1 hour', {state} WHERE id = $1"
-        ))
+        )))
         .bind(run_id)
         .execute(&test.db)
         .await
@@ -1772,13 +1772,13 @@ async fn a_heartbeat_that_cannot_extend_the_lease_is_logged_and_stops_the_run_be
 
 /// Makes the release of the run `run_id` wait, as a lock held by someone else would.
 async fn delay_release(test: &TestApp, run_id: Uuid) {
-    sqlx::raw_sql(&format!(
+    sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
         "CREATE FUNCTION hold_release() RETURNS trigger LANGUAGE plpgsql AS $$ \
          BEGIN PERFORM pg_sleep(30); RETURN NEW; END $$; \
          CREATE TRIGGER hold_release BEFORE UPDATE ON flow_runs FOR EACH ROW \
            WHEN (OLD.id = '{run_id}' AND OLD.status = 'running' AND NEW.status = 'pending') \
            EXECUTE FUNCTION hold_release()"
-    ))
+    )))
     .execute(&test.db)
     .await
     .unwrap();

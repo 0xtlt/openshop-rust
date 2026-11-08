@@ -164,11 +164,11 @@ pub(crate) async fn store_access_token(
     reinstall: bool,
 ) -> anyhow::Result<()> {
     let restart = if reinstall { ", nonce = NULL, installed_at = now()" } else { "" };
-    sqlx::query(&format!(
+    sqlx::query(sqlx::AssertSqlSafe(format!(
         "INSERT INTO installations (app_handle, shop, access_token, scopes) VALUES ($1, $2, $3, $4) \
          ON CONFLICT (app_handle, shop) DO UPDATE SET \
            access_token = EXCLUDED.access_token, scopes = EXCLUDED.scopes, uninstalled_at = NULL{restart}"
-    ))
+    )))
     .bind(shopify_app)
     .bind(shop)
     .bind(app.crypto().encrypt_string(&token.access_token)?)

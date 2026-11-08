@@ -9,7 +9,7 @@ the records to a real warehouse.
 
 Have these ready:
 
-- Rust **1.88** or newer, with Cargo. Check with `rustc --version`.
+- Rust **1.94** or newer, with Cargo. Check with `rustc --version`.
 - Docker with its daemon running. We will use a PostgreSQL **17** container.
 - [Shopify CLI](https://shopify.dev/docs/api/shopify-cli) installed and available as `shopify`.
 - A Shopify development store and an account allowed to create and install an app on it.

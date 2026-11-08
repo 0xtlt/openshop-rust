@@ -21,7 +21,7 @@ admin UI, saved provider credentials, background workers, schedules, and run log
 
 [Build your first app](tutorials/first-app.md) to create a project, install it on a
 Shopify development store, and run its sample integration. You will need Rust
-1.88 or newer, PostgreSQL 17, and Shopify CLI.
+1.94 or newer, PostgreSQL 17, and Shopify CLI.
 
 A typical integration has three parts:
 

@@ -283,11 +283,12 @@ async fn assert_one_run_per_claim(test: &TestApp, column: &str, kind: impl Fn(&F
         *run_counts.entry(kind(run)).or_default() += 1;
     }
     let mut runs_per_kind: Vec<i64> = run_counts.into_values().collect();
-    let mut claims_per_kind: Vec<i64> =
-        sqlx::query_scalar(&format!("SELECT count(*) FROM cron_ticks GROUP BY {column}"))
-            .fetch_all(&test.db)
-            .await
-            .unwrap();
+    let mut claims_per_kind: Vec<i64> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+        "SELECT count(*) FROM cron_ticks GROUP BY {column}"
+    )))
+    .fetch_all(&test.db)
+    .await
+    .unwrap();
     runs_per_kind.sort();
     claims_per_kind.sort();
     assert_eq!(runs_per_kind, claims_per_kind, "runs and claimed occurrences differ");

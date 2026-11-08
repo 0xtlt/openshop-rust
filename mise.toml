@@ -1,8 +1,8 @@
 # Toolchain + tasks for OpenShop. Run `mise install` once, then `mise run <task>`.
 [tools]
-rust = { version = "1.98.1", components = "clippy,rustfmt", targets = "wasm32-unknown-unknown" }
+rust = { version = "1.99.1", components = "clippy,rustfmt", targets = "wasm32-unknown-unknown" }
 # Builds the admin UI bundles (`crates/openshop-ui`, the templates in `templates/`).
-"github:trunk-rs/trunk" = "0.21.14"
+"github:trunk-rs/trunk" = "0.22.1"
 # Builds the documentation in `docs/`.
 mdbook = "0.5.4"
 

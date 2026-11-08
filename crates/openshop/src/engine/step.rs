@@ -155,7 +155,7 @@ impl StepExecutor {
             owned(6, 7, 8)
         );
         let written = retry(format!("storing the state of step {step_id}"), || async {
-            let result = sqlx::query(&sql)
+            let result = sqlx::query(sqlx::AssertSqlSafe(&*sql))
                 .bind(status)
                 .bind(&output)
                 .bind(error)
@@ -247,7 +247,7 @@ impl StepExecutor {
             owned(1, 4, 5)
         );
         let inserted: Result<Option<(Uuid,)>> = retry(format!("starting step \"{name}\""), || async {
-            let result = sqlx::query_as(&insert)
+            let result = sqlx::query_as(sqlx::AssertSqlSafe(&*insert))
                 .bind(&self.flow_run_id)
                 .bind(name)
                 .bind(self.attempt)
@@ -412,7 +412,7 @@ impl StepExecutor {
             owned(1, 5, 6)
         );
         let inserted = retry(format!("suspending at step \"{name}\""), || async {
-            let result = sqlx::query(&insert)
+            let result = sqlx::query(sqlx::AssertSqlSafe(&*insert))
                 .bind(&self.flow_run_id)
                 .bind(name)
                 .bind(self.attempt)

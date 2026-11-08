@@ -94,7 +94,7 @@ impl TestDb {
         let schema = format!("test_{}", uuid::Uuid::new_v4().simple());
 
         let mut connection = connect(&options).await?;
-        sqlx::raw_sql(&format!("CREATE SCHEMA \"{schema}\""))
+        sqlx::raw_sql(sqlx::AssertSqlSafe(format!("CREATE SCHEMA \"{schema}\"")))
             .execute(&mut connection)
             .await?;
         connection.close().await?;
@@ -123,7 +123,7 @@ impl TestDb {
 
 async fn drop_schema(options: &PgConnectOptions, schema: &str) -> Result<()> {
     let mut connection = PgConnection::connect_with(options).await?;
-    sqlx::raw_sql(&format!("DROP SCHEMA IF EXISTS \"{schema}\" CASCADE"))
+    sqlx::raw_sql(sqlx::AssertSqlSafe(format!("DROP SCHEMA IF EXISTS \"{schema}\" CASCADE")))
         .execute(&mut connection)
         .await?;
     connection.close().await?;

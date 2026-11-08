@@ -525,7 +525,7 @@ impl Inner {
     /// Gives the run back to the queue, if this worker still holds the claim.
     async fn release_run(&self, run_id: Uuid, lease_id: Option<Uuid>) -> Result<bool> {
         let statement = bounded(RELEASE_TIMEOUT, &release_sql(run_id, &self.worker_id, lease_id));
-        let release = sqlx::raw_sql(&statement).execute(self.app.db());
+        let release = sqlx::raw_sql(sqlx::AssertSqlSafe(&*statement)).execute(self.app.db());
         match tokio::time::timeout(RELEASE_TIMEOUT, release).await {
             Ok(result) => Ok(result?.rows_affected() > 0),
             Err(_) => Err(anyhow::anyhow!("timed out after {}ms", RELEASE_TIMEOUT.as_millis())),
@@ -634,7 +634,7 @@ impl Inner {
     async fn extend_lease(&self, run_id: Uuid, lease_id: Option<Uuid>) -> Result<bool> {
         let limit = self.heartbeat_timeout();
         let statement = bounded(limit, &heartbeat_sql(self.lease_ms(), run_id, &self.worker_id, lease_id));
-        let extend = sqlx::raw_sql(&statement).execute(self.app.db());
+        let extend = sqlx::raw_sql(sqlx::AssertSqlSafe(&*statement)).execute(self.app.db());
         match tokio::time::timeout(limit, extend).await {
             Ok(result) => Ok(result?.rows_affected() > 0),
             Err(_) => Err(anyhow::anyhow!("timed out after {}ms", limit.as_millis())),
@@ -673,7 +673,7 @@ mod tests {
     /// The plan PostgreSQL chooses for a statement of the worker, as JSON text.
     async fn plan(db: &TestDb, statement: &str, limit: Option<i64>) -> String {
         let explain = format!("EXPLAIN (FORMAT JSON) {statement}");
-        let mut query = sqlx::query_as(&explain);
+        let mut query = sqlx::query_as(sqlx::AssertSqlSafe(&*explain));
         if let Some(limit) = limit {
             query = query.bind("worker").bind(30_000_i64).bind(limit);
         }

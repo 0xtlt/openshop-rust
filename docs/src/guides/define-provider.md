@@ -16,7 +16,7 @@ already lists. This is the version and feature set OpenShop itself uses, so
 nothing is compiled twice:
 
 ```toml
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
 ```
 
 A provider is a struct. Its fields are the configuration a merchant saves, and

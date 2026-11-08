@@ -114,10 +114,10 @@ impl Drop for TempProject {
 /// A database without any table, as before the first deployment.
 pub async fn empty_database() -> TestDb {
     let db = TestDb::create().await.unwrap();
-    sqlx::raw_sql(&format!(
+    sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
         "DROP SCHEMA \"{0}\" CASCADE; CREATE SCHEMA \"{0}\"",
         db.schema
-    ))
+    )))
     .execute(&db.pool)
     .await
     .unwrap();
@@ -155,7 +155,7 @@ pub async fn shop_connectors(ctx: &TestContext) -> openshop::Connectors {
 /// connection does (SQLSTATE 08006): the first `failures` of them, or all of
 /// them until [`heal_write_fault`]. No code of the framework is involved.
 pub async fn inject_write_fault(db: &PgPool, table: &str, when: &str, failures: i64) {
-    sqlx::raw_sql(&format!(
+    sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
         "CREATE SEQUENCE fault_{table}_hits; \
          CREATE FUNCTION fault_{table}() RETURNS trigger LANGUAGE plpgsql AS $$ \
          BEGIN \
@@ -166,7 +166,7 @@ pub async fn inject_write_fault(db: &PgPool, table: &str, when: &str, failures: 
          END $$; \
          CREATE TRIGGER fault BEFORE UPDATE ON {table} FOR EACH ROW WHEN ({when}) \
            EXECUTE FUNCTION fault_{table}()"
-    ))
+    )))
     .execute(db)
     .await
     .expect("fault trigger");
@@ -174,7 +174,7 @@ pub async fn inject_write_fault(db: &PgPool, table: &str, when: &str, failures: 
 
 /// Removes the fault of [`inject_write_fault`].
 pub async fn heal_write_fault(db: &PgPool, table: &str) {
-    sqlx::raw_sql(&format!("DROP TRIGGER fault ON {table}"))
+    sqlx::raw_sql(sqlx::AssertSqlSafe(format!("DROP TRIGGER fault ON {table}")))
         .execute(db)
         .await
         .expect("drop fault trigger");
@@ -182,10 +182,12 @@ pub async fn heal_write_fault(db: &PgPool, table: &str) {
 
 /// How many updates the fault of [`inject_write_fault`] has seen.
 pub async fn write_fault_hits(db: &PgPool, table: &str) -> i64 {
-    let (hits,): (i64,) = sqlx::query_as(&format!("SELECT last_value FROM fault_{table}_hits"))
-        .fetch_one(db)
-        .await
-        .unwrap();
+    let (hits,): (i64,) = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "SELECT last_value FROM fault_{table}_hits"
+    )))
+    .fetch_one(db)
+    .await
+    .unwrap();
     hits
 }
 

@@ -20,7 +20,7 @@ const STATEMENT_TIMEOUT: &str = "10s";
 /// reads, and ends with a rollback when it is dropped.
 async fn bounded(db: &PgPool) -> Result<Transaction<'static, Postgres>> {
     let mut tx = db.begin().await?;
-    sqlx::query(&format!("SET LOCAL statement_timeout = '{STATEMENT_TIMEOUT}'"))
+    sqlx::query(sqlx::AssertSqlSafe(format!("SET LOCAL statement_timeout = '{STATEMENT_TIMEOUT}'")))
         .execute(&mut *tx)
         .await?;
     Ok(tx)
@@ -98,7 +98,7 @@ impl Range {
     }
 }
 
-type Sql = QueryBuilder<'static, Postgres>;
+type Sql = QueryBuilder<Postgres>;
 
 /// Where a page of results stops: the last row it showed. Rows are ordered by
 /// `created_at` and then `id`, so rows created at the same instant are neither
@@ -394,7 +394,7 @@ async fn tallies(db: &PgPool, column: &str, since: DateTime<Utc>, only_failing: 
     } else {
         ""
     };
-    Ok(sqlx::query_as(&format!(
+    Ok(sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT {column} AS name, count(*) AS runs, count(*) FILTER (WHERE status = 'failed') AS failed, \
                 (avg(extract(epoch FROM (completed_at - started_at))) FILTER ( \
                   WHERE started_at IS NOT NULL AND completed_at IS NOT NULL \
@@ -402,7 +402,7 @@ async fn tallies(db: &PgPool, column: &str, since: DateTime<Utc>, only_failing: 
                 max(created_at) AS latest \
          FROM flow_runs WHERE created_at >= $1 GROUP BY 1{failing} \
          ORDER BY failed DESC, runs DESC, name ASC LIMIT $2",
-    ))
+    )))
     .bind(since)
     .bind(limit)
     .fetch_all(&mut *tx)

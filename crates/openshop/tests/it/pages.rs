@@ -63,7 +63,7 @@ fn mcp_initialize(ctx: &TestContext, token: &str) -> RequestBuilder {
 }
 
 async fn count(ctx: &TestContext, table: &str) -> i64 {
-    let (rows,): (i64,) = sqlx::query_as(&format!("SELECT count(*) FROM {table}"))
+    let (rows,): (i64,) = sqlx::query_as(sqlx::AssertSqlSafe(format!("SELECT count(*) FROM {table}")))
         .fetch_one(&ctx.db)
         .await
         .unwrap();
