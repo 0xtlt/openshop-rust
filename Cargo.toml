@@ -59,7 +59,7 @@ sha2 = "0.11"
 # The Shopify Admin API: the GraphQL client and `graphql!`, tokens, OAuth,
 # session tokens, app proxies and webhooks. Without its HTTP client: its
 # requests go through the `reqwest` of the workspace (`ReqwestTransport`).
-shopify_api = { version = "=1.0.0-rc.3", default-features = false, features = ["oauth", "webhooks"] }
+shopify_api = { version = "=1.0.0-rc.4", default-features = false, features = ["oauth", "webhooks"] }
 sqlx = { version = "0.9", default-features = false, features = ["chrono", "derive", "json", "postgres", "runtime-tokio", "tls-rustls-aws-lc-rs", "uuid"] }
 subtle = "2"
 syn = { version = "3", features = ["full"] }
@@ -98,10 +98,3 @@ opt-level = 3
 lto = "thin"
 codegen-units = 1
 strip = "debuginfo"
-
-# shopify_api from a commit of its repository (0xtlt/shopify_api#34), until the
-# release with `admin_origin`, which `LSF_URL` needs, is published: then the
-# release instead, and no patch. `shopify_api_macros` and `shopify_api_graphql`
-# come from the same commit.
-[patch.crates-io]
-shopify_api = { git = "https://github.com/0xtlt/shopify_api", rev = "40876f217cddf90bd9d28db0596aefa9bb6ed532" }

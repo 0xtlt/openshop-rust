@@ -358,8 +358,8 @@ fn follow_the_tables(item: &mut Item) {
 }
 
 /// The manifest of a project made from a template: a package of its own, the
-/// dependencies of the template with their source, and the profiles and
-/// patches of the workspace, which a member of it cannot declare.
+/// dependencies of the template with their source, and the profiles of the
+/// workspace, which a member of it cannot declare.
 fn project_manifest(template: &str, package_name: &str, openshop: &str) -> Result<String> {
     let mut manifest = parse_manifest(template, "The manifest of the template")?;
     let openshop = openshop_dependency(openshop)?;
@@ -411,14 +411,10 @@ fn project_manifest(template: &str, package_name: &str, openshop: &str) -> Resul
     manifest.remove("lints");
 
     let workspace = parse_manifest(WORKSPACE_MANIFEST, "The manifest of the workspace")?;
-    // A patch applies to the workspace that declares it only: the project
-    // builds `openshop` with the crates the workspace patched in, or not at all.
-    for section in ["profile", "patch"] {
-        if let Some(tables) = workspace.get(section) {
-            let mut tables = tables.clone();
-            follow_the_tables(&mut tables);
-            manifest.insert(section, tables);
-        }
+    if let Some(profiles) = workspace.get("profile") {
+        let mut profiles = profiles.clone();
+        follow_the_tables(&mut profiles);
+        manifest.insert("profile", profiles);
     }
     Ok(manifest.to_string().trim_end().to_string() + "\n")
 }
@@ -1365,26 +1361,6 @@ other = "1""#
             "[package]\nname = \"shop\"\nversion = \"0.1.0\"\nedition = \"2024\"\npublish = false\n\n[dependencies]\nopenshop = { path = \"/openshop\", features = [\"ui\"] }\nserde = { version = \"1\", features = [\"derive\"] }\nregex = { version = \"1\", features = [\"unicode\"] }\n# The views.\nleptos = \"0.8\"\n\n[dev-dependencies]\nopenshop = { path = \"/openshop\", features = [\"testing\"] }"
         );
         assert!(profiles.contains("[profile.release]"));
-
-        // The patches of the workspace, whatever they are: a project builds
-        // `openshop` with the same crates.
-        let patches = |manifest: &str| -> Vec<(String, String, String)> {
-            let manifest = parse_manifest(manifest, "").unwrap();
-            let Some(registries) = manifest.get("patch").and_then(Item::as_table_like) else {
-                return Vec::new();
-            };
-            let mut patches = Vec::new();
-            for (registry, crates) in registries.iter() {
-                for (name, source) in crates.as_table_like().unwrap().iter() {
-                    let mut source = source.as_value().unwrap().clone();
-                    source.decor_mut().clear();
-                    patches.push((registry.to_string(), name.to_string(), source.to_string()));
-                }
-            }
-            patches
-        };
-        let project = project_manifest(template, "shop", "path = \"/openshop\"").unwrap();
-        assert_eq!(patches(&project), patches(WORKSPACE_MANIFEST));
 
         let error = project_manifest(
             "[dependencies]\nsqlx = { workspace = true, features = [\"uuid\"] }\n",
