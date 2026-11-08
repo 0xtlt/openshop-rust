@@ -2,6 +2,7 @@
 //! changes, or a crate on disk it is compiled with.
 
 use std::path::{Path, PathBuf};
+use std::process::{ExitStatus, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -18,6 +19,14 @@ const WATCHED_DIRECTORIES: [&str; 2] = ["src", "migrations"];
 const DEBOUNCE: Duration = Duration::from_millis(500);
 /// A worker may be finishing a flow run: give it one lease before killing it.
 const PROCESS_EXIT_GRACE: Duration = Duration::from_secs(35);
+/// How long the processes of the app have to go once killed.
+const KILL_WAIT: Duration = Duration::from_secs(5);
+/// How often a stopping app, or a port, is looked at again.
+const POLL: Duration = Duration::from_millis(100);
+/// How long a port that is still taken is waited for before saying so.
+const PORT_WAIT: Duration = Duration::from_secs(5);
+/// The port of `dev` when `PORT` is not set.
+const DEFAULT_PORT: u16 = 3000;
 
 /// Whether a change to a top-level file should restart the app.
 fn is_watched_root_file(name: &str) -> bool {
@@ -127,11 +136,219 @@ fn requested_package(cargo_args: &[String]) -> Option<&str> {
     None
 }
 
+/// The port the app listens on: `PORT`, else the `PORT` of `.env`, which the
+/// app loads for a variable the environment does not set, else 3000. `0` is
+/// not a port, as for the app.
+fn app_port(env_port: Option<&str>, dot_env: Option<&str>) -> u16 {
+    let parse = |value: &str| value.trim().parse::<u16>().ok().filter(|port| *port != 0);
+    match env_port {
+        Some(value) => parse(value),
+        None => dot_env
+            .and_then(|content| {
+                content.lines().find_map(|line| {
+                    let line = line.trim();
+                    let line = line
+                        .strip_prefix("export")
+                        .filter(|rest| rest.starts_with(char::is_whitespace))
+                        .map_or(line, str::trim_start);
+                    let (key, value) = line.split_once('=')?;
+                    (key.trim_end() == "PORT").then(|| value.trim().trim_matches(|quote| quote == '"' || quote == '\''))
+                })
+            })
+            .and_then(parse),
+    }
+    .unwrap_or(DEFAULT_PORT)
+}
+
+/// Whether another process listens on `port`, on every address or on the
+/// loopback one: binding it as the app does fails.
+fn port_taken(port: u16) -> bool {
+    let in_use = |address: &str| {
+        matches!(
+            std::net::TcpListener::bind((address, port)),
+            Err(error) if error.kind() == std::io::ErrorKind::AddrInUse
+        )
+    };
+    in_use("0.0.0.0") || in_use("127.0.0.1")
+}
+
+/// The process that listens on `port`, `PID 123 (name)`, when `lsof` can say.
+async fn port_holder(port: u16) -> Option<String> {
+    let output = Command::new("lsof")
+        .args(["-nP", &format!("-iTCP:{port}"), "-sTCP:LISTEN", "-Fpc"])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .await
+        .ok()?;
+    let text = String::from_utf8_lossy(&output.stdout);
+    let field = |prefix: char| {
+        text.lines()
+            .find_map(|line| line.strip_prefix(prefix))
+            .map(str::to_string)
+    };
+    let pid = field('p')?;
+    Some(match field('c') {
+        Some(name) => format!("PID {pid} ({name})"),
+        None => format!("PID {pid}"),
+    })
+}
+
+/// Waits for `port` to be free, for up to [`PORT_WAIT`]. When it is still
+/// taken, says so loudly: the app started now cannot listen on it, and what
+/// answers there is not its code.
+async fn check_port(port: u16) {
+    let deadline = tokio::time::Instant::now() + PORT_WAIT;
+    while port_taken(port) {
+        if tokio::time::Instant::now() >= deadline {
+            let holder = port_holder(port).await.map_or_else(
+                || "another process".to_string(),
+                |holder| format!("another process, {holder}"),
+            );
+            eprintln!(
+                "\n[openshop] !!! Port {port} is still taken, by {holder}.\n\
+                 [openshop] !!! The app starting now cannot listen on it: what answers on http://localhost:{port} is NOT this code.\n\
+                 [openshop] !!! Stop that process (`lsof -nP -iTCP:{port} -sTCP:LISTEN` names it), then save a file to restart.\n"
+            );
+            return;
+        }
+        tokio::time::sleep(POLL).await;
+    }
+}
+
+/// Sends `signal` (`-TERM`, `-KILL`, `-0` to only ask whether it is there)
+/// to every process of the group `group`. False when no process of it was
+/// there to receive it.
+#[cfg(unix)]
+async fn signal_group(group: u32, signal: &str) -> bool {
+    Command::new("kill")
+        .args([signal, "--", &format!("-{group}")])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .await
+        .is_ok_and(|status| status.success())
+}
+
+/// The app as `dev` runs it: `cargo run`, and what that starts.
+///
+/// `cargo run` may not be the app itself. Cargo replaces itself with the app
+/// on unix, but a `cargo` on the `PATH` may be a wrapper that runs the real one
+/// as its child (a shim of a tool manager), and so may a `runner` of the cargo
+/// configuration: a signal to the process `dev` started would not reach the
+/// app, which would keep its port and serve the code it was built from. On
+/// unix the process leads a process group of its own, which what it starts
+/// joins, and the group is what is stopped and waited for.
+struct AppProcess {
+    child: Child,
+    /// The process group of the app: the id of the process `dev` started.
+    #[cfg(unix)]
+    group: Option<u32>,
+    /// Every process of the group is gone: nothing is left to kill when this is dropped.
+    gone: bool,
+    /// Its exit was told, when it exited by itself.
+    exit_reported: bool,
+}
+
+impl AppProcess {
+    /// Starts `command` as the app: in a process group of its own on unix,
+    /// without the terminal's input, which a process outside the group of
+    /// the terminal may not read.
+    fn spawn(command: &mut Command) -> std::io::Result<Self> {
+        command.stdin(Stdio::null()).kill_on_drop(true);
+        #[cfg(unix)]
+        command.process_group(0);
+        let child = command.spawn()?;
+        Ok(Self {
+            #[cfg(unix)]
+            group: child.id(),
+            child,
+            gone: false,
+            exit_reported: false,
+        })
+    }
+
+    /// How the process `dev` started exited, once it has: a wrapper may
+    /// leave the app behind it, which [`AppProcess::stop`] stops.
+    fn exited(&mut self) -> Option<ExitStatus> {
+        self.child.try_wait().ok().flatten()
+    }
+
+    /// Whether a process of the app is still there.
+    async fn running(&mut self) -> bool {
+        // The process `dev` started is reaped first: until it is, it is
+        // still a member of its group.
+        let exited = self.exited().is_some();
+        #[cfg(unix)]
+        if let Some(group) = self.group {
+            return signal_group(group, "-0").await;
+        }
+        !exited
+    }
+
+    /// Waits for every process of the app to be gone, for up to `timeout`.
+    async fn gone_within(&mut self, timeout: Duration) -> bool {
+        let deadline = tokio::time::Instant::now() + timeout;
+        while self.running().await {
+            if tokio::time::Instant::now() >= deadline {
+                return false;
+            }
+            tokio::time::sleep(POLL).await;
+        }
+        self.gone = true;
+        true
+    }
+
+    /// Asks every process of the app to shut down gracefully, waits for them
+    /// for up to `grace`, then kills them. False when some are still there.
+    async fn stop(&mut self, grace: Duration) -> bool {
+        if !self.running().await {
+            self.gone = true;
+            return true;
+        }
+        #[cfg(unix)]
+        if let Some(group) = self.group {
+            signal_group(group, "-TERM").await;
+            if self.gone_within(grace).await {
+                return true;
+            }
+            eprintln!("[openshop] Force-killing stale app process");
+            signal_group(group, "-KILL").await;
+            let _ = self.child.kill().await;
+            return self.gone_within(KILL_WAIT).await;
+        }
+        let _ = grace;
+        let _ = self.child.kill().await;
+        self.gone_within(KILL_WAIT).await
+    }
+}
+
+impl Drop for AppProcess {
+    /// `dev` stops its app before it exits. If it is torn down without that
+    /// (a panic), the whole app goes with it, not only the process it started.
+    fn drop(&mut self) {
+        if self.gone {
+            return;
+        }
+        #[cfg(unix)]
+        if let Some(group) = self.group {
+            let _ = std::process::Command::new("kill")
+                .args(["-KILL", "--", &format!("-{group}")])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+        }
+    }
+}
+
 struct DevProcess {
+    cwd: PathBuf,
     cargo_args: Vec<String>,
     /// The admin UI bundle the app serves, when the project builds its own.
     ui_dir: std::sync::Mutex<Option<PathBuf>>,
-    child: Mutex<Option<Child>>,
+    child: Mutex<Option<AppProcess>>,
     /// Set once `dev` shuts down: a restart still under way then stops the
     /// app without starting it again.
     closing: AtomicBool,
@@ -210,44 +427,30 @@ impl DevProcess {
         *self.ui_dir.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = ui_dir;
     }
 
-    fn spawn(&self) -> Result<Child> {
-        Command::new("cargo")
-            .args(["run"])
-            .args(&self.cargo_args)
-            .args(["--", "dev"])
-            .envs(self.ui_dir().map(|directory| ("OPENSHOP_UI_DIR", directory)))
-            .kill_on_drop(true)
-            .spawn()
-            .context("[openshop] Failed to run cargo")
+    fn spawn(&self) -> Result<AppProcess> {
+        AppProcess::spawn(
+            Command::new("cargo")
+                .args(["run"])
+                .args(&self.cargo_args)
+                .args(["--", "dev"])
+                .envs(self.ui_dir().map(|directory| ("OPENSHOP_UI_DIR", directory))),
+        )
+        .context("[openshop] Failed to run cargo")
     }
 
-    /// Asks the process to shut down gracefully, then kills it after the grace period.
-    async fn stop(child: &mut Child) {
-        if matches!(child.try_wait(), Ok(Some(_))) {
-            return;
-        }
-        let asked = match child.id() {
-            #[cfg(unix)]
-            Some(pid) => Command::new("kill")
-                .args(["-TERM", &pid.to_string()])
-                .status()
-                .await
-                .is_ok_and(|status| status.success()),
-            _ => false,
-        };
-        if asked && tokio::time::timeout(PROCESS_EXIT_GRACE, child.wait()).await.is_ok() {
-            return;
-        }
-        if asked {
-            eprintln!("[openshop] Force-killing stale app process");
-        }
-        let _ = child.kill().await;
+    /// The port the app is about to listen on.
+    fn port(&self) -> u16 {
+        let dot_env = std::fs::read_to_string(self.cwd.join(".env")).ok();
+        app_port(std::env::var("PORT").ok().as_deref(), dot_env.as_deref())
     }
 
     async fn start(&self) {
         if self.closing.load(Ordering::SeqCst) {
             return;
         }
+        // A process that still holds the port would keep serving the code it
+        // was built from, while the new app fails to listen.
+        check_port(self.port()).await;
         match self.spawn() {
             Ok(child) => *self.child.lock().await = Some(child),
             Err(error) => eprintln!("{error:#}"),
@@ -255,8 +458,12 @@ impl DevProcess {
     }
 
     async fn shutdown(&self) {
-        if let Some(mut child) = self.child.lock().await.take() {
-            Self::stop(&mut child).await;
+        if let Some(mut child) = self.child.lock().await.take()
+            && !child.stop(PROCESS_EXIT_GRACE).await
+        {
+            eprintln!(
+                "\n[openshop] !!! The app is still running after being killed: it may keep its port, and serve the code it was built from.\n"
+            );
         }
     }
 
@@ -264,6 +471,24 @@ impl DevProcess {
         println!("[openshop] {reason} changed — restarting...");
         self.shutdown().await;
         self.start().await;
+    }
+
+    /// Tells, once, that the app exited by itself: it failed to build, to
+    /// start, or to listen. Nothing runs until the next change.
+    async fn report_exit(&self) {
+        // A restart under way holds the app: it is the restart's to tell.
+        let Ok(mut child) = self.child.try_lock() else {
+            return;
+        };
+        let Some(child) = child.as_mut().filter(|child| !child.exit_reported) else {
+            return;
+        };
+        if let Some(status) = child.exited() {
+            child.exit_reported = true;
+            eprintln!(
+                "\n[openshop] !!! The app exited ({status}): nothing of the current code is serving. Fix what it printed, then save a file to restart it.\n"
+            );
+        }
     }
 }
 
@@ -315,14 +540,18 @@ struct Change {
     dependencies: bool,
 }
 
+/// Resolves when `dev` is asked to stop: Ctrl-C, `SIGTERM`, or `SIGHUP` when
+/// its terminal closes. The app is in a process group of its own, which
+/// neither the terminal nor the shell signals: `dev` stops it.
 async fn terminate_signal() {
     #[cfg(unix)]
     {
         use tokio::signal::unix::{SignalKind, signal};
-        if let Ok(mut terminate) = signal(SignalKind::terminate()) {
+        if let (Ok(mut terminate), Ok(mut hangup)) = (signal(SignalKind::terminate()), signal(SignalKind::hangup())) {
             tokio::select! {
                 _ = tokio::signal::ctrl_c() => {}
                 _ = terminate.recv() => {}
+                _ = hangup.recv() => {}
             }
             return;
         }
@@ -346,6 +575,7 @@ pub async fn start_dev(cargo_args: &[String]) -> Result<()> {
     let ui_dir = |built: bool| (built && !chosen).then(|| bundle::dist(&cwd));
 
     let process = Arc::new(DevProcess {
+        cwd: cwd.clone(),
         cargo_args: cargo_args.to_vec(),
         ui_dir: std::sync::Mutex::new(ui_dir(bundle.refresh().await)),
         child: Mutex::new(None),
@@ -378,6 +608,9 @@ pub async fn start_dev(cargo_args: &[String]) -> Result<()> {
     let shutdown = terminate_signal();
     tokio::pin!(shutdown);
     let mut pending: Option<Change> = None;
+    // An app that exits by itself is told about.
+    let mut exits = tokio::time::interval(Duration::from_secs(1));
+    exits.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
     loop {
         let due = pending.as_ref().map(|change| change.due);
@@ -390,6 +623,7 @@ pub async fn start_dev(cargo_args: &[String]) -> Result<()> {
 
         tokio::select! {
             _ = &mut shutdown => break,
+            _ = exits.tick() => process.report_exit().await,
             Some(path) = changed.recv() => {
                 // A watched directory may have just been created.
                 watch_existing(&mut watcher, &cwd, &local, &mut watched);
@@ -510,6 +744,81 @@ mod tests {
         assert_eq!(source("/work/crates/charts/tests/axis.rs"), None);
         assert_eq!(source("/work/crates/charts/target/debug/build.rs"), None);
         assert_eq!(source("/work/crates/other/src/lib.rs"), None);
+    }
+
+    #[test]
+    fn reads_the_port_of_the_app_as_the_app_does() {
+        assert_eq!(app_port(None, None), 3000);
+        assert_eq!(app_port(Some("4000"), Some("PORT=5000")), 4000);
+        assert_eq!(app_port(None, Some("# PORT=1\nHOST=x\nPORT=5000\n")), 5000);
+        assert_eq!(app_port(None, Some("export PORT=\"5001\"")), 5001);
+        assert_eq!(app_port(None, Some("PORT='5002'")), 5002);
+        assert_eq!(app_port(None, Some("SHOPIFY_PORT=5003")), 3000);
+        // What the app does not take as a port is 3000 for it too.
+        assert_eq!(app_port(Some("0"), None), 3000);
+        assert_eq!(app_port(Some("http"), Some("PORT=5000")), 3000);
+    }
+
+    #[test]
+    fn sees_a_port_another_process_listens_on() {
+        let listener = std::net::TcpListener::bind(("0.0.0.0", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        assert!(port_taken(port));
+        drop(listener);
+        assert!(!port_taken(port));
+    }
+
+    /// Whether the process `pid` is there.
+    #[cfg(unix)]
+    async fn alive(pid: u32) -> bool {
+        Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .stderr(Stdio::null())
+            .status()
+            .await
+            .is_ok_and(|status| status.success())
+    }
+
+    /// The bug of a `cargo` that is a wrapper: it runs the app as its child,
+    /// and exits on `SIGTERM` without passing it on. The app ignores the
+    /// signal too; it was left listening, serving the code of before.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn stopping_the_app_stops_what_a_wrapper_started() {
+        // The wrapper writes the id of the app where the test reads it.
+        let pid_file = std::env::temp_dir().join(format!("openshop-dev-test-{}.pid", std::process::id()));
+        let _ = std::fs::remove_file(&pid_file);
+        let mut app = AppProcess::spawn(
+            Command::new("sh")
+                .arg("-c")
+                .arg("(trap '' TERM; exec sleep 300) & echo $! > \"$0.tmp\" && mv \"$0.tmp\" \"$0\"; wait")
+                .arg(&pid_file),
+        )
+        .unwrap();
+        let pid: u32 = loop {
+            if let Ok(pid) = std::fs::read_to_string(&pid_file) {
+                break pid.trim().parse().unwrap();
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        };
+        let _ = std::fs::remove_file(&pid_file);
+        assert!(alive(pid).await);
+
+        assert!(app.stop(Duration::from_millis(300)).await);
+        // The wrapper went at once, the app after the grace period.
+        assert!(app.exited().is_some());
+        assert!(!alive(pid).await, "the app outlived its wrapper");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_app_that_stops_on_sigterm_is_not_killed() {
+        let mut app = AppProcess::spawn(Command::new("sh").args(["-c", "sleep 300 & wait"])).unwrap();
+        let started = tokio::time::Instant::now();
+        assert!(app.stop(Duration::from_secs(30)).await);
+        assert!(started.elapsed() < Duration::from_secs(10));
+        // Stopped already: nothing to do.
+        assert!(app.stop(Duration::from_secs(30)).await);
     }
 
     #[test]

@@ -210,8 +210,9 @@ not start a second `dev` process alongside it.
   `-p <package>`, they are the crates of that package, itself included; in the
   root of a workspace that is not a package, the ones of its default members;
 - hidden files and directories and names ending in `~` are ignored;
-- changes are debounced for 500 ms, then the process receives `SIGTERM`, is
-  killed if it has not exited after 35 seconds, and is started again;
+- changes are debounced for 500 ms, then the app receives `SIGTERM`, is
+  killed if it has not exited after 35 seconds, and is started again once
+  every process of it is gone;
 - changes that arrive during a restart are coalesced into one more restart;
 - arguments after `dev` are passed to `cargo run`, for example
   `openshop dev -p my-app` in a workspace;
@@ -226,6 +227,36 @@ not start a second `dev` process alongside it.
 The page open in the browser follows: it reloads once the app is back, and
 again if the bundle is ready after it. A change that does not compile leaves
 the page as it is, and the error in the terminal.
+
+### Stopping the app
+
+`cargo run` is not always the app: cargo replaces itself with the app on
+Unix, but the `cargo` on the `PATH` may be a wrapper that runs the real one as
+its child, such as the shim of a tool manager, and so may a `runner` of the
+cargo configuration. On Unix, `openshop dev` therefore starts `cargo run` in a
+process group of its own, which everything it starts joins, and stops the
+group: `SIGTERM` to every process of it, `SIGKILL` to those left after 35
+seconds, then it waits until none is left. The app does not read the
+terminal's input, and Ctrl-C, `SIGTERM` or `SIGHUP` (the terminal closing) to
+`openshop dev` stop it the same way. On Windows, cargo stops what it started.
+
+Before it starts the app, `openshop dev` checks that its port is free: `PORT`,
+else the `PORT` of `.env`, else 3000. A port still taken after 5 seconds is
+said loudly, with the process that holds it when `lsof` can name it:
+
+```text
+[openshop] !!! Port 3000 is still taken, by another process, PID 31654 (my-app).
+[openshop] !!! The app starting now cannot listen on it: what answers on http://localhost:3000 is NOT this code.
+[openshop] !!! Stop that process (`lsof -nP -iTCP:3000 -sTCP:LISTEN` names it), then save a file to restart.
+```
+
+The app is started anyway, and fails with `Address already in use`. An app
+that exits by itself, because it does not build, does not start or cannot
+listen, is said too: nothing runs until the next change.
+
+```text
+[openshop] !!! The app exited (exit status: 1): nothing of the current code is serving. Fix what it printed, then save a file to restart it.
+```
 
 Only `dev` loads the project-root `.env` file, before it builds the
 configuration. Set variables explicitly for build, migration, test, and
