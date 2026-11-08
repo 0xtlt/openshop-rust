@@ -304,6 +304,7 @@ async fn retry_run(
     let retried = sqlx::query(
         "UPDATE flow_runs SET \
            status = 'pending', error = NULL, available_at = now(), completed_at = NULL, worker_id = NULL, \
+           lease_id = NULL, \
            attempts = 0, deadline_at = $2, started_at = NULL, retry_policy = NULL \
          WHERE id = $1 AND app_handle = $4 AND shop = $5 AND status = ANY($3)",
     )
@@ -374,7 +375,8 @@ async fn cancel(
     // was read is not overwritten.
     let mut tx = app.db().begin().await?;
     let canceled = sqlx::query(
-        "UPDATE flow_runs SET status = 'canceled', completed_at = now() \
+        "UPDATE flow_runs SET status = 'canceled', completed_at = now(), \
+           worker_id = NULL, lease_id = NULL, available_at = NULL \
          WHERE id = $1 AND app_handle = $2 AND shop = $3 AND status = ANY($4)",
     )
     .bind(run_id)

@@ -536,25 +536,21 @@ pub async fn prepare(cwd: &Path) -> Result<Option<Prepared>> {
     }))
 }
 
-/// Rebuilds the bundle whenever its pages change.
-pub fn watch(prepared: &Prepared) -> Option<Child> {
-    match Command::new("trunk")
+/// Rebuilds the bundle whenever its pages change. The error says why trunk
+/// could not be run, for the caller to report.
+pub fn watch(prepared: &Prepared) -> Result<Child> {
+    let child = Command::new("trunk")
         .arg("watch")
         .current_dir(&prepared.directory)
         .kill_on_drop(true)
         .spawn()
-    {
-        Ok(child) => {
-            println!("[openshop] Building the admin UI bundle (trunk watch)");
-            Some(child)
-        }
-        Err(error) => {
-            eprintln!(
+        .map_err(|error| {
+            anyhow!(
                 "[openshop] Could not run trunk ({error}); the admin UI bundle is not rebuilt. Install it with `cargo install trunk`."
-            );
-            None
-        }
-    }
+            )
+        })?;
+    println!("[openshop] Building the admin UI bundle (trunk watch)");
+    Ok(child)
 }
 
 /// Builds the bundle of the project for production. `false` when the project

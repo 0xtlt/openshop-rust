@@ -40,14 +40,32 @@ pub fn FunctionInstances(handle: String) -> impl IntoView {
             api_fetch(&format!("/api/functions/{handle}/instances")),
         )
         .await;
-        if let (Some(definitions), Ok(listed)) = (definitions, listed) {
-            definition.set(definitions.into_iter().find(|definition| definition.handle == handle));
-            if !listed.ok {
-                error.set(listed.error());
-            } else if let Ok(items) = listed.json() {
-                instances.set(items);
+        // Every way the load can fail sets `error`: without it, a failure
+        // would read as a function that has no instance yet, and offer to
+        // create the first one of a singleton.
+        let failure = match (definitions, listed) {
+            (None, _) => Some("The functions could not be loaded.".to_string()),
+            (Some(definitions), listed) => {
+                definition.set(definitions.into_iter().find(|definition| definition.handle == handle));
+                match listed {
+                    Err(failure) => Some(failure.to_string()),
+                    Ok(listed) if !listed.ok => Some(listed.error().unwrap_or_else(|| {
+                        format!(
+                            "The instances could not be loaded: the server answered {}",
+                            listed.status
+                        )
+                    })),
+                    Ok(listed) => match listed.json() {
+                        Ok(items) => {
+                            instances.set(items);
+                            None
+                        }
+                        Err(failure) => Some(failure.to_string()),
+                    },
+                }
             }
-        }
+        };
+        error.set(failure);
         loading.set(false);
     });
 
@@ -96,6 +114,14 @@ pub fn FunctionInstances(handle: String) -> impl IntoView {
             return view! {
                 <s-box padding="large-500">
                     <s-text color="subdued">"Loading instances from Shopify..."</s-text>
+                </s-box>
+            }
+            .into_any();
+        }
+        if error.with(Option::is_some) {
+            return view! {
+                <s-box padding="large-500">
+                    <s-text color="subdued">"The instances could not be loaded."</s-text>
                 </s-box>
             }
             .into_any();

@@ -115,7 +115,10 @@ struct McpState {
     new_expiration: RwSignal<String>,
     new_permissions: RwSignal<Vec<String>>,
     one_time_token: RwSignal<Option<String>>,
-    busy: RwSignal<Option<String>>,
+    /// The actions under way: `create`, `permissions`, or the ID of a token
+    /// for its row. Each action takes its own key and gives back only that
+    /// one, so the end of one never re-enables the buttons of another.
+    busy: RwSignal<Vec<String>>,
     message: RwSignal<Option<BannerMessage>>,
     create_error: RwSignal<Option<String>>,
     edit_error: RwSignal<Option<String>>,
@@ -133,11 +136,23 @@ impl McpState {
             new_expiration: RwSignal::new(DEFAULT_EXPIRATION.to_string()),
             new_permissions: RwSignal::new(Vec::new()),
             one_time_token: RwSignal::new(None),
-            busy: RwSignal::new(None),
+            busy: RwSignal::new(Vec::new()),
             message: RwSignal::new(None),
             create_error: RwSignal::new(None),
             edit_error: RwSignal::new(None),
         }
+    }
+
+    fn begin(self, key: &str) {
+        self.busy.update(|busy| busy.push(key.to_string()));
+    }
+
+    fn end(self, key: &str) {
+        self.busy.update(|busy| {
+            if let Some(index) = busy.iter().position(|busy| busy == key) {
+                busy.remove(index);
+            }
+        });
     }
 
     fn fail(self, error: ApiError) {
@@ -184,6 +199,15 @@ impl McpState {
             return Ok(());
         };
         let data = api_json::<McpTokenSummary>(&format!("/api/mcp/tokens/{id}")).await?;
+        // Another token may have been selected while this one loaded: its
+        // detail is the one the form shows, and its permissions the ones it saves.
+        if self
+            .selected_id
+            .try_with_untracked(|selected| selected.as_deref() == Some(id.as_str()))
+            != Some(true)
+        {
+            return Ok(());
+        }
         self.selected_permissions
             .set(self.known_permissions(&data.permissions, false));
         self.selected_detail.set(Some(data));
@@ -222,7 +246,7 @@ impl McpState {
             &self.new_expiration.get_untracked(),
             &self.new_permissions.get_untracked(),
         );
-        self.busy.set(Some("create".to_string()));
+        self.begin("create");
         self.message.set(None);
         self.create_error.set(None);
         let created = async {
@@ -243,7 +267,7 @@ impl McpState {
         if let Err(error) = created.await {
             self.create_error.set(Some(error.to_string()));
         }
-        self.busy.set(None);
+        self.end("create");
     }
 
     async fn save_permissions(self) {
@@ -257,7 +281,7 @@ impl McpState {
             return;
         }
         let body = json!({ "permissions": self.selected_permissions.get_untracked() });
-        self.busy.set(Some("permissions".to_string()));
+        self.begin("permissions");
         self.message.set(None);
         self.edit_error.set(None);
         let saved = async {
@@ -275,11 +299,11 @@ impl McpState {
             self.edit_error.set(Some(text.clone()));
             shopify::toast_error(&text);
         }
-        self.busy.set(None);
+        self.end("permissions");
     }
 
     async fn patch_token(self, id: String, status: &'static str) {
-        self.busy.set(Some(id.clone()));
+        self.begin(&id);
         let patched = async {
             let body = json!({ "status": status });
             mutate(
@@ -294,11 +318,11 @@ impl McpState {
         if let Err(error) = patched.await {
             self.fail(error);
         }
-        self.busy.set(None);
+        self.end(&id);
     }
 
     async fn revoke_token(self, id: String) {
-        self.busy.set(Some(id.clone()));
+        self.begin(&id);
         let revoked = async {
             mutate(
                 Method::Post,
@@ -313,11 +337,11 @@ impl McpState {
         if let Err(error) = revoked.await {
             self.fail(error);
         }
-        self.busy.set(None);
+        self.end(&id);
     }
 
     async fn rotate_token(self, id: String) {
-        self.busy.set(Some(id.clone()));
+        self.begin(&id);
         self.message.set(None);
         let rotated = async {
             let url = format!("/api/mcp/tokens/{id}/rotate");
@@ -333,7 +357,7 @@ impl McpState {
         if let Err(error) = rotated.await {
             self.fail(error);
         }
-        self.busy.set(None);
+        self.end(&id);
     }
 }
 
@@ -481,7 +505,7 @@ pub fn Mcp() -> impl IntoView {
             .with(|keys| !keys.is_empty() && selection.with(|selection| keys.iter().all(|key| selection.contains(key))))
     };
     let no_permissions = move || permission_keys.with(Vec::is_empty);
-    let is_busy = move |key: &str| busy.with(|busy| busy.as_deref() == Some(key));
+    let is_busy = move |key: &str| busy.with(|busy| busy.iter().any(|busy| busy == key));
     let selected_revoked =
         Signal::derive(move || selected.with(|token| token.as_ref().is_some_and(|token| token.status == "revoked")));
 
@@ -660,7 +684,7 @@ pub fn Mcp() -> impl IntoView {
         let id = StoredValue::new(token.id.clone());
         let status = token.status.clone();
         let is_revoked = status == "revoked";
-        let row_busy = move || busy.with(|busy| busy.as_ref() == Some(&id.get_value()));
+        let row_busy = move || id.with_value(|id| busy.with(|busy| busy.contains(id)));
         let toggle_status = match status.as_str() {
             "active" => Some(("Disable", "disabled")),
             "disabled" => Some(("Enable", "active")),

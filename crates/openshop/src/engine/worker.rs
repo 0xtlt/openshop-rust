@@ -235,6 +235,10 @@ struct Inner {
     slot_freed: Notify,
     wake: Mutex<CancellationToken>,
     loop_handle: Mutex<Option<JoinHandle<()>>>,
+    /// Held by `start` and for the whole of `stop`: a start made while the
+    /// worker stops waits for it, so the shutdown never hands back the runs
+    /// of the loop that start begins.
+    lifecycle: Mutex<()>,
     /// The runs this worker leased and still executes. Shutdown hands back the
     /// ones that did not finish.
     held: std::sync::Mutex<HashMap<Uuid, Held>>,
@@ -260,6 +264,7 @@ impl Worker {
                 slot_freed: Notify::new(),
                 wake: Mutex::new(CancellationToken::new()),
                 loop_handle: Mutex::new(None),
+                lifecycle: Mutex::new(()),
                 held: std::sync::Mutex::new(HashMap::new()),
             }),
         }
@@ -278,6 +283,7 @@ impl Worker {
     }
 
     pub async fn start(&self) {
+        let _lifecycle = self.inner.lifecycle.lock().await;
         if self.inner.running.swap(true, Ordering::SeqCst) {
             return;
         }
@@ -304,6 +310,7 @@ impl Worker {
     /// execution is stopped, so that another worker takes it up at once
     /// instead of when its lease expires. See [`Inner::release_held`].
     pub async fn stop(&self) {
+        let _lifecycle = self.inner.lifecycle.lock().await;
         self.inner.running.store(false, Ordering::SeqCst);
         logger::info("[openshop] Worker stopping...");
         self.inner.wake.lock().await.cancel();

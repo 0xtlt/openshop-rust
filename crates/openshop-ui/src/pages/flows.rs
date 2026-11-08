@@ -96,7 +96,12 @@ pub fn Flows() -> impl IntoView {
     let checked_ids = RwSignal::new(Vec::<String>::new());
     let deleting = RwSignal::new(false);
     let refresh_key = RwSignal::new(0_u32);
-    let error = RwSignal::new(None::<String>);
+    // Why the runs could not be listed: the next poll that succeeds clears it.
+    let load_error = RwSignal::new(None::<String>);
+    // Why the last trigger or delete failed, as a heading and a reason. Kept
+    // apart from `load_error`, which polls would otherwise clear within
+    // seconds; the next action clears it.
+    let action_error = RwSignal::new(None::<(&'static str, String)>);
     let input_json = RwSignal::new("{}".to_string());
     let input_error = RwSignal::new(None::<String>);
     let initial_query = QueryParams::parse(&dom::location_search())
@@ -156,9 +161,9 @@ pub fn Flows() -> impl IntoView {
                 match result {
                     Ok(data) => {
                         set_if_changed(runs, data);
-                        set_if_changed(error, None);
+                        set_if_changed(load_error, None);
                     }
-                    Err(failure) => error.set(Some(failure.to_string())),
+                    Err(failure) => load_error.set(Some(failure.to_string())),
                 }
                 loading_runs.set(false);
             });
@@ -177,16 +182,23 @@ pub fn Flows() -> impl IntoView {
         };
         input_error.set(None);
         triggering.set(true);
-        error.set(None);
+        action_error.set(None);
         spawn_local(async move {
             let url = format!("/api/flows/{flow}/run");
             if let Ok(response) = api_request(Method::Post, &url, Some(&json!({ "input": input }))).await {
                 hide_modal(RUN_MODAL_ID);
                 if !response.ok {
-                    error.set(response.error());
+                    let reason = response
+                        .error()
+                        .unwrap_or_else(|| format!("The server answered {}", response.status));
+                    action_error.set(Some(("Run failed to start", reason)));
                 } else if let Ok(started) = response.json::<RunStarted>() {
                     shopify::toast(&format!("Flow \"{flow}\" started"));
                     route(&format!("/runs/{}", started.run_id));
+                } else {
+                    // Queued, but the answer did not name the run: it shows in the list.
+                    shopify::toast(&format!("Flow \"{flow}\" started"));
+                    refresh_key.update(|key| *key += 1);
                 }
             }
             triggering.set(false);
@@ -229,12 +241,16 @@ pub fn Flows() -> impl IntoView {
             return;
         }
         deleting.set(true);
+        action_error.set(None);
         hide_modal(DELETE_MODAL_ID);
         spawn_local(async move {
             let body = json!({ "ids": ids });
             if let Ok(response) = api_request(Method::Post, "/api/runs/bulk-delete", Some(&body)).await {
                 if !response.ok {
-                    error.set(response.error());
+                    let reason = response
+                        .error()
+                        .unwrap_or_else(|| format!("The server answered {}", response.status));
+                    action_error.set(Some(("Runs could not be deleted", reason)));
                 } else if let Ok(result) = response.json::<BulkDeleted>() {
                     shopify::toast(&deleted_message(&result));
                     checked_ids.set(Vec::new());
@@ -272,9 +288,16 @@ pub fn Flows() -> impl IntoView {
             <FlowListTable flows on_run=Callback::new(on_run) />
 
             {move || {
-                error
+                action_error
                     .get()
-                    .map(|error| view! { <s-banner tone="critical" heading="Run failed">{error}</s-banner> })
+                    .map(|(heading, reason)| view! { <s-banner tone="critical" heading=heading>{reason}</s-banner> })
+            }}
+            {move || {
+                load_error
+                    .get()
+                    .map(|error| {
+                        view! { <s-banner tone="critical" heading="Runs could not be loaded">{error}</s-banner> }
+                    })
             }}
 
             <RunsTable

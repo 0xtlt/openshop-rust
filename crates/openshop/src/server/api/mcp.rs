@@ -136,6 +136,14 @@ fn is_revoked(token: &McpToken) -> bool {
     token.status == "revoked" || token.revoked_at.is_some()
 }
 
+/// The condition [`is_revoked`] negates, for the statements that change a
+/// token: a revocation that lands after the token was read is not undone.
+const NOT_REVOKED: &str = "status <> 'revoked' AND revoked_at IS NULL";
+
+fn revoked_conflict(action: &str) -> Response {
+    json_error(StatusCode::CONFLICT, format!("Cannot {action} a revoked token"))
+}
+
 /// Distinct string permissions from the body; the error names the first unknown one.
 fn selected_permissions(body: &JsonMap, registry: &McpRegistry) -> Result<Vec<String>, String> {
     let mut permissions: Vec<String> = Vec::new();
@@ -348,7 +356,7 @@ async fn update_token(
         return Ok(token_not_found());
     };
     if is_revoked(&existing) {
-        return Ok(json_error(StatusCode::CONFLICT, "Cannot update a revoked token"));
+        return Ok(revoked_conflict("update"));
     }
 
     let name = string_value(&body, "name");
@@ -366,17 +374,20 @@ async fn update_token(
         existing.expires_at
     };
 
-    sqlx::query(
+    let updated = sqlx::query(sqlx::AssertSqlSafe(format!(
         "UPDATE mcp_tokens SET \
            name = COALESCE($2, name), status = COALESCE($3, status), expires_at = $4, updated_at = now() \
-         WHERE id = $1",
-    )
+         WHERE id = $1 AND {NOT_REVOKED}"
+    )))
     .bind(existing.id)
     .bind(name)
     .bind(status)
     .bind(expires_at)
     .execute(app.db())
     .await?;
+    if updated.rows_affected() == 0 {
+        return Ok(revoked_conflict("update"));
+    }
     Ok(json_response(StatusCode::OK, json!({ "ok": true })))
 }
 
@@ -395,10 +406,22 @@ async fn set_permissions(
         return Ok(token_not_found());
     };
     if is_revoked(&row) {
-        return Ok(json_error(StatusCode::CONFLICT, "Cannot update a revoked token"));
+        return Ok(revoked_conflict("update"));
     }
 
+    // The row is locked first: a revocation waits for the grants, or the
+    // grants find the token revoked.
     let mut tx = app.db().begin().await?;
+    let updated = sqlx::query(sqlx::AssertSqlSafe(format!(
+        "UPDATE mcp_tokens SET updated_at = now() WHERE id = $1 AND {NOT_REVOKED}"
+    )))
+    .bind(row.id)
+    .execute(&mut *tx)
+    .await?;
+    if updated.rows_affected() == 0 {
+        tx.rollback().await?;
+        return Ok(revoked_conflict("update"));
+    }
     sqlx::query("DELETE FROM mcp_permission_grants WHERE app_handle = $1 AND shop = $2 AND token_id = $3")
         .bind(&session.shopify_app)
         .bind(&session.shop)
@@ -406,10 +429,6 @@ async fn set_permissions(
         .execute(&mut *tx)
         .await?;
     insert_grants(&mut tx, &session, &row.token_id, &permissions).await?;
-    sqlx::query("UPDATE mcp_tokens SET updated_at = now() WHERE id = $1")
-        .bind(row.id)
-        .execute(&mut *tx)
-        .await?;
     tx.commit().await?;
 
     Ok(json_response(StatusCode::OK, json!({ "ok": true })))
@@ -424,15 +443,17 @@ async fn rotate_token(
         return Ok(token_not_found());
     };
     if is_revoked(&existing) {
-        return Ok(json_error(StatusCode::CONFLICT, "Cannot rotate a revoked token"));
+        return Ok(revoked_conflict("rotate"));
     }
     let generated = generate_token(Some(existing.token_id)).await?;
 
-    let updated = sqlx::query(
+    // The hash takes a while: a revocation made meanwhile stands, and the new
+    // secret is never handed out.
+    let updated = sqlx::query(sqlx::AssertSqlSafe(format!(
         "UPDATE mcp_tokens SET \
-           token_hash = $1, token_fingerprint = $2, status = 'active', revoked_at = NULL, updated_at = now() \
-         WHERE id = $3 AND app_handle = $4 AND shop = $5",
-    )
+           token_hash = $1, token_fingerprint = $2, status = 'active', updated_at = now() \
+         WHERE id = $3 AND app_handle = $4 AND shop = $5 AND {NOT_REVOKED}"
+    )))
     .bind(&generated.token_hash)
     .bind(&generated.token_fingerprint)
     .bind(existing.id)
@@ -441,7 +462,10 @@ async fn rotate_token(
     .execute(app.db())
     .await?;
     if updated.rows_affected() == 0 {
-        return Ok(token_not_found());
+        return Ok(match find_token(&app, &session, &id).await? {
+            Some(_) => revoked_conflict("rotate"),
+            None => token_not_found(),
+        });
     }
     Ok(json_response(
         StatusCode::OK,

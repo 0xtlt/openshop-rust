@@ -115,14 +115,15 @@ fn NavMenu() -> impl IntoView {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 enum AuthStatus {
     Checking,
     Ready,
     /// There is no App Bridge session: the app is not open in Shopify admin.
     Blocked,
-    /// There is a session, and what the app needs to start could not be loaded.
-    Failed,
+    /// There is a session, and what the app needs to start could not be
+    /// loaded: why, for the page to say.
+    Failed(String),
 }
 
 /// Waits for an App Bridge session, then keeps the page visibility config fresh.
@@ -130,8 +131,6 @@ enum AuthStatus {
 fn AuthGate(children: ChildrenFn) -> impl IntoView {
     let location = use_location();
     let status = RwSignal::new(AuthStatus::Checking);
-    // Why the app could not start, when `status` is `Failed`.
-    let failure = RwSignal::new(String::new());
     let pages = RwSignal::new(resolve_admin_pages(None, None));
     let custom_pages = RwSignal::new(CustomAdminPagesResponse::default());
     provide_context(AdminPagesContext(pages.read_only()));
@@ -151,8 +150,9 @@ fn AuthGate(children: ChildrenFn) -> impl IntoView {
             }
             Err(error) => {
                 log_error("Could not get a session token from App Bridge", &error);
-                failure.set(format!("Could not get a session from Shopify: {error}"));
-                status.set(AuthStatus::Failed);
+                status.set(AuthStatus::Failed(format!(
+                    "Could not get a session from Shopify: {error}"
+                )));
                 return;
             }
         }
@@ -161,8 +161,7 @@ fn AuthGate(children: ChildrenFn) -> impl IntoView {
             Ok(data) => data,
             Err(error) => {
                 log_error("Could not load the pages of the app", &error);
-                failure.set(format!("Could not load the app: {error}"));
-                status.set(AuthStatus::Failed);
+                status.set(AuthStatus::Failed(format!("Could not load the app: {error}")));
                 return;
             }
         };
@@ -184,7 +183,7 @@ fn AuthGate(children: ChildrenFn) -> impl IntoView {
     Effect::new(move |was_ready: Option<bool>| {
         location.pathname.track();
         location.search.track();
-        if status.get() != AuthStatus::Ready {
+        if status.with(|status| *status != AuthStatus::Ready) {
             return false;
         }
         let active = Arc::new(AtomicBool::new(true));
@@ -247,10 +246,10 @@ fn AuthGate(children: ChildrenFn) -> impl IntoView {
                 <s-section>
                     {match status {
                         AuthStatus::Checking => view! { <s-paragraph>"Loading..."</s-paragraph> }.into_any(),
-                        AuthStatus::Failed => {
+                        AuthStatus::Failed(reason) => {
                             view! {
                                 <s-banner tone="critical" heading="The app could not start">
-                                    {failure.get()}
+                                    {reason}
                                 </s-banner>
                             }
                                 .into_any()

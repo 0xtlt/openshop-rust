@@ -132,14 +132,23 @@ struct DevProcess {
     /// The admin UI bundle the app serves, when the project builds its own.
     ui_dir: std::sync::Mutex<Option<PathBuf>>,
     child: Mutex<Option<Child>>,
+    /// Set once `dev` shuts down: a restart still under way then stops the
+    /// app without starting it again.
+    closing: AtomicBool,
 }
 
 /// The admin UI bundle of the project, rebuilt by trunk while `dev` runs.
 struct BundleWatch {
     cwd: PathBuf,
+    /// The trunk process, while it runs: one that exited is started again at
+    /// the next refresh.
     trunk: Option<Child>,
-    /// trunk could not be started: said once, not at every change.
+    /// trunk could not be started: said once, not at every change. It is
+    /// still tried at every refresh, for a trunk installed meanwhile.
     unavailable: bool,
+    /// Whether the project had a bundle at the last refresh that could tell:
+    /// sources that are half written leave it as it was.
+    bundled: bool,
 }
 
 impl BundleWatch {
@@ -151,22 +160,35 @@ impl BundleWatch {
                 if prepared.watch_changed {
                     self.stop().await;
                 }
-                if self.trunk.is_none() && !self.unavailable {
-                    self.trunk = bundle::watch(&prepared);
-                    self.unavailable = self.trunk.is_none();
+                if let Some(trunk) = &mut self.trunk
+                    && !matches!(trunk.try_wait(), Ok(None))
+                {
+                    self.trunk = None;
                 }
-                true
+                if self.trunk.is_none() {
+                    match bundle::watch(&prepared) {
+                        Ok(trunk) => {
+                            self.trunk = Some(trunk);
+                            self.unavailable = false;
+                        }
+                        Err(error) => {
+                            if !self.unavailable {
+                                eprintln!("{error}");
+                            }
+                            self.unavailable = true;
+                        }
+                    }
+                }
+                self.bundled = true;
             }
             Ok(None) => {
                 self.stop().await;
-                false
+                self.bundled = false;
             }
             // The sources may be half written: what is running is kept.
-            Err(error) => {
-                eprintln!("{error:#}");
-                self.trunk.is_some()
-            }
+            Err(error) => eprintln!("{error:#}"),
         }
+        self.bundled
     }
 
     async fn stop(&mut self) {
@@ -223,6 +245,9 @@ impl DevProcess {
     }
 
     async fn start(&self) {
+        if self.closing.load(Ordering::SeqCst) {
+            return;
+        }
         match self.spawn() {
             Ok(child) => *self.child.lock().await = Some(child),
             Err(error) => eprintln!("{error:#}"),
@@ -279,6 +304,9 @@ fn watch_existing(watcher: &mut RecommendedWatcher, cwd: &Path, local: &LocalCra
 
 /// What changed since the app was last started.
 struct Change {
+    /// When the restart is due: the debounce after the last file that changed.
+    /// Events of files that are not watched leave it as it is.
+    due: tokio::time::Instant,
     /// The last file that changed: the one the restart is reported for.
     source: String,
     /// A view may have been added to the project, or the last one removed.
@@ -312,6 +340,7 @@ pub async fn start_dev(cargo_args: &[String]) -> Result<()> {
         cwd: cwd.clone(),
         trunk: None,
         unavailable: false,
+        bundled: false,
     };
     let chosen = std::env::var_os("OPENSHOP_UI_DIR").is_some();
     let ui_dir = |built: bool| (built && !chosen).then(|| bundle::dist(&cwd));
@@ -320,6 +349,7 @@ pub async fn start_dev(cargo_args: &[String]) -> Result<()> {
         cargo_args: cargo_args.to_vec(),
         ui_dir: std::sync::Mutex::new(ui_dir(bundle.refresh().await)),
         child: Mutex::new(None),
+        closing: AtomicBool::new(false),
     });
     let mut local = LocalCrates::read(&cwd, cargo_args).await.unwrap_or_default();
     process.start().await;
@@ -350,9 +380,10 @@ pub async fn start_dev(cargo_args: &[String]) -> Result<()> {
     let mut pending: Option<Change> = None;
 
     loop {
-        let debounce = async {
-            match &pending {
-                Some(_) => tokio::time::sleep(DEBOUNCE).await,
+        let due = pending.as_ref().map(|change| change.due);
+        let debounce = async move {
+            match due {
+                Some(due) => tokio::time::sleep_until(due).await,
                 None => std::future::pending().await,
             }
         };
@@ -371,6 +402,7 @@ pub async fn start_dev(cargo_args: &[String]) -> Result<()> {
                 if let Some(source) = project.or_else(|| local.source(&path)) {
                     let manifest = source.rsplit('/').next().is_some_and(|name| name.starts_with("Cargo."));
                     pending = Some(Change {
+                        due: tokio::time::Instant::now() + DEBOUNCE,
                         pages: pages || pending.as_ref().is_some_and(|change| change.pages),
                         dependencies: manifest || pending.as_ref().is_some_and(|change| change.dependencies),
                         source,
@@ -400,7 +432,11 @@ pub async fn start_dev(cargo_args: &[String]) -> Result<()> {
         }
     }
 
-    restarter.abort();
+    // A restart under way ends first: aborting it would drop the app it is
+    // stopping, which kills it without its grace period.
+    process.closing.store(true, Ordering::SeqCst);
+    drop(restart);
+    let _ = restarter.await;
     process.shutdown().await;
     bundle.stop().await;
     Ok(())
