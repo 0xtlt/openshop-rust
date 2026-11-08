@@ -183,12 +183,18 @@ App Bridge takes the admin's origin from its own address, and `localhost` and
 
 lsf delivers the subscriptions of `shopify.app.toml` to `--app-url`, signed with
 the client secret. `POST /webhooks` verifies them the way it verifies Shopify's.
-To send one on demand:
+The templates subscribe to no topic: add a `[[webhooks.subscriptions]]` with
+`uri = "/webhooks"` for each topic the app handles
+([Handle webhooks](handle-webhooks.md)), and restart lsf. To send one on
+demand:
 
 ```bash
 curl -X POST http://localhost:9393/__lsf/webhooks/trigger \
   -H 'Content-Type: application/json' -d '{"topic": "products/create"}'
 ```
+
+lsf refuses a topic the app does not subscribe to. To send one anyway, give
+where it goes: `{"topic": "products/create", "address": "http://localhost:3000/webhooks"}`.
 
 `GET http://localhost:9393/__lsf/webhooks` lists the deliveries and what the app
 answered.
