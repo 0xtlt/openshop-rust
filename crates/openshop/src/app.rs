@@ -52,6 +52,11 @@ pub struct OpenShopConfig {
     pub admin_menu: Option<Vec<AdminMenuItem>>,
     pub worker: WorkerConfig,
     pub retry_policy: RetryPolicy,
+    /// How the Shopify client retries a request Shopify did not run (a `5xx`,
+    /// a network failure, a throttled request). `None` is `shopify_api`'s
+    /// [`RetryPolicy::default`](shopify_api::RetryPolicy): four retries,
+    /// one second apart and doubling.
+    pub shopify_retry: Option<shopify_api::RetryPolicy>,
     pub on_error: Option<OnErrorFn>,
     /// App proxy handlers by route path (`/reviews`, `/api/reviews/:id`), served under `/proxy` and `/ext`.
     pub proxies: IndexMap<String, Proxy>,
@@ -293,6 +298,28 @@ impl OpenShopBuilder {
 
     pub fn retry_policy(mut self, policy: RetryPolicy) -> Self {
         self.config.retry_policy = policy;
+        self
+    }
+
+    /// How the Shopify client of every handler retries a request Shopify did
+    /// not run: a query after a `5xx` or a network failure, any request
+    /// Shopify throttled. Not the retries of a flow run, which
+    /// [`retry_policy`](Self::retry_policy) sets. Without it, `shopify_api`'s
+    /// default: four retries, from one second apart and doubling, up to
+    /// thirty seconds.
+    ///
+    /// ```
+    /// use std::time::Duration;
+    /// use openshop::shopify::RetryPolicy;
+    ///
+    /// let config = openshop::OpenShopConfig::builder()
+    ///     .shopify_retry(RetryPolicy::new(2).with_max_delay(Duration::from_secs(5)))
+    ///     .build()
+    ///     .unwrap();
+    /// assert_eq!(config.shopify_retry.unwrap().max_retries(), 2);
+    /// ```
+    pub fn shopify_retry(mut self, policy: shopify_api::RetryPolicy) -> Self {
+        self.config.shopify_retry = Some(policy);
         self
     }
 

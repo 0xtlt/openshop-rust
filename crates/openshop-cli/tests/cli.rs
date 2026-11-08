@@ -36,3 +36,13 @@ fn no_command_or_a_request_for_help_prints_the_usage_and_succeeds() {
         assert!(output.stderr.is_empty(), "{args:?}");
     }
 }
+
+#[test]
+fn the_usage_names_the_commands_that_run_a_flow_by_hand() {
+    let usage = String::from_utf8_lossy(&openshop(&["--help"]).stdout).into_owned();
+    assert!(
+        usage.contains("run <flow> [--shop=<domain> | --all-shops] [--input=<json>]"),
+        "{usage}"
+    );
+    assert!(usage.contains("cron run <name>"), "{usage}");
+}

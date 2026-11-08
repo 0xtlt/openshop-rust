@@ -47,6 +47,11 @@ plan of its recurring line, help to read it. An amount is a `Money`, whose
 `amount` is the decimal written as text (`"9.99"`) and `currency_code` its
 currency.
 
+The request is the GraphQL operation `OpenShopActiveSubscriptions`
+(`billing::ACTIVE_SUBSCRIPTIONS_OPERATION`). A test answers it with
+`ctx.shopify.active_subscriptions([subscription("Pro")])`, `[]` for a shop
+without a plan: see [Answer the Admin API](testing.md#answer-the-admin-api).
+
 ## Guard an admin page
 
 `billing::require_plan(&ctx, &plans)` guards a loader or an action: it returns

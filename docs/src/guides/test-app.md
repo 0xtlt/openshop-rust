@@ -10,10 +10,10 @@ with one database test. This guide adds a second one.
 ## 1. Prepare a test database
 
 The test harness needs a reachable PostgreSQL server, nothing else. Start the
-container of the generated project:
+container of the generated project, and wait until it accepts connections:
 
 ```bash
-docker compose up -d
+docker compose up -d --wait
 ```
 
 Each test gets a `TestContext` with its own schema in that database: the
@@ -60,17 +60,18 @@ that are already there:
 #[cfg(test)]
 mod tests {
     use super::*;
-    use openshop::testing::{MockTransport, TestContext};
+    use openshop::testing::TestContext;
 
     // ... existing tests ...
 
     #[openshop::test(APP)]
     #[ignore = "requires PostgreSQL"]
     async fn syncs_an_order_and_lists_its_run(ctx: &TestContext) {
-        // Shopify Admin API responses.
-        ctx.transport.respond_json(json!({
-            "data": { "orders": { "nodes": [{ "id": "gid://shopify/Order/1", "name": "#1001" }] } },
-        }));
+        // Shopify answers the operation of the flow, `query GetRecentOrders`, by its name.
+        ctx.shopify.on(
+            "GetRecentOrders",
+            json!({ "orders": { "nodes": [{ "id": "gid://shopify/Order/1", "name": "#1001" }] } }),
+        );
 
         // The warehouse provider is replaced by a recording fake.
         let push = ctx.fakes.for_call(Warehouse::PUSH);
@@ -105,11 +106,22 @@ recorded call are the `Vec<Order>` the method would have received.
 `ctx.fakes.method("warehouse", "push")` is the same fake without the types,
 with arguments and results as JSON.
 
-The fixture answers the `nodes` query of the template and of the flow guide.
-Update it when your flow requests different fields.
+The fixture is the `data` of the `GetRecentOrders` query of the template and
+of the flow guide, which `ctx.shopify` answers by the name the query gives
+itself. Update it when your flow requests different fields.
 `run_flow()` executes immediately with fake provider methods; it does not need a
-worker. Shopify requests never leave the process: they are answered by
-`ctx.transport`, and a request without a configured response gets a 404.
+worker. Shopify requests never leave the process: `ctx.shopify` answers the
+GraphQL operations, and one it does not answer fails with an error that names
+it: ``The test does not answer the Admin API operation `GetRecentOrders` ``.
+`ctx.shopify.active_subscriptions([subscription("Pro")])` answers what the
+[billing](../reference/billing.md) helpers ask; see
+[Answer the Admin API](../reference/testing.md#answer-the-admin-api) for the
+rest, and for the operations OpenShop sends of its own.
+
+The test reads the `shopify.app.toml` of the project, as the app does: the
+pricing page and the links to the admin name the app by its `handle`. A
+Shopify request that fails with a `5xx` is retried as many times as in
+production, without waiting.
 `ctx.get(..)` and the other request helpers add a staff session token for the
 test shop; `ctx.request_as(method, path, shop, sub)` signs for another shop or
 user.
@@ -146,6 +158,8 @@ tests.
 
 - Use `ctx.dispatch_flow(name, input)` to assert queue insertion; the test
   context does not start a worker. See [Test a flow](../reference/testing.md).
+  To run a flow or a cron by hand against the development database, outside
+  the tests, use [`openshop run`](../reference/cli.md#run-a-flow-or-a-cron-by-hand).
 - Use the proxy test client, `ctx.proxy().get("/api/reviews").send()`, for
   signed storefront requests. `ctx.proxy_for(shop, secret)` signs for another
   shop or app secret.

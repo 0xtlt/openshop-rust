@@ -1021,11 +1021,56 @@ async fn a_line_reaches_the_process_logger_at_its_level_without_the_level_in_its
         .find(|line| line.message.contains("Flow logger check"))
         .expect("the line of the flow");
     // The runtime logger writes the level: `WARN Flow logger check`, not `WARN [WARN] …`.
+    // The payload comes with the run the line belongs to.
     assert_eq!(
         (line.level, line.message.as_str(), line.context),
-        ("warn", "Flow logger check", Some(json!({ "count": 3 })))
+        (
+            "warn",
+            "Flow logger check",
+            Some(json!({ "count": 3, "runId": run_id.to_string() }))
+        )
     );
     drop(logs);
+    test.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_line_carries_its_fields_to_the_process_logger_and_its_payload_alone_to_the_table() {
+    let test = new_test().await;
+    let run_id = create_run(&test).await;
+    let logger = FlowLogger::new(test.db.clone(), run_id.to_string())
+        .with_fields(json!({ "shop": "fields.myshopify.com", "flow": "sync" }))
+        .with_fields(json!("not an object"));
+
+    let logs = LogCapture::start().await;
+    logger.info_with("Flow fields check", json!({ "count": 3, "flow": "mine" }));
+    logger.error("Flow fields check without payload");
+    logger.flush().await;
+
+    let lines = logs.lines();
+    let context = |message: &str| {
+        lines
+            .iter()
+            .find(|line| line.message == message)
+            .and_then(|line| line.context.clone())
+            .expect("the line")
+    };
+    // A key of the payload wins over a field of the same name.
+    assert_eq!(
+        context("Flow fields check"),
+        json!({ "count": 3, "flow": "mine", "shop": "fields.myshopify.com", "runId": run_id.to_string() })
+    );
+    assert_eq!(
+        context("Flow fields check without payload"),
+        json!({ "shop": "fields.myshopify.com", "flow": "sync", "runId": run_id.to_string() })
+    );
+    drop(logs);
+
+    let (payload,): (openshop::Value,) = sqlx::query_as("SELECT payload FROM logs WHERE message = 'Flow fields check'")
+        .fetch_one(&test.db)
+        .await
+        .unwrap();
+    assert_eq!(payload, json!({ "count": 3, "flow": "mine" }));
     test.cleanup().await;
 }
 

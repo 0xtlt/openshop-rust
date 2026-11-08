@@ -42,10 +42,18 @@ payload is a JSON value (`serde_json::Value`), usually
 `json!({ "count": 3 })`; a line logged without one is stored with an empty
 object.
 
-Each line is sent to the runtime logger at its level, the message as it is
-(the default logger writes `INFO Starting order sync`), and stored in the
-`logs` table with the time it was emitted. Lines are written in emission order
-by a background task:
+Each line is sent to the runtime logger at its level, the message as it is,
+with its payload and what the run is: `shop`, `shopifyApp`, `flow` and `runId`.
+A key of the payload wins over a field of the same name. The default logger
+writes:
+
+```text
+INFO Orders pushed context={"source":"shopify","shop":"demo.myshopify.com","shopifyApp":"default","flow":"syncOrders","runId":"3f1c…"}
+```
+
+The line is also stored in the `logs` table, with its payload alone (the run
+is the row it belongs to) and the time it was emitted. Lines are written in
+emission order by a background task:
 logging never blocks or fails a flow. A line waits up to 50 ms for the next
 ones, which are written with it in one statement, and the lines a flow logged
 are stored before the outcome of its run is. `flush().await` writes the lines
@@ -106,7 +114,9 @@ not an object is logged under `payload`. When the application reports to
 without their payload, as the lines of a run are.
 
 A context built by hand, in a test, takes `ContextLogger::new(json!({ … }))`,
-whose fields are added to every line, or `ContextLogger::default()`.
+whose fields are added to every line, or `ContextLogger::default()`. A
+`FlowLogger` built by hand, `FlowLogger::new(db, run_id)`, adds `runId`;
+`.with_fields(json!({ … }))` adds more.
 
 ## `tracing`
 

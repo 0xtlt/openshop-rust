@@ -40,7 +40,7 @@ fn main() -> Result<()> {
 mod tests {
     use super::*;
     use openshop::db::migrate::check_migrations;
-    use openshop::testing::{MockTransport, TestContext};
+    use openshop::testing::TestContext;
 
     #[test]
     fn the_application_is_valid() {
@@ -57,16 +57,15 @@ mod tests {
         check_migrations(std::path::Path::new(env!("CARGO_MANIFEST_DIR")), &config.models).unwrap();
     }
 
-    // Needs PostgreSQL: `docker compose up -d`, then `cargo test -- --ignored`.
+    // Needs PostgreSQL: `docker compose up -d --wait`, then `cargo test -- --ignored`.
     #[openshop::test(APP)]
     #[ignore = "requires PostgreSQL"]
     async fn sync_orders_pushes_orders_to_the_warehouse(ctx: &TestContext) {
-        ctx.transport.respond_with(|_request| {
-            Ok(MockTransport::json(
-                200,
-                json!({ "data": { "orders": { "nodes": [{ "id": "gid://shopify/Order/1", "name": "#1001" }] } } }),
-            ))
-        });
+        // Shopify answers the operation of the flow, by its name: `query GetRecentOrders`.
+        ctx.shopify.on(
+            "GetRecentOrders",
+            json!({ "orders": { "nodes": [{ "id": "gid://shopify/Order/1", "name": "#1001" }] } }),
+        );
         // The fake of a method takes what the method returns, and gives back what it received.
         let push = ctx.fakes.for_call(Warehouse::PUSH);
         push.returns(1);
@@ -74,6 +73,7 @@ mod tests {
         let outcome = ctx.run_flow(sync_orders::NAME, json!({ "limit": 5 })).await.unwrap();
 
         assert_eq!(outcome, RunOutcome::Completed);
+        assert_eq!(ctx.shopify.operations(), ["GetRecentOrders"]);
         assert_eq!(push.call_count(), 1);
         assert_eq!(push.last_call().unwrap().args[0].name, "#1001");
     }

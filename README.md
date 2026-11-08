@@ -20,7 +20,7 @@ development store.
 cargo install --locked --git https://github.com/0xtlt/openshop-rust openshop-cli
 openshop init my-app       # asks for a template: minimal, custom or public
 cd my-app
-docker compose up -d
+docker compose up -d --wait
 cp .env.example .env
 openshop dev
 ```

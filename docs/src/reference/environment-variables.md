@@ -1,7 +1,8 @@
 # Environment variables
 
-`dev` loads `.env` from the project root. An environment variable already
-present in the process wins over the value in `.env`. Production commands such
+`dev` loads `.env` from the project root, and so do `run` and `cron run`,
+which run a flow by hand in the environment of `dev`. An environment variable
+already present in the process wins over the value in `.env`. Production commands such
 as `start` and `worker` expect the process manager or deployment platform to
 inject their environment.
 
@@ -55,7 +56,7 @@ Notes:
   default. `0` disables a timeout and is the default size for `PGPOOL_MAX`:
   see [Connection](database.md#connection).
 - The `DATABASE_URL` fallback applies to `dev`, `start`, `worker`, `migrate`,
-  and `migrate status`, when the variable is unset or empty.
+  `migrate status`, `run` and `cron run`, when the variable is unset or empty.
 - `RUST_LOG` is read when the command starts. `dev` loads `.env` first, so the
   variable can be set there for development. See [Logging](logging.md).
 - `OPS_PASSWORD` is not in this table: OpenShop does not read it. It is the
@@ -170,7 +171,7 @@ variable: use `APP.main()`.
 3. Development CLI fallback, where one exists
 
 The `.env` loader does not overwrite an existing process variable and is used by
-`dev`, not by `start`, `worker`, or `migrate`.
+`dev`, `run` and `cron`, not by `start`, `worker`, or `migrate`.
 
 ### Shopify app URL
 

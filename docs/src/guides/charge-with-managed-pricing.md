@@ -123,7 +123,33 @@ pub async fn subscription_updated(ctx: WebhookContext, update: AppSubscriptionsU
 List it in the `webhooks` of `app!`. A flow, a webhook or a route reads what
 the shop has now with `ctx.shopify.active_subscriptions().await?`.
 
-## 5. Try it locally
+## 5. Test it
+
+A test gives the shop its plans by name, without writing what Shopify answers:
+
+```rust,ignore
+use openshop::billing::{self, PLAN_REQUIRED};
+use openshop::testing::{AdminTestOptions, TestContext, admin_context, subscription};
+
+#[openshop::test(APP)]
+async fn a_shop_without_a_plan_is_sent_to_the_plans(ctx: &TestContext) {
+    ctx.shopify.active_subscriptions([]);
+    let page = admin_context(&ctx.app, AdminTestOptions::default()).await.unwrap();
+    let error = billing::require_plan(&page, &["Pro"]).await.unwrap_err();
+    let error = error.downcast_ref::<openshop::AdminPublicError>().unwrap();
+    assert_eq!((error.code.as_str(), error.status), (PLAN_REQUIRED, 402));
+    // The `handle` of the `shopify.app.toml` of the project.
+    assert_eq!(error.details.as_ref().unwrap()["pricingLink"], "shopify:admin/charges/my-app/pricing_plans");
+
+    ctx.shopify.active_subscriptions([subscription("Pro")]);
+    let page = admin_context(&ctx.app, AdminTestOptions::default()).await.unwrap();
+    assert_eq!(billing::require_plan(&page, &["Pro"]).await.unwrap().name, "Pro");
+}
+```
+
+See [Answer the Admin API](../reference/testing.md#answer-the-admin-api).
+
+## 6. Try it locally
 
 [local-storefront](https://github.com/0xtlt/local-storefront) serves the plan
 selection page in its admin, at

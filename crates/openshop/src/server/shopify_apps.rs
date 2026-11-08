@@ -154,6 +154,18 @@ fn read_app_toml_of(cwd: &Path, api_key: &str) -> Option<String> {
         .find(|content| read_toml_value(top_level(content), "client_id").as_deref() == Some(api_key))
 }
 
+/// The `client_id` of the `shopify.app.toml` of `cwd`, when no
+/// `shopify.app*.toml` there has `api_key` for its own: the app a test runs
+/// as, when it gives the placeholder API key.
+#[cfg(feature = "testing")]
+pub(crate) fn client_id_in_place_of(cwd: &Path, api_key: &str) -> Option<String> {
+    if read_app_toml_of(cwd, api_key).is_some() {
+        return None;
+    }
+    let toml = std::fs::read_to_string(cwd.join("shopify.app.toml")).ok()?;
+    read_top_level_value(&toml, "client_id")
+}
+
 /// Reads OAuth scopes from `shopify.app.<name>.toml` files, then `shopify.app.toml`.
 fn read_scopes_from_toml(cwd: &Path) -> String {
     let mut candidates: Vec<String> = std::fs::read_dir(cwd)

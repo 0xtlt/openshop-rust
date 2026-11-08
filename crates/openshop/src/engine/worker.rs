@@ -142,25 +142,9 @@ fn report_failed_run(run: &FailedRun) {
     );
 }
 
-/// Leases up to `$3` runs in one statement, to the worker `$1` for `$2`
-/// milliseconds, and returns them oldest first.
-///
-/// `FOR UPDATE SKIP LOCKED` lets several workers claim at the same time. A
-/// `running` row past its `available_at` is an expired lease and can be taken
-/// over. A run past its deadline is left to [`EXPIRE_SQL`].
-///
-/// Every claim is an attempt, except the one of a run waking up from a sleep:
-/// a sleep is not a failure, and a flow may sleep as often as it needs to.
-/// An expired lease means the worker died before it recorded the outcome of
-/// its attempt. A run that did so with its last attempt is failed instead of
-/// claimed, or a flow that takes its worker down would be claimed forever. The
-/// attempts allowed are the `maxAttempts` of the retry policy of the run, or
-/// one when it has none, as in [`super::runner`] when a failure is recorded.
-///
-/// The candidates repeat the predicate of `flow_runs_claimable_idx`, which
-/// yields them already ordered, and the updates find them by primary key:
-/// the cost of a claim follows its size, not the length of the queue.
-const CLAIM_SQL: &str = "\
+// The statement of a claim, whose candidates are filtered by `$only` too.
+macro_rules! claim_sql {
+    ($only:literal) => { concat!("\
     WITH candidate AS ( \
       SELECT id, available_at, created_at, \
         status = 'running' AND attempts >= GREATEST( \
@@ -168,7 +152,7 @@ const CLAIM_SQL: &str = "\
             THEN (retry_policy->>'maxAttempts')::bigint ELSE 1 END, 1) AS exhausted \
       FROM flow_runs \
       WHERE status IN ('pending', 'sleeping', 'running') AND available_at <= now() \
-        AND (deadline_at IS NULL OR deadline_at > now()) \
+        AND (deadline_at IS NULL OR deadline_at > now()) ", $only, " \
       ORDER BY available_at ASC, created_at ASC \
       LIMIT $3 \
       FOR UPDATE SKIP LOCKED \
@@ -193,7 +177,32 @@ const CLAIM_SQL: &str = "\
     SELECT run.*, candidate.exhausted FROM ( \
       SELECT * FROM claimed UNION ALL SELECT * FROM failed \
     ) run JOIN candidate USING (id) \
-    ORDER BY candidate.available_at, candidate.created_at";
+    ORDER BY candidate.available_at, candidate.created_at")
+    };
+}
+
+/// Leases up to `$3` runs in one statement, to the worker `$1` for `$2`
+/// milliseconds, and returns them oldest first.
+///
+/// `FOR UPDATE SKIP LOCKED` lets several workers claim at the same time. A
+/// `running` row past its `available_at` is an expired lease and can be taken
+/// over. A run past its deadline is left to [`EXPIRE_SQL`].
+///
+/// Every claim is an attempt, except the one of a run waking up from a sleep:
+/// a sleep is not a failure, and a flow may sleep as often as it needs to.
+/// An expired lease means the worker died before it recorded the outcome of
+/// its attempt. A run that did so with its last attempt is failed instead of
+/// claimed, or a flow that takes its worker down would be claimed forever. The
+/// attempts allowed are the `maxAttempts` of the retry policy of the run, or
+/// one when it has none, as in [`super::runner`] when a failure is recorded.
+///
+/// The candidates repeat the predicate of `flow_runs_claimable_idx`, which
+/// yields them already ordered, and the updates find them by primary key:
+/// the cost of a claim follows its size, not the length of the queue.
+const CLAIM_SQL: &str = claim_sql!("");
+
+/// [`CLAIM_SQL`] for the runs of `$4` only: what a worker of some runs claims.
+const CLAIM_ONLY_SQL: &str = claim_sql!("AND id = ANY($4)");
 
 /// A run the claim returned: leased to this worker, or failed because it used
 /// all its attempts.
@@ -229,6 +238,8 @@ struct Inner {
     app: OpenShop,
     config: ResolvedWorkerConfig,
     worker_id: String,
+    /// The runs this worker may claim, when it is a worker of some runs.
+    only: Option<Vec<Uuid>>,
     running: AtomicBool,
     active: AtomicUsize,
     /// Signalled when a run finishes, for a loop that waits for a free slot.
@@ -253,12 +264,24 @@ pub struct Worker {
 
 impl Worker {
     pub fn new(app: OpenShop, overrides: WorkerConfig) -> Self {
+        Self::of(app, overrides, None)
+    }
+
+    /// A worker that claims these runs only, as any worker would, retries
+    /// included: what runs a flow by hand (`openshop run`, `openshop cron
+    /// run`). It removes no log line past their retention.
+    pub(crate) fn for_runs(app: OpenShop, overrides: WorkerConfig, runs: Vec<Uuid>) -> Self {
+        Self::of(app, overrides, Some(runs))
+    }
+
+    fn of(app: OpenShop, overrides: WorkerConfig, only: Option<Vec<Uuid>>) -> Self {
         let config = merge(merge(DEFAULT_WORKER_CONFIG, &app.config().worker), &overrides);
         Self {
             inner: Arc::new(Inner {
                 app,
                 config,
                 worker_id: Uuid::new_v4().to_string(),
+                only,
                 running: AtomicBool::new(false),
                 active: AtomicUsize::new(0),
                 slot_freed: Notify::new(),
@@ -391,7 +414,7 @@ impl Inner {
     /// Removes the log lines past the `log_retention` setting once per sweep
     /// interval, if the application sets one.
     async fn retention_loop(&self, stop: &CancellationToken) {
-        let Some(retention) = self.app.config().log_retention else {
+        let Some(retention) = self.app.config().log_retention.filter(|_| self.only.is_none()) else {
             return;
         };
         let retention = chrono::Duration::from_std(retention).unwrap_or(chrono::Duration::MAX);
@@ -412,12 +435,18 @@ impl Inner {
     /// to the runs to execute and to how many were failed.
     async fn claim(&self, limit: usize) -> Result<(Vec<ClaimedRun>, usize)> {
         let sent = tokio::time::Instant::now();
-        let mut rows = sqlx::query_as::<_, ClaimedRun>(CLAIM_SQL)
-            .bind(&self.worker_id)
-            .bind(self.lease_ms())
-            .bind(limit as i64)
-            .fetch_all(self.app.db())
-            .await?;
+        let claim = match &self.only {
+            Some(runs) => sqlx::query_as::<_, ClaimedRun>(CLAIM_ONLY_SQL)
+                .bind(&self.worker_id)
+                .bind(self.lease_ms())
+                .bind(limit as i64)
+                .bind(runs),
+            None => sqlx::query_as::<_, ClaimedRun>(CLAIM_SQL)
+                .bind(&self.worker_id)
+                .bind(self.lease_ms())
+                .bind(limit as i64),
+        };
+        let mut rows = claim.fetch_all(self.app.db()).await?;
         for row in &mut rows {
             row.claimed_at = Some(sent);
         }

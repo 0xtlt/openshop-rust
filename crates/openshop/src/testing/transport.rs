@@ -7,6 +7,7 @@ use anyhow::Result;
 use serde_json::Value;
 use shopify_api::transport::{BoxFuture, HttpRequest, HttpResponse, Method, Transport, TransportError};
 
+use super::shopify::{FakeShopify, GraphqlCall};
 use crate::locked;
 
 /// The `Content-Type` of a request whose body is a URL-encoded form, such as
@@ -102,28 +103,17 @@ impl OutboundResponse {
 
 type Responder = Arc<dyn Fn(&OutboundRequest) -> Result<OutboundResponse> + Send + Sync>;
 
-/// Records every outbound request and answers with the configured responder.
-/// Without a responder every request gets a 404. A responder that fails is a
-/// request that did not reach Shopify.
+/// Records every outbound request and answers it: a GraphQL operation its
+/// [`shopify`](Self::shopify) answers by name, anything else with the
+/// configured responder. Without a responder, a GraphQL operation nothing
+/// answers gets a GraphQL error that names it, and any other request a `404`.
+/// A responder that fails is a request that did not reach Shopify.
+#[derive(Default)]
 pub struct MockTransport {
-    responder: Mutex<Responder>,
+    responder: Mutex<Option<Responder>>,
+    shopify: FakeShopify,
     requests: Mutex<Vec<OutboundRequest>>,
     delay: Mutex<Duration>,
-}
-
-impl Default for MockTransport {
-    fn default() -> Self {
-        Self {
-            responder: Mutex::new(Arc::new(|_| {
-                Ok(OutboundResponse {
-                    status: 404,
-                    body: "not mocked".to_string(),
-                })
-            })),
-            requests: Mutex::new(Vec::new()),
-            delay: Mutex::new(Duration::ZERO),
-        }
-    }
 }
 
 impl MockTransport {
@@ -139,11 +129,21 @@ impl MockTransport {
         }
     }
 
+    /// Answers what [`shopify`](Self::shopify) does not: the requests that
+    /// are not GraphQL (the token requests), and the operations it has no
+    /// answer for.
     pub fn respond_with(
         &self,
         responder: impl Fn(&OutboundRequest) -> Result<OutboundResponse> + Send + Sync + 'static,
     ) {
-        *locked(&self.responder) = Arc::new(responder);
+        *locked(&self.responder) = Some(Arc::new(responder));
+    }
+
+    /// The Admin API behind this transport, which answers GraphQL operations
+    /// by name before the responder does. `ctx.shopify` of a
+    /// [`TestContext`](super::TestContext). Clones share their answers.
+    pub fn shopify(&self) -> FakeShopify {
+        self.shopify.clone()
     }
 
     /// Makes every request wait `delay` before it is answered, as a slow
@@ -152,7 +152,8 @@ impl MockTransport {
         *locked(&self.delay) = delay;
     }
 
-    /// Answers every request with the same JSON body and status 200.
+    /// Answers every request [`shopify`](Self::shopify) does not with the
+    /// same JSON body and status 200.
     pub fn respond_json(&self, body: Value) {
         self.respond_with(move |_| Ok(Self::json(200, body.clone())));
     }
@@ -179,11 +180,23 @@ impl Transport for MockTransport {
         locked(&self.requests)
             .push(request.clone());
         let delay = *locked(&self.delay);
+        let shopify = self.shopify.clone();
         Box::pin(async move {
             if !delay.is_zero() {
                 tokio::time::sleep(delay).await;
             }
-            match responder(&request) {
+            let call = GraphqlCall::of(&request);
+            let answered = call.as_ref().and_then(|call| shopify.answer(call));
+            let response = match (answered, responder, &call) {
+                (Some(answer), _, _) => answer,
+                (None, Some(responder), _) => responder(&request),
+                (None, None, Some(call)) => Ok(shopify.unanswered_response(call)),
+                (None, None, None) => Ok(OutboundResponse {
+                    status: 404,
+                    body: "not mocked".to_string(),
+                }),
+            };
+            match response {
                 Ok(response) => Ok(HttpResponse::new(response.status, response.body.into_bytes())
                     .with_header("Content-Type", "application/json")),
                 Err(error) => Err(TransportError::new(format!("{error:#}"))),

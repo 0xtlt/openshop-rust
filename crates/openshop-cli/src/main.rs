@@ -30,6 +30,10 @@ const USAGE: &str = "
     build                       Build for production: the admin UI bundle, if any, then the app
     build-ui                    Build the admin UI bundle alone, into dist/
     start                       Start production server (API + UI + scheduler, no worker)
+    run <flow> [--shop=<domain> | --all-shops] [--input=<json>]
+                                Run a flow once, through the queue and a worker, against the
+                                database of the app, and wait for it
+    cron run <name>             Run the flow of a cron once, for the shops of the cron
     test [args]                 Run tests
 
   Usage:
@@ -41,12 +45,14 @@ const USAGE: &str = "
     openshop migrate
     openshop migrate check
     openshop migrate status
+    openshop run syncOrders --shop=my-store.myshopify.com --input='{\"limit\":10}'
+    openshop cron run \"Nightly sync\"
     openshop test
     openshop build && openshop start
 
-  `worker`, `migrate` and `start` run the application binary through
-  cargo in the current project; `test` and `build` run `cargo test` and
-  `cargo build --release` there.
+  `worker`, `migrate`, `start`, `run` and `cron` run the application binary
+  through cargo in the current project; `test` and `build` run `cargo test`
+  and `cargo build --release` there.
 ";
 
 /// Runs cargo in the current directory and forwards its exit status.
@@ -78,7 +84,7 @@ async fn run(args: &[String]) -> Result<()> {
             Ok(())
         }
         Some("test") => cargo(&["test"], rest).await,
-        Some("migrate") => cargo(&["run", "--", "migrate"], rest).await,
+        Some(command @ ("migrate" | "run" | "cron")) => cargo(&["run", "--", command], rest).await,
         Some(command @ ("start" | "worker")) => cargo(&["run", "--release", "--", command], rest).await,
         None | Some("help" | "--help" | "-h") => {
             println!("{USAGE}");

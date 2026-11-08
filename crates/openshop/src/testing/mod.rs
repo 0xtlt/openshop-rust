@@ -8,16 +8,21 @@ mod admin;
 mod context;
 mod db;
 mod fake;
+mod shopify;
 mod transport;
 
 pub use admin::{AdminTestOptions, admin_context};
 pub use context::{
-    IntoTestContext, ProxyClient, ProxyRequestBuilder, ProxyResponse, StartedTestContext, TestContext, TestOptions,
+    IntoTestContext, ProxyClient, ProxyRequestBuilder, ProxyResponse, StartedTestContext, TEST_API_KEY, TestContext,
+    TestOptions,
 };
+#[doc(hidden)]
+pub use context::in_crate;
 pub use db::{TestDb, test_database_url};
 #[cfg(test)]
 pub(crate) use db::connect;
 pub use fake::{FakeCall, FakeMethod, FakeProviders, TypedCall, TypedFake};
+pub use shopify::{FakeShopify, GraphqlCall, subscription};
 pub use transport::{FORM_CONTENT_TYPE, MockTransport, OutboundRequest, OutboundResponse};
 
 pub use crate::admin::invoke_admin_function;

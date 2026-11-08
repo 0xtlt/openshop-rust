@@ -68,6 +68,68 @@
   wrote the level twice (`INFO [INFO] Order received`), and writes
   `INFO Order received`. A `RuntimeLogger` of your own no longer finds
   `[LEVEL]` before the message.
+- The lines of a flow say what they run for in the console: `shop`,
+  `shopifyApp`, `flow` and `runId` reach the runtime logger with the payload
+  (`context={"count":3,"shop":"demo.myshopify.com",…}` instead of
+  `context={}`). A key of the payload wins. The `logs` table still stores the
+  payload alone. `FlowLogger::with_fields(json!({ … }))` adds fields to a
+  logger built by hand, whose lines carry `runId`.
+- `shopify_retry` sets how the Shopify client retries what Shopify did not
+  run (a query after a `5xx` or a network failure, a throttled request):
+  `app! { shopify_retry: shopify::RetryPolicy::new(2).with_max_delay(…) }`,
+  or `OpenShopBuilder::shopify_retry`. `openshop::shopify::RetryPolicy` is
+  `shopify_api`'s. Without it, `shopify_api`'s four retries, as before.
+- Tests retry Shopify without waiting: `TestOptions::shopify_retry`, `None` by
+  default, is the policy of the application (or `shopify_api`'s) with the same
+  number of attempts and no wait between them, so a test that answers `503`
+  runs the code that retries in no time instead of ~15 seconds.
+  `Some(policy)` is that policy as it is, waits included. A `429`'s
+  `Retry-After` is still waited for.
+- `openshop run <flow> [--shop=<domain> | --all-shops] [--input=<json>]` and
+  `openshop cron run <name>` run a flow, or the flow of a cron, once, against
+  the database of the app, whatever the admin shows (`AdminPagesConfig::none()`
+  removes `/api/flows/*/run`, `/ops` is read-only). The runs are queued as the
+  scheduler queues them (the shops of the cron, its input, without the shops
+  that turned it off; the input checked, the concurrency and retry policy of
+  the flow), then executed by a worker of the command that takes these runs
+  only, with the claim, lease, retries and timeout of `worker`; the command
+  waits for them and fails when one did not complete. Without `--shop`, the
+  one shop installed. A cron is named by its name, its key `<flow>:<schedule>`
+  or its flow. No occurrence is claimed: the cron still fires on schedule.
+  Like `dev`, they load `.env`; outside production they push the schema, in
+  production they refuse a database behind its migrations. The application
+  binary has the same commands: `cargo run -- run …`, `cargo run -- cron run …`.
+- `ctx.shopify` in a test, a `FakeShopify`, answers the GraphQL operations the
+  application sends by their name (`query Name …`, or the `operationName`):
+  `on(operation, data)`, `on_variables(operation, variables, data)`,
+  `on_with(operation, |call| …)` and `respond(operation, response)`; `calls()`,
+  `calls_to(…)`, `operations()`, `unanswered()` and `assert_answered()` say what
+  was sent. An operation nothing answers, without a responder, gets a GraphQL
+  error that names it and the ones answered, and fails the call (it got a
+  `404` before; a request that is not GraphQL still does).
+  `ctx.shopify.active_subscriptions([subscription("Pro")])` answers what the
+  billing helpers ask, `OpenShopActiveSubscriptions`
+  (`billing::ACTIVE_SUBSCRIPTIONS_OPERATION`); `testing::subscription(name)`
+  is an active test subscription. `MockTransport::shopify()` is the same fake;
+  its responder answers what the fake does not. The testing reference lists
+  the operations OpenShop sends of its own. The templates' tests answer their
+  operations by name.
+- `#[openshop::test]` reads the Shopify TOML files of the crate of the test
+  (its `CARGO_MANIFEST_DIR`): the `handle`, the `name` and the scopes of
+  `shopify.app.toml`, so the pricing page and the links to the admin name the
+  app as Shopify does. When that file has a `client_id` and no
+  `shopify.app*.toml` is the one of `test-app`, the test's API key is that
+  `client_id`, unless the options give another (`TestOptions::api_key`, whose
+  default is now `TEST_API_KEY`). A `cwd` in `TestOptions` still wins. Behavior
+  change: a test of `#[openshop::test]` in a crate with a `shopify.app.toml`
+  now reads it, where it read none.
+- The `docker-compose.yml` of a new project, and of the repository, has a
+  healthcheck (`pg_isready`): `docker compose up -d --wait` returns once
+  PostgreSQL accepts connections. `openshop init`, the READMEs and the guides
+  say `docker compose up -d --wait`, and so does `mise run db:up`.
+- Breaking for code that builds these structs field by field, without
+  `..Default::default()`: `OpenShopConfig` (`shopify_retry`) and
+  `TestOptions` (`shopify_retry`). `TestContext` has a `shopify` field.
 
 - `ShopifyEndpoints` says where an app reaches Shopify, for a simulator of
   Shopify such as [local-storefront](https://github.com/0xtlt/local-storefront),

@@ -819,7 +819,7 @@ fn write_project(
     println!();
     println!("Next steps:");
     println!("  cd {target}");
-    println!("  docker compose up -d");
+    println!("  docker compose up -d --wait");
     println!("  cp .env.example .env");
     if template.views() {
         println!("  rustup target add wasm32-unknown-unknown && cargo install trunk    # once, for the admin pages");
@@ -1044,6 +1044,11 @@ mod tests {
         // The build secret, if it was written in the project, is not copied by `COPY . .`.
         assert!(read(".dockerignore").lines().any(|line| line == "gitconfig"));
         assert!(read(".env.example").contains("DATABASE_URL="));
+        // PostgreSQL says when it is ready: `docker compose up -d --wait` returns then.
+        assert!(
+            read("docker-compose.yml")
+                .contains("healthcheck:\n      test: [\"CMD-SHELL\", \"pg_isready -U openshop -d openshop\"]")
+        );
         assert!(read("src/flows/sync_orders.rs").contains("syncOrders"));
         // The application is declared, and starts with MCP off.
         let main = read("src/main.rs");

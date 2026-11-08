@@ -71,20 +71,9 @@ impl ContextLogger {
         }
     }
 
-    /// What a line is logged with: its payload, and the fields of the logger
-    /// it does not name. A payload that is not an object is under `payload`.
+    /// What a line is logged with: see [`with_fields`].
     fn context(&self, payload: Value) -> Value {
-        let mut context = match payload {
-            Value::Object(payload) => payload,
-            Value::Null => Map::new(),
-            other => Map::from_iter([("payload".to_string(), other)]),
-        };
-        for (key, value) in self.fields.iter() {
-            if !context.contains_key(key) {
-                context.insert(key.clone(), value.clone());
-            }
-        }
-        Value::Object(context)
+        with_fields(payload, &self.fields)
     }
 
     /// The level is the method of the runtime logger, which writes it: the
@@ -125,6 +114,23 @@ impl ContextLogger {
     pub fn error_with(&self, message: impl AsRef<str>, payload: Value) {
         self.log("error", message.as_ref(), payload);
     }
+}
+
+/// What a line goes to the runtime logger with: its payload, and the
+/// `fields` of its logger it does not name. A payload that is not an object
+/// is under `payload`.
+pub(super) fn with_fields(payload: Value, fields: &Map<String, Value>) -> Value {
+    let mut context = match payload {
+        Value::Object(payload) => payload,
+        Value::Null => Map::new(),
+        other => Map::from_iter([("payload".to_string(), other)]),
+    };
+    for (key, value) in fields {
+        if !context.contains_key(key) {
+            context.insert(key.clone(), value.clone());
+        }
+    }
+    Value::Object(context)
 }
 
 #[cfg(test)]

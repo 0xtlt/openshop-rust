@@ -112,6 +112,7 @@ can fail with `?`: the error is the one `APP.config()` and `APP.run()` return.
 | `shopify_endpoints` | [`ShopifyEndpoints`](#shopify-endpoints): where the Admin API and OAuth go, and the App Bridge and Polaris the admin UI loads, for a simulator, a proxy or an API of your own | Each field from its environment variable, then Shopify's |
 | `worker` | `WorkerConfig` | See [Worker defaults](#worker-defaults) |
 | `retry_policy` | `RetryPolicy` | See [Retry defaults](#retry-defaults) |
+| `shopify_retry` | `openshop::shopify::RetryPolicy`: how the Shopify client retries what Shopify did not run; see [Shopify client retries](#shopify-client-retries) | Four retries, from one second apart, doubling, up to thirty seconds |
 | `builtin_pages` | [`AdminPagesConfig`](#admin-pages), or `AdminPagesConfig::none()` for an admin made of the pages of the application | Every built-in page of the admin `visible` |
 | `admin_ui` | `UiSource` | The admin UI bundle built into the framework; see [Custom admin pages](custom-admin-pages.md#serve-the-bundle) |
 | `max_request_body_bytes` | `usize` | `2 * 1024 * 1024` (2 MB); larger request bodies are answered with `413` |
@@ -194,6 +195,7 @@ fn main() -> Result<()> {
 | `.client_credentials_shop(shop)` | `Option<String>` or `String` | Background work asks no token for a shop without a row |
 | `.worker(config)` | `WorkerConfig` | See [Worker defaults](#worker-defaults) |
 | `.retry_policy(policy)` | `RetryPolicy` | See [Retry defaults](#retry-defaults) |
+| `.shopify_retry(policy)` | `openshop::shopify::RetryPolicy` | See [Shopify client retries](#shopify-client-retries) |
 | `.on_error(hook)` | `Fn(Arc<anyhow::Error>, ErrorContext) -> impl Future<Output = ()>` | No hook |
 | `.build()` | — | Returns `Result<OpenShopConfig>` after [validation](#runtime-validation) |
 
@@ -218,7 +220,7 @@ Calling the other methods again:
 - `.builtin_pages(…)` and `.builtin_page(…)` merge with earlier calls; later values win.
 - `.shopify_endpoints(…)` merges with earlier calls field by field: a field it
   sets replaces the earlier one, a field it leaves `None` keeps it.
-- The remaining settings (`.shopify(…)`, `.worker(…)`, `.retry_policy(…)`,
+- The remaining settings (`.shopify(…)`, `.worker(…)`, `.retry_policy(…)`, `.shopify_retry(…)`,
   `.on_error(…)`, `.admin_menu(…)`, `.admin_ui(…)`,
   `.max_request_body_bytes(…)`, `.request_timeout(…)`,
   `.max_concurrent_requests(…)`, `.ops_password(…)`, `.log_retention(…)`,
@@ -385,6 +387,12 @@ overrides. Changing the schedule of a cron changes its key: the overrides of the
 old key are never read again, and `/api/crons/toggle` and the MCP tool answer
 `Cron not found` to a key the application does not declare. An `input` that is
 not a JSON object is ignored.
+
+To fire a cron now, without waiting for its schedule, run
+`openshop cron run <name>` (its name, its key, or its flow): one run per shop
+of the cron, with its input, executed and waited for. To run its flow for
+another shop or with another input, `openshop run <flow> --shop=<domain>
+--input=<json>`. See [Run a flow or a cron by hand](cli.md#run-a-flow-or-a-cron-by-hand).
 
 ## Admin pages
 
@@ -575,6 +583,46 @@ The app-level `retry_policy` setting supplies defaults for the flows of the
 application. Flow and dispatch settings override it field by field. See the
 [retry defaults and precedence](flows.md#retry-precedence-and-defaults)
 for the authoritative option table and deadline behavior.
+
+## Shopify client retries
+
+`shopify_retry` sets how the Shopify client of every handler (`ctx.shopify`,
+`app.shopify_client(…)`, the billing helpers, the built-in pages) retries a
+request Shopify did not run:
+
+- a query after a `5xx` or a network failure, with exponential backoff (a
+  mutation is not sent again: it may have run);
+- any request Shopify throttled: a `THROTTLED` answer waits for the cost it
+  reports, a `429` for its `Retry-After`.
+
+It is not the [retry policy of a flow](#retry-defaults), which runs an attempt
+of a flow again. The value is `shopify_api`'s `RetryPolicy`, re-exported as
+`openshop::shopify::RetryPolicy`:
+
+```rust,ignore
+use std::time::Duration;
+use openshop::prelude::*;
+use openshop::shopify;
+
+pub static APP: App = app! {
+    // Two retries, from 250 ms apart up to 2 s: a page answers sooner when Shopify fails.
+    shopify_retry: shopify::RetryPolicy::new(2)
+        .with_base_delay(Duration::from_millis(250))
+        .with_max_delay(Duration::from_secs(2)),
+};
+```
+
+| Method | Sets | Default |
+| --- | --- | --- |
+| `RetryPolicy::new(n)` | At most `n` retries | `RetryPolicy::default()` is `new(4)` |
+| `RetryPolicy::none()` | No retry | — |
+| `.with_base_delay(delay)` | The first backoff, doubled at each retry, with up to a quarter of jitter | 1 second |
+| `.with_max_delay(delay)` | The longest backoff, and the longest wait for a throttled cost | 30 seconds |
+| `.with_max_retry_after(wait)` | The longest `Retry-After` of a `429` waited for; a longer one fails at once with the wait Shopify asked for | 5 minutes |
+
+Without the setting, four retries wait about 1, 2, 4 and 8 seconds: a query
+Shopify keeps failing takes some 15 seconds to fail. A test does not wait: see
+[`TestOptions::shopify_retry`](testing.md#testoptions).
 
 ## Environment variables
 

@@ -193,7 +193,9 @@ The generated `.gitignore` excludes `target/`, `.env`, `.shopify/`, and `dist/`.
 - `Procfile` declares three processes: `release: app migrate`,
   `web: app start`, and `worker: app worker --concurrency=5`.
 - `docker-compose.yml` starts a local PostgreSQL 17 with the `openshop` role
-  and database expected by the default `DATABASE_URL`.
+  and database expected by the default `DATABASE_URL`. Its healthcheck
+  (`pg_isready`) makes the container `healthy` once it accepts connections:
+  `docker compose up -d --wait` returns then.
 - `.env.example` lists the variables to copy into `.env`. `ENCRYPTION_KEY` is
   commented out: `openshop dev` stores credentials in plaintext until you set
   it. `start` and `worker` refuse to run without it unless

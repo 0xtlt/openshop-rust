@@ -21,7 +21,7 @@ there and from `src/`.
 ## Develop
 
 ```bash
-docker compose up -d          # PostgreSQL
+docker compose up -d --wait   # PostgreSQL
 cp .env.example .env          # then fill in the Shopify credentials
 openshop dev                  # or: cargo run -- dev
 ```
@@ -43,7 +43,7 @@ cargo install trunk
 ## Test
 
 ```bash
-docker compose up -d          # most tests need PostgreSQL
+docker compose up -d --wait   # most tests need PostgreSQL
 cargo test
 ```
 

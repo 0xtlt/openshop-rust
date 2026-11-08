@@ -59,6 +59,11 @@ use crate::types::ShopScope;
 /// The `code` of the error [`require_plan`] answers when no plan fits.
 pub const PLAN_REQUIRED: &str = "PLAN_REQUIRED";
 
+/// The name of the GraphQL operation [`ShopifyClient::active_subscriptions`]
+/// sends, and so [`require_plan`] and [`any_plan`]: what a test answers
+/// (`ctx.shopify.active_subscriptions([…])` of the `testing` feature does it).
+pub const ACTIVE_SUBSCRIPTIONS_OPERATION: &str = "OpenShopActiveSubscriptions";
+
 /// What [`ShopifyClient::active_subscriptions`] asks Shopify.
 const ACTIVE_SUBSCRIPTIONS: &str = "query OpenShopActiveSubscriptions { currentAppInstallation { activeSubscriptions { \
      id name status test trialDays createdAt currentPeriodEnd \
@@ -347,6 +352,32 @@ fn read_active_subscriptions(data: Value) -> anyhow::Result<ActiveSubscriptions>
             })
             .collect(),
     ))
+}
+
+/// The `data` Shopify answers [`ACTIVE_SUBSCRIPTIONS`] with when the shop
+/// has `subscriptions`: what [`read_active_subscriptions`] reads back.
+#[cfg(feature = "testing")]
+pub(crate) fn active_subscriptions_data(subscriptions: &[AppSubscription]) -> Value {
+    let subscriptions: Vec<Value> = subscriptions
+        .iter()
+        .map(|subscription| {
+            serde_json::json!({
+                "id": subscription.id,
+                "name": subscription.name,
+                "status": subscription.status,
+                "test": subscription.test,
+                "trialDays": subscription.trial_days,
+                "createdAt": subscription.created_at,
+                "currentPeriodEnd": subscription.current_period_end,
+                "lineItems": subscription
+                    .line_items
+                    .iter()
+                    .map(|line| serde_json::json!({ "id": line.id, "plan": { "pricingDetails": line.pricing } }))
+                    .collect::<Vec<_>>(),
+            })
+        })
+        .collect();
+    serde_json::json!({ "currentAppInstallation": { "activeSubscriptions": subscriptions } })
 }
 
 impl ShopifyClient {
@@ -644,6 +675,34 @@ mod tests {
         assert_eq!(update.app_subscription.status, SubscriptionStatus::Cancelled);
         assert_eq!(update.app_subscription.price.as_deref(), Some("5"));
         assert_eq!(update.app_subscription.capped_amount, None);
+    }
+
+    #[test]
+    fn the_operation_is_named_as_the_tests_answer_it() {
+        assert_eq!(
+            crate::testing::GraphqlCall::of(&crate::testing::OutboundRequest {
+                method: "POST",
+                url: "https://test.myshopify.com/admin/api/2026-10/graphql.json".to_string(),
+                headers: Vec::new(),
+                body: json!({ "query": ACTIVE_SUBSCRIPTIONS }),
+            })
+            .and_then(|call| call.operation)
+            .as_deref(),
+            Some(ACTIVE_SUBSCRIPTIONS_OPERATION)
+        );
+    }
+
+    #[test]
+    fn the_fixture_of_the_tests_reads_back_as_it_was_written() {
+        let written = read_active_subscriptions(answer(vec![
+            subscription("Pro", "ACTIVE", Some("pro")),
+            subscription("Basic", "FROZEN", None),
+        ]))
+        .unwrap();
+        // `AppFuturePricing` reads as `Other`, which is written as such.
+        let read = read_active_subscriptions(active_subscriptions_data(&written)).unwrap();
+        assert_eq!(read, written);
+        assert_eq!(read_active_subscriptions(active_subscriptions_data(&[])).unwrap(), ActiveSubscriptions::default());
     }
 
     #[test]

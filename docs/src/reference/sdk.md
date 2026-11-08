@@ -44,9 +44,9 @@ framework and its tests and can change without notice.
 | `openshop::server` | `router`, `listen`, and `serve`, to embed the HTTP server | [Server, worker, and scheduler](#server-worker-and-scheduler) |
 | `openshop::validators` | Ready-made field validators | [Providers](providers.md#validators) |
 | `openshop::runtime` | `RuntimeEnv`, the runtime logger, and `Transport`, what Shopify requests go through | [Logging](logging.md) |
-| `openshop::shopify` | `ShopifyClient`, the `shopify_api` types it takes: `ApiVersion`, `Operation`, `IntoVariable`, `Page`, and `input!` | [Typed GraphQL](graphql.md) |
+| `openshop::shopify` | `ShopifyClient`, the `shopify_api` types it takes: `ApiVersion`, `Operation`, `IntoVariable`, `Page`, `RetryPolicy` (of the [`shopify_retry`](configuration.md#shopify-client-retries) setting), and `input!` | [Typed GraphQL](graphql.md) |
 | `openshop::shopify_api` | The `shopify_api` crate, which the code of `graphql!` names: `Error`, `Shopify`… | [Typed GraphQL](graphql.md) |
-| `openshop::testing` | Contexts, provider fakes, and signing helpers (cargo feature `testing`) | [Testing](testing.md) |
+| `openshop::testing` | Contexts, provider fakes, the Admin API answered by operation name (`FakeShopify`), and signing helpers (cargo feature `testing`) | [Testing](testing.md) |
 
 `openshop::ui` (cargo feature `ui`) is what the view of a custom admin page
 uses: `use_loader`, `use_action`, and the App Bridge helpers. The modules of
@@ -421,7 +421,9 @@ async fn product_title(ctx: &WebhookContext, id: &str) -> Result<Option<String>>
   `X-Shopify-Access-Token` header, `<version>` the one of the schema of the
   crate (`[package.metadata.shopify_api]`), or the one the client pins;
 - waits and retries when Shopify throttles the request, and retries a query
-  after a server error; a mutation never runs twice;
+  after a server error; a mutation never runs twice. The
+  [`shopify_retry`](configuration.md#shopify-client-retries) setting says how
+  many times and how long apart;
 - fails on non-2xx HTTP responses, and when the top-level GraphQL `errors`
   array is non-empty, with a `shopify_api::Error` (`Http`, `Graphql`) that
   `error.downcast_ref::<openshop::shopify_api::Error>()` reads;

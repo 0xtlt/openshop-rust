@@ -4,8 +4,9 @@
 
 - Rust 1.94 or newer (`rustup`), plus the `wasm32-unknown-unknown` target and
   [trunk](https://trunkrs.dev) if you work on the admin UI.
-- PostgreSQL 17. `docker compose up -d` starts one on `localhost:5432` with the
-  `openshop` role and database.
+- PostgreSQL 17. `docker compose up -d --wait` starts one on `localhost:5432`
+  with the `openshop` role and database, and returns once it accepts
+  connections.
 
 ```bash
 export DATABASE_URL=postgresql://openshop:openshop@localhost:5432/openshop

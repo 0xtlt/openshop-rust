@@ -18,6 +18,8 @@ An OpenShop app has two command lines:
 | `openshop start [args]` | `cargo run --release -- start [args]` | Start the production web process. |
 | `openshop worker [args]` | `cargo run --release -- worker [args]` | Start the worker process. |
 | `openshop migrate [args]` | `cargo run -- migrate [args]` | Apply, generate, check, or inspect migrations. |
+| `openshop run <flow> [args]` | `cargo run -- run <flow> [args]` | [Run a flow once](#run-a-flow-or-a-cron-by-hand), for a shop or every shop, and wait for it. |
+| `openshop cron run <name>` | `cargo run -- cron run <name>` | [Run the flow of a cron once](#run-a-flow-or-a-cron-by-hand), for the shops of the cron. |
 | `openshop test [args]` | `cargo test [args]` | Run the app's tests. |
 
 An unknown command fails with status `2` and the usage text (see the end of
@@ -150,6 +152,8 @@ the current directory.
 | `migrate generate` | `--name=<name>`, `--allow-destructive`, `--allow-generate-in-production` | Writes the framework schema your project does not cover yet, and the statements that bring your tables in line with the registered models since the last generation; with `--name` and nothing else to write, writes an empty migration for your own changes. Updates `migrations/schema.snapshot.json`. Does not connect to the database. Refuses a migration that drops a table or a column, or converts a column in a way that can lose values, unless `--allow-destructive` is given. Blocked in production by default. See [Generated model migrations](database.md#generated-model-migrations). |
 | `migrate check` | `migrations/` directory | Fails when the committed migrations do not cover the framework schema, or when the models changed since the last generated migration. Does not connect to the database. |
 | `migrate status` | Database and `migrations/` directory | Prints the migrations folder and the applied and pending migrations. |
+| `run <flow>` | `--shop=<domain>` or `--all-shops`, `--input=<json>` | Queues a run of the flow for the shop, or for each shop, executes it with a worker of its own and waits until it is over. See [Run a flow or a cron by hand](#run-a-flow-or-a-cron-by-hand). |
+| `cron run <name>` | The name of a cron, its key `<flow>:<schedule>`, or its flow | Queues a run of the flow of the cron for each of its shops, with its input, then executes and waits as `run` does. |
 
 No command, `help`, `--help` and `-h` print the usage text and exit with status
 `0`. Any other first argument fails with `[openshop] Unknown command: <name>`
@@ -181,9 +185,9 @@ Details:
   [Database and migrations](database.md#client-owned-migrations) for the
   migration contract and [Deploy to production](../guides/deploy-production.md)
   for the sequence.
-- `dev`, `start`, `worker`, `migrate`, and `migrate status` connect to
-  `DATABASE_URL` and fall back to the local development database when it is
-  unset. See [Environment variables](environment-variables.md).
+- `dev`, `start`, `worker`, `migrate`, `migrate status`, `run` and `cron run`
+  connect to `DATABASE_URL` and fall back to the local development database
+  when it is unset. See [Environment variables](environment-variables.md).
 
 `dev`, `start`, and `worker` stop on `SIGINT` or `SIGTERM`. The HTTP server
 stops accepting connections and waits up to five seconds for requests in
@@ -192,6 +196,75 @@ lease duration (`30` seconds by default).
 
 `start` runs the cron scheduler and there is no leader election: run a single
 `start` process unless duplicate cron dispatches are acceptable.
+
+## Run a flow or a cron by hand
+
+```bash
+openshop run syncOrders                                   # the one shop installed
+openshop run syncOrders --shop=my-store.myshopify.com --input='{"limit":10}'
+openshop run syncOrders --all-shops
+openshop cron run "Nightly sync"                          # the name of the cron
+openshop cron run 'syncOrders:0 2 * * *'                  # its key, <flow>:<schedule>
+```
+
+`run` and `cron run` run a flow once, now, against the database of the app,
+whatever the admin shows: the built-in pages may be hidden
+(`AdminPagesConfig::none()`) and the operator dashboard is read-only. A run
+goes the way a run of the scheduler goes:
+
+1. The shops are the ones a cron finds: a shop of `shopify.apps` runs once per
+   app it is installed for, a shop without an installation runs under the app
+   `default`, and `--all-shops` is every installed shop plus the
+   [`client_credentials_shop`](configuration.md#settings) when it has a token.
+   `cron run` takes the shops of the cron and its input, and skips a shop that
+   turned the cron off, as its schedule would.
+2. A run is queued per shop, as `dispatch` and the scheduler queue one: the
+   input is checked against the schema of the flow, a flow that rejects a
+   second run refuses it while one is active for the shop, and the retry
+   policy is the one of the flow. No occurrence of a schedule is claimed: the
+   cron still fires at its next time.
+3. A worker of the command executes the runs it queued, and only them: the
+   claim, the lease, the heartbeat, the retries and the timeout of the
+   `worker` command. Another worker may take one first, such as the one of
+   `openshop dev` running beside it; the command waits for it the same way.
+
+The flow runs with its real providers and Shopify client, and its lines, its
+steps and its outcome are the ones of any run: in the console, in the admin
+and in `/ops`. The command prints the ID of each run, then how it ended:
+
+```text
+[openshop] Queued run 0b8f5c1e-… of "syncOrders" for my-store.myshopify.com
+INFO Flow "syncOrders" started context={"flowName":"syncOrders","shop":"my-store.myshopify.com",…}
+[openshop] Run 0b8f5c1e-… for my-store.myshopify.com: completed
+```
+
+It waits for the retries a flow declares, and says each failed attempt. A run
+that sleeps (`ctx.step.sleep`) is left asleep: the command says until when,
+and a worker of the application (`dev`, `worker`) wakes it. Ctrl-C stops the
+worker of the command, which hands back to the queue the runs it was
+executing, as a stopping `worker` does.
+
+| Argument of `run` | Behavior |
+| --- | --- |
+| `<flow>` | The name of the flow, as `#[flow]` gives it: `syncOrders` for `sync_orders`. An unknown name fails with `Flow "…" not found. Available: …`. |
+| `--shop=<domain>`, `--shop <domain>` | The shop: `my-store.myshopify.com`, or `my-store`. Anything else fails with `[openshop] --shop must be a *.myshopify.com domain, got "…"`. |
+| `--all-shops` | Every shop the app is installed for. Not with `--shop`. |
+| Neither | The one shop the app is installed for. With none, or several, the command fails and names them: `[openshop] Name the shop to run "syncOrders" for, with --shop=<domain> or --all-shops: 2 shops have installed it (a.myshopify.com, b.myshopify.com)`. |
+| `--input=<json>`, `--input <json>` | The input of the run, a JSON object. `{}` without it. |
+
+`cron run <name>` finds the cron by its name (`.name("Nightly sync")`), else
+by its key, `<flow>:<schedule>` as the admin shows it, else by its flow when
+one cron runs it. Two crons of one flow are named by their key: the error
+lists them. A cron of `CronShops::Global` runs once, for the shop
+`__global__`.
+
+The command fails, with status `1`, when a run could not be queued, failed
+for good or was canceled: `[openshop] 1 of 2 runs of "syncOrders" did not
+complete`. Like `dev`, it loads `.env` first, and stores secrets in plaintext
+without an `ENCRYPTION_KEY` unless the environment is a production one. Like
+`dev`, it pushes the schema first; in production it pushes nothing, and
+refuses to run against a database that is behind its migrations, as `worker`
+does.
 
 ## Development process
 
@@ -259,9 +332,9 @@ listen, is said too: nothing runs until the next change.
 [openshop] !!! The app exited (exit status: 1): nothing of the current code is serving. Fix what it printed, then save a file to restart it.
 ```
 
-Only `dev` loads the project-root `.env` file, before it builds the
-configuration. Set variables explicitly for build, migration, test, and
-production commands. Existing process variables take precedence over `.env`
+Only `dev`, `run` and `cron` load the project-root `.env` file, before they
+build the configuration. Set variables explicitly for build, migration, test,
+and production commands. Existing process variables take precedence over `.env`
 in development. See [Environment variables](environment-variables.md).
 
 ## Tests

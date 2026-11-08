@@ -1,7 +1,8 @@
 //! A running application for tests.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Result;
 use indexmap::IndexMap;
@@ -13,6 +14,7 @@ use uuid::Uuid;
 
 use super::db::TestDb;
 use super::fake::FakeProviders;
+use super::shopify::FakeShopify;
 use super::transport::MockTransport;
 use super::{session_token, to_query_string};
 use crate::app::{OpenShop, OpenShopConfig};
@@ -21,7 +23,7 @@ use crate::engine::dispatch::DispatchOptions;
 use crate::engine::runner::{RunFlowOptions, RunOutcome, run_flow};
 use crate::runtime::RuntimeEnv;
 use super::proxy_signature;
-use crate::server::shopify_apps::DEFAULT_SHOPIFY_APP_HANDLE;
+use crate::server::shopify_apps::{DEFAULT_SHOPIFY_APP_HANDLE, client_id_in_place_of};
 use crate::server::{ServerHandle, ServerOptions, create_router, serve};
 use crate::shopify::ShopifyEndpoints;
 use crate::types::ShopScope;
@@ -169,12 +171,41 @@ impl ProxyClient {
     }
 }
 
+/// The API key of the options of a test that sets none, [`TestOptions::api_key`].
+pub const TEST_API_KEY: &str = "test-app";
+
+tokio::task_local! {
+    /// The directory of the manifest of the crate whose test runs, which
+    /// `#[openshop::test]` sets.
+    static MANIFEST_DIR: PathBuf;
+}
+
+/// Runs `test` with `manifest_dir`, the `CARGO_MANIFEST_DIR` of the crate of
+/// the test, as the directory of the contexts it starts without a `cwd`:
+/// what `#[openshop::test]` wraps a test in.
+#[doc(hidden)]
+pub async fn in_crate<F: Future>(manifest_dir: &'static str, test: F) -> F::Output {
+    MANIFEST_DIR.scope(PathBuf::from(manifest_dir), test).await
+}
+
+/// The retries of `policy`, without waiting between them: the same number
+/// of attempts, so that a test still runs the code that retries.
+fn without_waits(policy: &shopify_api::RetryPolicy) -> shopify_api::RetryPolicy {
+    shopify_api::RetryPolicy::new(policy.max_retries())
+        .with_base_delay(Duration::ZERO)
+        .with_max_delay(Duration::ZERO)
+        .with_max_retry_after(policy.max_retry_after())
+}
+
 #[derive(Clone)]
 pub struct TestOptions {
     pub shop: String,
     /// `SHOPIFY_API_SECRET` of the single-app setup.
     pub secret: String,
-    /// `SHOPIFY_API_KEY` of the single-app setup.
+    /// `SHOPIFY_API_KEY` of the single-app setup. With [`TEST_API_KEY`], the
+    /// default, and a `shopify.app.toml` in [`cwd`](Self::cwd) whose
+    /// `client_id` is another, the test is that app: its `client_id` is the
+    /// API key.
     pub api_key: String,
     /// Marks the shop as installed with this access token.
     pub access_token: Option<String>,
@@ -189,8 +220,17 @@ pub struct TestOptions {
     /// an `encryption_key`. `true` by default; with `false` and no key the
     /// application refuses to start.
     pub development: bool,
-    /// Project root used to resolve Shopify TOML files. Defaults to a directory without any.
+    /// Project root used to resolve Shopify TOML files: the `handle` and the
+    /// `name` of the app, its scopes. Defaults, under `#[openshop::test]`, to
+    /// the directory of the crate of the test (its `CARGO_MANIFEST_DIR`), and
+    /// to a directory without any otherwise.
     pub cwd: Option<PathBuf>,
+    /// How the Shopify client retries what Shopify did not run. `None`, the
+    /// default: the policy of the application (its `shopify_retry`, else
+    /// `shopify_api`'s four retries) without waiting between the attempts,
+    /// whose number is the same. `Some(policy)` is that policy as it is,
+    /// waits included.
+    pub shopify_retry: Option<shopify_api::RetryPolicy>,
     pub server: ServerOptions,
     pub transport: Option<Arc<MockTransport>>,
     /// The Shopify endpoints of the application, field by field over the ones
@@ -206,7 +246,7 @@ impl Default for TestOptions {
         Self {
             shop: "test.myshopify.com".to_string(),
             secret: "test-secret".to_string(),
-            api_key: "test-app".to_string(),
+            api_key: TEST_API_KEY.to_string(),
             access_token: None,
             encryption_key: None,
             client_credentials_shop: None,
@@ -214,6 +254,7 @@ impl Default for TestOptions {
             production: false,
             development: true,
             cwd: None,
+            shopify_retry: None,
             server: ServerOptions::default(),
             transport: None,
             shopify_endpoints: ShopifyEndpoints::new(),
@@ -234,6 +275,10 @@ pub struct TestContext {
     pub fakes: FakeProviders,
     /// Scripted Shopify HTTP responses and the recorded requests.
     pub transport: Arc<MockTransport>,
+    /// The Admin API of the test: answers the GraphQL operations the
+    /// application sends by their name, `ctx.shopify.on("Name", data)`, and
+    /// records them. The one of [`transport`](Self::transport).
+    pub shopify: FakeShopify,
     /// HTTP client that does not follow redirects.
     pub http: reqwest::Client,
     test_db: TestDb,
@@ -300,6 +345,17 @@ impl ShopScope for TestContext {
     }
 }
 
+/// The API key a test runs with: the one of the options, or with
+/// [`TEST_API_KEY`] the `client_id` of the `shopify.app.toml` of `cwd` when
+/// no `shopify.app*.toml` there is the one of `test-app`, so that the file
+/// is the one of the app.
+fn api_key_of(api_key: &str, cwd: &Path) -> String {
+    match api_key {
+        TEST_API_KEY => client_id_in_place_of(cwd, api_key).unwrap_or_else(|| api_key.to_string()),
+        _ => api_key.to_string(),
+    }
+}
+
 impl TestOptions {
     /// The options of a test whose shop has installed the application: the
     /// flows, the proxies and the admin find an access token for it.
@@ -327,21 +383,28 @@ impl TestContext {
             config.client_credentials_shop = options.client_credentials_shop.clone();
         }
         config.shopify_endpoints = options.shopify_endpoints.clone().or(config.shopify_endpoints);
+        config.shopify_retry = Some(match &options.shopify_retry {
+            Some(policy) => policy.clone(),
+            None => without_waits(&config.shopify_retry.clone().unwrap_or_default()),
+        });
+        let cwd = options
+            .cwd
+            .clone()
+            .or_else(|| MANIFEST_DIR.try_with(Clone::clone).ok())
+            .unwrap_or_else(|| std::env::temp_dir().join("openshop-test-no-toml"));
+        let api_key = api_key_of(&options.api_key, &cwd);
         let test_db = TestDb::create_with_models(&config.models).await?;
         let db = test_db.pool.clone();
         let transport = options.transport.clone().unwrap_or_default();
         let env = RuntimeEnv {
-            shopify_api_key: Some(options.api_key.clone()),
+            shopify_api_key: Some(api_key.clone()),
             shopify_api_secret: Some(options.secret.clone()),
             host: options.host.clone(),
             shopify_app_url: None,
             encryption_key: options.encryption_key.clone(),
             production: options.production,
             development: options.development,
-            cwd: options
-                .cwd
-                .clone()
-                .unwrap_or_else(|| std::env::temp_dir().join("openshop-test-no-toml")),
+            cwd,
             shopify_endpoints: ShopifyEndpoints::new(),
         };
         let app = OpenShop::with_transport(config, db.clone(), env, transport.clone())?;
@@ -367,13 +430,14 @@ impl TestContext {
             url: format!("http://127.0.0.1:{port}"),
             port,
             fakes,
+            shopify: transport.shopify(),
             transport,
             http: reqwest::Client::builder()
                 .redirect(reqwest::redirect::Policy::none())
                 .build()?,
             shop: options.shop,
             secret: options.secret,
-            api_key: options.api_key,
+            api_key,
             app,
             db,
             test_db,

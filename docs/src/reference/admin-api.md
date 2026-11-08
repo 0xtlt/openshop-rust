@@ -103,6 +103,11 @@ error contract.
 | `DELETE /api/runs/:id` | — | Deletes an inactive run, its steps, and logs: `{ ok: true }`. |
 | `POST /api/runs/bulk-delete` | `{ "ids": ["uuid"] }` | `{ deleted, skipped }`, maximum 100 IDs. |
 
+A flow is run by hand from the command line too, whatever the admin serves:
+[`openshop run <flow>` and `openshop cron run <name>`](cli.md#run-a-flow-or-a-cron-by-hand)
+queue and execute a run against the database of the app, for an app whose
+built-in pages are hidden as for any other.
+
 A run row has the keys `id`, `appHandle`, `shop`, `flowName`, `status`,
 `input`, `error`, `deadlineAt`, `parentRunId`, `attempts`, `availableAt`,
 `workerId`, `retryPolicy`, `startedAt`, `completedAt`, and `createdAt`. A step

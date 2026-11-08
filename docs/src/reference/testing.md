@@ -12,9 +12,10 @@ openshop = { git = "https://github.com/0xtlt/openshop-rust", tag = "v<version>",
 
 A `TestContext` starts the application on a real local HTTP server against an
 isolated PostgreSQL schema that it creates and drops itself. Shopify HTTP calls
-are answered by a scripted `MockTransport` unless you opt into live requests,
-and provider methods are replaced with recording fakes when a flow is run
-through the context.
+are answered by a scripted `MockTransport`: the GraphQL operations of the
+Admin API by their name, through [`ctx.shopify`](#answer-the-admin-api), and
+provider methods are replaced with recording fakes when a flow is run through
+the context.
 
 ## Context lifecycle
 
@@ -34,6 +35,15 @@ async fn serves_health(ctx: &TestContext) {
 declared with `app!`. It starts the application on an isolated database with
 its shop installed, passes the `TestContext` to the function, and shuts the
 context down when the function returns.
+
+The contexts a `#[openshop::test]` starts read the Shopify TOML files of the
+crate of the test, in its `CARGO_MANIFEST_DIR`: the `handle` and the `name` of
+`shopify.app.toml`, and its scopes. So `billing::pricing_url(ctx)` and the
+links of a route name the app as Shopify does. When the file has a
+`client_id`, the test is that app: its `client_id` is the API key of the
+context (`ctx.api_key`), unless the options give one, or a
+`shopify.app*.toml` there is the one of `test-app`. A `cwd` in the
+[options](#testoptions) reads another directory.
 
 | Part | Contract |
 | --- | --- |
@@ -157,14 +167,15 @@ in a test that ends with `ctx.shutdown().await`.
 | --- | --- | --- |
 | `shop` | `test.myshopify.com` | Default shop for flows, proxy signatures, and tokens. |
 | `secret` | `test-secret` | Shopify API secret of the single-app setup. Signs proxy requests and session tokens. |
-| `api_key` | `test-app` | Shopify API key of the single-app setup. Session-token audience. |
+| `api_key` | `test-app` (`TEST_API_KEY`) | Shopify API key of the single-app setup. Session-token audience. With `test-app` and a `shopify.app.toml` in `cwd` whose `client_id` is another, the `client_id`. |
 | `access_token` | `None`; `test-access-token` with `TestOptions::installed()` | Inserts an installation so Shopify client calls can run. |
 | `encryption_key` | `None` | `ENCRYPTION_KEY` of the application. |
 | `development` | `true` | A development environment: without an `encryption_key`, secrets are stored in plaintext. With `false` (or `production: true`) and no key, the context does not start. |
 | `client_credentials_shop` | `None` | The `client_credentials_shop` setting of the application, in place of the one its configuration gives: the shop background work may get a token for with the [client credentials grant](authentication.md#client-credentials-grant), from the mock transport. A token stored by `access_token` is used as it is. |
 | `host` | `None` | `HOST` of the application. |
 | `production` | `false` | Production mode, for example to test the checks it turns on. |
-| `cwd` | A directory without Shopify TOML files | Project root used to resolve Shopify TOML files. |
+| `cwd` | Under `#[openshop::test]`, the directory of the crate of the test (`CARGO_MANIFEST_DIR`); otherwise a directory without Shopify TOML files | Project root used to resolve Shopify TOML files: the `handle`, the `name` and the scopes of the app. |
+| `shopify_retry` | `None`: the retries of the application without waiting | How the [Shopify client retries](configuration.md#shopify-client-retries) what Shopify did not run. `None` takes the `shopify_retry` of the application, else `shopify_api`'s four retries, with the same number of attempts and no wait between them: a test that answers `503` runs the code that retries, in no time. `Some(policy)` is that policy as it is, waits included. A `Retry-After` of a `429` is still waited for: script it short. |
 | `server` | `ServerOptions::default()` | API only: no admin UI is served. |
 | `transport` | A new `MockTransport` | Transport shared with other contexts or prepared in advance. |
 | `shopify_endpoints` | `ShopifyEndpoints::new()` | The [Shopify endpoints](../guides/custom-shopify-endpoints.md) of the application, field by field over the ones its configuration sets: the Admin API and OAuth at another origin, another App Bridge or Polaris in the admin UI. The requests still go to the mock transport. `SHOPIFY_ADMIN_ORIGIN` and the other variables of the endpoints are not read in a test. |
@@ -195,6 +206,7 @@ fn another_shop() -> TestOptions {
 | `db` | `PgPool` on the context's schema. |
 | `shop`, `secret`, `api_key` | The values from the options. |
 | `fakes` | `FakeProviders` used by `run_flow`. |
+| `shopify` | The `FakeShopify` that answers the GraphQL operations the application sends, by name. See [Answer the Admin API](#answer-the-admin-api). |
 | `transport` | The `MockTransport` behind every Shopify HTTP call. |
 | `http` | A `reqwest::Client` that does not follow redirects, for unauthenticated requests. |
 | `run_flow(flow, input)` / `run_flow_for(flow, input, shop)` | Executes a flow immediately with the fakes. |
@@ -214,20 +226,17 @@ use my_app::APP;
 use my_app::flows::sync_orders::sync_orders;
 use my_app::providers::warehouse::Warehouse;
 use openshop::prelude::*;
-use openshop::testing::{MockTransport, TestContext};
+use openshop::testing::TestContext;
 
 #[openshop::test(APP)]
 async fn syncs_orders(ctx: &TestContext) {
-    ctx.transport.respond_with(|request| {
-        let query = request.body["query"].as_str().unwrap_or_default();
-        assert!(query.contains("orders"));
-        Ok(MockTransport::json(
-            200,
-            json!({ "data": { "orders": { "edges": [
-                { "node": { "id": "gid://shopify/Order/1", "name": "#1001" } },
-            ] } } }),
-        ))
-    });
+    // `query RecentOrders { orders(…) { … } }`, the operation the flow sends.
+    ctx.shopify.on(
+        "RecentOrders",
+        json!({ "orders": { "edges": [
+            { "node": { "id": "gid://shopify/Order/1", "name": "#1001" } },
+        ] } }),
+    );
     // The fake takes what `push` returns, and gives back what it received.
     let push = ctx.fakes.for_call(Warehouse::PUSH);
     push.returns(1);
@@ -235,6 +244,7 @@ async fn syncs_orders(ctx: &TestContext) {
     let outcome = ctx.run_flow(sync_orders::NAME, json!({ "limit": 10 })).await.unwrap();
 
     assert_eq!(outcome, RunOutcome::Completed);
+    assert_eq!(ctx.shopify.operations(), ["RecentOrders"]);
     assert_eq!(push.call_count(), 1);
     let orders = push.last_call().unwrap().args;
     assert_eq!(orders[0].id, "gid://shopify/Order/1");
@@ -256,20 +266,25 @@ the run is not retried: a failing flow returns
 | `Canceled` | The run was canceled. |
 | `LeaseLost` | Another worker owns the run. |
 
-Shopify GraphQL calls go to `ctx.transport`:
+Shopify GraphQL calls go to `ctx.transport`, and the operations it knows by
+name are answered by [`ctx.shopify`](#answer-the-admin-api). What it does not
+answer goes to the responder of the transport:
 
 | `MockTransport` | Contract |
 | --- | --- |
-| `respond_with(responder)` | Sets the responder, a closure that receives the `OutboundRequest` (`method`, `url`, `headers`, `body`: the JSON of the request, or the fields of a form as an object of strings) and returns a `Result<OutboundResponse>`. An `Err` is a request that did not reach Shopify. |
-| `respond_json(body)` | Answers every request with status `200` and this JSON body. |
+| `respond_with(responder)` | Sets the responder, a closure that receives the `OutboundRequest` (`method`, `url`, `headers`, `body`: the JSON of the request, or the fields of a form as an object of strings) and returns a `Result<OutboundResponse>`. An `Err` is a request that did not reach Shopify. It answers what `ctx.shopify` does not. |
+| `respond_json(body)` | Answers every request `ctx.shopify` does not with status `200` and this JSON body. |
+| `shopify()` | The `FakeShopify` of the transport: `ctx.shopify`. |
 | `MockTransport::json(status, body)` | Builds a JSON `OutboundResponse`. |
-| `requests()`, `last_request()` | The recorded requests. |
+| `delay_responses(delay)` | Makes every answer wait, as a slow Shopify would. |
+| `requests()`, `last_request()` | The recorded requests, every one of them. |
 | `clear()` | Forgets the recorded requests. |
 
-Without a responder every request is answered with `404` and the body
-`not mocked`. The transport also receives the OAuth token requests made by the
-server. `MockTransport` is a `shopify_api` `Transport`: every request of the
-`shopify_api` client goes through it.
+Without a responder, a GraphQL operation nothing answers gets a GraphQL error
+that names it (see [below](#answer-the-admin-api)), and any other request is
+answered with `404` and the body `not mocked`. The transport also receives the
+OAuth token requests made by the server. `MockTransport` is a `shopify_api`
+`Transport`: every request of the `shopify_api` client goes through it.
 
 Use `dispatch_flow(flow, input)` to test queueing:
 
@@ -297,6 +312,105 @@ async fn queues_a_run(ctx: &TestContext) {
 `dispatch_flow` only queues the run. A `TestContext` does not start a worker or
 the cron scheduler; start a `Worker` on `ctx.app.clone()` when a test needs
 queued runs to execute.
+
+## Answer the Admin API
+
+`ctx.shopify` is the Admin API of the test: a `FakeShopify` that answers each
+GraphQL operation the application sends by its name, the one of
+`query Name { … }` or `mutation Name(…) { … }` (or the `operationName` of the
+request), and records what it was sent. There is nothing to match in the text
+of a query.
+
+```rust,ignore
+use my_app::APP;
+use openshop::prelude::*;
+use openshop::testing::{TestContext, subscription};
+
+#[openshop::test(APP)]
+async fn hides_paypal_for_a_paying_shop(ctx: &TestContext) {
+    ctx.shopify
+        // What `billing::require_plan` and `active_subscriptions()` ask.
+        .active_subscriptions([subscription("Monthly")])
+        .on("CurrentCustomization", json!({ "paymentCustomizations": { "nodes": [] } }))
+        .on_with("CreateCustomization", |call| {
+            assert_eq!(call.variables["input"]["enabled"], true);
+            Ok(json!({ "paymentCustomizationCreate": { "userErrors": [] } }))
+        });
+
+    let outcome = ctx.run_flow("hidePaypal", json!({})).await.unwrap();
+
+    assert_eq!(outcome, RunOutcome::Completed);
+    assert_eq!(
+        ctx.shopify.operations(),
+        ["OpenShopActiveSubscriptions", "CurrentCustomization", "CreateCustomization"]
+    );
+}
+```
+
+| `FakeShopify` | Contract |
+| --- | --- |
+| `on(operation, data)` | Answers the operation with `{ "data": data }`, status `200`. A later answer of the same operation replaces it. |
+| `on_variables(operation, variables, data)` | The same, for a request whose variables contain `variables`: each key given, with the same value, an object compared key by key. Chosen before an answer without variables. |
+| `on_with(operation, answer)` | Answers with what `answer` makes of the `GraphqlCall`: `Ok(data)` is `{ "data": data }`, an `Err` a GraphQL error with its message. For a shop whose state the mutations change: the closure keeps it, in an `Arc<Mutex<…>>`. |
+| `respond(operation, response)` | Answers with an `OutboundResponse` as it is: `MockTransport::json(503, json!({}))` for a Shopify that fails, `json!({ "errors": … })` for a refusal. |
+| `active_subscriptions(subscriptions)` | Answers `OpenShopActiveSubscriptions`, what `ctx.shopify.active_subscriptions()`, `billing::require_plan` and `billing::any_plan` ask, with these `AppSubscription`s. `[]` is a shop without a plan. |
+| `calls()`, `calls_to(operation)` | The requests, oldest first, as `GraphqlCall`s: `operation` (`None` for an anonymous one), `query`, `variables` (`{}` without), `url`. |
+| `operations()` | The names of the operations sent, in order; `(anonymous)` for one without a name. |
+| `unanswered()` | The operations nothing answered, once each. |
+| `assert_answered()` | Panics when an operation was not answered, naming it: for code that swallows the error it got. |
+| `reset()` | Forgets the answers and the calls. |
+
+The methods that answer return the fake, to chain them. Each answer applies to
+every call of the operation until another replaces it.
+
+An operation `ctx.shopify` does not answer goes to the responder of the
+transport, when the test set one. Without a responder, Shopify answers it with
+a GraphQL error, which fails the call that sent it:
+
+```text
+[openshop] The test does not answer the Admin API operation `CurrentCustomization`: answer it with `ctx.shopify.on("CurrentCustomization", data)`. Answered: OpenShopActiveSubscriptions.
+```
+
+`openshop::testing::subscription(name)` is an active test subscription to the
+plan `name`, as `activeSubscriptions` lists one
+(`gid://shopify/AppSubscription/1`, no trial, created now, no line). Its
+fields are public:
+
+```rust,ignore
+use openshop::billing::{AppSubscription, SubscriptionStatus};
+use openshop::testing::subscription;
+
+// A frozen shop: `require_plan` sends it to the pricing page.
+ctx.shopify.active_subscriptions([AppSubscription {
+    status: SubscriptionStatus::Frozen,
+    ..subscription("Monthly")
+}]);
+```
+
+A `5xx`, a network failure or a throttled answer is retried as in
+production, with the [retry policy](#testoptions) of the test, which does not
+wait: `ctx.shopify.respond("Orders", MockTransport::json(503, json!({})))`
+makes the query `Orders` fail after its five attempts, at once (a mutation is
+sent once, as in production).
+
+### The operations OpenShop sends
+
+The operations of the application are the ones it writes. OpenShop sends
+these of its own, and a test that reaches them answers them by these names:
+
+| Operation | Sent by | Answer |
+| --- | --- | --- |
+| `OpenShopActiveSubscriptions` (`billing::ACTIVE_SUBSCRIPTIONS_OPERATION`) | `ShopifyClient::active_subscriptions()`, `billing::require_plan`, `billing::any_plan` | `ctx.shopify.active_subscriptions([…])` |
+| `ListShopifyFunctions`, `ListCartTransformInstances` | The built-in Functions page, listing the instances of a cart transform | `on(…)`, with the `shopifyFunctions` and `cartTransforms` connections |
+| `ListDiscountInstances` | The same page, for a discount Function | `on(…)`, with `discountNodes` |
+| `ListInstances` | The same page, for the other Functions | `on(…)`, with the connection of the type: `paymentCustomizations`, `deliveryCustomizations`, `validations` or `fulfillmentConstraintRules` |
+| `CreateAutoDiscount`, `CreateCodeDiscount`, `CreateCartTransform`, `CreateFulfillmentConstraint`, `CreateDeliveryCustomization`, `CreatePaymentCustomization`, `CreateValidation` | The same page, creating an instance | `on(…)`, with the payload of the mutation and its `userErrors` |
+| `UpdateAutoDiscount`, `UpdateCodeDiscount`, `UpdateDeliveryCustomization`, `UpdatePaymentCustomization`, `UpdateValidation` | The same page, updating one | The same |
+| `DeleteFunctionInstance` | The same page, deleting one | The same |
+
+The `openshop.admin.graphql` tool of [MCP](mcp.md) sends the operation its caller
+wrote. The token requests (OAuth, the token exchange, the client credentials
+grant) are not GraphQL: they go to the responder of the transport.
 
 ## Configure provider fakes
 
@@ -595,3 +709,6 @@ test that starts its context by hand needs an async test attribute such as
 The context does not start a worker or the scheduler, and it does not make real
 Shopify requests: they go to its `MockTransport`. `shutdown()` closes the HTTP
 server and drops the context's schema.
+
+To run a flow or a cron by hand against the development database, outside the
+tests, see [`openshop run`](cli.md#run-a-flow-or-a-cron-by-hand).

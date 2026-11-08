@@ -58,11 +58,12 @@ pub fn load_env_file(cwd: &Path) -> usize {
     set
 }
 
-/// Loads the `.env` file of the project for the `dev` command, and only for it.
-/// Returns how many variables it set.
+/// Loads the `.env` file of the project for the commands of development:
+/// `dev`, and `run` and `cron`, which run a flow by hand in the environment
+/// of `dev`. Returns how many variables it set.
 pub fn load_dev_env(args: &[String], cwd: &Path) -> usize {
     match args.first().map(String::as_str) {
-        Some("dev") => load_env_file(cwd),
+        Some("dev" | "run" | "cron") => load_env_file(cwd),
         _ => 0,
     }
 }
@@ -104,6 +105,19 @@ mod tests {
                 ("B".to_string(), "'".to_string())
             ]
         );
+    }
+
+    #[test]
+    fn run_and_cron_load_the_env_file_of_dev() {
+        for command in ["run", "cron"] {
+            let dir = std::env::temp_dir().join(format!("openshop-env-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let name = format!("OPENSHOP_TEST_ENV_{}", command.to_ascii_uppercase());
+            std::fs::write(dir.join(".env"), format!("{name}=from-file\n")).unwrap();
+            assert_eq!(load_dev_env(&[command.to_string(), "arg".to_string()], &dir), 1, "{command}");
+            assert_eq!(std::env::var(&name).unwrap(), "from-file");
+            std::fs::remove_dir_all(dir).ok();
+        }
     }
 
     #[test]

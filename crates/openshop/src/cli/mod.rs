@@ -3,6 +3,7 @@
 pub mod dev;
 pub mod env;
 pub mod migrate;
+pub mod run;
 pub mod start;
 pub mod worker;
 
@@ -23,6 +24,9 @@ pub const USAGE: &str = "
     migrate check               Check that ./migrations covers the current schema
     migrate status              Show client migration status
     start                       Start production server (API + UI + scheduler, no worker)
+    run <flow> [--shop=<domain> | --all-shops] [--input=<json>]
+                                Run a flow once, through the queue and a worker, and wait for it
+    cron run <name>             Run the flow of a cron once, for the shops of the cron
 
   Usage:
     cargo run -- dev
@@ -32,6 +36,8 @@ pub const USAGE: &str = "
     cargo run -- migrate check
     cargo run -- migrate status
     cargo run --release -- start
+    cargo run -- run syncOrders --shop=my-store.myshopify.com --input='{\"limit\":10}'
+    cargo run -- cron run \"Nightly sync\"
 ";
 
 /// Logs to stdout. `RUST_LOG` overrides the default filter (`info`, with SQL
@@ -138,6 +144,18 @@ pub async fn run_with_args(config: impl FnOnce() -> Result<OpenShopConfig>, args
             outcome
         }
         Some("migrate") => migrate::run_migrate(&config()?, &args[1..]).await,
+        Some(command @ ("run" | "cron")) => {
+            let config = config()?;
+            let _reporting = report::start(&config, command);
+            let outcome = match command {
+                "run" => run::run_flow_command(config, &args[1..]).await,
+                _ => run::run_cron_command(config, &args[1..]).await,
+            };
+            if let Err(error) = &outcome {
+                report::error(error);
+            }
+            outcome
+        }
         _ => {
             println!("{USAGE}");
             Ok(())

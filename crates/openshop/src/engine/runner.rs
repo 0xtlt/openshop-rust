@@ -339,7 +339,12 @@ async fn run_attempt(app: &OpenShop, opts: RunFlowOptions) -> Result<RunOutcome>
         heartbeat,
     };
 
-    let logger = FlowLogger::new(db.clone(), run_id_text.clone());
+    // The lines of the run say, in the console, what it runs for.
+    let logger = FlowLogger::new(db.clone(), run_id_text.clone()).with_fields(json!({
+        "shop": opts.shop,
+        "shopifyApp": shopify_app,
+        "flow": flow_name,
+    }));
     let attempt = match opts.attempt {
         Some(attempt) => attempt,
         None => resolve_run_attempt(db, run_id).await?,

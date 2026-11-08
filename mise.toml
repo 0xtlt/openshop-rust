@@ -7,8 +7,8 @@ rust = { version = "1.99.1", components = "clippy,rustfmt", targets = "wasm32-un
 mdbook = "0.5.4"
 
 [tasks."db:up"]
-description = "Start PostgreSQL on localhost:5432"
-run = "docker compose up -d"
+description = "Start PostgreSQL on localhost:5432, and wait until it accepts connections"
+run = "docker compose up -d --wait"
 
 [tasks."db:down"]
 description = "Stop PostgreSQL (the data volume is kept)"
