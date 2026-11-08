@@ -96,14 +96,17 @@ impl<I, O> fmt::Debug for AdminFunctionRef<I, O> {
 
 /// Failure of a loader or action call.
 ///
-/// `code`, `request_id` and `field_errors` are set when the server answered with a structured
-/// error; transport and decoding failures only carry a `message`.
+/// `code`, `request_id`, `field_errors` and `details` are set when the server answered with a
+/// structured error; transport and decoding failures only carry a `message`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct AdminRpcError {
     pub message: String,
     pub code: Option<String>,
     pub request_id: Option<String>,
     pub field_errors: Option<BTreeMap<String, String>>,
+    /// What else the server sent with the error, by name: `pricingUrl` and `pricingLink` for a
+    /// `PLAN_REQUIRED` error, the page where the merchant chooses a plan.
+    pub details: Option<BTreeMap<String, String>>,
 }
 
 impl AdminRpcError {
@@ -116,17 +119,26 @@ impl AdminRpcError {
 
     fn from_payload(payload: &Value) -> Self {
         let text = |key: &str| payload.get(key).and_then(Value::as_str).map(str::to_string);
+        let texts = |key: &str| {
+            payload.get(key).and_then(Value::as_object).map(|values| {
+                values
+                    .iter()
+                    .filter_map(|(name, value)| Some((name.clone(), value.as_str()?.to_string())))
+                    .collect()
+            })
+        };
         Self {
             message: text("error").unwrap_or_default(),
             code: text("code"),
             request_id: text("requestId"),
-            field_errors: payload.get("fieldErrors").and_then(Value::as_object).map(|errors| {
-                errors
-                    .iter()
-                    .filter_map(|(field, message)| Some((field.clone(), message.as_str()?.to_string())))
-                    .collect()
-            }),
+            field_errors: texts("fieldErrors"),
+            details: texts("details"),
         }
+    }
+
+    /// A value the server sent with the error, by name: `error.detail("pricingUrl")`.
+    pub fn detail(&self, name: &str) -> Option<&str> {
+        self.details.as_ref()?.get(name).map(String::as_str)
     }
 }
 
@@ -564,6 +576,19 @@ mod tests {
 
         let bare = AdminRpcError::from_payload(&json!({ "error": "Forbidden" }));
         assert_eq!(bare, AdminRpcError::from_message("Forbidden"));
+        assert_eq!(bare.detail("pricingUrl"), None);
+
+        let plan = AdminRpcError::from_payload(&json!({
+            "error": "Choose a plan to use this feature",
+            "code": "PLAN_REQUIRED",
+            "details": { "pricingLink": "shopify:admin/charges/app/pricing_plans", "count": 1 }
+        }));
+        assert_eq!(
+            plan.detail("pricingLink"),
+            Some("shopify:admin/charges/app/pricing_plans")
+        );
+        // Only texts are kept.
+        assert_eq!(plan.detail("count"), None);
     }
 
     #[test]

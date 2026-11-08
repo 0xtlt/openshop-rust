@@ -71,6 +71,9 @@ impl Response {
 }
 
 /// Resolves once the response headers arrive; fails on network errors and aborts.
+///
+/// A `401` makes the next request ask App Bridge for another session token: the server refused
+/// the one the requests of the page share.
 pub async fn send(request: Request<'_>) -> Result<Response, String> {
     let headers = Headers::new().map_err(js_error)?;
     for (name, value) in request.headers {
@@ -86,5 +89,9 @@ pub async fn send(request: Request<'_>) -> Result<Response, String> {
     let response = JsFuture::from(window().fetch_with_str_and_init(request.url, &init))
         .await
         .map_err(js_error)?;
-    response.dyn_into().map(Response).map_err(js_error)
+    let response: Response = response.dyn_into().map(Response).map_err(js_error)?;
+    if response.status() == 401 {
+        crate::shopify::forget_id_token();
+    }
+    Ok(response)
 }
