@@ -97,6 +97,12 @@ CREATE TABLE IF NOT EXISTS "reviews" (
 CREATE INDEX IF NOT EXISTS "reviews_shop_product_id_idx" ON "reviews" ("shop", "product_id");
 ```
 
+Before the `CREATE TABLE`, the file has a `DO $openshop$ … $openshop$;` block,
+left out above. On a database without the table it does nothing. When the table
+already exists, such as one created by the TypeScript version, it brings it
+to the model first: see
+[Switch from the TypeScript version](switch-from-typescript.md).
+
 Change the struct later, for example by adding `pub note: Option<String>` and
 `pub author: String`, and the next generation writes only the difference:
 

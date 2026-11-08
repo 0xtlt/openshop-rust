@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- An app moves from the TypeScript version on its database with no step of
+  its own: the first migration `migrate generate` writes for a model takes
+  over a table that Drizzle created. It adds the missing columns, converts
+  `json` to `jsonb`, applies the defaults and the nullability of the model,
+  and renames Drizzle's indexes and foreign keys instead of creating them a
+  second time. It fails, and rolls back, on a column of another type or on a
+  `NOT NULL` column the model lacks. On a database without the table it does
+  nothing. The foreign keys of a new table are now added only when missing.
+  `start` and `dev` warn about queued runs of a flow the app does not
+  register, and about crons shops disabled that no cron matches any more.
+  See the new guide, Switch from the TypeScript version.
 - Dependencies up to date: sqlx 0.9, reqwest 0.13 and gloo-timers 0.4, with
   Rust 1.99.1 and trunk 0.22.1 in `mise.toml`, CI and the generated
   `Dockerfile`. Breaking changes:
