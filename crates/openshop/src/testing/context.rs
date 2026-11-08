@@ -192,6 +192,10 @@ pub struct TestOptions {
     pub cwd: Option<PathBuf>,
     pub server: ServerOptions,
     pub transport: Option<Arc<MockTransport>>,
+    /// `LSF_URL`: the Admin API, OAuth and the admin UI as with
+    /// local-storefront at this address. The requests still go to the mock
+    /// transport.
+    pub lsf_url: Option<String>,
 }
 
 impl Default for TestOptions {
@@ -209,6 +213,7 @@ impl Default for TestOptions {
             cwd: None,
             server: ServerOptions::default(),
             transport: None,
+            lsf_url: None,
         }
     }
 }
@@ -333,6 +338,7 @@ impl TestContext {
                 .cwd
                 .clone()
                 .unwrap_or_else(|| std::env::temp_dir().join("openshop-test-no-toml")),
+            lsf_url: options.lsf_url.clone(),
         };
         let app = OpenShop::with_transport(config, db.clone(), env, transport.clone())?;
 

@@ -35,6 +35,7 @@ use super::shop_domain::normalize_shop_domain;
 use super::shopify_apps::ResolvedShopifyApp;
 use crate::app::OpenShop;
 use crate::shopify::client_credentials::Grant;
+use shopify_api::AdminOrigin;
 use shopify_api::oauth::{SessionToken, SignedQuery};
 use openshop_shared::rpc::{decode_uri_component, encode_uri_component};
 
@@ -184,6 +185,63 @@ pub fn inject_api_key(html: &str, api_key: &str) -> String {
         .into_owned()
 }
 
+/// The App Bridge of local-storefront (`LSF_URL`), under its origin. Shopify's
+/// only talks to Shopify's admin: in local-storefront's admin,
+/// `shopify.idToken()` would wait for ever.
+const LSF_APP_BRIDGE_PATH: &str = "/__lsf/admin/app-bridge.js";
+
+/// Polaris through local-storefront, under its origin: it redirects to
+/// Shopify's CDN, or serves its own copy offline.
+const LSF_POLARIS_PATH: &str = "/__lsf/cdn/shopifycloud/polaris.js";
+
+/// The opening tag of the script of Shopify's App Bridge.
+static APP_BRIDGE_TAG: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"<script\b[^>]*\bsrc="?https://cdn\.shopify\.com/shopifycloud/app-bridge\.js"?[^>]*>"#)
+        .expect("valid regex")
+});
+static POLARIS_SRC: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#"src="?https://cdn\.shopify\.com/shopifycloud/polaris\.js"?"#).expect("valid regex"));
+
+/// The address of local-storefront's Polaris, escaped for an attribute.
+fn lsf_polaris(lsf: &str) -> String {
+    escape(&format!("{lsf}{LSF_POLARIS_PATH}"))
+}
+
+/// A page as it runs in the admin of local-storefront (`LSF_URL`): its App
+/// Bridge loads right before the tag of Shopify's, which keeps its
+/// `data-api-key` and returns at once since `shopify.ready` is there, and
+/// Polaris comes through it. A page without Shopify's App Bridge gets none.
+pub fn use_lsf(html: &str, lsf: &AdminOrigin) -> String {
+    use_lsf_at(html, lsf.as_str())
+}
+
+/// [`use_lsf`] with an origin of any text, escaped where it is written.
+fn use_lsf_at(html: &str, lsf: &str) -> String {
+    let app_bridge = format!(
+        r#"<script src="{}"></script>"#,
+        escape(&format!("{lsf}{LSF_APP_BRIDGE_PATH}"))
+    );
+    let html = if html.contains(&app_bridge) {
+        Cow::Borrowed(html)
+    } else {
+        APP_BRIDGE_TAG.replace(html, |tag: &regex::Captures<'_>| format!("{app_bridge}{}", &tag[0]))
+    };
+    let polaris = format!(r#"src="{}""#, lsf_polaris(lsf));
+    POLARIS_SRC
+        .replace_all(&html, |_: &regex::Captures<'_>| polaris.clone())
+        .into_owned()
+}
+
+/// The shell as it is served: the API key App Bridge starts with, and, with
+/// `LSF_URL`, local-storefront's App Bridge and Polaris.
+fn render_shell(index: &str, api_key: &str, lsf: Option<&AdminOrigin>) -> String {
+    let shell = inject_api_key(index, api_key);
+    match lsf {
+        Some(lsf) => use_lsf(&shell, lsf),
+        None => shell,
+    }
+}
+
 /// Decodes the `%XX` escapes of a request path. `None` when an escape is malformed,
 /// hides a path separator or a NUL, or when the result is not UTF-8.
 fn decode_asset_path(path: &str) -> Option<String> {
@@ -218,9 +276,31 @@ const WELCOME_POLICY: &str = "default-src 'none'; \
     connect-src https://cdn.shopify.com/shopifycloud/; \
     form-action 'none'; base-uri 'none'";
 
+/// [`WELCOME_POLICY`], with the origin of local-storefront (`LSF_URL`) in each
+/// directive of what Polaris loads: it serves Polaris and what it loads
+/// offline, and redirects to Shopify's CDN online.
+fn welcome_policy(lsf: Option<&AdminOrigin>) -> Cow<'static, str> {
+    let Some(lsf) = lsf else {
+        return Cow::Borrowed(WELCOME_POLICY);
+    };
+    Cow::Owned(format!(
+        "default-src 'none'; \
+         script-src {lsf} https://cdn.shopify.com/shopifycloud/polaris.js; \
+         style-src 'unsafe-inline' {lsf} https://cdn.shopify.com/static/fonts/; \
+         font-src {lsf} https://cdn.shopify.com/static/fonts/; \
+         img-src {lsf}; \
+         connect-src {lsf} https://cdn.shopify.com/shopifycloud/; \
+         form-action 'none'; base-uri 'none'"
+    ))
+}
+
 /// What a visitor is told when the admin is not opened for a shop: where the
 /// app opens from. It shows nothing of the application.
-fn open_from_shopify_admin(status: StatusCode) -> Response {
+fn open_from_shopify_admin(status: StatusCode, lsf: Option<&AdminOrigin>) -> Response {
+    let polaris = match lsf {
+        Some(lsf) => Cow::Owned(lsf_polaris(lsf.as_str())),
+        None => Cow::Borrowed(POLARIS_SCRIPT),
+    };
     let html = format!(
         "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">\
          <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\
@@ -231,22 +311,23 @@ fn open_from_shopify_admin(status: StatusCode) -> Response {
          <s-paragraph>This app works inside Shopify admin. Open it from the Apps section of your store.</s-paragraph>\
          </s-stack></s-section></s-page></body></html>",
         POLARIS_FALLBACK_STYLE,
-        POLARIS_SCRIPT,
+        polaris,
     );
+    let policy = welcome_policy(lsf);
     (
         status,
         [
             (CONTENT_TYPE.as_str(), "text/html; charset=utf-8"),
             (CACHE_CONTROL.as_str(), "no-store"),
-            (CONTENT_SECURITY_POLICY.as_str(), WELCOME_POLICY),
+            (CONTENT_SECURITY_POLICY.as_str(), policy.as_ref()),
         ],
         html,
     )
         .into_response()
 }
 
-fn unauthorized_ui() -> Response {
-    open_from_shopify_admin(StatusCode::UNAUTHORIZED)
+fn unauthorized_ui(lsf: Option<&AdminOrigin>) -> Response {
+    open_from_shopify_admin(StatusCode::UNAUTHORIZED, lsf)
 }
 
 fn shell_response(html: String, frame_ancestors: &str) -> Response {
@@ -365,6 +446,7 @@ pub(crate) async fn serve_ui(
     }
 
     let query = parse_query(request.uri().query());
+    let lsf = app.lsf_origin();
     let (api_key, frame_ancestors) = if options.dev {
         // Development: no signature gate, but keep stray visitors out of tunnels.
         let headers = request.headers();
@@ -378,7 +460,7 @@ pub(crate) async fn serve_ui(
             || referer.contains("admin.shopify.com")
             || query.contains_key("shop");
         if !allowed {
-            return open_from_shopify_admin(StatusCode::FORBIDDEN);
+            return open_from_shopify_admin(StatusCode::FORBIDDEN, lsf);
         }
         let shopify_app = app
             .apps()
@@ -394,10 +476,10 @@ pub(crate) async fn serve_ui(
         )
     } else {
         let Some(shop) = query.get("shop").and_then(|shop| normalize_shop_domain(shop)) else {
-            return unauthorized_ui();
+            return unauthorized_ui(lsf);
         };
         let Ok((shopify_app, signed)) = app.apps().by_signed_query(request.uri().query().unwrap_or_default()) else {
-            return unauthorized_ui();
+            return unauthorized_ui(lsf);
         };
         match is_installed_for_launch(&app, shopify_app, &shop, &signed).await {
             Ok(true) => {}
@@ -418,13 +500,19 @@ pub(crate) async fn serve_ui(
         )
     };
 
+    // The admin of local-storefront frames the app too.
+    let frame_ancestors = match lsf {
+        Some(lsf) => format!("{frame_ancestors} {lsf}"),
+        None => frame_ancestors,
+    };
+
     if !matches!(*request.method(), Method::GET | Method::HEAD) {
         return not_found();
     }
     let Some(index) = options.ui.read("index.html").await else {
         return not_found();
     };
-    let mut shell = inject_api_key(&String::from_utf8_lossy(&index), &api_key);
+    let mut shell = render_shell(&String::from_utf8_lossy(&index), &api_key, lsf);
     if let Some(served) = reload {
         shell = served.inject(&shell);
     }
@@ -514,6 +602,105 @@ mod tests {
         assert!(
             injected.contains(r#"data-api-key="a&quot;b" src="https://cdn.shopify.com/shopifycloud/app-bridge.js""#)
         );
+    }
+
+    const CDN_APP_BRIDGE: &str = "https://cdn.shopify.com/shopifycloud/app-bridge.js";
+
+    fn lsf() -> AdminOrigin {
+        AdminOrigin::new("http://localhost:9292").unwrap()
+    }
+
+    #[test]
+    fn local_storefront_loads_its_app_bridge_first_and_polaris_through_it() {
+        // The shell the framework embeds, as every bundle has it.
+        let index = include_str!("../../ui-dist/index.html");
+        let shell = render_shell(index, "key-123", Some(&lsf()));
+
+        let lsf_app_bridge = r#"<script src="http://localhost:9292/__lsf/admin/app-bridge.js"></script>"#;
+        let cdn_app_bridge = format!(r#"<script data-api-key="key-123" src="{CDN_APP_BRIDGE}"></script>"#);
+        let polaris = r#"<script src="http://localhost:9292/__lsf/cdn/shopifycloud/polaris.js"></script>"#;
+        // local-storefront's App Bridge right before Shopify's, which keeps its key.
+        assert!(shell.contains(&format!("{lsf_app_bridge}{cdn_app_bridge}")), "{shell}");
+        assert_eq!(shell.matches("app-bridge.js").count(), 2, "{shell}");
+        assert!(shell.contains(polaris), "{shell}");
+        assert!(!shell.contains("https://cdn.shopify.com/shopifycloud/polaris.js"), "{shell}");
+        assert!(shell.contains(r#"<meta name="shopify-api-key" content="key-123" />"#));
+        // Nothing else moves.
+        let unchanged = |html: &str| {
+            html.replace(lsf_app_bridge, "")
+                .replace(polaris, r#"<script src="https://cdn.shopify.com/shopifycloud/polaris.js"></script>"#)
+        };
+        assert_eq!(unchanged(&shell), inject_api_key(index, "key-123"));
+
+        // Once only, however many times it is applied.
+        assert_eq!(use_lsf(&shell, &lsf()), shell);
+    }
+
+    #[test]
+    fn without_local_storefront_the_shell_does_not_change() {
+        let index = include_str!("../../ui-dist/index.html");
+        assert_eq!(render_shell(index, "key-123", None), inject_api_key(index, "key-123"));
+        let minified = format!(r#"<meta name=shopify-api-key content=""><script src={CDN_APP_BRIDGE}></script>"#);
+        assert_eq!(render_shell(&minified, "k", None), inject_api_key(&minified, "k"));
+    }
+
+    #[test]
+    fn local_storefront_follows_minified_markup_and_other_attributes() {
+        let html = format!(
+            r#"<script async type=module data-api-key="k" src={CDN_APP_BRIDGE}></script><script defer src=https://cdn.shopify.com/shopifycloud/polaris.js></script>"#
+        );
+        assert_eq!(
+            use_lsf(&html, &AdminOrigin::new("http://[::1]:9393/").unwrap()),
+            format!(
+                r#"<script src="http://[::1]:9393/__lsf/admin/app-bridge.js"></script><script async type=module data-api-key="k" src={CDN_APP_BRIDGE}></script><script defer src="http://[::1]:9393/__lsf/cdn/shopifycloud/polaris.js"></script>"#
+            )
+        );
+        // A page without Shopify's App Bridge gets none, and keeps the rest.
+        let page = "<head><title>t</title></head>";
+        assert_eq!(use_lsf(page, &lsf()), page);
+    }
+
+    #[test]
+    fn the_origin_of_local_storefront_is_escaped_where_it_is_written() {
+        let html = format!(
+            r#"<script src="{CDN_APP_BRIDGE}"></script><script src="https://cdn.shopify.com/shopifycloud/polaris.js"></script>"#
+        );
+        let written = use_lsf_at(&html, r#"http://x"><script>alert('&')</script>"#);
+        assert!(!written.contains("<script>alert"), "{written}");
+        assert!(
+            written.starts_with(
+                r#"<script src="http://x&quot;&gt;&lt;script&gt;alert(&#39;&amp;&#39;)&lt;/script&gt;/__lsf/admin/app-bridge.js"></script>"#
+            ),
+            "{written}"
+        );
+        assert!(
+            written.ends_with(
+                r#"<script src="http://x&quot;&gt;&lt;script&gt;alert(&#39;&amp;&#39;)&lt;/script&gt;/__lsf/cdn/shopifycloud/polaris.js"></script>"#
+            ),
+            "{written}"
+        );
+    }
+
+    #[test]
+    fn the_welcome_page_allows_local_storefront_where_polaris_needs_it() {
+        assert_eq!(welcome_policy(None), WELCOME_POLICY);
+        let policy = welcome_policy(Some(&lsf()));
+        let directive = |name: &str| {
+            policy
+                .split(';')
+                .map(str::trim)
+                .find(|directive| directive.starts_with(&format!("{name} ")))
+                .unwrap_or_else(|| panic!("no {name} in {policy}"))
+                .to_string()
+        };
+        for name in ["script-src", "style-src", "font-src", "img-src", "connect-src"] {
+            assert!(directive(name).contains(" http://localhost:9292"), "{name}: {policy}");
+        }
+        // Shopify's CDN too: local-storefront redirects there online.
+        assert!(directive("script-src").contains("https://cdn.shopify.com/shopifycloud/polaris.js"));
+        assert!(directive("connect-src").contains("https://cdn.shopify.com/shopifycloud/"));
+        assert!(policy.starts_with("default-src 'none'; "));
+        assert!(policy.ends_with("form-action 'none'; base-uri 'none'"));
     }
 
     #[tokio::test]

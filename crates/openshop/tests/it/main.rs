@@ -24,6 +24,7 @@ mod engine_step;
 mod engine_worker;
 mod functions;
 mod graphql_typed;
+mod local_storefront;
 mod logs_retention;
 mod mcp;
 mod migrations;

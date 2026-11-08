@@ -3568,8 +3568,7 @@ checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
 [[package]]
 name = "shopify_api"
 version = "1.0.0-rc.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "46a93a82ccfc2d50f8e808a7fc57a0fd4f3fd7fff9c59f8f8e5a2e3621db935d"
+source = "git+https://github.com/0xtlt/shopify_api?rev=40876f217cddf90bd9d28db0596aefa9bb6ed532#40876f217cddf90bd9d28db0596aefa9bb6ed532"
 dependencies = [
  "base64 0.23.1",
  "chrono",
@@ -3588,8 +3587,7 @@ dependencies = [
 [[package]]
 name = "shopify_api_graphql"
 version = "1.0.0-rc.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0a9998360a208cada591fbc213b7f729a0e2c58a9d818232ae613b52ee8ed61b"
+source = "git+https://github.com/0xtlt/shopify_api?rev=40876f217cddf90bd9d28db0596aefa9bb6ed532#40876f217cddf90bd9d28db0596aefa9bb6ed532"
 dependencies = [
  "graphql-parser",
  "proc-macro2",
@@ -3602,8 +3600,7 @@ dependencies = [
 [[package]]
 name = "shopify_api_macros"
 version = "1.0.0-rc.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9d12dbb06c96469d97bbf25eab67b7481affb1a375698a2d74eb47319a044075"
+source = "git+https://github.com/0xtlt/shopify_api?rev=40876f217cddf90bd9d28db0596aefa9bb6ed532#40876f217cddf90bd9d28db0596aefa9bb6ed532"
 dependencies = [
  "proc-macro2",
  "quote",

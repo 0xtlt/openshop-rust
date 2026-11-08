@@ -171,8 +171,13 @@ async fn callback(State(app): State<OpenShop>, headers: HeaderMap, RawQuery(raw)
     store_access_token(&app, &shopify_app.handle, &shop, &token, true).await?;
 
     // The cookie stays: it only names the browser, and the other
-    // installations it started may still be pending.
-    Ok(redirect(&format!("https://{shop}/admin/apps/{}", shopify_app.api_key)))
+    // installations it started may still be pending. Back to the app in the
+    // admin of the shop: with `LSF_URL`, local-storefront's, which serves
+    // every shop on one origin and takes the shop in the query.
+    Ok(redirect(&match app.lsf_origin() {
+        Some(lsf) => format!("{lsf}/admin/apps/{}?shop={shop}", shopify_app.api_key),
+        None => format!("https://{shop}/admin/apps/{}", shopify_app.api_key),
+    }))
 }
 
 async fn app_uninstalled(State(app): State<OpenShop>, headers: HeaderMap, body: Bytes) -> ApiResult {

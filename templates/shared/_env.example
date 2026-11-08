@@ -30,3 +30,9 @@ SHOPIFY_API_SECRET=
 # DSN of the Sentry project the failures are reported to: runs that fail,
 # handlers that fail, panics. Without it nothing is reported.
 # SENTRY_DSN=
+
+# Development only: run against local-storefront, a local fake of Shopify
+# (`lsf app dev --app . --app-url http://localhost:3000`), instead of Shopify.
+# The Admin API, OAuth and the token exchange go to it, and the admin UI loads
+# its App Bridge and Polaris from it. Never set it on a deployed app.
+# LSF_URL=http://localhost:9292

@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+- `LSF_URL` runs an app against [local-storefront](https://github.com/0xtlt/local-storefront),
+  a local fake of Shopify, instead of Shopify. It is for development and tests
+  only (`dev`, `start` and `worker`, and `TestOptions::lsf_url`). Set to
+  `http://localhost:9292`, it sends the Admin API, the token exchange, OAuth and
+  the client credentials grant of every shop to lsf, through `shopify_api`'s new
+  `admin_origin`. It also sends the `/auth` and `/auth/callback` redirects to
+  lsf. The admin UI loads lsf's App Bridge before Shopify's tag, so that session
+  tokens work in lsf's admin, and loads Polaris through lsf. The
+  `frame-ancestors` of the admin UI, and the policy of the page that says where
+  the app opens from, allow lsf's origin. `LSF_URL` must be an `https://` URL,
+  or an `http://` URL to `localhost`, `127.0.0.1` or `[::1]`. The process logs a
+  warning when it is set. When it is unset, nothing changes. See
+  `docs/src/guides/local-storefront.md`.
+- `openshop init` copies the `[patch]` of the workspace into the projects it
+  makes, as it does the profiles: a project builds `openshop` with the same
+  crates.
+- `shopify_api` comes from a commit of its repository (`[patch.crates-io]`)
+  until its release with `admin_origin` is published.
+
 - Dependencies up to date: sqlx 0.9, reqwest 0.13 and gloo-timers 0.4, with
   Rust 1.99.1 and trunk 0.22.1 in `mise.toml`, CI and the generated
   `Dockerfile`. Breaking changes:

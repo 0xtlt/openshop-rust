@@ -98,3 +98,10 @@ opt-level = 3
 lto = "thin"
 codegen-units = 1
 strip = "debuginfo"
+
+# shopify_api from a commit of its repository (0xtlt/shopify_api#34), until the
+# release with `admin_origin`, which `LSF_URL` needs, is published: then the
+# release instead, and no patch. `shopify_api_macros` and `shopify_api_graphql`
+# come from the same commit.
+[patch.crates-io]
+shopify_api = { git = "https://github.com/0xtlt/shopify_api", rev = "40876f217cddf90bd9d28db0596aefa9bb6ed532" }

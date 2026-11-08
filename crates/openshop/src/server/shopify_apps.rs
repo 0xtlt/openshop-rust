@@ -7,6 +7,7 @@ use anyhow::{Result, anyhow, bail};
 use regex::Regex;
 
 use axum::http::HeaderMap;
+use shopify_api::AdminOrigin;
 use shopify_api::oauth::{ShopifyApp, SignedQuery};
 use shopify_api::webhooks::Webhook;
 
@@ -207,6 +208,18 @@ impl ShopifyApps {
             app.oauth = app.oauth.clone().with_transport(SharedTransport(transport.clone()));
         }
         self
+    }
+
+    /// The same apps, with the Admin API, OAuth and the token exchange of
+    /// every shop at `origin` instead of Shopify (`LSF_URL`): the clients they
+    /// build send their requests there too.
+    pub(crate) fn with_admin_origin(mut self, origin: Option<&AdminOrigin>) -> Result<Self> {
+        if let Some(origin) = origin {
+            for app in &mut self.apps {
+                app.oauth = app.oauth.clone().with_admin_origin(origin)?;
+            }
+        }
+        Ok(self)
     }
 
     pub fn all(&self) -> &[ResolvedShopifyApp] {
@@ -507,6 +520,48 @@ scopes = "read_products,read_orders"
         assert!(error.contains("Missing Shopify app handle"));
         let error = apps.by_handle(Some("nope")).unwrap_err().to_string();
         assert!(error.contains("Unknown Shopify app \"nope\""));
+    }
+
+    #[test]
+    fn an_admin_origin_sends_every_app_and_client_to_local_storefront() {
+        let apps = two_apps("secret-a", "secret-b", "client-a-key", "client-b-key")
+            .with_transport(crate::testing::MockTransport::new());
+        let lsf = AdminOrigin::new("http://localhost:9292").unwrap();
+        let shop = shopify_api::ShopDomain::new("local-supply-co.myshopify.com").unwrap();
+        let graphql_url = |apps: &ShopifyApps| -> Vec<String> {
+            apps.all()
+                .iter()
+                .map(|app| {
+                    app.oauth
+                        .builder(&shop)
+                        .access_token("shpat_x")
+                        .build()
+                        .unwrap()
+                        .graphql_url(shopify_api::ApiVersion::V2026_10)
+                })
+                .collect()
+        };
+
+        let unchanged = apps.clone().with_admin_origin(None).unwrap();
+        assert!(unchanged.all().iter().all(|app| app.oauth.admin_origin().is_none()));
+        assert_eq!(
+            graphql_url(&unchanged),
+            vec!["https://local-supply-co.myshopify.com/admin/api/2026-10/graphql.json"; 2]
+        );
+
+        let local = apps.with_admin_origin(Some(&lsf)).unwrap();
+        assert!(local.all().iter().all(|app| app.oauth.admin_origin() == Some(&lsf)));
+        assert_eq!(
+            graphql_url(&local),
+            vec!["http://localhost:9292/admin/api/2026-10/graphql.json"; 2]
+        );
+        // OAuth too, for the same shop.
+        let link = local.all()[0].oauth.authorization_url(
+            &shop,
+            &shopify_api::oauth::AuthorizationRequest::new("http://localhost:3000/auth/callback", "state"),
+        );
+        assert!(link.starts_with("http://localhost:9292/admin/oauth/authorize?client_id=client-a-key&"), "{link}");
+        assert!(link.ends_with("&shop=local-supply-co.myshopify.com"), "{link}");
     }
 
     #[test]

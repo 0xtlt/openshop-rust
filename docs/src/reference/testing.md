@@ -167,6 +167,7 @@ in a test that ends with `ctx.shutdown().await`.
 | `cwd` | A directory without Shopify TOML files | Project root used to resolve Shopify TOML files. |
 | `server` | `ServerOptions::default()` | API only: no admin UI is served. |
 | `transport` | A new `MockTransport` | Transport shared with other contexts or prepared in advance. |
+| `lsf_url` | `None` | `LSF_URL` of the application: the Admin API, OAuth and the admin UI as with [local-storefront](../guides/local-storefront.md) at that address. The requests still go to the mock transport. |
 
 `TestOptions` implements `Default`; set the fields you need with struct update
 syntax. `TestOptions::installed()` is the default options with an

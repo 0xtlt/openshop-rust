@@ -42,8 +42,11 @@ multiple-versions = "warn"
 wildcards = "allow"
 
 [sources]
-# crates.io, and nothing else: no unknown registry, no git dependency.
+# crates.io, and nothing else: no unknown registry, no git dependency. For a
+# while, the one exception is shopify_api, patched to a commit of its
+# repository until its release with `admin_origin` is out (see the
+# `[patch.crates-io]` of Cargo.toml): remove it with the patch.
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
-allow-git = []
+allow-git = ["https://github.com/0xtlt/shopify_api"]

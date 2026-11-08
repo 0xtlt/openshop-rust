@@ -23,6 +23,7 @@ afterwards has no effect on a running process.
 | `NODE_ENV` | No | — | `production` is honored like `OPENSHOP_ENV=production`. It never allows plaintext secrets: only `OPENSHOP_ENV` does |
 | `PORT` | No | `3000` | HTTP port of `dev` and `start` |
 | `OPENSHOP_UI_DIR` | No | The bundle set with the `admin_ui` setting of `app!`, then the embedded admin UI | Directory of a custom admin UI bundle served by `dev` and `start` |
+| `LSF_URL` | No, development and tests only | Unset: Shopify | The address of [local-storefront](../guides/local-storefront.md), a local fake of Shopify, such as `http://localhost:9292`, for `dev`, `start` and `worker`. When it is set, the Admin API, OAuth and the token exchange of every shop go to it, and the admin UI loads App Bridge and Polaris from it |
 | `PGPOOL_MAX` | No | `10` | Maximum PostgreSQL pool connections per process |
 | `PGPOOL_IDLE_TIMEOUT_MS` | No | `30000` | Idle PostgreSQL connection timeout |
 | `PGPOOL_CONNECTION_TIMEOUT_MS` | No | `5000` | PostgreSQL connection acquisition timeout |
@@ -32,7 +33,11 @@ afterwards has no effect on a running process.
 Notes:
 
 - An empty value counts as unset for `SHOPIFY_API_KEY`, `SHOPIFY_API_SECRET`,
-  `HOST`, `SHOPIFY_APP_URL`, `ENCRYPTION_KEY`, and `OPENSHOP_UI_DIR`.
+  `HOST`, `SHOPIFY_APP_URL`, `ENCRYPTION_KEY`, `OPENSHOP_UI_DIR`, and `LSF_URL`.
+- `LSF_URL` must be an `https://` URL, or an `http://` URL to `localhost`,
+  `127.0.0.1` or `[::1]`, with no path, query string or user. Any other value
+  stops the command at startup. When it is set, the command logs a warning at
+  startup. See [Run against local-storefront](../guides/local-storefront.md).
 - The templates of `openshop init` also read `OPS_PASSWORD`, `SENTRY_DSN` and
   `SHOPIFY_CLIENT_CREDENTIALS_SHOP` in `src/main.rs` or `src/lib.rs`, and pass
   them to the `ops_password`, `sentry` and `client_credentials_shop` settings

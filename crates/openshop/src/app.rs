@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use indexmap::IndexMap;
+use shopify_api::AdminOrigin;
 use sqlx::PgPool;
 
 use crate::admin::{AdminPage, CustomAdminPage};
@@ -437,6 +438,8 @@ struct Inner {
     crypto: Crypto,
     apps: ShopifyApps,
     transport: Arc<dyn Transport>,
+    /// The origin of `LSF_URL`, when it is set.
+    lsf_origin: Option<AdminOrigin>,
     client_credentials: ClientCredentials,
     custom_pages: Vec<CustomAdminPage>,
     mcp_registry: McpRegistry,
@@ -465,7 +468,17 @@ impl OpenShop {
     ) -> Result<Self> {
         validate_openshop_config(&config)?;
         crate::server::ops::check_password(config.ops_password.as_deref(), env.production)?;
-        let apps = ShopifyApps::resolve(config.shopify.as_ref(), &env)?.with_transport(transport.clone());
+        let lsf_origin = env.lsf_origin()?;
+        let apps = ShopifyApps::resolve(config.shopify.as_ref(), &env)?
+            .with_transport(transport.clone())
+            .with_admin_origin(lsf_origin.as_ref())?;
+        if let Some(lsf) = &lsf_origin {
+            tracing::warn!(
+                "[openshop] LSF_URL is set: this process talks to local-storefront at {lsf}, not to Shopify. \
+                 The Admin API, OAuth and the token exchange of every shop go there, and the admin UI loads \
+                 App Bridge and Polaris from there. For development and tests only: unset LSF_URL to use Shopify."
+            );
+        }
         let crypto = Crypto::new(env.encryption_key.clone(), env.allows_plaintext_secrets());
         crypto.check_configured()?;
         let client_credentials = ClientCredentials::new(config.client_credentials_shop.as_deref())?;
@@ -479,6 +492,7 @@ impl OpenShop {
                 crypto,
                 apps,
                 transport,
+                lsf_origin,
                 client_credentials,
                 custom_pages,
                 mcp_registry,
@@ -509,6 +523,13 @@ impl OpenShop {
 
     pub fn transport(&self) -> &Arc<dyn Transport> {
         &self.inner.transport
+    }
+
+    /// The origin of local-storefront when `LSF_URL` is set: where the Admin
+    /// API, OAuth and the token exchange go instead of Shopify, and where the
+    /// admin UI loads App Bridge and Polaris from.
+    pub fn lsf_origin(&self) -> Option<&AdminOrigin> {
+        self.inner.lsf_origin.as_ref()
     }
 
     /// The client credentials grant, and the shop of the
