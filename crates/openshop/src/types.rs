@@ -18,6 +18,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::app::OpenShop;
 use crate::engine::step::StepExecutor;
+use crate::runtime::context_logger::ContextLogger;
 use crate::runtime::flow_logger::FlowLogger;
 use crate::server::connectors::Connectors;
 use crate::shopify::client::ShopifyClient;
@@ -843,6 +844,9 @@ pub struct WebhookContext {
     pub shopify: ShopifyClient,
     /// The providers of the shop. Nothing is read before the first call.
     pub connectors: Connectors,
+    /// Logs for the shop and the topic, as `ctx.logger` of a flow does for
+    /// its run: to the process logger, not to the database.
+    pub logger: ContextLogger,
     pub app: OpenShop,
 }
 

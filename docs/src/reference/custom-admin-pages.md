@@ -212,6 +212,7 @@ The functions receive an `AdminContext`:
 | `connectors` | `Connectors` | Provider connectors for the shop. |
 | `request_id` | `String` | Identifier also present in logs and error responses. |
 | `idempotency_key` | `Option<String>` | The `Idempotency-Key` request header, when the client sent one. |
+| `logger` | `ContextLogger` | Logs to the runtime logger with the shop, the app and the request ID; see [Logging](logging.md#handler-logger). |
 | `app` | `OpenShop` | The running application. |
 
 Nothing is read when the context is built: the access token of the shop is

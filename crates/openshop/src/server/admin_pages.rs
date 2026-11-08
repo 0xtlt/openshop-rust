@@ -19,6 +19,7 @@ use super::shop::ShopSession;
 use crate::admin::{AdminAuthorize, AdminContext, AdminFunctionKind, AdminPublicError, CustomAdminPage};
 use crate::app::OpenShop;
 use crate::engine::step::error_message;
+use crate::runtime::context_logger::ContextLogger;
 use crate::runtime::report;
 use crate::runtime::logger;
 use crate::types::{CustomAdminPageAccess, CustomAdminPagesResponse, JsonMap};
@@ -57,6 +58,10 @@ fn create_context(
         db: app.db().clone(),
         shopify: session.shopify_client(app),
         connectors: app.connectors(&session.shop, &session.shopify_app),
+        logger: ContextLogger::with_category(
+            json!({ "shop": session.shop, "shopifyApp": session.shopify_app, "requestId": request_id }),
+            "admin",
+        ),
         request_id,
         idempotency_key,
         app: app.clone(),

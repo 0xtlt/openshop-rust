@@ -79,6 +79,7 @@ Shopify sends all configured topics to `POST /webhooks`.
 | `db` | `PgPool` | The database of the application |
 | `shopify` | `ShopifyClient` | The Admin API of the shop |
 | `connectors` | `Connectors` | The providers of the shop |
+| `logger` | `ContextLogger` | Logs to the runtime logger with the shop, the app and the topic; see [Logging](logging.md#handler-logger) |
 | `app` | `OpenShop` | The running application |
 
 A missing header yields an empty string, except `X-Shopify-Shop-Domain`: a

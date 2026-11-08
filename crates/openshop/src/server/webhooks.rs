@@ -25,8 +25,9 @@ use tokio::time::Instant;
 use super::auth::{is_app_uninstalled, record_uninstall};
 use super::http::{catch_panic, header, json_error, json_response, report_failure};
 use crate::app::OpenShop;
-use crate::runtime::report;
+use crate::runtime::context_logger::ContextLogger;
 use crate::runtime::logger;
+use crate::runtime::report;
 use crate::server::connectors::Connectors;
 use crate::server::shop_domain::strict_shop_domain;
 use crate::shopify::client::ShopifyClient;
@@ -254,6 +255,10 @@ async fn handle(State(app): State<OpenShop>, headers: HeaderMap, body: Bytes) ->
         // shop's row holds and asks for no other shop than the configured one.
         shopify: ShopifyClient::new(&app, &shop, &shopify_app.handle),
         connectors: Connectors::for_shop(&app, &shop, &shopify_app.handle),
+        logger: ContextLogger::with_category(
+            json!({ "shop": shop, "shopifyApp": shopify_app.handle, "topic": topic }),
+            "webhook",
+        ),
         app: app.clone(),
     };
     // Still return 200 on handler errors — don't let Shopify retry them.

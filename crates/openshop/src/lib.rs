@@ -124,6 +124,11 @@ not_wasm! {
     pub use indexmap::IndexMap;
     pub use sqlx::{self, PgPool};
     pub use tokio_util::sync::CancellationToken;
+    /// The `tracing` crate the framework logs with, whose subscriber
+    /// `APP.main()` installs: `tracing::info!(shop = %ctx.shop, "Synced")`
+    /// without a dependency of the application's own. A flow, a webhook and
+    /// an admin page log for their run or their shop with `ctx.logger`.
+    pub use tracing;
     pub use uuid::Uuid;
     /// The Sentry SDK the framework reports with. What an application
     /// captures itself goes through it: another version of the crate would
@@ -147,7 +152,7 @@ not_wasm! {
     pub use runtime::logger::{logger, set_logger};
     #[cfg(feature = "sentry")]
     pub use runtime::SentryConfig;
-    pub use runtime::{FlowLogger, RuntimeLogger};
+    pub use runtime::{ContextLogger, FlowLogger, RuntimeLogger};
     pub use server::UiSource;
     pub use server::http::PublicError;
     pub use server::connectors::Connectors;
@@ -181,7 +186,7 @@ not_wasm! {
 ///
 /// The attributes and derives that declare building blocks, [`app!`], the
 /// contexts of the handlers, and what their bodies reach for: [`Result`],
-/// [`json!`], [`bail!`], [`graphql!`], [`liquid!`]… The attribute of tests,
+/// [`json!`], [`bail!`], [`graphql!`], [`liquid!`], the [`tracing`] crate… The attribute of tests,
 /// `#[openshop::test]`, is not part of it: it would hide `#[test]`.
 pub mod prelude {
     pub use crate::input;
@@ -192,7 +197,7 @@ pub mod prelude {
             McpContext, McpPermission, McpRiskLevel, Model, ProviderConfig, ProxyContext, PublicError, QueuedRun, RetryPolicy,
             RouteAuthContext, RouteAuthOutcome, RouteContext, RunOutcome, ShopScope, ShopifyEndpoints, Uuid,
             WebhookContext, WorkerConfig, flow, graphql, liquid, mcp_resource, mcp_tool, provider, proxy, response,
-            route, validators, webhook,
+            route, tracing, validators, webhook,
         };
         #[cfg(feature = "sentry")]
         pub use crate::SentryConfig;

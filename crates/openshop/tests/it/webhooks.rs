@@ -2,7 +2,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use crate::common::{assert_error, noop_flow, two_shopify_apps, two_shopify_apps_with_one_secret};
+use crate::common::{LogCapture, assert_error, noop_flow, two_shopify_apps, two_shopify_apps_with_one_secret};
 use openshop::builder::{OpenShopBuilder, Webhook};
 use openshop::db::schema::FlowRun;
 use openshop::testing::{TestContext, TestOptions, sign_webhook_body};
@@ -795,5 +795,40 @@ async fn post_webhooks_uninstalls_only_the_shop_the_payload_names() {
     assert_ok(response).await;
     assert_eq!(installation_state(&ctx, "test.myshopify.com").await, (None, true));
     assert_eq!(recorder.count(), 0);
+    ctx.shutdown().await.unwrap();
+}
+
+// ─── ctx.logger ──────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn a_handler_logs_for_its_shop_and_topic() {
+    let handler = Webhook::new(|ctx: WebhookContext| async move {
+        ctx.logger.info_with("Webhook logger check", json!({ "id": 7 }));
+        ctx.logger.warn("Webhook logger warning");
+        Ok(())
+    });
+    let ctx = TestContext::new(builder().webhook("orders/create", handler).build().unwrap())
+        .await
+        .unwrap();
+    let logs = LogCapture::start().await;
+
+    assert_ok(deliver(&ctx, "orders/create", "shop-logs.myshopify.com", r#"{"id":7}"#).await).await;
+
+    let lines = logs.lines();
+    let info = lines
+        .iter()
+        .find(|line| line.message == "[INFO] Webhook logger check")
+        .expect("the line of the handler");
+    assert_eq!(info.level, "info");
+    assert_eq!(
+        info.context,
+        Some(json!({ "id": 7, "shop": "shop-logs.myshopify.com", "shopifyApp": "default", "topic": "orders/create" }))
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.level == "warn" && line.message == "[WARN] Webhook logger warning")
+    );
+    drop(logs);
     ctx.shutdown().await.unwrap();
 }

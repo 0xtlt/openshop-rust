@@ -13,6 +13,7 @@ use serde_json::Value;
 use sqlx::PgPool;
 
 use crate::app::OpenShop;
+use crate::runtime::context_logger::ContextLogger;
 use crate::server::connectors::Connectors;
 use crate::shopify::client::ShopifyClient;
 use crate::types::{AdminMenuItem, InputSchema};
@@ -44,6 +45,9 @@ pub struct AdminContext {
     pub connectors: Connectors,
     pub request_id: String,
     pub idempotency_key: Option<String>,
+    /// Logs for the shop and the request, as `ctx.logger` of a flow does for
+    /// its run: to the process logger, not to the database.
+    pub logger: ContextLogger,
     pub app: OpenShop,
 }
 

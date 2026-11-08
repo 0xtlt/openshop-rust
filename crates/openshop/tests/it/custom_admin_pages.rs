@@ -3,7 +3,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use crate::common::{TEST_SHOP, install, json_body, two_shopify_apps, vault_provider};
+use crate::common::{LogCapture, TEST_SHOP, install, json_body, two_shopify_apps, vault_provider};
 use openshop::builder::{AdminFunction, AdminPage, InputSchema, OpenShopBuilder};
 use openshop::testing::{
     AdminTestOptions, MockTransport, TestContext, TestOptions, admin_context, invoke_admin_function, session_token,
@@ -1268,4 +1268,32 @@ async fn functions_can_be_invoked_without_http(ctx: &TestContext) {
         .await
         .unwrap_err();
     assert_eq!(error.to_string(), "Admin function authorization rejected");
+}
+
+#[tokio::test]
+async fn a_loader_logs_for_its_shop_and_request() {
+    let page = AdminPage::new("/tools").loader("check", |ctx: AdminContext, _input: Value| async move {
+        ctx.logger.error_with("Admin logger check", json!({ "step": "load" }));
+        Ok(json!({ "requestId": ctx.request_id }))
+    });
+    let ctx = context(tools_app(page)).await;
+    let logs = LogCapture::start().await;
+
+    let response = rpc(&ctx, REVIEWER, "/tools", "loader", "check", Value::Null)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    let request_id = json_body(response).await["requestId"].clone();
+
+    let line = logs
+        .lines()
+        .into_iter()
+        .find(|line| line.message == "[ERROR] Admin logger check")
+        .expect("the line of the loader");
+    assert_eq!(line.level, "error");
+    assert_eq!(
+        line.context,
+        Some(json!({ "step": "load", "shop": TEST_SHOP, "shopifyApp": "default", "requestId": request_id }))
+    );
 }

@@ -5,6 +5,7 @@ use indexmap::IndexMap;
 
 use crate::admin::{AdminActor, AdminContext};
 use crate::app::OpenShop;
+use crate::runtime::context_logger::ContextLogger;
 use crate::shopify::client_credentials::Grant;
 
 #[derive(Debug, Clone)]
@@ -44,6 +45,10 @@ pub async fn admin_context(app: &OpenShop, options: AdminTestOptions) -> Result<
                 Grant::vouched(&options.shopify_app, &options.shop).unwrap_or(Grant::Background),
             )),
         connectors: app.connectors(&options.shop, &options.shopify_app),
+        logger: ContextLogger::with_category(
+            serde_json::json!({ "shop": options.shop, "shopifyApp": options.shopify_app, "requestId": options.request_id }),
+            "admin",
+        ),
         request_id: options.request_id,
         idempotency_key: None,
         shop: options.shop,

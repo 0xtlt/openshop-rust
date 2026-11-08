@@ -1,9 +1,12 @@
 # Logging
 
-OpenShop has two logging surfaces:
+OpenShop has three logging surfaces:
 
 - flow logs written through `ctx.logger` and stored in PostgreSQL;
-- runtime logs written by the web process, worker, scheduler, and server.
+- the lines of a webhook handler or of an admin page, written through their
+  own `ctx.logger` and sent to the runtime logger with the shop they run for;
+- runtime logs written by the web process, worker, scheduler, and server, and
+  by the application through `tracing`, which `openshop` re-exports.
 
 ## Flow logger
 
@@ -70,6 +73,58 @@ message, without their payload.
 
 Do not log access tokens, provider passwords, session tokens, OAuth state, or
 personal data that is not required for diagnosis.
+
+## Handler logger
+
+A webhook handler and the loaders, actions and access rules of an admin page
+have a `ctx.logger` too, a `ContextLogger`, with the methods of the flow
+logger:
+
+```rust,ignore
+use openshop::prelude::*;
+
+#[webhook("orders/create")]
+pub async fn orders_create(ctx: WebhookContext) -> Result<()> {
+    ctx.logger.info_with("Order received", json!({ "id": ctx.payload["id"] }));
+    Ok(())
+}
+```
+
+A handler has no run: its lines are not stored in the database and the admin
+does not show them. Each one goes to the runtime logger as `[LEVEL] message`,
+with its payload and what the handler runs for:
+
+| Context | Fields added to the payload |
+| --- | --- |
+| `WebhookContext` | `shop`, `shopifyApp`, `topic` |
+| `AdminContext` | `shop`, `shopifyApp`, `requestId` (the one of the error response and of the line OpenShop logs for the call) |
+
+A key of the payload wins over a field of the same name, and a payload that is
+not an object is logged under `payload`. When the application reports to
+[Sentry](sentry.md), the lines are the breadcrumbs of a failure of the handler,
+without their payload, as the lines of a run are.
+
+A context built by hand, in a test, takes `ContextLogger::new(json!({ … }))`,
+whose fields are added to every line, or `ContextLogger::default()`.
+
+## `tracing`
+
+`openshop::tracing` is the [`tracing`](https://docs.rs/tracing) crate OpenShop
+logs with, and the prelude names it: an application logs to the runtime logger
+without a dependency of its own.
+
+```rust,ignore
+use openshop::prelude::*;
+
+pub fn report(shop: &str, synced: usize) {
+    tracing::info!(shop, synced, "Orders synced");
+}
+```
+
+Its lines go through the subscriber `APP.main()` installs (see
+[Runtime logger](#runtime-logger)), with the filter of `RUST_LOG`. Prefer
+`ctx.logger` in a flow, whose lines are kept with its run, and in a handler,
+whose lines say what they ran for.
 
 ## Log query syntax
 

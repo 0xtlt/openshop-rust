@@ -524,8 +524,10 @@ fn install_logger() {
 ```
 
 This logger handles framework and process messages. Flow code should normally
-use `ctx.logger`, which persists records in the run log. See
-[Logging](logging.md).
+use `ctx.logger`, which persists records in the run log; a webhook handler and
+an admin page have a `ctx.logger` of their own, which logs here with the shop
+they run for. `openshop::tracing`, in the prelude, is the `tracing` crate this
+logger forwards to by default. See [Logging](logging.md).
 
 ## Server, worker, and scheduler
 
