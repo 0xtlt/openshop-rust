@@ -730,7 +730,8 @@ async fn post_webhooks_records_app_uninstalled_without_a_handler() {
 #[tokio::test]
 async fn post_webhooks_records_app_uninstalled_before_its_handler_runs() {
     // What the handler finds of the installation when it runs.
-    let seen: Arc<Mutex<Vec<(Option<String>, bool)>>> = Arc::default();
+    type Seen = Arc<Mutex<Vec<(Option<String>, bool)>>>;
+    let seen: Seen = Arc::default();
     let recorded = seen.clone();
     let handler = Webhook::new(move |ctx: WebhookContext| {
         let recorded = recorded.clone();
