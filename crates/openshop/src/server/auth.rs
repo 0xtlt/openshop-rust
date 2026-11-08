@@ -172,10 +172,10 @@ async fn callback(State(app): State<OpenShop>, headers: HeaderMap, RawQuery(raw)
 
     // The cookie stays: it only names the browser, and the other
     // installations it started may still be pending. Back to the app in the
-    // admin of the shop: with `LSF_URL`, local-storefront's, which serves
+    // admin of the shop: at the admin origin when there is one, which serves
     // every shop on one origin and takes the shop in the query.
-    Ok(redirect(&match app.lsf_origin() {
-        Some(lsf) => format!("{lsf}/admin/apps/{}?shop={shop}", shopify_app.api_key),
+    Ok(redirect(&match &app.endpoints().admin_origin {
+        Some(origin) => format!("{origin}/admin/apps/{}?shop={shop}", shopify_app.api_key),
         None => format!("https://{shop}/admin/apps/{}", shopify_app.api_key),
     }))
 }

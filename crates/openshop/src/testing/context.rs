@@ -23,6 +23,7 @@ use crate::runtime::RuntimeEnv;
 use super::proxy_signature;
 use crate::server::shopify_apps::DEFAULT_SHOPIFY_APP_HANDLE;
 use crate::server::{ServerHandle, ServerOptions, create_router, serve};
+use crate::shopify::ShopifyEndpoints;
 use crate::types::ShopScope;
 
 #[derive(Debug, Clone)]
@@ -192,10 +193,12 @@ pub struct TestOptions {
     pub cwd: Option<PathBuf>,
     pub server: ServerOptions,
     pub transport: Option<Arc<MockTransport>>,
-    /// `LSF_URL`: the Admin API, OAuth and the admin UI as with
-    /// local-storefront at this address. The requests still go to the mock
-    /// transport.
-    pub lsf_url: Option<String>,
+    /// The Shopify endpoints of the application, field by field over the ones
+    /// its configuration sets: the Admin API and OAuth at another origin, the
+    /// admin UI with another App Bridge or Polaris. The requests still go to
+    /// the mock transport. The environment variables of the endpoints are not
+    /// read in a test.
+    pub shopify_endpoints: ShopifyEndpoints,
 }
 
 impl Default for TestOptions {
@@ -213,7 +216,7 @@ impl Default for TestOptions {
             cwd: None,
             server: ServerOptions::default(),
             transport: None,
-            lsf_url: None,
+            shopify_endpoints: ShopifyEndpoints::new(),
         }
     }
 }
@@ -323,6 +326,7 @@ impl TestContext {
         if options.client_credentials_shop.is_some() {
             config.client_credentials_shop = options.client_credentials_shop.clone();
         }
+        config.shopify_endpoints = options.shopify_endpoints.clone().or(config.shopify_endpoints);
         let test_db = TestDb::create_with_models(&config.models).await?;
         let db = test_db.pool.clone();
         let transport = options.transport.clone().unwrap_or_default();
@@ -338,7 +342,7 @@ impl TestContext {
                 .cwd
                 .clone()
                 .unwrap_or_else(|| std::env::temp_dir().join("openshop-test-no-toml")),
-            lsf_url: options.lsf_url.clone(),
+            shopify_endpoints: ShopifyEndpoints::new(),
         };
         let app = OpenShop::with_transport(config, db.clone(), env, transport.clone())?;
 

@@ -211,8 +211,9 @@ impl ShopifyApps {
     }
 
     /// The same apps, with the Admin API, OAuth and the token exchange of
-    /// every shop at `origin` instead of Shopify (`LSF_URL`): the clients they
-    /// build send their requests there too.
+    /// every shop at `origin` instead of Shopify (the `admin_origin` of the
+    /// Shopify endpoints): the clients they build send their requests there
+    /// too.
     pub(crate) fn with_admin_origin(mut self, origin: Option<&AdminOrigin>) -> Result<Self> {
         if let Some(origin) = origin {
             for app in &mut self.apps {
@@ -523,10 +524,10 @@ scopes = "read_products,read_orders"
     }
 
     #[test]
-    fn an_admin_origin_sends_every_app_and_client_to_local_storefront() {
+    fn an_admin_origin_sends_every_app_and_client_there() {
         let apps = two_apps("secret-a", "secret-b", "client-a-key", "client-b-key")
             .with_transport(crate::testing::MockTransport::new());
-        let lsf = AdminOrigin::new("http://localhost:9292").unwrap();
+        let origin = AdminOrigin::new("http://localhost:9292").unwrap();
         let shop = shopify_api::ShopDomain::new("local-supply-co.myshopify.com").unwrap();
         let graphql_url = |apps: &ShopifyApps| -> Vec<String> {
             apps.all()
@@ -549,8 +550,8 @@ scopes = "read_products,read_orders"
             vec!["https://local-supply-co.myshopify.com/admin/api/2026-10/graphql.json"; 2]
         );
 
-        let local = apps.with_admin_origin(Some(&lsf)).unwrap();
-        assert!(local.all().iter().all(|app| app.oauth.admin_origin() == Some(&lsf)));
+        let local = apps.with_admin_origin(Some(&origin)).unwrap();
+        assert!(local.all().iter().all(|app| app.oauth.admin_origin() == Some(&origin)));
         assert_eq!(
             graphql_url(&local),
             vec!["http://localhost:9292/admin/api/2026-10/graphql.json"; 2]

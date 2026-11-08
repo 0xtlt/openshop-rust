@@ -3,7 +3,7 @@
 
 use std::path::PathBuf;
 
-use shopify_api::AdminOrigin;
+use crate::shopify::ShopifyEndpoints;
 
 /// Database used when `DATABASE_URL` is not set.
 pub const DEFAULT_DATABASE_URL: &str = "postgresql://openshop:openshop@localhost:5432/openshop";
@@ -29,12 +29,10 @@ pub struct RuntimeEnv {
     pub development: bool,
     /// Project root used to resolve Shopify TOML files and migrations.
     pub cwd: PathBuf,
-    /// `LSF_URL`: the address of local-storefront, a local fake of Shopify,
-    /// such as `http://localhost:9292`. Set, the Admin API, OAuth and the
-    /// token exchange go to it instead of Shopify, and the admin UI loads its
-    /// App Bridge and Polaris from it. For development only. Checked by
-    /// [`RuntimeEnv::lsf_origin`].
-    pub lsf_url: Option<String>,
+    /// `SHOPIFY_ADMIN_ORIGIN`, `SHOPIFY_APP_BRIDGE_URL` and
+    /// `SHOPIFY_POLARIS_URL`: the endpoints of Shopify the configuration does
+    /// not set, field by field. See [`ShopifyEndpoints`].
+    pub shopify_endpoints: ShopifyEndpoints,
 }
 
 impl std::fmt::Debug for RuntimeEnv {
@@ -49,7 +47,7 @@ impl std::fmt::Debug for RuntimeEnv {
             .field("production", &self.production)
             .field("development", &self.development)
             .field("cwd", &self.cwd)
-            .field("lsf_url", &self.lsf_url)
+            .field("shopify_endpoints", &self.shopify_endpoints)
             .finish()
     }
 }
@@ -83,26 +81,8 @@ impl RuntimeEnv {
             production,
             development,
             cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
-            lsf_url: non_empty("LSF_URL"),
+            shopify_endpoints: ShopifyEndpoints::from_env(),
         }
-    }
-
-    /// The origin of `LSF_URL`, when it is set: `http://localhost:9292`, with
-    /// no trailing `/`. Fails when it is not an absolute `https://` URL, or an
-    /// `http://` one to `localhost`, `127.0.0.1` or `[::1]`, with no path,
-    /// query string or user: an access token never goes elsewhere in clear
-    /// text.
-    pub fn lsf_origin(&self) -> anyhow::Result<Option<AdminOrigin>> {
-        self.lsf_url
-            .as_deref()
-            .map(|url| {
-                AdminOrigin::new(url).map_err(|error| {
-                    anyhow::anyhow!(
-                        "[openshop] LSF_URL must be the origin of local-storefront, such as http://localhost:9292: {error}"
-                    )
-                })
-            })
-            .transpose()
     }
 
     /// Whether secrets may be stored in plaintext, without an `ENCRYPTION_KEY`:
@@ -175,38 +155,6 @@ mod tests {
         // `prod`, `staging`, a typo, an empty value: not a development environment.
         for value in ["prod", "staging", "Production", "developement", ""] {
             assert!(!environment(Some(value), None).1, "{value}");
-        }
-    }
-
-    #[test]
-    fn lsf_url_is_an_origin_of_this_machine_or_over_https() {
-        let lsf = |url: &str| {
-            RuntimeEnv {
-                lsf_url: Some(url.into()),
-                ..Default::default()
-            }
-            .lsf_origin()
-        };
-        assert_eq!(RuntimeEnv::default().lsf_origin().unwrap(), None);
-        for (url, origin) in [
-            ("http://localhost:9292", "http://localhost:9292"),
-            ("http://localhost:9292/", "http://localhost:9292"),
-            ("http://127.0.0.1:9292", "http://127.0.0.1:9292"),
-            ("http://[::1]:9292", "http://[::1]:9292"),
-            ("https://lsf.example.com", "https://lsf.example.com"),
-        ] {
-            assert_eq!(lsf(url).unwrap().unwrap().as_str(), origin, "{url}");
-        }
-        for url in [
-            "localhost:9292",
-            "http://lsf.example.com",
-            "http://localhost:9292/admin",
-            "http://localhost:9292?x=1",
-            "http://user:shpat_secret@localhost:9292",
-        ] {
-            let error = lsf(url).unwrap_err().to_string();
-            assert!(error.starts_with("[openshop] LSF_URL must be the origin of local-storefront"), "{url}: {error}");
-            assert!(!error.contains("shpat_secret"), "{error}");
         }
     }
 

@@ -6,7 +6,6 @@ use std::time::Duration;
 
 use anyhow::Result;
 use indexmap::IndexMap;
-use shopify_api::AdminOrigin;
 use sqlx::PgPool;
 
 use crate::admin::{AdminPage, CustomAdminPage};
@@ -24,6 +23,7 @@ use crate::server::mcp::registry::{McpRegistry, build_mcp_registry};
 use crate::server::shopify_apps::ShopifyApps;
 use crate::server::static_ui::UiSource;
 use crate::shopify::client::ShopifyClient;
+use crate::shopify::endpoints::{Endpoints, ShopifyEndpoints};
 use crate::server::webhooks::WebhookDeliveries;
 use crate::shopify::client_credentials::ClientCredentials;
 use crate::types::{
@@ -35,6 +35,9 @@ use crate::types::{
 #[derive(Clone, Default)]
 pub struct OpenShopConfig {
     pub shopify: Option<ShopifyConfig>,
+    /// Where the application reaches Shopify, field by field: a field that is
+    /// `None` is read from its environment variable, then is Shopify's.
+    pub shopify_endpoints: ShopifyEndpoints,
     pub providers: IndexMap<String, Provider>,
     pub flows: IndexMap<String, Flow>,
     pub functions: IndexMap<String, Function>,
@@ -147,6 +150,21 @@ impl OpenShopBuilder {
 
     pub fn shopify(mut self, shopify: ShopifyConfig) -> Self {
         self.config.shopify = Some(shopify);
+        self
+    }
+
+    /// Where the application reaches Shopify: the Admin API and OAuth, and
+    /// the App Bridge and Polaris of the admin UI, for a simulator, a proxy
+    /// or an API of one's own. Merges with earlier calls field by field: a
+    /// field set here replaces the earlier one, a field left `None` keeps it.
+    /// So a call at startup, on the builder of the declaration
+    /// ([`App::main_with`](crate::App::main_with)), wins over the
+    /// `shopify_endpoints` of `app!`. A field no call sets is read from its
+    /// environment variable when the application starts, then is Shopify's.
+    /// It does not change the Shopify app(s) served: see
+    /// [`shopify`](Self::shopify).
+    pub fn shopify_endpoints(mut self, endpoints: ShopifyEndpoints) -> Self {
+        self.config.shopify_endpoints = endpoints.or(std::mem::take(&mut self.config.shopify_endpoints));
         self
     }
 
@@ -438,8 +456,8 @@ struct Inner {
     crypto: Crypto,
     apps: ShopifyApps,
     transport: Arc<dyn Transport>,
-    /// The origin of `LSF_URL`, when it is set.
-    lsf_origin: Option<AdminOrigin>,
+    /// Where Shopify is reached: the configuration's, else the environment's.
+    endpoints: Endpoints,
     client_credentials: ClientCredentials,
     custom_pages: Vec<CustomAdminPage>,
     mcp_registry: McpRegistry,
@@ -468,16 +486,12 @@ impl OpenShop {
     ) -> Result<Self> {
         validate_openshop_config(&config)?;
         crate::server::ops::check_password(config.ops_password.as_deref(), env.production)?;
-        let lsf_origin = env.lsf_origin()?;
+        let endpoints = Endpoints::resolve(&config.shopify_endpoints, &env.shopify_endpoints)?;
         let apps = ShopifyApps::resolve(config.shopify.as_ref(), &env)?
             .with_transport(transport.clone())
-            .with_admin_origin(lsf_origin.as_ref())?;
-        if let Some(lsf) = &lsf_origin {
-            tracing::warn!(
-                "[openshop] LSF_URL is set: this process talks to local-storefront at {lsf}, not to Shopify. \
-                 The Admin API, OAuth and the token exchange of every shop go there, and the admin UI loads \
-                 App Bridge and Polaris from there. For development and tests only: unset LSF_URL to use Shopify."
-            );
+            .with_admin_origin(endpoints.admin_origin.as_ref())?;
+        if let Some(line) = endpoints.startup_line() {
+            tracing::info!("{line}");
         }
         let crypto = Crypto::new(env.encryption_key.clone(), env.allows_plaintext_secrets());
         crypto.check_configured()?;
@@ -492,7 +506,7 @@ impl OpenShop {
                 crypto,
                 apps,
                 transport,
-                lsf_origin,
+                endpoints,
                 client_credentials,
                 custom_pages,
                 mcp_registry,
@@ -525,11 +539,16 @@ impl OpenShop {
         &self.inner.transport
     }
 
-    /// The origin of local-storefront when `LSF_URL` is set: where the Admin
-    /// API, OAuth and the token exchange go instead of Shopify, and where the
-    /// admin UI loads App Bridge and Polaris from.
-    pub fn lsf_origin(&self) -> Option<&AdminOrigin> {
-        self.inner.lsf_origin.as_ref()
+    /// Where this application reaches Shopify: each field of the
+    /// configuration, else of its environment variable, written in full. A
+    /// field that is `None` is Shopify's.
+    pub fn shopify_endpoints(&self) -> &ShopifyEndpoints {
+        &self.inner.endpoints.shown
+    }
+
+    /// The same, checked.
+    pub(crate) fn endpoints(&self) -> &Endpoints {
+        &self.inner.endpoints
     }
 
     /// The client credentials grant, and the shop of the

@@ -151,7 +151,7 @@ not_wasm! {
     pub use server::UiSource;
     pub use server::http::PublicError;
     pub use server::connectors::Connectors;
-    pub use shopify::ShopifyClient;
+    pub use shopify::{ShopifyClient, ShopifyEndpoints};
     pub use template::Liquid;
     pub use types::{
         AdminMenuItem, AdminPageId, AdminPageMode, AdminPagesConfig, Concurrency, Cron, CronShops, ErrorContext,
@@ -190,9 +190,9 @@ pub mod prelude {
         pub use crate::{
             AdminContext, App, Cron, ErrorContext, FlowContext, FunctionConfig, InvalidInput, Liquid, McpConfig,
             McpContext, McpPermission, McpRiskLevel, Model, ProviderConfig, ProxyContext, PublicError, QueuedRun, RetryPolicy,
-            RouteAuthContext, RouteAuthOutcome, RouteContext, RunOutcome, ShopScope, Uuid, WebhookContext,
-            WorkerConfig, flow, graphql, liquid, mcp_resource, mcp_tool, provider, proxy, response, route,
-            validators, webhook,
+            RouteAuthContext, RouteAuthOutcome, RouteContext, RunOutcome, ShopScope, ShopifyEndpoints, Uuid,
+            WebhookContext, WorkerConfig, flow, graphql, liquid, mcp_resource, mcp_tool, provider, proxy, response,
+            route, validators, webhook,
         };
         #[cfg(feature = "sentry")]
         pub use crate::SentryConfig;

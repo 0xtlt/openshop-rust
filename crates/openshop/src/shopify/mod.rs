@@ -2,9 +2,11 @@
 
 pub mod client;
 pub(crate) mod client_credentials;
+pub mod endpoints;
 pub(crate) mod token_exchange;
 
 pub use client::ShopifyClient;
+pub use endpoints::ShopifyEndpoints;
 pub use shopify_api::{ApiVersion, IntoVariable, Operation, Page};
 
 /// A Shopify app and a shop, what the process keeps its tokens and clients by.

@@ -164,7 +164,14 @@ impl App {
 
     /// Runs the command given on the command line: `dev`, `start`, `worker`, `migrate`…
     pub async fn run(&self) -> Result<()> {
-        crate::cli::run(|| self.config()).await
+        self.run_with(|app| app).await
+    }
+
+    /// [`App::run`] with settings decided at startup, on top of the
+    /// declaration: `configure` takes its builder once `.env` is loaded, and
+    /// what it sets replaces what the declaration says.
+    pub async fn run_with(&self, configure: impl FnOnce(OpenShopBuilder) -> OpenShopBuilder) -> Result<()> {
+        crate::cli::run(|| configure(self.builder()?).build()).await
     }
 
     /// [`App::run`] for a `main` that is not `async`: loads `.env` for `dev`,
@@ -177,6 +184,29 @@ impl App {
     /// }
     /// ```
     pub fn main(&self) -> Result<()> {
+        self.main_with(|app| app)
+    }
+
+    /// [`App::main`] with settings decided at startup, on top of the
+    /// declaration, for what `app!` cannot know: `configure` takes its builder
+    /// once `.env` is loaded, and what it sets replaces what the declaration
+    /// says. The Shopify endpoints of a simulator in CI, for instance:
+    ///
+    /// ```no_run
+    /// # use openshop::prelude::*;
+    /// # static APP: App = app! {};
+    /// fn main() -> Result<()> {
+    ///     let simulator = std::env::args().any(|arg| arg == "--simulator");
+    ///     APP.main_with(|app| {
+    ///         if simulator {
+    ///             app.shopify_endpoints(ShopifyEndpoints::new().admin_origin("http://localhost:9393"))
+    ///         } else {
+    ///             app
+    ///         }
+    ///     })
+    /// }
+    /// ```
+    pub fn main_with(&self, configure: impl FnOnce(OpenShopBuilder) -> OpenShopBuilder) -> Result<()> {
         // `dev` reads `.env` into the environment, which no thread may read meanwhile:
         // before the runtime and its threads exist.
         let args: Vec<String> = std::env::args().skip(1).collect();
@@ -184,6 +214,6 @@ impl App {
         tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()?
-            .block_on(self.run())
+            .block_on(self.run_with(configure))
     }
 }
