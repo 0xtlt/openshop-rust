@@ -39,6 +39,8 @@
 //! - [`server`]: the HTTP server and its parts;
 //! - [`db`]: the pool, models, tables and migrations;
 //! - [`admin`]: the server side of custom admin pages;
+//! - [`billing`]: the subscriptions of a shop to the app, with Shopify's
+//!   managed pricing, and the guard of an admin page that needs a plan;
 //! - [`runtime`]: the environment, the loggers, the reports to Sentry and the outbound transport;
 //! - [`shopify`]: the Admin API client and typed operations;
 //! - [`testing`] (feature `testing`): the test harness;
@@ -59,6 +61,7 @@ macro_rules! not_wasm {
 not_wasm! {
     pub mod admin;
     mod app;
+    pub mod billing;
     pub mod builder;
     pub mod cli;
     mod config;

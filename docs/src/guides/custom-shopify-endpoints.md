@@ -17,7 +17,7 @@ nothing changes.
 
 | Field | In place of | What moves |
 | --- | --- | --- |
-| `admin_origin` | `https://{shop}` | The GraphQL Admin API, the token exchange, the code exchange, the client credentials grant and the refresh of every shop. Also the install link that `/auth` sends the browser to, and the redirect at the end of `/auth/callback`, which goes to `{admin_origin}/admin/apps/{client_id}?shop={shop}`. The admin UI may also be framed by this origin (`frame-ancestors`), since a simulator serves its admin there |
+| `admin_origin` | `https://{shop}` | The GraphQL Admin API, the token exchange, the code exchange, the client credentials grant and the refresh of every shop. Also the install link that `/auth` sends the browser to, and the redirect at the end of `/auth/callback`, which goes to `{admin_origin}/admin/apps/{client_id}?shop={shop}`, and the pages of the admin the app links to (`ctx.admin_url(path)`, `billing::pricing_url(&ctx)`), `{admin_origin}/admin/{path}?shop={shop}` in place of `https://admin.shopify.com/store/{store}/{path}`. The admin UI may also be framed by this origin (`frame-ancestors`), since a simulator serves its admin there |
 | `app_bridge` | `https://cdn.shopify.com/shopifycloud/app-bridge.js` | The App Bridge script of the admin UI. The tag keeps its `data-api-key`, and the page keeps its `shopify-api-key` meta |
 | `polaris` | `https://cdn.shopify.com/shopifycloud/polaris.js` | The Polaris script of the admin UI, and of the page that tells a visitor where the app opens from. That page's policy allows the script's origin in `script-src`, `style-src`, `font-src` and `connect-src`, where a copy of Polaris loads its styles, font and icons from |
 
@@ -198,6 +198,20 @@ where it goes: `{"topic": "products/create", "address": "http://localhost:3000/w
 
 `GET http://localhost:9393/__lsf/webhooks` lists the deliveries and what the app
 answered.
+
+`POST http://localhost:9393/__lsf/admin/uninstall` uninstalls the app from the
+shop: lsf revokes its tokens and delivers `app/uninstalled`, which OpenShop
+records ([Uninstallation](../reference/webhooks.md#uninstallation)).
+
+### Pages of the admin and pricing
+
+The pages of Shopify's admin are at the admin origin too, with the shop in the
+query: `ctx.admin_url("settings/payments")` is
+`http://localhost:9393/admin/settings/payments?shop=…`, and
+`billing::pricing_url(&ctx)` lsf's plan selection page,
+`http://localhost:9393/admin/charges/<handle>/pricing_plans?shop=…`, where the
+plans lsf is given stand for the ones of the Partner Dashboard. See
+[Charge with managed pricing](charge-with-managed-pricing.md).
 
 ## Tests
 

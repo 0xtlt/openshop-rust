@@ -518,10 +518,30 @@ pub trait ShopScope {
     /// The domain of the shop.
     fn shop(&self) -> &str;
 
-    /// The handle of the Shopify app the shop is served by.
+    /// The name OpenShop gives the Shopify app the shop is served by: the key
+    /// of `shopify.apps`, or `default` for the app of the environment.
     fn shopify_app(&self) -> &str;
 
     fn app(&self) -> &OpenShop;
+
+    /// The handle of the app on Shopify, which the URLs of the Shopify admin
+    /// name it by (`charges/{app_handle}/pricing_plans`): the `handle` of its
+    /// `shopify.app*.toml` (the one whose `client_id` is its API key), else its
+    /// API key. Not [`shopify_app`](Self::shopify_app), the name OpenShop
+    /// gives it.
+    fn app_handle(&self) -> &str {
+        self.app()
+            .apps()
+            .by_handle(Some(self.shopify_app()))
+            .map_or(self.shopify_app(), |app| app.app_handle.as_str())
+    }
+
+    /// A page of the Shopify admin of the shop, `path` being what follows the
+    /// admin of the store (`settings/payments`): Shopify's, or at the
+    /// `admin_origin` of the [Shopify endpoints](crate::ShopifyEndpoints::admin_url).
+    fn admin_url(&self, path: &str) -> String {
+        self.app().shopify_endpoints().admin_url(self.shop(), path)
+    }
 }
 
 macro_rules! shop_scope {

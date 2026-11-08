@@ -357,7 +357,7 @@ the server, and `Deserialize`, for the view.
 | `use_loader(reference, input)` | Calls the loader when the page mounts, and again whenever the input closure yields a different JSON value or the loader is revalidated. Exposes the signals `data`, `error`, and `loading`, and `revalidate()`. Responses of superseded calls are discarded. |
 | `use_action(reference)` | Exposes the signals `data`, `error`, and `pending`, `invoke(input, options)`, and `reset()`. Never retries on its own. |
 | `AdminActionOptions` | `.revalidate(loader)` reloads mounted loaders after a success, `.idempotency_key(key)` sets the `Idempotency-Key` header, `.concurrency(ActionConcurrency::Allow)` permits overlapping calls. By default a call made while another one is in flight is skipped and `invoke` returns `Ok(None)`. |
-| `AdminRpcError` | Failure of a call: `message`, and the server's `code`, `request_id`, and `field_errors` when it answered with a structured error. |
+| `AdminRpcError` | Failure of a call: `message`, and the server's `code`, `request_id`, `field_errors` and `details` when it answered with a structured error; `detail(name)` reads one of the details. |
 | `RouteParams::get(name)` | The percent-decoded value of a dynamic segment. |
 | `openshop::ui::navigate(path)` | Switches to another embedded page without reloading. |
 | `openshop::ui::shopify` | `toast`, `toast_error`, and `toast_with` for App Bridge toasts; `id_token` for a session token. |
@@ -493,12 +493,18 @@ every request. All of them must allow the request.
 
 Return an `AdminPublicError` for failures that are safe to show.
 `AdminPublicError::new(code, message)` has status `400`; `.status(…)` and
-`.field_errors(…)` change the status and attach per-field messages. Any other
-error is logged with a request ID and returned without details.
+`.field_errors(…)` change the status and attach per-field messages, and
+`.detail(name, value)` adds a text the page receives with the error. Any other
+error is logged with a request ID and returned without details. An access rule
+or a rule of the function may return one too: the call is answered with it.
+`billing::require_plan` and `billing::any_plan` answer `402 PLAN_REQUIRED` this
+way, with the pricing page of the app in the details; see
+[Billing](billing.md#guard-an-admin-page).
 
 | Status | `code` | Condition |
 | --- | --- | --- |
 | `200` | — | The handler's JSON output is the response body. |
+| `402` | `PLAN_REQUIRED` | `billing::require_plan` or `billing::any_plan` found no active plan; `details` has `pricingUrl` and `pricingLink`. |
 | `403` | `FORBIDDEN` | A page or function rule rejected the request. |
 | `404` | `NOT_FOUND` | The page, function, or kind does not exist. |
 | `422` | `INVALID_INPUT` | The input does not satisfy the function's schema. |
@@ -507,7 +513,7 @@ error is logged with a request ID and returned without details.
 
 Error bodies have the form
 `{ "error": "<message>", "code": "<code>", "requestId": "<id>" }`, plus
-`fieldErrors` when the error carries them. Unexpected errors always use the
+`fieldErrors` and `details` when the error carries them. Unexpected errors always use the
 message `Internal server error`.
 
 Each call writes one structured line to the runtime logger with the request

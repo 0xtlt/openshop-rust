@@ -13,6 +13,7 @@ mod common;
 mod admin_views;
 mod api;
 mod auth;
+mod billing;
 mod client_credentials;
 mod contexts;
 mod custom_admin_pages;

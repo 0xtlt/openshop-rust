@@ -294,6 +294,9 @@ async fn rpc(
                 if let Some(field_errors) = &public.field_errors {
                     payload.insert("fieldErrors".into(), json!(field_errors));
                 }
+                if let Some(details) = &public.details {
+                    payload.insert("details".into(), json!(details));
+                }
                 let status = StatusCode::from_u16(public.status).unwrap_or(StatusCode::BAD_REQUEST);
                 json_response(status, Value::Object(payload))
             }

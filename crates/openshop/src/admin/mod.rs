@@ -230,6 +230,11 @@ pub struct AdminPublicError {
     pub message: String,
     pub status: u16,
     pub field_errors: Option<IndexMap<String, String>>,
+    /// What else the page receives with the error, by name: `details` of the
+    /// response, and of the `AdminRpcError` of a view. The error of
+    /// [`billing::require_plan`](crate::billing::require_plan) carries the
+    /// pricing page there.
+    pub details: Option<IndexMap<String, String>>,
 }
 
 impl AdminPublicError {
@@ -239,7 +244,17 @@ impl AdminPublicError {
             message: message.into(),
             status: 400,
             field_errors: None,
+            details: None,
         }
+    }
+
+    /// Adds a value the page receives with the error, under `name`:
+    /// `.detail("pricingUrl", url)`.
+    pub fn detail(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.details
+            .get_or_insert_with(IndexMap::new)
+            .insert(name.into(), value.into());
+        self
     }
 
     pub fn status(mut self, status: u16) -> Self {
@@ -483,5 +498,13 @@ mod tests {
         assert_eq!(error.status, 422);
         assert_eq!(error.field_errors.unwrap()["title"], "Required");
         assert_eq!(AdminPublicError::new("X", "y").status, 400);
+
+        let error = AdminPublicError::new("PLAN_REQUIRED", "Choose a plan")
+            .status(402)
+            .detail("pricingUrl", "https://admin.shopify.com/store/demo/charges/app/pricing_plans")
+            .detail("pricingLink", "shopify:admin/charges/app/pricing_plans");
+        let details = error.details.unwrap();
+        assert_eq!(details.keys().collect::<Vec<_>>(), ["pricingUrl", "pricingLink"]);
+        assert!(AdminPublicError::new("X", "y").details.is_none());
     }
 }

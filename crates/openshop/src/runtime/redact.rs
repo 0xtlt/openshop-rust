@@ -157,6 +157,7 @@ mod tests {
 
         let resolved = ResolvedShopifyApp {
             handle: "default".into(),
+            app_handle: "my-app".into(),
             api_key: "public-key".into(),
             api_secret: "api-secret-value".into(),
             app_url: "https://app.example.com".into(),

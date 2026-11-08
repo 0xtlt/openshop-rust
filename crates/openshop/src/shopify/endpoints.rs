@@ -119,6 +119,74 @@ impl ShopifyEndpoints {
         }
     }
 
+    /// A page of the Shopify admin of `shop`, where a merchant is sent:
+    /// `path` is what follows the admin of the store, such as
+    /// `settings/payments`, `apps/my-app` or `""` for its home, and may carry
+    /// a query string.
+    ///
+    /// On Shopify, `https://admin.shopify.com/store/{store}/{path}`, `store`
+    /// being the shop without `.myshopify.com`; with an
+    /// [`admin_origin`](Self::admin_origin), which serves every shop on one
+    /// origin, `{admin_origin}/admin/{path}?shop={shop}`.
+    ///
+    /// ```
+    /// use openshop::ShopifyEndpoints;
+    ///
+    /// assert_eq!(
+    ///     ShopifyEndpoints::new().admin_url("demo.myshopify.com", "settings/payments"),
+    ///     "https://admin.shopify.com/store/demo/settings/payments"
+    /// );
+    /// assert_eq!(
+    ///     ShopifyEndpoints::new()
+    ///         .admin_origin("http://localhost:9393")
+    ///         .admin_url("demo.myshopify.com", "settings/payments"),
+    ///     "http://localhost:9393/admin/settings/payments?shop=demo.myshopify.com"
+    /// );
+    /// ```
+    pub fn admin_url(&self, shop: &str, path: &str) -> String {
+        let path = path.trim_start_matches('/');
+        let (path, fragment) = match path.split_once('#') {
+            Some((path, fragment)) => (path, format!("#{fragment}")),
+            None => (path, String::new()),
+        };
+        let (path, query) = path.split_once('?').unwrap_or((path, ""));
+        let path = path.trim_end_matches('/');
+        let page = |base: String| if path.is_empty() { base } else { format!("{base}/{path}") };
+        match &self.admin_origin {
+            Some(origin) => {
+                let shop: String = url::form_urlencoded::byte_serialize(shop.as_bytes()).collect();
+                let query = if query.is_empty() { String::new() } else { format!("{query}&") };
+                format!(
+                    "{}?{query}shop={shop}{fragment}",
+                    page(format!("{}/admin", origin.trim_end_matches('/')))
+                )
+            }
+            None => {
+                let store = shop.strip_suffix(".myshopify.com").unwrap_or(shop);
+                let query = if query.is_empty() { String::new() } else { format!("?{query}") };
+                format!("{}{query}{fragment}", page(format!("https://admin.shopify.com/store/{store}")))
+            }
+        }
+    }
+
+    /// The plan selection page of an app with Shopify's managed pricing, for
+    /// `shop`: `charges/{app_handle}/pricing_plans` of its admin, as
+    /// [`admin_url`](Self::admin_url) writes it. `app_handle` is the handle of
+    /// the app on Shopify, which [`ShopScope::app_handle`](crate::ShopScope::app_handle)
+    /// gives.
+    ///
+    /// ```
+    /// use openshop::ShopifyEndpoints;
+    ///
+    /// assert_eq!(
+    ///     ShopifyEndpoints::new().pricing_plans_url("demo.myshopify.com", "hide-paypal"),
+    ///     "https://admin.shopify.com/store/demo/charges/hide-paypal/pricing_plans"
+    /// );
+    /// ```
+    pub fn pricing_plans_url(&self, shop: &str, app_handle: &str) -> String {
+        self.admin_url(shop, &format!("charges/{app_handle}/pricing_plans"))
+    }
+
     /// Checks the fields the code sets, as `build()` does.
     pub(crate) fn check(&self) -> Result<()> {
         Endpoints::resolve(self, &Self::default()).map(drop)
@@ -350,6 +418,37 @@ mod tests {
         // A field of the code wins over the environment for that field only.
         let env_only = Endpoints::resolve(&ShopifyEndpoints::new(), &env.clone()).unwrap();
         assert_eq!(env_only.shown, env.clone().admin_origin("https://proxy.example.com"));
+    }
+
+    #[test]
+    fn admin_pages_are_shopify_s_or_at_the_admin_origin() {
+        let shopify = ShopifyEndpoints::new();
+        let local = ShopifyEndpoints::new().admin_origin("http://localhost:9393/");
+        let shop = "demo-shop.myshopify.com";
+
+        assert_eq!(shopify.admin_url(shop, ""), "https://admin.shopify.com/store/demo-shop");
+        assert_eq!(
+            shopify.admin_url(shop, "/apps/hide-paypal/"),
+            "https://admin.shopify.com/store/demo-shop/apps/hide-paypal"
+        );
+        assert_eq!(
+            shopify.admin_url(shop, "orders?query=open#top"),
+            "https://admin.shopify.com/store/demo-shop/orders?query=open#top"
+        );
+        assert_eq!(local.admin_url(shop, ""), "http://localhost:9393/admin?shop=demo-shop.myshopify.com");
+        assert_eq!(
+            local.admin_url(shop, "orders?query=open#top"),
+            "http://localhost:9393/admin/orders?query=open&shop=demo-shop.myshopify.com#top"
+        );
+
+        assert_eq!(
+            shopify.pricing_plans_url(shop, "hide-paypal"),
+            "https://admin.shopify.com/store/demo-shop/charges/hide-paypal/pricing_plans"
+        );
+        assert_eq!(
+            local.pricing_plans_url(shop, "hide-paypal"),
+            "http://localhost:9393/admin/charges/hide-paypal/pricing_plans?shop=demo-shop.myshopify.com"
+        );
     }
 
     #[test]
