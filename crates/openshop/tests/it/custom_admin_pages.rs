@@ -1289,7 +1289,7 @@ async fn a_loader_logs_for_its_shop_and_request() {
     let line = logs
         .lines()
         .into_iter()
-        .find(|line| line.message == "[ERROR] Admin logger check")
+        .find(|line| line.message == "Admin logger check")
         .expect("the line of the loader");
     assert_eq!(line.level, "error");
     assert_eq!(

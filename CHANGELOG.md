@@ -63,6 +63,11 @@
   local-storefront show it in the title bar of a page whose `s-page` has no
   `heading`, and the browser in its tab. A bundle with a title of its own keeps
   it. `ResolvedShopifyApp` has `name`.
+- The lines of `ctx.logger`, of a flow, a webhook or an admin page, reach the
+  runtime logger with their message alone, at their level: the default logger
+  wrote the level twice (`INFO [INFO] Order received`), and writes
+  `INFO Order received`. A `RuntimeLogger` of your own no longer finds
+  `[LEVEL]` before the message.
 
 - `ShopifyEndpoints` says where an app reaches Shopify, for a simulator of
   Shopify such as [local-storefront](https://github.com/0xtlt/local-storefront),

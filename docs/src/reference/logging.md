@@ -42,7 +42,8 @@ payload is a JSON value (`serde_json::Value`), usually
 `json!({ "count": 3 })`; a line logged without one is stored with an empty
 object.
 
-Each line is sent to the runtime logger as `[LEVEL] message` and stored in the
+Each line is sent to the runtime logger at its level, the message as it is
+(the default logger writes `INFO Starting order sync`), and stored in the
 `logs` table with the time it was emitted. Lines are written in emission order
 by a background task:
 logging never blocks or fails a flow. A line waits up to 50 ms for the next
@@ -91,8 +92,8 @@ pub async fn orders_create(ctx: WebhookContext) -> Result<()> {
 ```
 
 A handler has no run: its lines are not stored in the database and the admin
-does not show them. Each one goes to the runtime logger as `[LEVEL] message`,
-with its payload and what the handler runs for:
+does not show them. Each one goes to the runtime logger at its level, as the
+lines of a flow do, with its payload and what the handler runs for:
 
 | Context | Fields added to the payload |
 | --- | --- |

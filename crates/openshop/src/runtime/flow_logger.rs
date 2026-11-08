@@ -124,13 +124,14 @@ impl FlowLogger {
         }
     }
 
+    /// The level is the method of the runtime logger, which writes it: the
+    /// message is not prefixed with it.
     fn log(&self, level: &'static str, mut payload: Value, message: &str) {
-        let line = format!("[{}] {message}", level.to_uppercase());
         let logger = logger();
         match level {
-            "warn" => logger.warn(&line, Some(&payload)),
-            "error" => logger.error(&line, Some(&payload)),
-            _ => logger.info(&line, Some(&payload)),
+            "warn" => logger.warn(message, Some(&payload)),
+            "error" => logger.error(message, Some(&payload)),
+            _ => logger.info(message, Some(&payload)),
         }
         self.trail.leave(level, message);
 

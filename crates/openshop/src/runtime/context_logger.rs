@@ -14,8 +14,8 @@ use super::report::Trail;
 /// [`FlowLogger`](super::FlowLogger), `info`, `warn`, `error` and their
 /// `_with` forms, which take a JSON payload.
 ///
-/// A line goes to the [runtime logger](super::RuntimeLogger) as
-/// `[LEVEL] message`, with its payload and what the context runs for: the shop,
+/// A line goes to the [runtime logger](super::RuntimeLogger) at its level, as
+/// the flow logger's do, with its payload and what the context runs for: the shop,
 /// the Shopify app, and the topic of a webhook or the request of an admin page.
 /// A key of the payload wins over those. A handler has no run: its lines are
 /// not stored in the database, unlike those of a flow. When the application
@@ -87,14 +87,15 @@ impl ContextLogger {
         Value::Object(context)
     }
 
+    /// The level is the method of the runtime logger, which writes it: the
+    /// message is not prefixed with it.
     fn log(&self, level: &'static str, message: &str, payload: Value) {
-        let line = format!("[{}] {message}", level.to_uppercase());
         let context = self.context(payload);
         let logger = logger();
         match level {
-            "warn" => logger.warn(&line, Some(&context)),
-            "error" => logger.error(&line, Some(&context)),
-            _ => logger.info(&line, Some(&context)),
+            "warn" => logger.warn(message, Some(&context)),
+            "error" => logger.error(message, Some(&context)),
+            _ => logger.info(message, Some(&context)),
         }
         self.trail.leave(level, message);
     }

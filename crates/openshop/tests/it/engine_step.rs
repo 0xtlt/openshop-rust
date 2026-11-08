@@ -1006,6 +1006,30 @@ async fn a_log_write_that_fails_is_told_to_the_process_logger() {
 }
 
 #[tokio::test]
+async fn a_line_reaches_the_process_logger_at_its_level_without_the_level_in_its_message() {
+    let test = new_test().await;
+    let run_id = create_run(&test).await;
+    let logger = FlowLogger::new(test.db.clone(), run_id.to_string());
+
+    let logs = LogCapture::start().await;
+    logger.warn_with("Flow logger check", json!({ "count": 3 }));
+    logger.flush().await;
+
+    let line = logs
+        .lines()
+        .into_iter()
+        .find(|line| line.message.contains("Flow logger check"))
+        .expect("the line of the flow");
+    // The runtime logger writes the level: `WARN Flow logger check`, not `WARN [WARN] …`.
+    assert_eq!(
+        (line.level, line.message.as_str(), line.context),
+        ("warn", "Flow logger check", Some(json!({ "count": 3 })))
+    );
+    drop(logs);
+    test.cleanup().await;
+}
+
+#[tokio::test]
 async fn a_sleep_is_recognized_when_the_answer_to_the_check_is_lost_too() {
     let test = new_test().await;
     let run_id = create_run(&test).await;

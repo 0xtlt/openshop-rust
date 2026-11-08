@@ -813,7 +813,7 @@ async fn a_handler_logs_for_its_shop_and_topic() {
     let lines = logs.lines();
     let info = lines
         .iter()
-        .find(|line| line.message == "[INFO] Webhook logger check")
+        .find(|line| line.message == "Webhook logger check")
         .expect("the line of the handler");
     assert_eq!(info.level, "info");
     assert_eq!(
@@ -823,7 +823,7 @@ async fn a_handler_logs_for_its_shop_and_topic() {
     assert!(
         lines
             .iter()
-            .any(|line| line.level == "warn" && line.message == "[WARN] Webhook logger warning")
+            .any(|line| line.level == "warn" && line.message == "Webhook logger warning")
     );
     drop(logs);
     ctx.shutdown().await.unwrap();
