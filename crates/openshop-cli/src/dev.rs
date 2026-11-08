@@ -160,16 +160,18 @@ fn app_port(env_port: Option<&str>, dot_env: Option<&str>) -> u16 {
     .unwrap_or(DEFAULT_PORT)
 }
 
-/// Whether another process listens on `port`, on every address or on the
-/// loopback one: binding it as the app does fails.
-fn port_taken(port: u16) -> bool {
-    let in_use = |address: &str| {
+/// Whether a process answers on `port` of this machine, in IPv4 or IPv6:
+/// what `http://localhost:{port}` reaches. It is asked by connecting, not by
+/// listening, which a firewall would ask the user to allow.
+async fn port_taken(port: u16) -> bool {
+    let answers = |address: std::net::IpAddr| async move {
+        let connect = tokio::net::TcpStream::connect((address, port));
         matches!(
-            std::net::TcpListener::bind((address, port)),
-            Err(error) if error.kind() == std::io::ErrorKind::AddrInUse
+            tokio::time::timeout(Duration::from_millis(500), connect).await,
+            Ok(Ok(_))
         )
     };
-    in_use("0.0.0.0") || in_use("127.0.0.1")
+    answers(std::net::Ipv4Addr::LOCALHOST.into()).await || answers(std::net::Ipv6Addr::LOCALHOST.into()).await
 }
 
 /// The process that listens on `port`, `PID 123 (name)`, when `lsof` can say.
@@ -199,7 +201,7 @@ async fn port_holder(port: u16) -> Option<String> {
 /// answers there is not its code.
 async fn check_port(port: u16) {
     let deadline = tokio::time::Instant::now() + PORT_WAIT;
-    while port_taken(port) {
+    while port_taken(port).await {
         if tokio::time::Instant::now() >= deadline {
             let holder = port_holder(port).await.map_or_else(
                 || "another process".to_string(),
@@ -759,13 +761,19 @@ mod tests {
         assert_eq!(app_port(Some("http"), Some("PORT=5000")), 3000);
     }
 
-    #[test]
-    fn sees_a_port_another_process_listens_on() {
+    #[tokio::test]
+    async fn sees_a_port_another_process_listens_on() {
         let listener = std::net::TcpListener::bind(("0.0.0.0", 0)).unwrap();
         let port = listener.local_addr().unwrap().port();
-        assert!(port_taken(port));
+        assert!(port_taken(port).await);
         drop(listener);
-        assert!(!port_taken(port));
+        // A process another test is starting may hold the socket until it
+        // runs its program, which closes it.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while port_taken(port).await {
+            assert!(tokio::time::Instant::now() < deadline, "the port is still taken");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
     }
 
     /// Whether the process `pid` is there.
@@ -779,22 +787,16 @@ mod tests {
             .is_ok_and(|status| status.success())
     }
 
-    /// The bug of a `cargo` that is a wrapper: it runs the app as its child,
-    /// and exits on `SIGTERM` without passing it on. The app ignores the
-    /// signal too; it was left listening, serving the code of before.
+    /// Starts a wrapper that runs `app` (a command of `sh`) as its child, as
+    /// a `cargo` shim runs cargo, and returns it with the id of the app, once
+    /// the app runs `sleep`: a signal sent before would reach the shell that
+    /// starts it, not the app.
     #[cfg(unix)]
-    #[tokio::test]
-    async fn stopping_the_app_stops_what_a_wrapper_started() {
-        // The wrapper writes the id of the app where the test reads it.
-        let pid_file = std::env::temp_dir().join(format!("openshop-dev-test-{}.pid", std::process::id()));
+    async fn wrapper(app: &str, name: &str) -> (AppProcess, u32) {
+        let pid_file = std::env::temp_dir().join(format!("openshop-dev-{name}-{}.pid", std::process::id()));
         let _ = std::fs::remove_file(&pid_file);
-        let mut app = AppProcess::spawn(
-            Command::new("sh")
-                .arg("-c")
-                .arg("(trap '' TERM; exec sleep 300) & echo $! > \"$0.tmp\" && mv \"$0.tmp\" \"$0\"; wait")
-                .arg(&pid_file),
-        )
-        .unwrap();
+        let script = format!("{app} & echo $! > \"$0.tmp\" && mv \"$0.tmp\" \"$0\"; wait");
+        let wrapper = AppProcess::spawn(Command::new("sh").arg("-c").arg(script).arg(&pid_file)).unwrap();
         let pid: u32 = loop {
             if let Ok(pid) = std::fs::read_to_string(&pid_file) {
                 break pid.trim().parse().unwrap();
@@ -802,6 +804,27 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(10)).await;
         };
         let _ = std::fs::remove_file(&pid_file);
+        loop {
+            let command = Command::new("ps")
+                .args(["-o", "comm=", "-p", &pid.to_string()])
+                .output()
+                .await
+                .unwrap();
+            if String::from_utf8_lossy(&command.stdout).trim().ends_with("sleep") {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        (wrapper, pid)
+    }
+
+    /// The bug of a `cargo` that is a wrapper: it runs the app as its child,
+    /// and exits on `SIGTERM` without passing it on. The app ignores the
+    /// signal too; it was left listening, serving the code of before.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn stopping_the_app_stops_what_a_wrapper_started() {
+        let (mut app, pid) = wrapper("(trap '' TERM; exec sleep 300)", "ignores-term").await;
         assert!(alive(pid).await);
 
         assert!(app.stop(Duration::from_millis(300)).await);
@@ -813,10 +836,11 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn an_app_that_stops_on_sigterm_is_not_killed() {
-        let mut app = AppProcess::spawn(Command::new("sh").args(["-c", "sleep 300 & wait"])).unwrap();
+        let (mut app, pid) = wrapper("sleep 300", "stops-on-term").await;
         let started = tokio::time::Instant::now();
         assert!(app.stop(Duration::from_secs(30)).await);
         assert!(started.elapsed() < Duration::from_secs(10));
+        assert!(!alive(pid).await);
         // Stopped already: nothing to do.
         assert!(app.stop(Duration::from_secs(30)).await);
     }

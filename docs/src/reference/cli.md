@@ -240,9 +240,10 @@ seconds, then it waits until none is left. The app does not read the
 terminal's input, and Ctrl-C, `SIGTERM` or `SIGHUP` (the terminal closing) to
 `openshop dev` stop it the same way. On Windows, cargo stops what it started.
 
-Before it starts the app, `openshop dev` checks that its port is free: `PORT`,
-else the `PORT` of `.env`, else 3000. A port still taken after 5 seconds is
-said loudly, with the process that holds it when `lsof` can name it:
+Before it starts the app, `openshop dev` checks that nothing answers on its
+port on this machine (`127.0.0.1` and `[::1]`): `PORT`, else the `PORT` of
+`.env`, else 3000. A port still taken after 5 seconds is said loudly, with the
+process that holds it when `lsof` can name it:
 
 ```text
 [openshop] !!! Port 3000 is still taken, by another process, PID 31654 (my-app).
