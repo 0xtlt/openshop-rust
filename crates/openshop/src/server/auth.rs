@@ -15,6 +15,7 @@ use rand::Rng;
 use serde_json::json;
 use shopify_api::ShopDomain;
 use shopify_api::oauth::AuthorizationRequest;
+use shopify_api::webhooks::Webhook;
 
 use super::hmac::{constant_time_eq, hmac_sha256};
 use super::http::{ApiResult, json_error, json_response, parse_query};
@@ -180,25 +181,37 @@ async fn callback(State(app): State<OpenShop>, headers: HeaderMap, RawQuery(raw)
     }))
 }
 
+/// Whether `topic` is `app/uninstalled`, as Shopify writes it or as the
+/// Admin API does (`APP_UNINSTALLED`).
+pub(crate) fn is_app_uninstalled(topic: &str) -> bool {
+    topic == "app/uninstalled" || topic == "APP_UNINSTALLED"
+}
+
+/// What OpenShop does itself for an `app/uninstalled` delivery: the
+/// installation of the shop is marked uninstalled and its access token
+/// deleted, and the token of the client credentials grant held for it is
+/// forgotten. The body is covered by the signature, the shop header is not:
+/// the shop is the one both name, and a delivery where they differ uninstalls
+/// nothing (`false`).
+pub(crate) async fn record_uninstall(app: &OpenShop, shopify_app: &str, webhook: &Webhook) -> anyhow::Result<bool> {
+    if webhook.verify_payload_shop().is_err() {
+        return Ok(false);
+    }
+    let shop = webhook.shop().to_string();
+    sqlx::query("UPDATE installations SET uninstalled_at = now(), access_token = NULL WHERE app_handle = $1 AND shop = $2")
+        .bind(shopify_app)
+        .bind(&shop)
+        .execute(app.db())
+        .await?;
+    app.client_credentials().forget(shopify_app, &shop);
+    Ok(true)
+}
+
 async fn app_uninstalled(State(app): State<OpenShop>, headers: HeaderMap, body: Bytes) -> ApiResult {
     let Ok((shopify_app, webhook)) = app.apps().by_webhook(&headers, &body) else {
         return Ok(json_error(StatusCode::UNAUTHORIZED, "Invalid webhook HMAC"));
     };
-
-    // The body is covered by the signature, the shop header is not: the shop
-    // is the one both name.
-    if webhook.verify_payload_shop().is_ok() {
-        let shop_domain = webhook.shop().to_string();
-        sqlx::query(
-            "UPDATE installations SET uninstalled_at = now(), access_token = NULL WHERE app_handle = $1 AND shop = $2",
-        )
-        .bind(&shopify_app.handle)
-        .bind(&shop_domain)
-        .execute(app.db())
-        .await?;
-        app.client_credentials().forget(&shopify_app.handle, &shop_domain);
-    }
-
+    record_uninstall(&app, &shopify_app.handle, &webhook).await?;
     Ok(json_response(StatusCode::OK, json!({ "ok": true })))
 }
 

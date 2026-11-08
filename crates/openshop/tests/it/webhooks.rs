@@ -191,7 +191,8 @@ async fn post_webhooks_normalizes_the_topic_to_find_the_handler() {
     for topic in ["orders/create", "ORDERS_CREATE", "Orders/Create", "orders_create"] {
         assert_ok(deliver(&ctx, topic, "test.myshopify.com", "{}").await).await;
     }
-    assert_ok(deliver(&ctx, "app/uninstalled", "test.myshopify.com", "{}").await).await;
+    let uninstall = r#"{"myshopify_domain":"test.myshopify.com"}"#;
+    assert_ok(deliver(&ctx, "app/uninstalled", "test.myshopify.com", uninstall).await).await;
     // Close, but another topic.
     assert_ok(deliver(&ctx, "orders/created", "test.myshopify.com", "{}").await).await;
     assert_ok(deliver(&ctx, "orders/create/extra", "test.myshopify.com", "{}").await).await;
@@ -691,5 +692,108 @@ async fn post_webhooks_runs_again_a_delivery_whose_request_was_cancelled() {
     // Completed: the next repeat is acknowledged and not run.
     assert_ok(delivery(&ctx, &ctx.http, "delivery-1").send().await.unwrap()).await;
     assert_eq!(calls_of(&calls), 2);
+    ctx.shutdown().await.unwrap();
+}
+
+// ─── app/uninstalled ─────────────────────────────────────────────────
+
+/// The access token of the shop and whether it is marked uninstalled.
+async fn installation_state(ctx: &TestContext, shop: &str) -> (Option<String>, bool) {
+    sqlx::query_as("SELECT access_token, uninstalled_at IS NOT NULL FROM installations WHERE shop = $1")
+        .bind(shop)
+        .fetch_one(&ctx.db)
+        .await
+        .unwrap()
+}
+
+async fn installed(config: OpenShopConfig) -> TestContext {
+    TestContext::with_options(config, TestOptions::installed())
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn post_webhooks_records_app_uninstalled_without_a_handler() {
+    let ctx = installed(builder().build().unwrap()).await;
+    let body = r#"{"id":1,"myshopify_domain":"test.myshopify.com"}"#;
+    assert!(!installation_state(&ctx, "test.myshopify.com").await.1);
+
+    assert_ok(deliver(&ctx, "app/uninstalled", "test.myshopify.com", body).await).await;
+    assert_eq!(installation_state(&ctx, "test.myshopify.com").await, (None, true));
+
+    // As the Admin API writes the topic, and again: nothing more to do.
+    assert_ok(deliver(&ctx, "APP_UNINSTALLED", "test.myshopify.com", body).await).await;
+    assert_eq!(installation_state(&ctx, "test.myshopify.com").await, (None, true));
+    ctx.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn post_webhooks_records_app_uninstalled_before_its_handler_runs() {
+    // What the handler finds of the installation when it runs.
+    let seen: Arc<Mutex<Vec<(Option<String>, bool)>>> = Arc::default();
+    let recorded = seen.clone();
+    let handler = Webhook::new(move |ctx: WebhookContext| {
+        let recorded = recorded.clone();
+        async move {
+            let state =
+                sqlx::query_as("SELECT access_token, uninstalled_at IS NOT NULL FROM installations WHERE shop = $1")
+                    .bind(&ctx.shop)
+                    .fetch_one(&ctx.db)
+                    .await?;
+            recorded.lock().unwrap().push(state);
+            Ok(())
+        }
+    });
+    let ctx = installed(builder().webhook("app/uninstalled", handler).build().unwrap()).await;
+
+    let body = r#"{"myshopify_domain":"test.myshopify.com"}"#;
+    assert_ok(deliver(&ctx, "app/uninstalled", "test.myshopify.com", body).await).await;
+    assert_eq!(*seen.lock().unwrap(), vec![(None, true)]);
+    ctx.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn post_webhooks_uninstalls_only_the_shop_the_payload_names() {
+    let recorder = Recorder::default();
+    let ctx = installed(
+        builder()
+            .webhook("APP_UNINSTALLED", recorder.webhook())
+            .build()
+            .unwrap(),
+    )
+    .await;
+
+    // The header is not signed: a signed body of another shop, or of none,
+    // uninstalls nothing and runs no handler.
+    for body in [r#"{"myshopify_domain":"other.myshopify.com"}"#, r#"{"id":1}"#] {
+        let response = deliver(&ctx, "app/uninstalled", "test.myshopify.com", body).await;
+        assert_error(
+            response,
+            400,
+            "The payload does not name the shop of X-Shopify-Shop-Domain",
+        )
+        .await;
+    }
+    assert_eq!(recorder.count(), 0);
+    assert_eq!(
+        installation_state(&ctx, "test.myshopify.com").await,
+        (Some("test-access-token".to_string()), false)
+    );
+
+    // The old route still uninstalls, for an app whose subscription points there.
+    let body = r#"{"myshopify_domain":"test.myshopify.com"}"#;
+    let response = ctx
+        .http
+        .post(format!("{}/auth/webhooks/app-uninstalled", ctx.url))
+        .header("x-shopify-hmac-sha256", sign_webhook_body(body, SECRET))
+        .header("x-shopify-topic", "app/uninstalled")
+        .header("x-shopify-shop-domain", "test.myshopify.com")
+        .body(body)
+        .send()
+        .await
+        .unwrap();
+    assert_ok(response).await;
+    assert_eq!(installation_state(&ctx, "test.myshopify.com").await, (None, true));
+    assert_eq!(recorder.count(), 0);
     ctx.shutdown().await.unwrap();
 }

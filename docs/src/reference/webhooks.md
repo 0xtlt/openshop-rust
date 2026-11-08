@@ -127,13 +127,46 @@ none of which starts so. The `X-Shopify-Topic` and `X-Shopify-Shop-Domain`
 headers must be there, as Shopify always sends them. In multi-app mode,
 exactly one configured app secret must match.
 
-OpenShop also serves `POST /auth/webhooks/app-uninstalled`. It verifies the
-same signature, marks the installation as uninstalled, and deletes its access
-token. The shop is the one both the signed payload (`myshopify_domain`) and
-the unsigned `X-Shopify-Shop-Domain` header name; a delivery where they differ
-uninstalls nothing. Point
-Shopify's `app/uninstalled` subscription at it, or register your own
-`app/uninstalled` handler on `/webhooks` when you need custom cleanup.
+## Uninstallation
+
+OpenShop records `app/uninstalled` itself: delivered to `POST /webhooks`, it
+marks the installation of the shop as uninstalled and deletes its access token,
+whether the application has a handler for the topic or not. Subscribe to it
+with the other topics:
+
+```toml
+[[webhooks.subscriptions]]
+topics = ["app/uninstalled"]
+uri = "/webhooks"
+```
+
+A handler of `app/uninstalled`, for the cleanup of the application, runs after
+that: the installation it finds is already marked uninstalled, and `ctx.shopify`
+has no token (Shopify revoked it anyway). Without a handler, the delivery is
+answered `200` and no warning is logged.
+
+```rust,ignore
+#[webhook("app/uninstalled")]
+pub async fn app_uninstalled(ctx: WebhookContext) -> Result<()> {
+    // The installation is marked uninstalled already: remove what the app keeps.
+    let removed = Review::of(&ctx).query().delete().await?;
+    ctx.logger.info(format!("{removed} reviews removed"));
+    Ok(())
+}
+```
+
+The shop is the one both the signed payload (`myshopify_domain`) and the
+unsigned `X-Shopify-Shop-Domain` header name: a delivery where they differ, or
+whose payload names no shop, is answered `400` and runs nothing, the handler
+included. Shopify always sends both. A repeat of a delivery that was recorded
+is acknowledged as any other (see
+[Idempotence](#idempotence-and-durable-work)), and recording the same
+uninstallation twice changes nothing but its date. When the database cannot
+record it, the delivery is answered `500` and Shopify sends it again.
+
+`POST /auth/webhooks/app-uninstalled` still does the same for an app whose
+subscription points there, and only that: it runs no handler, and answers
+`200` to a delivery whose payload names another shop, uninstalling nothing.
 
 ## Register with Shopify
 
@@ -149,13 +182,15 @@ Shopify version used by your app.
 | Status | Condition |
 | --- | --- |
 | `200 { "ok": true }` | Handler completed. |
-| `200 { "ok": true }` | No handler matched; OpenShop logs a warning. |
+| `200 { "ok": true }` | No handler matched; OpenShop logs a warning, except for `app/uninstalled`, which it records. |
 | `200 { "ok": true }` | Handler returned an error or panicked, or the payload could not be read into the type of its second argument; OpenShop logs the error. |
 | `400 { "error": "Invalid JSON body" }` | Authenticated body is not valid JSON and a handler matched. |
-| `400 { "error": "Invalid shop domain" }` | A handler matched and `X-Shopify-Shop-Domain` is not a shop written as `<name>.myshopify.com`. |
+| `400 { "error": "Invalid shop domain" }` | A handler matched, or the topic is `app/uninstalled`, and `X-Shopify-Shop-Domain` is not a shop written as `<name>.myshopify.com`. |
+| `400 { "error": "The payload does not name the shop of X-Shopify-Shop-Domain" }` | `app/uninstalled` whose signed payload names another shop, or none. |
 | `401 { "error": "Invalid webhook HMAC" }` | The signature did not verify with exactly one configured app, the body is not a JSON object, or a header Shopify always sends (`X-Shopify-Topic`, a valid `X-Shopify-Shop-Domain`) is missing. |
 | `413` | Request body is larger than the request body limit (2 MB unless the `max_request_body_bytes` setting of `app!` is set). |
 | `500 { "error": "SHOPIFY_API_SECRET is not configured" }` | No Shopify app secret is configured. A secret that is empty or only whitespace counts as not configured. |
+| `500 { "error": "Internal server error" }` | `app/uninstalled` could not be recorded in the database; the handler did not run. |
 
 Handler errors deliberately return 200, so Shopify will not retry them.
 OpenShop does not provide automatic retries for webhook handlers.

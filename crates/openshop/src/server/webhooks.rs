@@ -1,5 +1,9 @@
 //! Shopify webhooks: `POST /webhooks`, dispatched by the `X-Shopify-Topic` header.
 //!
+//! `app/uninstalled` is recorded by OpenShop before its handler, if the
+//! application has one, runs: the installation is marked uninstalled and its
+//! access token deleted, as `POST /auth/webhooks/app-uninstalled` does.
+//!
 //! Shopify delivers a webhook at least once: a delivery it believes failed is
 //! sent again, with the same `X-Shopify-Webhook-Id`. A delivery this process
 //! has already run is acknowledged and not run again, within [`REMEMBER`].
@@ -18,6 +22,7 @@ use axum::routing::post;
 use serde_json::{Value, json};
 use tokio::time::Instant;
 
+use super::auth::{is_app_uninstalled, record_uninstall};
 use super::http::{catch_panic, header, json_error, json_response, report_failure};
 use crate::app::OpenShop;
 use crate::runtime::report;
@@ -162,15 +167,17 @@ async fn handle(State(app): State<OpenShop>, headers: HeaderMap, body: Bytes) ->
 
     let ok = || json_response(StatusCode::OK, json!({ "ok": true }));
     // Shopify sends `orders/create`; handlers may also be registered as `ORDERS_CREATE`.
-    let Some(handler) = config
+    let handler = config
         .webhooks
         .get(&topic)
-        .or_else(|| config.webhooks.get(&webhook.topic_enum()))
-    else {
+        .or_else(|| config.webhooks.get(&webhook.topic_enum()));
+    // `app/uninstalled` is OpenShop's to record, with or without a handler.
+    let uninstalled = is_app_uninstalled(&topic);
+    if handler.is_none() && !uninstalled {
         logger::warn(format!("[openshop] No webhook handler for topic \"{topic}\""));
         // Always return 200 to Shopify
         return ok();
-    };
+    }
 
     let Ok(payload) = serde_json::from_slice::<Value>(&body) else {
         return json_error(StatusCode::BAD_REQUEST, "Invalid JSON body");
@@ -180,6 +187,14 @@ async fn handle(State(app): State<OpenShop>, headers: HeaderMap, body: Bytes) ->
     let Some(shop) = strict_shop_domain(&shop).filter(|domain| *domain == shop.trim().to_ascii_lowercase()) else {
         return json_error(StatusCode::BAD_REQUEST, "Invalid shop domain");
     };
+    // An uninstallation is of the shop its signed payload names: one whose
+    // header names another shop runs nothing, the handler included.
+    if uninstalled && webhook.verify_payload_shop().is_err() {
+        return json_error(
+            StatusCode::BAD_REQUEST,
+            "The payload does not name the shop of X-Shopify-Shop-Domain",
+        );
+    }
     report::describe(|delivery| {
         delivery.unit("webhook", &topic).shop(&shop, &shopify_app.handle);
     });
@@ -205,6 +220,26 @@ async fn handle(State(app): State<OpenShop>, headers: HeaderMap, body: Bytes) ->
         }
         Some((_, Claim::First(delivery))) => Some(delivery),
         None => None,
+    };
+
+    // The installation is marked uninstalled and its token deleted before the
+    // handler runs. A failure is the server's: Shopify sends the delivery
+    // again, and the claim is given up for it.
+    if uninstalled {
+        if let Err(error) = record_uninstall(&app, &shopify_app.handle, &webhook).await {
+            report_failure(format!("[openshop] Uninstallation of {shop} could not be recorded"), &error);
+            return json_error(StatusCode::INTERNAL_SERVER_ERROR, "Internal server error");
+        }
+        logger::info(format!(
+            "[openshop] {shop} uninstalled app \"{}\": its access token is deleted",
+            shopify_app.handle
+        ));
+    }
+    let Some(handler) = handler else {
+        if let Some(delivery) = claim {
+            delivery.complete();
+        }
+        return ok();
     };
 
     let context = WebhookContext {
