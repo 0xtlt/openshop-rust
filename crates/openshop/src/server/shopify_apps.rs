@@ -17,6 +17,10 @@ use crate::types::{ShopifyAppConfig, ShopifyConfig};
 
 pub const DEFAULT_SHOPIFY_APP_HANDLE: &str = "default";
 
+/// The name of an app that nothing names: no `name` in a `shopify.app*.toml`,
+/// and the app of the environment.
+pub const DEFAULT_APP_NAME: &str = "OpenShop";
+
 /// `Debug` does not show `api_secret`.
 #[derive(Clone)]
 pub struct ResolvedShopifyApp {
@@ -28,6 +32,11 @@ pub struct ResolvedShopifyApp {
     /// name it by (`/charges/{app_handle}/pricing_plans`): the `handle` of its
     /// `shopify.app*.toml`, else its API key, else [`handle`](Self::handle).
     pub app_handle: String,
+    /// The name of the app, which the admin shows: the `name` of the
+    /// `shopify.app*.toml` its `app_handle` is read from, else its
+    /// [`handle`](Self::handle) when it is one of `shopify.apps`, else
+    /// [`DEFAULT_APP_NAME`].
+    pub name: String,
     pub api_key: String,
     pub api_secret: String,
     pub app_url: String,
@@ -44,21 +53,28 @@ fn signing_secret(api_secret: &str) -> &str {
 }
 
 impl ResolvedShopifyApp {
+    /// `toml` is the text of the `shopify.app*.toml` of the app, when it has one.
     fn new(
         handle: &str,
-        toml_handle: Option<String>,
+        toml: Option<&str>,
         api_key: String,
         api_secret: String,
         app_url: String,
         scopes: String,
     ) -> Self {
         let oauth = ShopifyApp::new(&api_key, signing_secret(&api_secret)).with_user_agent(USER_AGENT);
-        let app_handle = toml_handle
+        let app_handle = toml
+            .and_then(|toml| read_top_level_value(toml, "handle"))
             .or_else(|| (!api_key.trim().is_empty()).then(|| api_key.clone()))
             .unwrap_or_else(|| handle.to_string());
+        let name = toml
+            .and_then(|toml| read_top_level_value(toml, "name"))
+            .or_else(|| (handle != DEFAULT_SHOPIFY_APP_HANDLE).then(|| handle.to_string()))
+            .unwrap_or_else(|| DEFAULT_APP_NAME.to_string());
         Self {
             handle: handle.to_string(),
             app_handle,
+            name,
             api_key,
             api_secret,
             app_url,
@@ -73,6 +89,7 @@ impl std::fmt::Debug for ResolvedShopifyApp {
         f.debug_struct("ResolvedShopifyApp")
             .field("handle", &self.handle)
             .field("app_handle", &self.app_handle)
+            .field("name", &self.name)
             .field("api_key", &self.api_key)
             .field("api_secret", &crate::runtime::redact::redacted(&self.api_secret))
             .field("app_url", &self.app_url)
@@ -107,21 +124,22 @@ fn top_level(content: &str) -> &str {
     &content[..end]
 }
 
-/// The `handle` of a `shopify.app.toml`, which Shopify CLI writes when it
-/// links the app: a top-level key, not one of a table.
-fn read_app_handle(content: &str) -> Option<String> {
-    read_toml_value(top_level(content), "handle").filter(|handle| !handle.trim().is_empty())
+/// A top-level key of a `shopify.app.toml`, not one of a table, that is not
+/// blank, trimmed: the `handle` and the `name` Shopify CLI writes when it
+/// links the app.
+fn read_top_level_value(content: &str, key: &str) -> Option<String> {
+    read_toml_value(top_level(content), key)
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
 }
 
-/// The handle of the app whose API key is `api_key`, from the
-/// `shopify.app*.toml` of `cwd` whose `client_id` it is. Without an API key,
-/// the one of `shopify.app.toml`.
-fn read_app_handle_of(cwd: &Path, api_key: &str) -> Option<String> {
+/// The text of the `shopify.app*.toml` of `cwd` of the app whose API key is
+/// `api_key`: the one whose `client_id` it is. Without an API key,
+/// `shopify.app.toml`.
+fn read_app_toml_of(cwd: &Path, api_key: &str) -> Option<String> {
     let api_key = api_key.trim();
     if api_key.is_empty() {
-        return std::fs::read_to_string(cwd.join("shopify.app.toml"))
-            .ok()
-            .and_then(|content| read_app_handle(&content));
+        return std::fs::read_to_string(cwd.join("shopify.app.toml")).ok();
     }
     let mut files: Vec<String> = std::fs::read_dir(cwd)
         .ok()?
@@ -134,7 +152,6 @@ fn read_app_handle_of(cwd: &Path, api_key: &str) -> Option<String> {
         .iter()
         .filter_map(|file| std::fs::read_to_string(cwd.join(file)).ok())
         .find(|content| read_toml_value(top_level(content), "client_id").as_deref() == Some(api_key))
-        .and_then(|content| read_app_handle(&content))
 }
 
 /// Reads OAuth scopes from `shopify.app.<name>.toml` files, then `shopify.app.toml`.
@@ -180,7 +197,7 @@ fn normalize_app(
             };
             Ok(ResolvedShopifyApp::new(
                 handle,
-                read_app_handle(&content),
+                Some(&content),
                 api_key,
                 api_secret.clone(),
                 app_url
@@ -202,8 +219,9 @@ fn normalize_app(
             handle,
             // An app of several has a file of its own: one with its client id.
             (!api_key.trim().is_empty())
-                .then(|| read_app_handle_of(&env.cwd, api_key))
-                .flatten(),
+                .then(|| read_app_toml_of(&env.cwd, api_key))
+                .flatten()
+                .as_deref(),
             api_key.clone(),
             api_secret.clone(),
             app_url.clone().unwrap_or_else(|| env.fallback_app_url()),
@@ -216,7 +234,7 @@ fn normalize_legacy_app(config: Option<&ShopifyConfig>, env: &RuntimeEnv) -> Res
     let api_key = env.shopify_api_key.clone().unwrap_or_default();
     ResolvedShopifyApp::new(
         DEFAULT_SHOPIFY_APP_HANDLE,
-        read_app_handle_of(&env.cwd, &api_key),
+        read_app_toml_of(&env.cwd, &api_key).as_deref(),
         api_key,
         env.shopify_api_secret.clone().unwrap_or_default(),
         env.fallback_app_url(),
@@ -575,6 +593,64 @@ scopes = "read_products,read_orders"
         assert_eq!(handle_of("main"), "hide-paypal-dev");
         assert_eq!(handle_of("keys"), "hide-paypal");
         assert_eq!(handle_of("other"), "other");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn names_the_app_after_the_name_of_its_toml() {
+        let dir = temp_dir("name");
+        let env = |api_key: Option<&str>| RuntimeEnv {
+            shopify_api_key: api_key.map(str::to_string),
+            cwd: dir.clone(),
+            ..Default::default()
+        };
+        let name = |api_key: Option<&str>| ShopifyApps::resolve(None, &env(api_key)).unwrap().all()[0].name.clone();
+        // No file: nothing names the app of the environment.
+        assert_eq!(name(Some("prod-key")), DEFAULT_APP_NAME);
+        assert_eq!(name(None), DEFAULT_APP_NAME);
+
+        std::fs::write(
+            dir.join("shopify.app.toml"),
+            "client_id = \"prod-key\"\nname = \"Easy hide PayPal Express\"\nhandle = \"hide-paypal\"\n",
+        )
+        .unwrap();
+        // The name of a table is not the app's, and a blank one names nothing.
+        std::fs::write(
+            dir.join("shopify.app.dev.toml"),
+            "client_id = 'dev-key'\nname = '  '\n[[extensions]]\nname = \"Not the app\"\n",
+        )
+        .unwrap();
+        assert_eq!(name(Some("prod-key")), "Easy hide PayPal Express");
+        assert_eq!(name(None), "Easy hide PayPal Express");
+        assert_eq!(name(Some("dev-key")), DEFAULT_APP_NAME);
+        assert_eq!(name(Some("other-key")), DEFAULT_APP_NAME);
+        std::fs::write(dir.join("shopify.app.dev.toml"), "client_id = 'dev-key'\nname = 'Hide PayPal (dev)' # linked\n").unwrap();
+        assert_eq!(name(Some("dev-key")), "Hide PayPal (dev)");
+
+        // An app of `shopify.apps`: the name of its own file, else its key.
+        let config = ShopifyConfig {
+            scopes: None,
+            apps: Some(
+                [
+                    (
+                        "main".to_string(),
+                        ShopifyAppConfig::Toml {
+                            toml: "shopify.app.dev.toml".into(),
+                            api_secret: "secret".into(),
+                            app_url: None,
+                        },
+                    ),
+                    ("keys".to_string(), keys("prod-key", "secret", "https://a.example.com")),
+                    ("other".to_string(), keys("other-key", "secret", "https://b.example.com")),
+                ]
+                .into(),
+            ),
+        };
+        let apps = ShopifyApps::resolve(Some(&config), &env(None)).unwrap();
+        let name_of = |handle: &str| apps.by_handle(Some(handle)).unwrap().name.clone();
+        assert_eq!(name_of("main"), "Hide PayPal (dev)");
+        assert_eq!(name_of("keys"), "Easy hide PayPal Express");
+        assert_eq!(name_of("other"), "other");
         std::fs::remove_dir_all(dir).ok();
     }
 

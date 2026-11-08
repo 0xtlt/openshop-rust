@@ -57,6 +57,12 @@
   before it expires, instead of asking App Bridge for one per request, and
   the requests made while one is asked for wait for it. A `401` makes the
   next request ask for another.
+- The admin UI is titled with the name of the app, not `OpenShop`: the server
+  writes into the `<title>` of the shell the `name` of the `shopify.app*.toml`
+  of the app, else its key in `shopify.apps`, else `OpenShop`. App Bridge and
+  local-storefront show it in the title bar of a page whose `s-page` has no
+  `heading`, and the browser in its tab. A bundle with a title of its own keeps
+  it. `ResolvedShopifyApp` has `name`.
 
 - `ShopifyEndpoints` says where an app reaches Shopify, for a simulator of
   Shopify such as [local-storefront](https://github.com/0xtlt/local-storefront),

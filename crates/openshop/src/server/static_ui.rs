@@ -32,7 +32,7 @@ use super::jwt::is_staff_subject;
 use super::reload::Served;
 use super::shop::ensure_installation;
 use super::shop_domain::normalize_shop_domain;
-use super::shopify_apps::ResolvedShopifyApp;
+use super::shopify_apps::{DEFAULT_APP_NAME, ResolvedShopifyApp};
 use crate::app::OpenShop;
 use crate::shopify::client_credentials::Grant;
 use crate::shopify::endpoints::{Endpoints, SHOPIFY_APP_BRIDGE, SHOPIFY_POLARIS, ScriptUrl};
@@ -206,14 +206,44 @@ fn use_scripts(mut html: String, app_bridge: Option<&str>, polaris: Option<&str>
     html
 }
 
-/// The shell as it is served: the API key App Bridge starts with, and the
-/// App Bridge and Polaris of the Shopify endpoints.
-fn render_shell(index: &str, api_key: &str, endpoints: &Endpoints) -> String {
+/// The `<title>` of the shell of every bundle, `OpenShop`, which stands for the
+/// name of the app.
+static DEFAULT_TITLE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(&format!(r"<title>\s*{DEFAULT_APP_NAME}\s*</title>")).expect("valid regex"));
+
+/// A page with the name of the app as its title, in place of the `OpenShop` of
+/// the shell. App Bridge titles a page whose `s-page` has no `heading` (and
+/// that has no `ui-title-bar`) with it in the title bar of the admin, and the
+/// browser tab shows it. A title of its own is kept.
+fn name_the_app(html: &str, name: &str) -> String {
+    let title = format!("<title>{}</title>", escape(name));
+    DEFAULT_TITLE.replace(html, regex::NoExpand(&title)).into_owned()
+}
+
+/// The shell as it is served: the name of the app as its title, the API key
+/// App Bridge starts with, and the App Bridge and Polaris of the Shopify
+/// endpoints.
+fn render_shell(index: &str, app: &ShellApp<'_>, endpoints: &Endpoints) -> String {
     use_scripts(
-        inject_api_key(index, api_key),
+        inject_api_key(&name_the_app(index, app.name), app.api_key),
         endpoints.app_bridge.as_ref().map(ScriptUrl::as_str),
         endpoints.polaris.as_ref().map(ScriptUrl::as_str),
     )
+}
+
+/// The app the shell is served for.
+struct ShellApp<'a> {
+    api_key: &'a str,
+    name: &'a str,
+}
+
+impl<'a> ShellApp<'a> {
+    fn of(app: Option<&'a ResolvedShopifyApp>) -> Self {
+        Self {
+            api_key: app.map_or("", |app| app.api_key.as_str()),
+            name: app.map_or(DEFAULT_APP_NAME, |app| app.name.as_str()),
+        }
+    }
 }
 
 /// Decodes the `%XX` escapes of a request path. `None` when an escape is malformed,
@@ -420,7 +450,7 @@ pub(crate) async fn serve_ui(
 
     let query = parse_query(request.uri().query());
     let endpoints = app.endpoints();
-    let (api_key, frame_ancestors) = if options.dev {
+    let (shell_app, frame_ancestors) = if options.dev {
         // Development: no signature gate, but keep stray visitors out of tunnels.
         let headers = request.headers();
         let host = header(headers, "host").unwrap_or_default();
@@ -442,9 +472,7 @@ pub(crate) async fn serve_ui(
             .map(|(shopify_app, _)| shopify_app)
             .or_else(|| app.apps().all().first());
         (
-            shopify_app
-                .map(|shopify_app| shopify_app.api_key.clone())
-                .unwrap_or_default(),
+            ShellApp::of(shopify_app),
             "https://*.myshopify.com https://admin.shopify.com http://localhost:*".to_string(),
         )
     } else {
@@ -468,7 +496,7 @@ pub(crate) async fn serve_ui(
             Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "Internal Server Error").into_response(),
         }
         (
-            shopify_app.api_key.clone(),
+            ShellApp::of(Some(shopify_app)),
             format!("https://{shop} https://admin.shopify.com"),
         )
     };
@@ -486,7 +514,7 @@ pub(crate) async fn serve_ui(
     let Some(index) = options.ui.read("index.html").await else {
         return not_found();
     };
-    let mut shell = render_shell(&String::from_utf8_lossy(&index), &api_key, endpoints);
+    let mut shell = render_shell(&String::from_utf8_lossy(&index), &shell_app, endpoints);
     if let Some(served) = reload {
         shell = served.inject(&shell);
     }
@@ -588,6 +616,45 @@ mod tests {
         Endpoints::resolve(&endpoints, &ShopifyEndpoints::new()).unwrap()
     }
 
+    /// An app with `api_key` that nothing names.
+    fn app(api_key: &str) -> ShellApp<'_> {
+        ShellApp {
+            api_key,
+            name: DEFAULT_APP_NAME,
+        }
+    }
+
+    #[test]
+    fn the_shell_is_titled_with_the_name_of_the_app() {
+        // The shell the framework embeds, as every bundle has it.
+        let index = include_str!("../../ui-dist/index.html");
+        assert!(index.contains("<title>OpenShop</title>"), "{index}");
+        let named = ShellApp {
+            api_key: "key-123",
+            name: "Easy hide PayPal Express",
+        };
+        let shell = render_shell(index, &named, &Endpoints::default());
+        assert!(shell.contains("<title>Easy hide PayPal Express</title>"), "{shell}");
+        assert!(!shell.contains("OpenShop"), "{shell}");
+        // Nothing else moves.
+        assert_eq!(
+            shell.replace("<title>Easy hide PayPal Express</title>", "<title>OpenShop</title>"),
+            render_shell(index, &app("key-123"), &Endpoints::default())
+        );
+
+        // The name is text, escaped, and `$` is no group of the replacement.
+        assert_eq!(
+            name_the_app("<head><title>OpenShop</title></head>", "</title><script>x</script> $1 & co"),
+            "<head><title>&lt;/title&gt;&lt;script&gt;x&lt;/script&gt; $1 &amp; co</title></head>"
+        );
+        // A bundle with a title of its own keeps it.
+        let own = "<head><title>Reviews admin</title></head>";
+        assert_eq!(name_the_app(own, "Reviews"), own);
+        // The app of an application without a `shopify.app.toml`, or without one in development.
+        assert_eq!(ShellApp::of(None).name, DEFAULT_APP_NAME);
+        assert_eq!(ShellApp::of(None).api_key, "");
+    }
+
     fn simulator() -> Endpoints {
         endpoints(
             ShopifyEndpoints::new()
@@ -601,7 +668,7 @@ mod tests {
     fn the_endpoints_replace_the_app_bridge_and_the_polaris_of_the_shell() {
         // The shell the framework embeds, as every bundle has it.
         let index = include_str!("../../ui-dist/index.html");
-        let shell = render_shell(index, "key-123", &simulator());
+        let shell = render_shell(index, &app("key-123"), &simulator());
 
         let app_bridge = format!(r#"<script data-api-key="key-123" src="{APP_BRIDGE}"></script>"#);
         let polaris = format!(r#"<script src="{POLARIS}"></script>"#);
@@ -618,22 +685,22 @@ mod tests {
         assert_eq!(unchanged, inject_api_key(index, "key-123"));
 
         // Each one on its own.
-        let only_app_bridge = render_shell(index, "key-123", &endpoints(ShopifyEndpoints::new().app_bridge(APP_BRIDGE)));
+        let only_app_bridge = render_shell(index, &app("key-123"), &endpoints(ShopifyEndpoints::new().app_bridge(APP_BRIDGE)));
         assert_eq!(only_app_bridge, inject_api_key(index, "key-123").replace(CDN_APP_BRIDGE, APP_BRIDGE));
-        let only_polaris = render_shell(index, "key-123", &endpoints(ShopifyEndpoints::new().polaris(POLARIS)));
+        let only_polaris = render_shell(index, &app("key-123"), &endpoints(ShopifyEndpoints::new().polaris(POLARIS)));
         assert_eq!(only_polaris, inject_api_key(index, "key-123").replace(CDN_POLARIS, POLARIS));
         // The admin origin alone moves no script.
         let only_origin = endpoints(ShopifyEndpoints::new().admin_origin("http://localhost:9393"));
-        assert_eq!(render_shell(index, "key-123", &only_origin), inject_api_key(index, "key-123"));
+        assert_eq!(render_shell(index, &app("key-123"), &only_origin), inject_api_key(index, "key-123"));
     }
 
     #[test]
     fn with_shopify_endpoints_the_shell_does_not_change() {
         let shopify = Endpoints::default();
         let index = include_str!("../../ui-dist/index.html");
-        assert_eq!(render_shell(index, "key-123", &shopify), inject_api_key(index, "key-123"));
+        assert_eq!(render_shell(index, &app("key-123"), &shopify), inject_api_key(index, "key-123"));
         let minified = format!(r#"<meta name=shopify-api-key content=""><script src={CDN_APP_BRIDGE}></script>"#);
-        assert_eq!(render_shell(&minified, "k", &shopify), inject_api_key(&minified, "k"));
+        assert_eq!(render_shell(&minified, &app("k"), &shopify), inject_api_key(&minified, "k"));
     }
 
     #[test]
@@ -647,15 +714,15 @@ mod tests {
                 .polaris("https://polaris.example.com/p.js"),
         );
         assert_eq!(
-            render_shell(&html, "k", &endpoints),
+            render_shell(&html, &app("k"), &endpoints),
             r#"<meta name="shopify-api-key" content="k" /><script async type=module data-api-key="k" src="http://[::1]:9393/app-bridge.js"></script><script defer src="https://polaris.example.com/p.js"></script>"#
         );
         // Once only, however many times it is applied.
-        let once = render_shell(&html, "k", &endpoints);
-        assert_eq!(render_shell(&once, "k", &endpoints), once);
+        let once = render_shell(&html, &app("k"), &endpoints);
+        assert_eq!(render_shell(&once, &app("k"), &endpoints), once);
         // A page without them gets none.
         let page = "<head><title>t</title></head>";
-        assert_eq!(render_shell(page, "k", &endpoints), page);
+        assert_eq!(render_shell(page, &app("k"), &endpoints), page);
     }
 
     #[test]
@@ -669,7 +736,7 @@ mod tests {
         // A query string, as a valid URL may have one.
         let query = endpoints(ShopifyEndpoints::new().polaris("https://polaris.example.com/p.js?v=2&x=1"));
         assert_eq!(
-            render_shell(&format!(r#"<script src="{CDN_POLARIS}"></script>"#), "k", &query),
+            render_shell(&format!(r#"<script src="{CDN_POLARIS}"></script>"#), &app("k"), &query),
             r#"<script src="https://polaris.example.com/p.js?v=2&amp;x=1"></script>"#
         );
     }

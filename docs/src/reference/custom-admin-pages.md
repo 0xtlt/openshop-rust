@@ -469,7 +469,15 @@ static APP: App = app! {
 
 Every path that is not an API route or a file is answered with the
 `index.html` of the bundle, after the server has injected the Shopify API key
-into `<meta name="shopify-api-key">` and the App Bridge `<script>` tag.
+into `<meta name="shopify-api-key">` and the App Bridge `<script>` tag, and
+the name of the app into its `<title>`, in place of `OpenShop`.
+
+The name is the `name` of the `shopify.app*.toml` of the app (the one whose
+`client_id` is its API key), else the key of the app in `shopify.apps`, else
+`OpenShop`. App Bridge titles a page with it in the title bar of the admin when
+its `s-page` has no `heading`, and the browser shows it in its tab; local-storefront
+does the same. A `heading` titles the page. A bundle whose `index.html` has a
+title of its own keeps it.
 
 Assets whose file name carries a content hash are served with
 `Cache-Control: public, max-age=31536000, immutable`, other files with

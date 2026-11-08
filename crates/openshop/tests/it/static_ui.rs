@@ -793,6 +793,65 @@ async fn dev_mode_injects_the_api_key_of_the_signing_app() {
     ctx.shutdown().await.unwrap();
 }
 
+/// The `<title>` of a served shell.
+fn title(reply: &Reply) -> &str {
+    let start = reply.body.find("<title>").expect("a title") + "<title>".len();
+    let end = reply.body[start..].find("</title>").expect("the end of the title");
+    &reply.body[start..start + end]
+}
+
+#[tokio::test]
+async fn the_shell_is_titled_with_the_name_of_the_app() {
+    let ui = UiDir::new();
+    ui.write("index.html", &SHELL.replace("<head>", "<head><title>OpenShop</title>"));
+    let cwd = ui.root.join("project");
+    std::fs::create_dir_all(&cwd).unwrap();
+    std::fs::write(
+        cwd.join("shopify.app.toml"),
+        "client_id = \"test-app\"\nname = \"Easy hide PayPal Express\"\nhandle = \"easy-hide-paypal-express\"\n",
+    )
+    .unwrap();
+    let ctx = TestContext::with_options(
+        static_config(),
+        TestOptions {
+            shop: SHOP.to_string(),
+            access_token: Some("offline-token".to_string()),
+            server: ui.server(false),
+            cwd: Some(cwd),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    // The `name` of its `shopify.app.toml`: what App Bridge titles a page
+    // without a heading with, in the title bar of the admin, and the tab shows.
+    let reply = get(&ctx, &signed_launch("/", SHOP, SECRET)).await;
+    assert_shell(&reply, "test-app");
+    assert_eq!(title(&reply), "Easy hide PayPal Express");
+    ctx.shutdown().await.unwrap();
+
+    // Without a file, an app of `shopify.apps` is named by its key, in development too.
+    let ctx = TestContext::with_options(
+        multi_app_config(),
+        TestOptions {
+            server: ui.server(true),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let reply = get(&ctx, &signed_launch("/", SHOP, "client-b-secret")).await;
+    assert_shell(&reply, "client-b-key");
+    assert_eq!(title(&reply), "clientB");
+    ctx.shutdown().await.unwrap();
+
+    // The app of the environment, without a file: nothing names it.
+    let ctx = ui_context(&ui).await;
+    assert_eq!(title(&get(&ctx, &signed_launch("/", SHOP, SECRET)).await), "OpenShop");
+    ctx.shutdown().await.unwrap();
+}
+
 /// The next version an event stream of `/__openshop/reload` names. `None` once it has ended.
 async fn told(events: &mut reqwest::Response) -> Option<String> {
     loop {
