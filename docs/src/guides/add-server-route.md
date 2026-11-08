@@ -87,6 +87,13 @@ anything that is an HTTP response: use the helpers of the `response` module
 `response::status`) or build any response with the custom status and headers
 you need.
 
+Every route is served under `/routes/`, so that it never collides with
+OpenShop's own paths (`/api`, `/auth`, `/webhooks`, `/proxy`, `/ext`,
+`/health`, `/ops`) and the pages of the admin UI. When you port an app whose
+URLs are set outside its code, point them at `/routes/…`: a managed pricing
+welcome link in the Partner Dashboard (`/newplan` becomes `/routes/newplan`), a
+link in an email, the App Store listing.
+
 Both functions read the request through `ctx.request`: `header(name)`,
 `query()`, `json()`, `text()`, and the raw `body`. A body larger than 2 MB is
 refused with HTTP 413 before your code runs; change the limit with the
