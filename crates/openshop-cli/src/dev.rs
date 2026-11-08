@@ -487,6 +487,13 @@ impl DevProcess {
         };
         if let Some(status) = child.exited() {
             child.exit_reported = true;
+            // A wrapper of cargo that went alone leaves the app running.
+            if child.running().await {
+                eprintln!(
+                    "\n[openshop] !!! `cargo run` exited ({status}), and what it started still runs: the app may serve the code it was built from until the next change restarts it.\n"
+                );
+                return;
+            }
             eprintln!(
                 "\n[openshop] !!! The app exited ({status}): nothing of the current code is serving. Fix what it printed, then save a file to restart it.\n"
             );
