@@ -72,6 +72,8 @@ pub fn FlowRun() -> impl IntoView {
     // The server sends the newest lines first; older ones are left to the export.
     let has_more_logs = RwSignal::new(false);
     let query = RwSignal::new(initial_params.get("q").unwrap_or_default().to_string());
+    // The query the logs are fetched for: the one typed, once typing pauses.
+    let searched = RwSignal::new(query.get_untracked());
     let levels = RwSignal::new(parse_levels(initial_params.get("levels")));
     let show_help = RwSignal::new(false);
     let level_counts = RwSignal::new(HashMap::<String, u64>::new());
@@ -104,7 +106,7 @@ pub fn FlowRun() -> impl IntoView {
     // Logs are filtered server-side.
     let fetch_logs = move || {
         let Some(id) = id.get_untracked() else { return };
-        let filtered_url = logs_url(&id, &query.get_untracked(), &levels.get_untracked());
+        let filtered_url = logs_url(&id, &searched.get_untracked(), &levels.get_untracked());
         latest_logs_url.set_value(filtered_url.clone());
         spawn_local(async move {
             // Polled like the run: a failure is logged, and the next poll tries again.
@@ -147,7 +149,7 @@ pub fn FlowRun() -> impl IntoView {
 
     Effect::new(move |_| {
         id.track();
-        query.track();
+        searched.track();
         levels.track();
         fetch_logs();
         every(3_000, fetch_logs);
@@ -156,8 +158,11 @@ pub fn FlowRun() -> impl IntoView {
     let handle_query_input = move |event: web_sys::Event| {
         let value = event_value(&event);
         levels.with_untracked(|levels| sync_url(&value, levels));
-        query.set(value);
-        debounce.set_value(Some(Timeout::new(300, fetch_logs)));
+        query.set(value.clone());
+        // Replacing the timeout cancels the one of the previous keystroke.
+        debounce.set_value(Some(Timeout::new(300, move || {
+            searched.try_set(value);
+        })));
     };
 
     let toggle = move |level: &'static str| {

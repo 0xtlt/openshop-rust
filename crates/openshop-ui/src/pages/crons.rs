@@ -29,7 +29,8 @@ fn show_input(cron: &CronItem) {
 #[component]
 pub fn Crons() -> impl IntoView {
     let crons = RwSignal::new(Vec::<CronItem>::new());
-    let toggling = RwSignal::new(None::<String>);
+    // The crons being toggled: each toggle gives back its own key only.
+    let toggling = RwSignal::new(Vec::<String>::new());
     let error = RwSignal::new(None::<String>);
 
     spawn_local(async move {
@@ -43,7 +44,7 @@ pub fn Crons() -> impl IntoView {
     });
 
     let toggle = move |key: String, enabled: bool| {
-        toggling.set(Some(key.clone()));
+        toggling.update(|toggling| toggling.push(key.clone()));
         spawn_local(async move {
             let body = json!({ "key": key, "enabled": !enabled });
             // A request that gets no answer is reported by `api_request`.
@@ -61,7 +62,7 @@ pub fn Crons() -> impl IntoView {
                     })));
                 }
             }
-            toggling.set(None);
+            toggling.update(|toggling| toggling.retain(|toggled| *toggled != key));
         });
     };
 
@@ -70,7 +71,7 @@ pub fn Crons() -> impl IntoView {
         let (key, enabled) = (cron.key.clone(), cron.enabled);
         let is_toggling = {
             let key = key.clone();
-            move || toggling.with(|toggling| toggling.as_deref() == Some(key.as_str()))
+            move || toggling.with(|toggling| toggling.contains(&key))
         };
         let toggle_label = {
             let is_toggling = is_toggling.clone();

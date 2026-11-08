@@ -364,6 +364,29 @@ impl AdminActionOptions {
     }
 }
 
+/// Counts a call of [`AdminActionState::invoke`] in flight until it is
+/// dropped. Its future may be dropped mid-call (the page is left, or the
+/// caller stops waiting): the count still goes down, so `pending` does not
+/// stay set and later [`ActionConcurrency::Ignore`] calls are not skipped
+/// for good.
+struct InFlightCall {
+    in_flight: StoredValue<u32>,
+    set_pending: WriteSignal<bool>,
+}
+
+impl Drop for InFlightCall {
+    fn drop(&mut self) {
+        let still_pending = self
+            .in_flight
+            .try_update_value(|count| {
+                *count = count.saturating_sub(1);
+                *count > 0
+            })
+            .unwrap_or(false);
+        self.set_pending.try_set(still_pending);
+    }
+}
+
 /// Reactive state of a [`use_action`] call.
 pub struct AdminActionState<I: 'static, O: 'static> {
     /// Output of the latest successful invocation.
@@ -402,6 +425,10 @@ where
             return Ok(None);
         }
         self.in_flight.try_update_value(|count| *count += 1);
+        let call = InFlightCall {
+            in_flight: self.in_flight,
+            set_pending: self.set_pending,
+        };
         let invocation = self
             .latest_invocation
             .try_update_value(|latest| {
@@ -428,13 +455,6 @@ where
             Err(error) => Err(error),
         };
 
-        let still_pending = self
-            .in_flight
-            .try_update_value(|count| {
-                *count = count.saturating_sub(1);
-                *count > 0
-            })
-            .unwrap_or(false);
         let is_latest = self.latest_invocation.try_get_value() == Some(invocation);
         match result {
             Ok(output) => {
@@ -442,7 +462,7 @@ where
                     self.set_data.set(Some(output.clone()));
                     self.set_error.set(None);
                 }
-                self.set_pending.set(still_pending);
+                drop(call);
                 for loader in options.revalidate {
                     revalidate(loader);
                 }
@@ -453,7 +473,7 @@ where
                     self.set_data.set(None);
                     self.set_error.set(Some(failure.clone()));
                 }
-                self.set_pending.set(still_pending);
+                drop(call);
                 Err(failure)
             }
         }

@@ -69,6 +69,11 @@ fn FunctionForm(handle: String, #[prop(optional)] instance_id: Option<String>) -
     let deleting = RwSignal::new(false);
     let message = RwSignal::new(None::<BannerMessage>);
     let is_edit = instance_id.is_some();
+    // The form shows once the definition, and the instance it edits, are
+    // loaded: fields typed before would be overwritten by the instance, and a
+    // save would send an empty configuration. A load that fails says why.
+    let instance_loaded = RwSignal::new(!is_edit);
+    let load_error = RwSignal::new(None::<String>);
     let handle = StoredValue::new(handle);
     let instance_id = StoredValue::new(instance_id);
     let list_path = move || format!("/functions/{}", handle.get_value());
@@ -80,25 +85,32 @@ fn FunctionForm(handle: String, #[prop(optional)] instance_id: Option<String>) -
 
     let wanted_handle = handle.get_value();
     spawn_local(async move {
-        if let Some(definitions) = api_json_or_report::<Vec<FunctionDef>>("/api/functions", "the functions").await
-            && let Some(found) = definitions
-                .into_iter()
-                .find(|definition| definition.handle == wanted_handle)
-        {
-            if let Some(first) = found.modes.as_ref().and_then(|modes| modes.first()) {
-                mode.set(first.clone());
-            }
-            definition.set(Some(found));
+        let Some(definitions) = api_json_or_report::<Vec<FunctionDef>>("/api/functions", "the functions").await else {
+            load_error.set(Some("The function could not be loaded.".to_string()));
+            return;
+        };
+        let Some(found) = definitions
+            .into_iter()
+            .find(|definition| definition.handle == wanted_handle)
+        else {
+            load_error.set(Some(format!("The app declares no function \"{wanted_handle}\".")));
+            return;
+        };
+        if let Some(first) = found.modes.as_ref().and_then(|modes| modes.first()) {
+            mode.set(first.clone());
         }
+        definition.set(Some(found));
     });
     if let Some(instance_id) = instance_id.get_value() {
         let url = instance_endpoint(&handle.get_value(), None);
         spawn_local(async move {
             let Some(instances) = api_json_or_report::<Vec<FunctionInstance>>(&url, "the instance").await else {
+                load_error.set(Some("The instance could not be loaded.".to_string()));
                 return;
             };
             let wanted = decode_uri_component(&instance_id).unwrap_or_else(|| instance_id.clone());
             let Some(instance) = instances.into_iter().find(|instance| instance.id == wanted) else {
+                load_error.set(Some("This instance no longer exists.".to_string()));
                 return;
             };
             form.set(
@@ -111,10 +123,18 @@ fn FunctionForm(handle: String, #[prop(optional)] instance_id: Option<String>) -
             if let Some(block) = instance.block_on_failure {
                 block_on_failure.set(block);
             }
+            instance_loaded.set(true);
         });
     }
 
+    // A save and a delete exclude each other: the one that finishes last
+    // would decide what the page shows.
+    let busy = move || saving.get() || deleting.get();
+
     let save = move |_| {
+        if saving.get_untracked() || deleting.get_untracked() {
+            return;
+        }
         let Some(kind) =
             definition.with_untracked(|definition| definition.as_ref().map(|definition| definition.kind.clone()))
         else {
@@ -150,6 +170,9 @@ fn FunctionForm(handle: String, #[prop(optional)] instance_id: Option<String>) -
     };
 
     let remove = move |_| {
+        if saving.get_untracked() || deleting.get_untracked() {
+            return;
+        }
         let Some(instance_id) = instance_id.get_value() else {
             return;
         };
@@ -202,7 +225,7 @@ fn FunctionForm(handle: String, #[prop(optional)] instance_id: Option<String>) -
                                 variant="primary"
                                 tone="critical"
                                 on:click=remove
-                                disabled=move || deleting.get()
+                                disabled=busy
                             >
                                 {move || if deleting.get() { "Deleting..." } else { "Delete" }}
                             </s-button>
@@ -232,7 +255,7 @@ fn FunctionForm(handle: String, #[prop(optional)] instance_id: Option<String>) -
                     slot="primary-action"
                     variant="primary"
                     on:click=save
-                    disabled=move || saving.get() || read_only
+                    disabled=move || busy() || read_only
                 >
                     {move || match (saving.get(), is_edit) {
                         (true, true) => "Saving...",
@@ -330,7 +353,7 @@ fn FunctionForm(handle: String, #[prop(optional)] instance_id: Option<String>) -
                                             tone="critical"
                                             commandFor=DELETE_MODAL_ID
                                             command="--show"
-                                            disabled=move || deleting.get()
+                                            disabled=busy
                                         >
                                             {move || if deleting.get() { "Deleting..." } else { "Delete instance" }}
                                         </s-button>
@@ -343,9 +366,18 @@ fn FunctionForm(handle: String, #[prop(optional)] instance_id: Option<String>) -
         }
     };
 
-    move || match definition.get() {
-        Some(definition) => form_page(definition).into_any(),
-        None => view! {
+    move || match (definition.get(), load_error.get()) {
+        (_, Some(error)) => view! {
+            <Page heading="Function">
+                <s-link slot="breadcrumb-actions" href=list_path()>
+                    "Function"
+                </s-link>
+                <s-banner tone="critical">{error}</s-banner>
+            </Page>
+        }
+        .into_any(),
+        (Some(definition), None) if instance_loaded.get() => form_page(definition).into_any(),
+        _ => view! {
             <Page heading="Loading...">
                 <s-link slot="breadcrumb-actions" href=list_path()>
                     "Function"

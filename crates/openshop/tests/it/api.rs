@@ -835,6 +835,31 @@ async fn post_run_cancel_cancels_a_pending_run(ctx: &TestContext) {
     assert!(run.completed_at.is_some());
 }
 
+#[openshop::test(api_context())]
+async fn post_run_cancel_releases_the_lease_of_a_running_run(ctx: &TestContext) {
+    let run_id = ctx.dispatch_flow("test-flow", json!({})).await.unwrap();
+    sqlx::query(
+        "UPDATE flow_runs SET status = 'running', worker_id = 'worker-1', lease_id = gen_random_uuid(), \
+           available_at = now() + interval '1 minute' WHERE id = $1",
+    )
+    .bind(run_id)
+    .execute(&ctx.db)
+    .await
+    .unwrap();
+
+    let (status, _) = send(ctx.post(&format!("/api/runs/{run_id}/cancel"))).await;
+    assert_eq!(status, StatusCode::OK);
+
+    // A canceled run is held by no worker: its lease ends with it.
+    let (worker_id, lease_id, available_at): (Option<String>, Option<Uuid>, Option<chrono::DateTime<chrono::Utc>>) =
+        sqlx::query_as("SELECT worker_id, lease_id, available_at FROM flow_runs WHERE id = $1")
+            .bind(run_id)
+            .fetch_one(&ctx.db)
+            .await
+            .unwrap();
+    assert_eq!((worker_id, lease_id, available_at), (None, None, None));
+}
+
 #[tokio::test]
 async fn post_run_cancel_aborts_a_run_in_progress() {
     let started = Arc::new(tokio::sync::Notify::new());
