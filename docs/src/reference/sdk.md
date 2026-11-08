@@ -301,7 +301,9 @@ webhook, of an app proxy, of an admin function, of an MCP tool or resource, or
 what `ctx.for_shop(…)` returns in a server route. These implement the
 `ShopScope` trait, which also gives `ctx.app_handle()`, the handle of the app
 on Shopify, and `ctx.admin_url(path)`, a page of the admin of the shop (see
-[Billing](billing.md#the-pricing-page-and-the-pages-of-the-admin)). The second argument is the input type of the flow, which
+[Billing](billing.md#the-pricing-page-and-the-pages-of-the-admin)); a
+`RouteContext` gives them for a shop it names, `ctx.app_handle(shop)` and
+`ctx.admin_url(shop, path)`, with no installation needed. The second argument is the input type of the flow, which
 implements `Serialize`; [`#[input]`](flows.md#input) derives it. A flow without
 input takes the context alone: `nightly_cleanup::dispatch(&ctx)`.
 

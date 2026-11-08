@@ -253,6 +253,39 @@ Values used to select a shop are untrusted until the route authenticates the
 request. Never treat a query parameter, path parameter, header, or decoded but
 unverified payload as proof of identity.
 
+## Links to the Shopify admin
+
+A route sends a merchant to the admin of a shop that may not have the app
+installed, or before anything is asked of it: the welcome link of a plan, a
+link in an email. These read the configuration only, and take the shop as
+`for_shop` does:
+
+| Method | Returns |
+| --- | --- |
+| `ctx.app_handle(shop)` | `Result<&str>`: the handle of the app on Shopify, which the URLs of the admin name it by (see [Billing](billing.md#the-handle-of-the-app)). |
+| `ctx.admin_url(shop, path)` | `Result<String>`: a page of the admin of the shop, `https://admin.shopify.com/store/{store}/{path}`, at the `admin_origin` of the [Shopify endpoints](../guides/custom-shopify-endpoints.md) when there is one. |
+| `ctx.pricing_url(shop)` | `Result<String>`: the plan selection page of the app for the shop, as `billing::pricing_url` gives it. |
+
+```rust,ignore
+use openshop::prelude::*;
+use openshop::response::{IntoResponse, Response, StatusCode, header};
+
+/// The welcome link of the plans: back to the app, in the admin of the shop.
+#[route(GET, "/welcome")]
+pub async fn welcome(ctx: RouteContext) -> Result<Response> {
+    let shop = ctx.request.query().get("shop").cloned().unwrap_or_default();
+    let app = format!("apps/{}", ctx.app_handle(&shop)?);
+    let location = ctx.admin_url(&shop, &app)?;
+    Ok((StatusCode::FOUND, [(header::LOCATION, location)]).into_response())
+}
+```
+
+An authentication function has them too. They fail as `for_shop` does when the
+shop is not a `*.myshopify.com` domain, or the app handle is unknown or missing
+while several apps are configured; whether the shop installed the app is not
+asked. A route that wants a context of the shop, with `app_handle()` and
+`admin_url(path)` of its own, calls `for_shop`.
+
 ## Queue durable work
 
 Keep externally called routes short and move retryable work into a flow.

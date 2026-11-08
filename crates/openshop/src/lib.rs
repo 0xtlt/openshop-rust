@@ -642,6 +642,8 @@ pub use openshop_macros::proxy;
 ///
 /// A route does not belong to a shop. `ctx.for_shop("demo.myshopify.com")`
 /// resolves an installed one and gives its `db`, `shopify` and `connectors`.
+/// `ctx.app_handle(shop)`, `ctx.admin_url(shop, path)` and
+/// `ctx.pricing_url(shop)` link to the admin of a shop, installed or not.
 ///
 /// The functions of one path are declared separately, one per method, each
 /// with its own authentication. They are listed in the `routes` of [`app!`].

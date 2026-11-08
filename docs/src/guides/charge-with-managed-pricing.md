@@ -92,7 +92,10 @@ fn view() -> impl IntoView {
 
 On the server, outside a view, `billing::pricing_url(&ctx)` is the same page,
 for a redirect or an email, and `ctx.admin_url("settings/payments")` any other
-page of the admin of the shop.
+page of the admin of the shop. A server route, such as the welcome link of the
+plans, gives them for the shop it names, installed or not:
+`ctx.pricing_url(&shop)?` and `ctx.admin_url(&shop, &format!("apps/{}",
+ctx.app_handle(&shop)?))?` (see [Server routes](../reference/server-routes.md#links-to-the-shopify-admin)).
 
 ## 4. Hear of the changes
 

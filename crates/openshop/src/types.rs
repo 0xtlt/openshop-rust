@@ -1380,6 +1380,36 @@ impl RouteAuthContext {
     pub async fn for_shop(&self, shop: impl Into<RouteShopInput>) -> Result<RouteShopContext> {
         crate::server::connectors::resolve_shop_context(&self.app, shop.into()).await
     }
+
+    /// As [`RouteContext::app_handle`].
+    pub fn app_handle(&self, shop: impl Into<RouteShopInput>) -> Result<&str> {
+        route_app_handle(&self.app, shop.into())
+    }
+
+    /// As [`RouteContext::admin_url`].
+    pub fn admin_url(&self, shop: impl Into<RouteShopInput>, path: &str) -> Result<String> {
+        route_admin_url(&self.app, shop.into(), path)
+    }
+
+    /// As [`RouteContext::pricing_url`].
+    pub fn pricing_url(&self, shop: impl Into<RouteShopInput>) -> Result<String> {
+        route_pricing_url(&self.app, shop.into())
+    }
+}
+
+fn route_app_handle(app: &OpenShop, shop: RouteShopInput) -> Result<&str> {
+    let (_, shopify_app) = crate::server::connectors::resolve_route_shop(app, shop)?;
+    Ok(&shopify_app.app_handle)
+}
+
+fn route_admin_url(app: &OpenShop, shop: RouteShopInput, path: &str) -> Result<String> {
+    let (shop, _) = crate::server::connectors::resolve_route_shop(app, shop)?;
+    Ok(app.shopify_endpoints().admin_url(&shop, path))
+}
+
+fn route_pricing_url(app: &OpenShop, shop: RouteShopInput) -> Result<String> {
+    let (shop, shopify_app) = crate::server::connectors::resolve_route_shop(app, shop)?;
+    Ok(app.shopify_endpoints().pricing_plans_url(&shop, &shopify_app.app_handle))
 }
 
 /// What the handler of a route receives. `A` is what the authentication
@@ -1400,6 +1430,52 @@ impl<A> RouteContext<A> {
     /// its database, its Shopify client and its providers.
     pub async fn for_shop(&self, shop: impl Into<RouteShopInput>) -> Result<RouteShopContext> {
         crate::server::connectors::resolve_shop_context(&self.app, shop.into()).await
+    }
+
+    /// The handle on Shopify of the app that serves `shop`, which the URLs
+    /// of the Shopify admin name it by: what [`ShopScope::app_handle`] gives
+    /// a context of the shop.
+    ///
+    /// `shop` is what [`for_shop`](Self::for_shop) takes, a domain or a
+    /// [`RouteShopInput`] that names the app, and is checked the same way,
+    /// except that the shop does not have to have the app installed: this
+    /// reads the configuration only. Fails when the shop is not a
+    /// `*.myshopify.com` domain, or when the app is unknown, or not named
+    /// while several are configured.
+    pub fn app_handle(&self, shop: impl Into<RouteShopInput>) -> Result<&str> {
+        route_app_handle(&self.app, shop.into())
+    }
+
+    /// A page of the Shopify admin of `shop`, `path` being what follows the
+    /// admin of the store (`settings/payments`, `apps/{app_handle}`): what
+    /// [`ShopScope::admin_url`] gives a context of the shop, at the
+    /// `admin_origin` of the [Shopify endpoints](crate::ShopifyEndpoints::admin_url)
+    /// when there is one. `shop` is taken and checked as by
+    /// [`app_handle`](Self::app_handle), with no installation needed.
+    ///
+    /// ```
+    /// use openshop::prelude::*;
+    /// use openshop::response::{IntoResponse, Response, StatusCode, header};
+    ///
+    /// /// The welcome link of the plans: back to the app, in the admin of the shop.
+    /// #[route(GET, "/welcome")]
+    /// async fn welcome(ctx: RouteContext) -> Result<Response> {
+    ///     let shop = ctx.request.query().get("shop").cloned().unwrap_or_default();
+    ///     let app = format!("apps/{}", ctx.app_handle(&shop)?);
+    ///     let location = ctx.admin_url(&shop, &app)?;
+    ///     Ok((StatusCode::FOUND, [(header::LOCATION, location)]).into_response())
+    /// }
+    /// ```
+    pub fn admin_url(&self, shop: impl Into<RouteShopInput>, path: &str) -> Result<String> {
+        route_admin_url(&self.app, shop.into(), path)
+    }
+
+    /// The plan selection page Shopify hosts for the app that serves `shop`,
+    /// with managed pricing: what [`billing::pricing_url`](crate::billing::pricing_url)
+    /// gives a context of the shop. `shop` is taken and checked as by
+    /// [`app_handle`](Self::app_handle), with no installation needed.
+    pub fn pricing_url(&self, shop: impl Into<RouteShopInput>) -> Result<String> {
+        route_pricing_url(&self.app, shop.into())
     }
 }
 

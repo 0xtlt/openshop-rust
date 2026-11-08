@@ -114,11 +114,14 @@ window of the admin, as an App Bridge link: `window.open(link, "_top")`, or an
 | `billing::pricing_url(&ctx)` | The plan selection page of the app, for the shop of the context: `https://admin.shopify.com/store/{store}/charges/{app_handle}/pricing_plans`. With an `admin_origin` ([Shopify endpoints](../guides/custom-shopify-endpoints.md)), `{admin_origin}/admin/charges/{app_handle}/pricing_plans?shop={shop}`. |
 | `billing::pricing_link(&ctx)` | `shopify:admin/charges/{app_handle}/pricing_plans`, the App Bridge link of the same page, for a view of an embedded page. |
 | `ctx.admin_url("settings/payments")` | Any page of the admin of the shop: `https://admin.shopify.com/store/{store}/settings/payments`, or `{admin_origin}/admin/settings/payments?shop={shop}`. The path may carry a query string. |
+| `ctx.pricing_url(shop)`, `ctx.admin_url(shop, path)`, `ctx.app_handle(shop)` | The same in a server route, for the shop it names, installed or not: see [Server routes](server-routes.md#links-to-the-shopify-admin). |
 | `ShopifyEndpoints::admin_url(shop, path)`, `::pricing_plans_url(shop, app_handle)` | The same without a context: `app.shopify_endpoints().admin_url(…)`. |
 
 `store` is the shop without `.myshopify.com`. `ctx` is any context that
 belongs to a shop: `pricing_url`, `pricing_link`, `app_handle` and
-`admin_url` come from the `ShopScope` trait, in the prelude.
+`admin_url` come from the `ShopScope` trait, in the prelude. A server route
+does not belong to a shop: `RouteContext` has them as methods that take the
+shop.
 
 ### The handle of the app
 

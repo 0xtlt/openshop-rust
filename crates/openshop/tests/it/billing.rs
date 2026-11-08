@@ -5,7 +5,8 @@ use std::path::PathBuf;
 
 use crate::common::{TEST_SHOP, json_body};
 use openshop::billing::{self, SubscriptionStatus};
-use openshop::builder::{AdminFunction, AdminPage, InputSchema};
+use openshop::builder::{AdminFunction, AdminPage, InputSchema, Route};
+use openshop::response;
 use openshop::testing::{MockTransport, TestContext, TestOptions};
 use openshop::{AdminContext, OpenShopConfig, ShopScope, ShopifyEndpoints, Value, json};
 use openshop_shared::build_admin_function_rpc_url;
@@ -42,6 +43,7 @@ fn subscriptions(plans: &[(&str, &str)]) -> Value {
 }
 
 /// `/reports`: a loader for the Pro and Plus plans, an action for any plan.
+/// `/routes/plans`: the links a route gives for the shop of `?shop=`.
 fn config() -> OpenShopConfig {
     let page = AdminPage::new("/reports")
         .loader("report", |ctx: AdminContext, _input: Value| async move {
@@ -55,7 +57,19 @@ fn config() -> OpenShopConfig {
             })
             .authorize(billing::any_plan),
         );
-    OpenShopConfig::builder().admin_page(page).build().unwrap()
+    let plans = Route::public().get(|ctx| async move {
+        let shop = ctx.request.query().get("shop").cloned().unwrap_or_default();
+        Ok(response::json(json!({
+            "appHandle": ctx.app_handle(&shop)?,
+            "pricingUrl": ctx.pricing_url(&shop)?,
+            "welcome": ctx.admin_url(&shop, &format!("apps/{}", ctx.app_handle(&shop)?))?,
+        })))
+    });
+    OpenShopConfig::builder()
+        .admin_page(page)
+        .route("/plans", plans)
+        .build()
+        .unwrap()
 }
 
 async fn context(
@@ -190,6 +204,22 @@ async fn the_pricing_page_is_at_the_admin_origin_and_names_the_app_by_its_handle
     assert_eq!(
         ctx.admin_url("settings/payments"),
         "http://localhost:9393/admin/settings/payments?shop=test-integration.myshopify.com"
+    );
+
+    // A route gives the same for a shop it names, installed or not.
+    let links = ctx
+        .http
+        .get(format!("{}/routes/plans?shop=Not-Installed.myshopify.com", ctx.url))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        json_body(links).await,
+        json!({
+            "appHandle": "hide-paypal",
+            "pricingUrl": "http://localhost:9393/admin/charges/hide-paypal/pricing_plans?shop=not-installed.myshopify.com",
+            "welcome": "http://localhost:9393/admin/apps/hide-paypal?shop=not-installed.myshopify.com",
+        })
     );
 
     // Read from a flow, a webhook or a route the same way.

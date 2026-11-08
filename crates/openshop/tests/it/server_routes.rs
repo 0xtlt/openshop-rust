@@ -84,6 +84,25 @@ fn shop_context_route() -> Route {
     })
 }
 
+/// Reports the links to the admin a route gives for the shop it names,
+/// installed or not, or why it refuses.
+fn admin_links_route() -> Route {
+    Route::public().get(|ctx| async move {
+        let input = shop_input(&parse_query(ctx.request.uri.query()));
+        let links = (|| -> Result<Value> {
+            Ok(json!({
+                "appHandle": ctx.app_handle(input.clone())?,
+                "adminUrl": ctx.admin_url(input.clone(), "settings/payments")?,
+                "pricingUrl": ctx.pricing_url(input.clone())?,
+            }))
+        })();
+        Ok(match links {
+            Ok(links) => response::json(links),
+            Err(error) => response::json_with_status(StatusCode::BAD_REQUEST, json!({ "error": error.to_string() })),
+        })
+    })
+}
+
 fn config() -> OpenShopConfig {
     OpenShopConfig::builder()
         .shopify(two_shopify_apps())
@@ -92,6 +111,7 @@ fn config() -> OpenShopConfig {
         .route("/authenticated", authenticated_route())
         .route("/provider", provider_route())
         .route("/shop-context", shop_context_route())
+        .route("/admin-links", admin_links_route())
         .route("/orders/[id]", open_route())
         .route(
             "/orders/new",
@@ -520,6 +540,7 @@ async fn for_shop_defaults_to_the_only_configured_app() {
     let config = OpenShopConfig::builder()
         .provider_as("vault", vault_provider())
         .route("/shop-context", shop_context_route())
+        .route("/admin-links", admin_links_route())
         .route("/provider", provider_route())
         .build()
         .unwrap();
@@ -581,4 +602,49 @@ fn rejects_routes_without_handlers_and_ambiguous_routes_when_the_config_is_built
 
     let error = error_of(OpenShopConfig::builder().route("/orders/:order-id", open_route()));
     assert!(error.contains("parameter names"), "{error}");
+}
+
+#[openshop::test(TestContext::new(config()))]
+async fn links_to_the_admin_of_a_shop_need_no_installation(ctx: &TestContext) {
+    let links = |query: &str| {
+        let request = get(ctx, &format!("/admin-links?{query}"));
+        async move {
+            let response = request.send().await.unwrap();
+            (response.status().as_u16(), json_body(response).await)
+        }
+    };
+    let shop = "shop=Links-Demo.myshopify.com&app=clientB";
+
+    // `for_shop` refuses a shop that has not installed the app; its links are there.
+    let refused = json_body(get(ctx, &format!("/shop-context?{shop}")).send().await.unwrap()).await;
+    assert_eq!(refused["error"], "[openshop] Shop is not actively installed");
+    assert_eq!(
+        links(shop).await,
+        (
+            200,
+            json!({
+                // No `shopify.app.toml`: the API key of the app.
+                "appHandle": "client-b-key",
+                "adminUrl": "https://admin.shopify.com/store/links-demo/settings/payments",
+                "pricingUrl": "https://admin.shopify.com/store/links-demo/charges/client-b-key/pricing_plans",
+            })
+        )
+    );
+    assert_eq!(
+        links("shop=links-demo.myshopify.com&app=clientA").await.1["appHandle"],
+        "client-a-key"
+    );
+
+    // The shop and the app are checked as `for_shop` checks them.
+    for (query, error) in [
+        ("shop=links-demo.myshopify.com", "[openshop] Missing Shopify app handle"),
+        (
+            "shop=links-demo.myshopify.com&app=nope",
+            "[openshop] Unknown Shopify app \"nope\"",
+        ),
+        ("shop=links.example.com&app=clientA", "[openshop] Invalid shop domain"),
+        ("app=clientA", "[openshop] Invalid shop domain"),
+    ] {
+        assert_eq!(links(query).await, (400, json!({ "error": error })), "{query}");
+    }
 }

@@ -37,6 +37,13 @@
   `pricing_plans_url`. All of them follow `admin_origin`.
   `ResolvedShopifyApp` has `app_handle`. See the new guide, Charge with
   managed pricing.
+- A server route links to the admin of the shop it names, installed or not,
+  without `for_shop`: `RouteContext` (and `RouteAuthContext`) gain
+  `app_handle(shop) -> Result<&str>`, `admin_url(shop, path) ->
+  Result<String>` and `pricing_url(shop) -> Result<String>`, which take the
+  shop as `for_shop` does and fail as it does, but for the installation. The
+  welcome link of the plans redirects with
+  `ctx.admin_url(&shop, &format!("apps/{}", ctx.app_handle(&shop)?))?`.
 - `AdminPublicError::detail(name, value)` sends texts with the error, in
   `details` of the response and of `AdminRpcError` (`error.detail(name)`).
   Breaking: `AdminPublicError` and `AdminRpcError` have a `details` field.
