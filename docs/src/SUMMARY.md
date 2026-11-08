@@ -21,6 +21,7 @@
   - [Test an app](guides/test-app.md)
   - [Use custom Shopify endpoints](guides/custom-shopify-endpoints.md)
   - [Manage migrations](guides/manage-migrations.md)
+  - [Switch from the TypeScript version](guides/switch-from-typescript.md)
   - [Deploy to production](guides/deploy-production.md)
   - [Operate an OpenShop app](guides/operate-app.md)
   - [Troubleshooting](guides/troubleshooting.md)

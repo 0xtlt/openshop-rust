@@ -8,7 +8,7 @@ use openshop::db::migrate::{
     FRAMEWORK_MIGRATIONS, MigrationStatus, assert_migrated, check_migrations, generate_migrations,
     get_client_migration_status, migrate_schema, push_schema,
 };
-use openshop::db::{ColumnDef, Table};
+use openshop::db::{ColumnDef, ForeignKeyDef, Table};
 use openshop::testing::{MockTransport, TestDb};
 use openshop::{DispatchOptions, OpenShop, PgPool};
 
@@ -687,5 +687,236 @@ async fn start_and_worker_refuse_a_database_that_is_behind_the_migrations() {
 
     migrate_schema(&db.pool, project.path()).await.unwrap();
     assert_migrated(&db.pool, project.path()).await.unwrap();
+    db.cleanup().await.unwrap();
+}
+
+/// The app tables of a TypeScript project, as `drizzle-kit generate` 0.31 writes
+/// them for `defineModel` models (with the `public.` prefix removed, since
+/// each test has its own schema).
+const DRIZZLE_APP_TABLES: &str = r#"
+CREATE TABLE "reviews" (
+	"id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
+	"shop" text NOT NULL,
+	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
+	"updated_at" timestamp with time zone DEFAULT now() NOT NULL,
+	"rating" integer NOT NULL,
+	"approved" boolean DEFAULT false
+);
+CREATE TABLE "widgets" (
+	"id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
+	"shop" text NOT NULL,
+	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
+	"updated_at" timestamp with time zone DEFAULT now() NOT NULL,
+	"sku" text NOT NULL,
+	"meta" json DEFAULT '{}'::json,
+	"review_id" uuid
+);
+ALTER TABLE "widgets" ADD CONSTRAINT "widgets_review_id_reviews_id_fk" FOREIGN KEY ("review_id") REFERENCES "reviews"("id") ON DELETE cascade ON UPDATE no action;
+CREATE UNIQUE INDEX "widgets_sku_key" ON "widgets" USING btree ("shop","sku");
+CREATE INDEX "widgets_review_idx" ON "widgets" USING btree ("review_id");
+"#;
+
+/// The Rust models of the tables of [`DRIZZLE_APP_TABLES`], written the way
+/// the documentation describes, with the names of the Rust version.
+fn models_of_the_drizzle_tables() -> Vec<Table> {
+    let conventional = |name: &str| {
+        Table::new(name)
+            .with_column(ColumnDef::id())
+            .with_column(ColumnDef::shop())
+            .with_column(ColumnDef::created_at())
+            .with_column(ColumnDef::updated_at())
+    };
+    vec![
+        conventional("reviews")
+            .with_column(ColumnDef::new("rating", "integer"))
+            .with_column(ColumnDef::new("approved", "boolean").nullable(true).default("false")),
+        conventional("widgets")
+            .with_column(ColumnDef::new("sku", "text"))
+            .with_column(ColumnDef::new("meta", "jsonb").nullable(true).default("'{}'::jsonb"))
+            .with_column(ColumnDef::new("review_id", "uuid").nullable(true))
+            .unique_index("widgets_shop_sku_unique", &["shop", "sku"])
+            .index("widgets_review_id_idx", &["review_id"])
+            .with_foreign_key(ForeignKeyDef::new("review_id", "reviews").on_delete("cascade")),
+    ]
+}
+
+/// A database as the TypeScript version leaves it: the framework tables, the
+/// app tables of Drizzle, and rows in them.
+async fn typescript_database() -> TestDb {
+    let db = empty_database().await;
+    sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+        "{}\n{DRIZZLE_APP_TABLES}",
+        FRAMEWORK_MIGRATIONS[0].sql
+    )))
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    sqlx::raw_sql(
+        "INSERT INTO reviews (shop, rating) VALUES ('a.myshopify.com', 5);\n\
+         INSERT INTO widgets (shop, sku, meta, review_id) SELECT shop, 'SKU1', '{\"a\":1}', id FROM reviews;",
+    )
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    db
+}
+
+async fn foreign_keys(pool: &PgPool, table: &str) -> Vec<(String, String)> {
+    sqlx::query_as(
+        "SELECT conname::text, confdeltype::text FROM pg_constraint \
+         WHERE conrelid = to_regclass($1) AND contype = 'f' ORDER BY conname",
+    )
+    .bind(table)
+    .fetch_all(pool)
+    .await
+    .unwrap()
+}
+
+async fn column_type(pool: &PgPool, table: &str, column: &str) -> String {
+    sqlx::query_scalar(
+        "SELECT format_type(atttypid, atttypmod) FROM pg_attribute \
+         WHERE attrelid = to_regclass($1) AND attname = $2",
+    )
+    .bind(table)
+    .bind(column)
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
+#[tokio::test]
+async fn the_first_migration_takes_over_the_tables_of_the_typescript_version() {
+    let db = typescript_database().await;
+    let project = TempProject::new();
+    let models = models_of_the_drizzle_tables();
+
+    // The project has no migration yet: everything is generated as for a new one.
+    generate_migrations(project.path(), &[], false, &models).unwrap();
+    migrate_schema(&db.pool, project.path()).await.unwrap();
+
+    // One foreign key, under the name of the model, instead of a second one.
+    assert_eq!(
+        foreign_keys(&db.pool, "widgets").await,
+        [("widgets_review_id_fkey".to_string(), "c".to_string())]
+    );
+    // The indexes of Drizzle under the names of the models, and no other.
+    assert_eq!(
+        indexes(&db.pool, "widgets").await,
+        ["widgets_pkey", "widgets_review_id_idx", "widgets_shop_sku_unique"]
+    );
+    assert_eq!(column_type(&db.pool, "widgets", "meta").await, "jsonb");
+    let (sku, meta): (String, serde_json::Value) = sqlx::query_as("SELECT sku, meta FROM widgets")
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!((sku.as_str(), meta), ("SKU1", serde_json::json!({ "a": 1 })));
+    // The defaults are those of the model.
+    let default: Option<String> = sqlx::query_scalar(
+        "SELECT column_default FROM information_schema.columns \
+         WHERE table_schema = current_schema() AND table_name = 'widgets' AND column_name = 'meta'",
+    )
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(default.as_deref(), Some("'{}'::jsonb"));
+
+    // The database matches the snapshot: nothing is left to generate, and
+    // deleting a review still cascades.
+    check_migrations(project.path(), &models).unwrap();
+    assert!(status(&db, &project).await.pending.is_empty());
+    sqlx::query("DELETE FROM reviews").execute(&db.pool).await.unwrap();
+    let (left,): (i64,) = sqlx::query_as("SELECT count(*) FROM widgets")
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(left, 0);
+    db.cleanup().await.unwrap();
+}
+
+#[tokio::test]
+async fn the_takeover_does_nothing_on_an_empty_database() {
+    let db = empty_database().await;
+    let project = TempProject::new();
+    let models = models_of_the_drizzle_tables();
+
+    generate_migrations(project.path(), &[], false, &models).unwrap();
+    migrate_schema(&db.pool, project.path()).await.unwrap();
+
+    assert_eq!(
+        foreign_keys(&db.pool, "widgets").await,
+        [("widgets_review_id_fkey".to_string(), "c".to_string())]
+    );
+    assert_eq!(
+        indexes(&db.pool, "widgets").await,
+        ["widgets_pkey", "widgets_review_id_idx", "widgets_shop_sku_unique"]
+    );
+    assert_eq!(column_type(&db.pool, "widgets", "meta").await, "jsonb");
+    db.cleanup().await.unwrap();
+}
+
+#[tokio::test]
+async fn the_takeover_replaces_a_foreign_key_with_another_action() {
+    let db = typescript_database().await;
+    sqlx::raw_sql(
+        "ALTER TABLE widgets DROP CONSTRAINT widgets_review_id_reviews_id_fk;\n\
+         ALTER TABLE widgets ADD CONSTRAINT widgets_review_id_reviews_id_fk \
+           FOREIGN KEY (review_id) REFERENCES reviews(id) ON DELETE set null;",
+    )
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    let project = TempProject::new();
+
+    generate_migrations(project.path(), &[], false, &models_of_the_drizzle_tables()).unwrap();
+    migrate_schema(&db.pool, project.path()).await.unwrap();
+
+    // The model says cascade: the constraint of Drizzle is gone, the model's is there.
+    assert_eq!(
+        foreign_keys(&db.pool, "widgets").await,
+        [("widgets_review_id_fkey".to_string(), "c".to_string())]
+    );
+    db.cleanup().await.unwrap();
+}
+
+#[tokio::test]
+async fn the_takeover_refuses_a_column_of_another_type() {
+    let db = typescript_database().await;
+    let project = TempProject::new();
+    let mut models = models_of_the_drizzle_tables();
+    models[0] = Table::new("reviews")
+        .with_column(ColumnDef::id())
+        .with_column(ColumnDef::shop())
+        .with_column(ColumnDef::created_at())
+        .with_column(ColumnDef::updated_at())
+        .with_column(ColumnDef::new("rating", "text"))
+        .with_column(ColumnDef::new("approved", "boolean").nullable(true).default("false"));
+
+    generate_migrations(project.path(), &[], false, &models).unwrap();
+    let error = format!("{:#}", migrate_schema(&db.pool, project.path()).await.unwrap_err());
+    assert!(
+        error.contains("[openshop] Column reviews.rating is integer in the database and text in the model."),
+        "{error}"
+    );
+    // The migration was rolled back: the rows and their types are as they were.
+    assert_eq!(column_type(&db.pool, "reviews", "rating").await, "integer");
+    assert_eq!(foreign_keys(&db.pool, "widgets").await.len(), 1);
+    db.cleanup().await.unwrap();
+}
+
+#[tokio::test]
+async fn the_takeover_refuses_a_required_column_the_model_lacks() {
+    let db = typescript_database().await;
+    sqlx::raw_sql("ALTER TABLE reviews ADD COLUMN author text NOT NULL DEFAULT 'x'; ALTER TABLE reviews ALTER COLUMN author DROP DEFAULT;")
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    let project = TempProject::new();
+
+    generate_migrations(project.path(), &[], false, &models_of_the_drizzle_tables()).unwrap();
+    let error = format!("{:#}", migrate_schema(&db.pool, project.path()).await.unwrap_err());
+    assert!(
+        error.contains("[openshop] reviews has NOT NULL columns without default that the model does not have: author."),
+        "{error}"
+    );
     db.cleanup().await.unwrap();
 }

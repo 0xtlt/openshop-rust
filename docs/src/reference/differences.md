@@ -226,6 +226,10 @@ larger configurations easier to split:
 
 - Migrations are SQL files in `./migrations`, applied in file-name order and
   recorded in the `__openshop_migrations` table. There is no Drizzle journal.
+- The first migration generated for a model takes over a table that Drizzle
+  created: it adds what is missing, converts `json` to `jsonb`, and renames the
+  indexes and foreign keys of Drizzle to the names of the model. See
+  [Switch from the TypeScript version](../guides/switch-from-typescript.md).
 - A model is a struct with `#[derive(Model)]` instead of a Drizzle table. Its
   typed rows cover insertion, lookup, filters on columns, ordering, update and
   deletion, limited to a shop; there is no general query builder, and other

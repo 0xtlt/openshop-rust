@@ -455,6 +455,61 @@ async fn fire_on_schedule(app: &OpenShop, entry: &Cron, tick_key: &str, schedule
     }
 }
 
+/// The flows that unfinished runs wait for and `is_registered` does not know.
+async fn unregistered_flows(db: &sqlx::PgPool, is_registered: impl Fn(&str) -> bool) -> sqlx::Result<Vec<String>> {
+    let names: Vec<String> = sqlx::query_scalar(
+        "SELECT DISTINCT flow_name FROM flow_runs WHERE status IN ('pending', 'sleeping', 'running') ORDER BY flow_name",
+    )
+    .fetch_all(db)
+    .await?;
+    Ok(names.into_iter().filter(|name| !is_registered(name)).collect())
+}
+
+/// Says which waiting runs name a flow the application does not register: a
+/// worker fails them as soon as it claims them. It happens when a flow is renamed, or comes from the TypeScript
+/// version under another name.
+async fn warn_about_unregistered_flows(app: &OpenShop) {
+    let flows = &app.config().flows;
+    match unregistered_flows(app.db(), |name| flows.contains_key(name)).await {
+        Ok(unknown) if unknown.is_empty() => {}
+        Ok(unknown) => logger::warn(format!(
+            "[openshop] Runs are waiting for flows this application does not register: {}. \
+             A worker fails them when it claims them. If a flow was renamed, give it its previous name with `#[flow(\"…\")]`.",
+            unknown.iter().map(|name| format!("\"{name}\"")).collect::<Vec<_>>().join(", ")
+        )),
+        Err(error) => logger::warn(format!(
+            "[openshop] Could not check the flows of the waiting runs: {error}"
+        )),
+    }
+}
+
+/// The crons disabled for a shop whose key no cron in `keys` has.
+async fn orphaned_overrides(db: &sqlx::PgPool, keys: &[String]) -> sqlx::Result<Vec<String>> {
+    let disabled: Vec<String> =
+        sqlx::query_scalar("SELECT DISTINCT cron_key FROM cron_overrides WHERE NOT enabled ORDER BY cron_key")
+            .fetch_all(db)
+            .await?;
+    Ok(disabled.into_iter().filter(|key| !keys.contains(key)).collect())
+}
+
+/// Says which crons a shop disabled no longer match a cron of the
+/// application. A cron is known by its flow and its schedule: when either
+/// changes, as when a cron is ported from the TypeScript version with another
+/// spelling, the shops that disabled it run it again.
+async fn warn_about_orphaned_overrides(app: &OpenShop) {
+    let keys: Vec<String> = app.config().crons.iter().map(Cron::key).collect();
+    match orphaned_overrides(app.db(), &keys).await {
+        Ok(orphaned) if orphaned.is_empty() => {}
+        Ok(orphaned) => logger::warn(format!(
+            "[openshop] Some shops disabled crons that no longer exist: {}. \
+             A cron is known by `flow:schedule`: if one of them was changed, the shops that disabled it run it again. \
+             Write its schedule as it was to keep them disabled.",
+            orphaned.iter().map(|key| format!("\"{key}\"")).collect::<Vec<_>>().join(", ")
+        )),
+        Err(error) => logger::warn(format!("[openshop] Could not check the disabled crons: {error}")),
+    }
+}
+
 /// Running cron jobs. Dropping the scheduler stops them.
 pub struct Scheduler {
     jobs: Vec<JoinHandle<()>>,
@@ -490,6 +545,14 @@ impl Scheduler {
             ));
         }
 
+        let check = app.clone();
+        // What an earlier version, or a rename, left in the database. Not one
+        // of the jobs: it ends once it has looked.
+        tokio::spawn(async move {
+            warn_about_unregistered_flows(&check).await;
+            warn_about_orphaned_overrides(&check).await;
+        });
+
         Ok(Self { jobs })
     }
 
@@ -518,6 +581,42 @@ mod tests {
     use crate::testing::{MockTransport, TestDb};
     use crate::{Concurrency, OpenShopConfig};
     use serde_json::json;
+
+    #[tokio::test]
+    async fn names_the_flows_of_waiting_runs_that_are_not_registered() {
+        let db = TestDb::create().await.unwrap();
+        sqlx::raw_sql(
+            "INSERT INTO flow_runs (shop, flow_name, status) VALUES \
+               ('s', 'syncOrders', 'pending'), ('s', 'sync-orders', 'pending'), ('s', 'oldSleep', 'sleeping'), \
+               ('s', 'oldRunning', 'running'), ('s', 'oldDone', 'completed'), ('s', 'oldFailed', 'failed')",
+        )
+        .execute(&db.pool)
+        .await
+        .unwrap();
+
+        let unknown = unregistered_flows(&db.pool, |name| name == "syncOrders").await.unwrap();
+
+        // Finished runs are history: only those a worker would claim count.
+        assert_eq!(unknown, ["oldRunning", "oldSleep", "sync-orders"]);
+        db.cleanup().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn names_the_disabled_crons_that_no_longer_exist() {
+        let db = TestDb::create().await.unwrap();
+        sqlx::raw_sql(
+            "INSERT INTO cron_overrides (shop, cron_key, enabled) VALUES \
+               ('a', 'sync:*/5 * * * *', false), ('b', 'sync:0 * * * *', false), ('a', 'gone:0 * * * *', true)",
+        )
+        .execute(&db.pool)
+        .await
+        .unwrap();
+
+        let keys = [Cron::new("*/5 * * * *", "sync").key()];
+        // An enabled override changes nothing, so it is not worth a warning.
+        assert_eq!(orphaned_overrides(&db.pool, &keys).await.unwrap(), ["sync:0 * * * *"]);
+        db.cleanup().await.unwrap();
+    }
 
     #[test]
     fn accepts_five_and_six_field_schedules_and_nicknames() {
