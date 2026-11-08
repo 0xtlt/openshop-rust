@@ -39,6 +39,7 @@ framework and its tests and can change without notice.
 | `openshop::db` | `connect`, `connect_to`, `pool_options`, models, and the `migrate` functions | [Database](database.md) |
 | `openshop::engine` | `Worker`, `Scheduler`, `run_flow`, `cancel_run`, `StepExecutor`, default policies, `SleepSignal`, and `LeaseLostError` | [Flows](flows.md), [Errors](errors.md) |
 | `openshop::admin` | Server side of experimental custom admin pages | [Custom admin pages](custom-admin-pages.md) |
+| `openshop::billing` | The subscriptions of a shop to the app with Shopify's managed pricing, the plan guard of an admin page, the pricing page, and the `app_subscriptions/update` payload | [Billing](billing.md) |
 | `openshop::response` | Helpers and re-exports for building HTTP responses | [Public server routes](server-routes.md) |
 | `openshop::server` | `router`, `listen`, and `serve`, to embed the HTTP server | [Server, worker, and scheduler](#server-worker-and-scheduler) |
 | `openshop::validators` | Ready-made field validators | [Providers](providers.md#validators) |
@@ -66,7 +67,7 @@ an application use:
 | Errors | `Result`, `Context`, `anyhow!`, `bail!`, and `InvalidInput`, which a proxy or a route answers with `422` |
 | Types | `Value`, `Uuid`, `Liquid`, `RouteAuthOutcome`, `McpPermission`, `McpRiskLevel`, `RunOutcome`, `QueuedRun` |
 | Macros | `graphql!`, `liquid!`, `json!` |
-| Modules | `validators`, `response` |
+| Modules | `validators`, `response`, and the `tracing` crate |
 
 `#[openshop::test]` is not part of it:
 its name would hide `#[test]`, so it is written with its path. The samples of
@@ -96,6 +97,7 @@ app does not need to depend on them directly:
 | `Uuid` | `uuid` |
 | `CancellationToken` | `tokio_util` |
 | `chrono` | `chrono` |
+| `tracing` | `tracing`, which the runtime logger forwards to; see [Logging](logging.md#tracing) |
 | `serde` | `serde` |
 | `JsonSchema`, `schemars` | `schemars` |
 | `sentry` | The Sentry SDK (feature `sentry`); see [Report from your own code](sentry.md#report-from-your-own-code) |
@@ -297,7 +299,9 @@ pub async fn orders_create(ctx: WebhookContext) -> Result<()> {
 `ctx` is any context that belongs to a shop: the context of a flow, of a
 webhook, of an app proxy, of an admin function, of an MCP tool or resource, or
 what `ctx.for_shop(…)` returns in a server route. These implement the
-`ShopScope` trait. The second argument is the input type of the flow, which
+`ShopScope` trait, which also gives `ctx.app_handle()`, the handle of the app
+on Shopify, and `ctx.admin_url(path)`, a page of the admin of the shop (see
+[Billing](billing.md#the-pricing-page-and-the-pages-of-the-admin)). The second argument is the input type of the flow, which
 implements `Serialize`; [`#[input]`](flows.md#input) derives it. A flow without
 input takes the context alone: `nightly_cleanup::dispatch(&ctx)`.
 
@@ -391,6 +395,7 @@ async fn product_title(ctx: &WebhookContext, id: &str) -> Result<Option<String>>
 | `client.graphql(query, variables)` | `variables`: anything that serializes to an object, or `()` for none. Returns Shopify's `data` object as a `Value`. |
 | `client.execute(graphql!(…))` | An operation checked against Shopify's schema at compile time, with typed variables and a typed result. See [Typed GraphQL](graphql.md). |
 | `client.api().await?` | The `shopify_api::Shopify` client of the shop: `paginate`, bulk operations, webhook subscriptions, `execute_response`. |
+| `client.active_subscriptions().await?` | The active subscriptions of the shop to the app, `currentAppInstallation.activeSubscriptions`. See [Billing](billing.md). |
 | `client.shop`, `client.shopify_app` | Public fields. |
 
 `graphql()`:
