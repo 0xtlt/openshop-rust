@@ -69,6 +69,9 @@ pub struct Change {
     /// Whether applying the statement loses data the database holds:
     /// `migrate generate` refuses it without `--allow-destructive`.
     pub destructive: bool,
+    /// Whether the statement is named in messages. The block that takes over an
+    /// existing table is not: its `CREATE TABLE` is.
+    pub listed: bool,
 }
 
 impl Change {
@@ -77,6 +80,7 @@ impl Change {
             sql: sql.into(),
             warning: None,
             destructive: false,
+            listed: true,
         }
     }
 
@@ -85,6 +89,7 @@ impl Change {
             sql: sql.into(),
             warning: Some(warning.into()),
             destructive: false,
+            listed: true,
         }
     }
 
@@ -93,6 +98,14 @@ impl Change {
             sql: sql.into(),
             warning: Some(warning.into()),
             destructive: true,
+            listed: true,
+        }
+    }
+
+    fn unlisted(sql: impl Into<String>) -> Self {
+        Self {
+            listed: false,
+            ..Self::new(sql)
         }
     }
 
@@ -121,7 +134,11 @@ pub fn render(changes: &[Change]) -> String {
 
 /// A short description of each change, for messages.
 pub fn summarize(changes: &[Change]) -> Vec<String> {
-    changes.iter().map(|change| change.summary().to_string()).collect()
+    changes
+        .iter()
+        .filter(|change| change.listed)
+        .map(|change| change.summary().to_string())
+        .collect()
 }
 
 /// What each change that loses data does, for messages.
@@ -465,13 +482,16 @@ pub fn diff(previous: &SchemaSnapshot, models: &[Table]) -> Vec<Change> {
     let mut added_foreign_keys = Vec::new();
     for (model, before) in &matched {
         let Some(before) = before else {
+            // A table the snapshot does not know may still exist, created by
+            // another tool such as the TypeScript version of OpenShop: it is
+            // brought to the model first, then what it lacks is created.
+            changes.push(Change::unlisted(model.adopt_sql()));
             changes.push(Change::new(model.create_sql()));
-            // A new table has no row that could break its foreign keys.
             added_foreign_keys.extend(
                 model
                     .foreign_keys()
                     .iter()
-                    .map(|foreign_key| Change::new(foreign_key.add_sql(&model.table))),
+                    .map(|foreign_key| Change::new(foreign_key.add_if_missing_sql(&model.table))),
             );
             continue;
         };
@@ -559,7 +579,12 @@ mod tests {
         let votes = conventional("review_votes").with_column(ColumnDef::new("value", "integer"));
         assert_eq!(
             sql(&[reviews()], &[reviews(), votes.clone()]),
-            format!("{}\n", votes.create_sql())
+            format!("{}\n\n{}\n", votes.adopt_sql(), votes.create_sql())
+        );
+        // The block that takes over an existing table is not named in messages.
+        assert_eq!(
+            summarize(&diff(&SchemaSnapshot::of(&[reviews()]), &[reviews(), votes.clone()])),
+            ["CREATE TABLE IF NOT EXISTS \"review_votes\""]
         );
         assert_eq!(
             sql(&[reviews(), votes], &[reviews()]),

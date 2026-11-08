@@ -110,6 +110,63 @@ impl ColumnDef {
     pub fn add_sql(&self, table: &str) -> String {
         format!("ALTER TABLE {} {};", quote(table), self.add_clause())
     }
+
+    /// The part of [`Table::adopt_sql`] that brings an existing column to
+    /// this definition: added when missing, converted between `json` and
+    /// `jsonb`, given its default and its nullability. Another type fails.
+    fn adopt_sql(&self, table: &str) -> String {
+        let target = quote(table);
+        let column = quote(&self.name);
+        let alter = format!("ALTER TABLE {target} ALTER COLUMN {column}");
+        let mut sql = format!(
+            "  SELECT format_type(atttypid, atttypmod) INTO existing FROM pg_attribute\n    \
+               WHERE attrelid = {}::regclass AND attname = {} AND attnum > 0 AND NOT attisdropped;\n  \
+             IF existing IS NULL THEN\n    \
+               {}\n  \
+             ELSE\n",
+            literal(&target),
+            literal(&self.name),
+            self.add_sql(table)
+        );
+        let mismatch = format!(
+            "replace(existing, ' ', '') <> {} THEN\n      \
+               RAISE EXCEPTION '[openshop] Column %.% is % in the database and % in the model. \
+             Give the field the type of the database with `sql_type`, or convert the column in a migration of its own.', \
+             {}, {}, existing, {};\n    \
+             END IF;\n",
+            literal(&self.sql_type.replace(' ', "")),
+            literal(table),
+            literal(&self.name),
+            literal(&self.sql_type)
+        );
+        if matches!(self.sql_type.as_str(), "json" | "jsonb") {
+            // Lossless for valid JSON. `jsonb` drops duplicate keys and reorders them.
+            sql.push_str(&format!(
+                "    IF existing IN ('json', 'jsonb') AND existing <> {ty} THEN\n      \
+                   {alter} DROP DEFAULT;\n      \
+                   {alter} TYPE {ty_sql} USING {column}::{ty_sql};\n    \
+                 ELSIF {mismatch}",
+                ty = literal(&self.sql_type),
+                ty_sql = self.sql_type,
+            ));
+        } else {
+            sql.push_str(&format!("    IF {mismatch}"));
+        }
+        match &self.default {
+            Some(default) => sql.push_str(&format!("    {alter} SET DEFAULT {default};\n")),
+            None => sql.push_str(&format!("    {alter} DROP DEFAULT;\n")),
+        }
+        sql.push_str(&format!(
+            "    {alter} {} NOT NULL;\n  END IF;\n",
+            if self.nullable { "DROP" } else { "SET" }
+        ));
+        sql
+    }
+}
+
+/// A SQL string literal.
+fn literal(text: &str) -> String {
+    format!("'{}'", text.replace('\'', "''"))
 }
 
 /// An index of an application table.
@@ -137,6 +194,34 @@ impl IndexDef {
     /// `DROP INDEX IF EXISTS …;`
     pub fn drop_sql(&self) -> String {
         format!("DROP INDEX IF EXISTS {};", quote(&self.name))
+    }
+
+    /// The part of [`Table::adopt_sql`] that gives this name to an index of
+    /// the table on the same columns, when the table has none by this name.
+    fn adopt_sql(&self, table: &str) -> String {
+        let columns: Vec<String> = self.columns.iter().map(|column| literal(column)).collect();
+        format!(
+            "  IF to_regclass({name}) IS NULL THEN\n    \
+               SELECT i.indexrelid::regclass::text INTO existing FROM pg_index i\n      \
+                 JOIN pg_class c ON c.oid = i.indexrelid\n      \
+                 JOIN pg_am am ON am.oid = c.relam AND am.amname = 'btree'\n      \
+                 WHERE i.indrelid = {table}::regclass AND NOT i.indisprimary AND i.indisunique = {unique}\n        \
+                   AND i.indexprs IS NULL AND i.indpred IS NULL AND i.indnkeyatts = i.indnatts\n        \
+                   AND ARRAY(\n          \
+                     SELECT a.attname::text FROM unnest(i.indkey::int2[]) WITH ORDINALITY AS k(attnum, ord)\n          \
+                     JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = k.attnum ORDER BY k.ord\n        \
+                   ) = ARRAY[{columns}]::text[]\n      \
+                 ORDER BY c.relname LIMIT 1;\n    \
+               IF existing IS NOT NULL THEN\n      \
+                 EXECUTE format('ALTER INDEX %s RENAME TO %I', existing, {plain});\n    \
+               END IF;\n  \
+             END IF;\n",
+            name = literal(&quote(&self.name)),
+            table = literal(&quote(table)),
+            unique = self.unique,
+            columns = columns.join(", "),
+            plain = literal(&self.name),
+        )
     }
 }
 
@@ -222,6 +307,51 @@ impl ForeignKeyDef {
             name.replace('\'', "''"),
             quote(table).replace('\'', "''"),
             self.add_sql(table)
+        )
+    }
+
+    /// `pg_constraint.confdeltype` of the `on_delete` action.
+    fn delete_code(&self) -> char {
+        match self.on_delete.as_deref() {
+            Some("CASCADE") => 'c',
+            Some("RESTRICT") => 'r',
+            Some("SET NULL") => 'n',
+            Some("SET DEFAULT") => 'd',
+            _ => 'a',
+        }
+    }
+
+    /// The part of [`Table::adopt_sql`] that leaves the column with this
+    /// constraint alone: the other foreign keys of the column are renamed to
+    /// its name when they are the same constraint, dropped otherwise.
+    fn adopt_sql(&self, table: &str) -> String {
+        let target = literal(&quote(table));
+        let referenced = literal(&quote(&self.table));
+        let name = literal(&self.name(table));
+        format!(
+            "  matched := EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = {target}::regclass AND conname = {name});\n  \
+             FOR existing IN\n    \
+               SELECT conname::text FROM pg_constraint\n    \
+               WHERE conrelid = {target}::regclass AND contype = 'f' AND conname <> {name}\n      \
+                 AND conkey = ARRAY[(SELECT attnum FROM pg_attribute WHERE attrelid = {target}::regclass AND attname = {column})]\n    \
+               ORDER BY conname\n  \
+             LOOP\n    \
+               IF NOT matched AND EXISTS (\n      \
+                 SELECT 1 FROM pg_constraint\n      \
+                 WHERE conrelid = {target}::regclass AND conname = existing\n        \
+                   AND confrelid = to_regclass({referenced})\n        \
+                   AND confkey = ARRAY[(SELECT attnum FROM pg_attribute WHERE attrelid = to_regclass({referenced}) AND attname = {references})]\n        \
+                   AND confdeltype = '{delete}' AND confupdtype = 'a' AND confmatchtype = 's'\n    \
+               ) THEN\n      \
+                 EXECUTE format('ALTER TABLE %s RENAME CONSTRAINT %I TO %I', {target}, existing, {name});\n      \
+                 matched := true;\n    \
+               ELSE\n      \
+                 EXECUTE format('ALTER TABLE %s DROP CONSTRAINT %I', {target}, existing);\n    \
+               END IF;\n  \
+             END LOOP;\n",
+            column = literal(&self.column),
+            references = literal(&self.references),
+            delete = self.delete_code(),
         )
     }
 }
@@ -326,6 +456,66 @@ impl Table {
             "CREATE TABLE IF NOT EXISTS {} (\n{}\n);",
             quote(&self.table),
             columns.join(",\n")
+        )
+    }
+
+    /// A block that brings the table to the model when it already exists,
+    /// and does nothing otherwise. It is how a migration takes over a table
+    /// that another tool created, such as the TypeScript version of OpenShop
+    /// with Drizzle:
+    ///
+    /// - missing columns are added, and existing ones get the default and the
+    ///   nullability of the model; `json` and `jsonb` are converted into each
+    ///   other, and any other difference of type fails the migration;
+    /// - a `NOT NULL` column without default that the model lacks fails it too,
+    ///   since every insertion would;
+    /// - an index on the same columns, or a foreign key with the same target
+    ///   and the same `ON DELETE`, is renamed to the name of the model instead
+    ///   of being created a second time. Other foreign keys of a referencing
+    ///   column are dropped.
+    ///
+    /// It runs before [`Table::create_sql`], whose statements then find what
+    /// they would create.
+    pub fn adopt_sql(&self) -> String {
+        let target = literal(&quote(&self.table));
+        let mut body = String::new();
+        for column in &self.columns {
+            body.push_str(&column.adopt_sql(&self.table));
+        }
+        let known: Vec<String> = self.columns.iter().map(|column| literal(&column.name)).collect();
+        body.push_str(&format!(
+            "  SELECT string_agg(quote_ident(attname), ', ' ORDER BY attnum) INTO existing FROM pg_attribute\n    \
+               WHERE attrelid = {target}::regclass AND attnum > 0 AND NOT attisdropped AND attnotnull\n      \
+                 AND NOT atthasdef AND attidentity = '' AND attgenerated = ''\n      \
+                 AND attname NOT IN ({});\n  \
+             IF existing IS NOT NULL THEN\n    \
+               RAISE EXCEPTION '[openshop] % has NOT NULL columns without default that the model does not have: %. \
+             Add them to the model, or drop them in a migration of their own.', {}, existing;\n  \
+             END IF;\n",
+            known.join(", "),
+            literal(&self.table)
+        ));
+        for index in &self.indexes {
+            body.push_str(&index.adopt_sql(&self.table));
+        }
+        for foreign_key in &self.foreign_keys {
+            body.push_str(&foreign_key.adopt_sql(&self.table));
+        }
+        format!(
+            "-- When {} already exists, such as a table created by the TypeScript version of OpenShop,\n\
+             -- this brings it to the model; otherwise it does nothing.\n\
+             DO $openshop$\n\
+             DECLARE\n  \
+               existing text;\n  \
+               matched boolean;\n\
+             BEGIN\n  \
+               IF to_regclass({target}) IS NULL THEN\n    \
+                 RETURN;\n  \
+               END IF;\n\
+             {body}\
+             END\n\
+             $openshop$;",
+            quote(&self.table)
         )
     }
 
