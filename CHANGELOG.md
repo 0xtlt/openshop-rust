@@ -2,24 +2,33 @@
 
 ## Unreleased
 
-- `LSF_URL` runs an app against [local-storefront](https://github.com/0xtlt/local-storefront),
-  a local fake of Shopify, instead of Shopify. It is for development and tests
-  only (`dev`, `start` and `worker`, and `TestOptions::lsf_url`). Set to
-  `http://localhost:9292`, it sends the Admin API, the token exchange, OAuth and
-  the client credentials grant of every shop to lsf, through `shopify_api`'s new
-  `admin_origin`. It also sends the `/auth` and `/auth/callback` redirects to
-  lsf. The admin UI loads lsf's App Bridge before Shopify's tag, so that session
-  tokens work in lsf's admin, and loads Polaris through lsf. The
-  `frame-ancestors` of the admin UI, and the policy of the page that says where
-  the app opens from, allow lsf's origin. `LSF_URL` must be an `https://` URL,
-  or an `http://` URL to `localhost`, `127.0.0.1` or `[::1]`. The process logs a
-  warning when it is set. When it is unset, nothing changes. See
-  `docs/src/guides/local-storefront.md`.
-- `openshop init` copies the `[patch]` of the workspace into the projects it
-  makes, as it does the profiles: a project builds `openshop` with the same
-  crates.
-- `shopify_api` comes from a commit of its repository (`[patch.crates-io]`)
-  until its release with `admin_origin` is published.
+- `ShopifyEndpoints` says where an app reaches Shopify, for a simulator of
+  Shopify such as [local-storefront](https://github.com/0xtlt/local-storefront),
+  a proxy or an API of your own. Each field is independent, and none set is
+  Shopify, as before:
+  - `admin_origin` sends the Admin API, the token exchange, the code exchange,
+    the client credentials grant and the refresh of every shop there, in place
+    of `https://{shop}`, through `shopify_api`'s `admin_origin`. The `/auth`
+    install link goes there too, `/auth/callback` sends the browser back to
+    `{admin_origin}/admin/apps/{client_id}?shop={shop}`, and the admin UI may
+    be framed by that origin.
+  - `app_bridge` replaces Shopify's App Bridge script in the admin UI. The tag
+    keeps its `data-api-key`.
+  - `polaris` replaces Shopify's Polaris script in the admin UI and in the page
+    that says where the app opens from. That page's policy allows the script's
+    origin where Polaris loads from.
+
+  They are set in `app!` (`shopify_endpoints: …`, a setting of its own that
+  does not turn on multi-app mode), at startup with the new `APP.main_with` /
+  `APP.run_with`, which hand the builder of the declaration to a closure, or by
+  `SHOPIFY_ADMIN_ORIGIN`, `SHOPIFY_APP_BRIDGE_URL` and `SHOPIFY_POLARIS_URL`
+  for a field the code does not set. `dev`, `start` and `worker` use them, and
+  log one line at startup that names the endpoints that are not Shopify's. An
+  origin or a script that is not `https://`, or `http://` to `localhost`,
+  `127.0.0.1` or `[::1]`, stops the app at startup. `TestOptions` has
+  `shopify_endpoints`, and `OpenShop::shopify_endpoints()` returns the ones in
+  use. See `docs/src/guides/custom-shopify-endpoints.md`.
+- `shopify_api` 1.0.0-rc.4, which has `admin_origin`.
 
 - Dependencies up to date: sqlx 0.9, reqwest 0.13 and gloo-timers 0.4, with
   Rust 1.99.1 and trunk 0.22.1 in `mise.toml`, CI and the generated

@@ -36,13 +36,12 @@ a worker and the cron scheduler on `http://localhost:3000`. It restarts when
 sources change, and the admin UI reloads by itself. Run it through
 `shopify app dev` to open the app in a store.
 
-To work without a development store, run the app against
-[local-storefront](https://github.com/0xtlt/local-storefront), a local fake of
-Shopify: start `lsf app dev --app . --app-url http://localhost:3000`, then run
-`LSF_URL=http://localhost:9292 openshop dev`. The Admin API, OAuth and the
-webhooks then come from lsf, and the app opens in lsf's admin at
-`http://localhost:9292/admin/apps/<handle>`. See
-[Run against local-storefront](docs/src/guides/local-storefront.md).
+To work without a development store, run the app against a simulator of
+Shopify such as [local-storefront](https://github.com/0xtlt/local-storefront):
+its `ShopifyEndpoints` send the Admin API and OAuth there, and make the admin
+UI load the simulator's App Bridge and Polaris. A proxy or an API of your own
+works the same way. See
+[Custom Shopify endpoints](docs/src/guides/custom-shopify-endpoints.md).
 
 ## What an application looks like
 

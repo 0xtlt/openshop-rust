@@ -23,7 +23,9 @@ afterwards has no effect on a running process.
 | `NODE_ENV` | No | — | `production` is honored like `OPENSHOP_ENV=production`. It never allows plaintext secrets: only `OPENSHOP_ENV` does |
 | `PORT` | No | `3000` | HTTP port of `dev` and `start` |
 | `OPENSHOP_UI_DIR` | No | The bundle set with the `admin_ui` setting of `app!`, then the embedded admin UI | Directory of a custom admin UI bundle served by `dev` and `start` |
-| `LSF_URL` | No, development and tests only | Unset: Shopify | The address of [local-storefront](../guides/local-storefront.md), a local fake of Shopify, such as `http://localhost:9292`, for `dev`, `start` and `worker`. When it is set, the Admin API, OAuth and the token exchange of every shop go to it, and the admin UI loads App Bridge and Polaris from it |
+| `SHOPIFY_ADMIN_ORIGIN` | No | Unset: `https://{shop}` | Where the Admin API, OAuth and the token requests of every shop go, when the code sets no `admin_origin` [endpoint](../guides/custom-shopify-endpoints.md): a simulator, a proxy or an API of your own, such as `http://localhost:9393` |
+| `SHOPIFY_APP_BRIDGE_URL` | No | Unset: Shopify's CDN | The App Bridge script of the admin UI, when the code sets no `app_bridge` [endpoint](../guides/custom-shopify-endpoints.md) |
+| `SHOPIFY_POLARIS_URL` | No | Unset: Shopify's CDN | The Polaris script of the admin UI and of the page that says where the app opens from, when the code sets no `polaris` [endpoint](../guides/custom-shopify-endpoints.md) |
 | `PGPOOL_MAX` | No | `10` | Maximum PostgreSQL pool connections per process |
 | `PGPOOL_IDLE_TIMEOUT_MS` | No | `30000` | Idle PostgreSQL connection timeout |
 | `PGPOOL_CONNECTION_TIMEOUT_MS` | No | `5000` | PostgreSQL connection acquisition timeout |
@@ -33,11 +35,17 @@ afterwards has no effect on a running process.
 Notes:
 
 - An empty value counts as unset for `SHOPIFY_API_KEY`, `SHOPIFY_API_SECRET`,
-  `HOST`, `SHOPIFY_APP_URL`, `ENCRYPTION_KEY`, `OPENSHOP_UI_DIR`, and `LSF_URL`.
-- `LSF_URL` must be an `https://` URL, or an `http://` URL to `localhost`,
-  `127.0.0.1` or `[::1]`, with no path, query string or user. Any other value
-  stops the command at startup. When it is set, the command logs a warning at
-  startup. See [Run against local-storefront](../guides/local-storefront.md).
+  `HOST`, `SHOPIFY_APP_URL`, `ENCRYPTION_KEY`, `OPENSHOP_UI_DIR`,
+  `SHOPIFY_ADMIN_ORIGIN`, `SHOPIFY_APP_BRIDGE_URL`, and `SHOPIFY_POLARIS_URL`.
+- `SHOPIFY_ADMIN_ORIGIN`, `SHOPIFY_APP_BRIDGE_URL` and `SHOPIFY_POLARIS_URL`
+  are read by `dev`, `start` and `worker`, each for the one field of the
+  `shopify_endpoints` the code does not set: a field set in `app!` or at
+  startup wins over its variable. The origin must be `https://host[:port]`, or
+  `http://` to `localhost`, `127.0.0.1` or `[::1]`, with no path; a script
+  URL is absolute, `https://`, or `http://` to the same hosts. Any other value
+  stops the command at startup. When one of the endpoints is not Shopify's,
+  the command logs a line at startup that names it. See
+  [Custom Shopify endpoints](../guides/custom-shopify-endpoints.md).
 - The templates of `openshop init` also read `OPS_PASSWORD`, `SENTRY_DSN` and
   `SHOPIFY_CLIENT_CREDENTIALS_SHOP` in `src/main.rs` or `src/lib.rs`, and pass
   them to the `ops_password`, `sentry` and `client_credentials_shop` settings

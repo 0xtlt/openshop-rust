@@ -19,7 +19,7 @@
   - [Add a server route](guides/add-server-route.md)
   - [Add a custom admin page](guides/add-admin-page.md)
   - [Test an app](guides/test-app.md)
-  - [Run against local-storefront](guides/local-storefront.md)
+  - [Use custom Shopify endpoints](guides/custom-shopify-endpoints.md)
   - [Manage migrations](guides/manage-migrations.md)
   - [Deploy to production](guides/deploy-production.md)
   - [Operate an OpenShop app](guides/operate-app.md)

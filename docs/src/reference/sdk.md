@@ -255,10 +255,10 @@ carries one as `ctx.app`.
 | Constructor | Behavior |
 | --- | --- |
 | `OpenShop::new(config, db, env)` | Uses an existing `PgPool` and `RuntimeEnv`. |
-| `OpenShop::with_transport(config, db, env, transport)` | Same, with another `shopify_api` `Transport` for every exchange with Shopify, such as `testing::MockTransport`. It must not follow redirections: every call carries a secret, a token or a code, and a `3xx` is returned as the answer, as the default `ReqwestTransport` does. |
+| `OpenShop::with_transport(config, db, env, transport)` | Same, with another `shopify_api` `Transport` for every exchange with Shopify, such as `testing::MockTransport`, or an in-memory simulator of Shopify that answers at the addresses of the [Shopify endpoints](../guides/custom-shopify-endpoints.md). It must not follow redirections: every call carries a secret, a token or a code, and a `3xx` is returned as the answer, as the default `ReqwestTransport` does. |
 
-Both validate the configuration and resolve the Shopify apps, and fail
-when either is invalid. `APP.main()` and `APP.run()` create the handle for
+Both validate the configuration, resolve the Shopify apps and the Shopify
+endpoints, and fail when any is invalid. `APP.main()` and `APP.run()` create the handle for
 you.
 
 | Method | Returns |
@@ -270,6 +270,7 @@ you.
 | `connectors(shop, shopify_app)` | `Connectors`: the providers of the shop, bound to the configuration it saved. The configuration is read at the first call. |
 | `shopify_client(shop, shopify_app)` | `ShopifyClient` of the shop. The access token is read at the first request. |
 | `mcp_registry()` | Core and application MCP permissions, tools, and resources |
+| `shopify_endpoints()` | `&ShopifyEndpoints`: the [Shopify endpoints](../guides/custom-shopify-endpoints.md) in use, each field from the configuration, else from its environment variable, written in full. `None` is Shopify's. |
 
 In a handler, use `ctx.shopify` and `ctx.connectors`: every context that
 belongs to a shop has them. `connectors` and `shopify_client` are for code

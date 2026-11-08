@@ -48,6 +48,7 @@ a value: the binary runs it, a test reads its configuration.
 | --- | --- |
 | `APP.main()` | `Result<()>`. Starts the runtime and runs the command given on the command line: `dev`, `start`, `worker`, or `migrate`. See [CLI commands](cli.md#command-behavior). |
 | `APP.run().await` | `Result<()>`. Runs the command in a binary that has its own runtime. |
+| `APP.main_with(configure)`, `APP.run_with(configure).await` | The same, with settings decided at startup: `configure` takes the builder of the declaration once `.env` is loaded and returns it, with `.shopify_endpoints(…)` for instance. What it sets replaces what the declaration says. See [Builder methods](#builder-methods). |
 | `APP.config()` | `Result<OpenShopConfig>`: the configuration, after [validation](#runtime-validation). |
 | `APP.builder()` | `Result<OpenShopBuilder>`: the builder holding the blocks and settings of the declaration, to add to them. It fails when a setting does. See [Builder methods](#builder-methods). |
 
@@ -108,6 +109,7 @@ can fail with `?`: the error is the one `APP.config()` and `APP.run()` return.
 | `mcp` | `McpConfig`: `McpConfig::disabled()` to turn MCP off, or `McpConfig::new()` with a permission no tool or resource lists (`.permission(…)`) and tools or resources built without an attribute | MCP enabled, with the core capabilities and the permissions the tools and resources of the application list |
 | `admin_menu` | The entries of the admin menu for the pages of the application (`AdminMenuItem::new(label, path)`), as an array or any other iterator, to set another order or other labels than the pages declare | One entry per page that declares `nav = "…"`, in the order of `admin_pages`; see [Custom admin pages](custom-admin-pages.md) |
 | `shopify` | [`ShopifyConfig`](#shopify) | Single app resolved from env and Shopify TOML |
+| `shopify_endpoints` | [`ShopifyEndpoints`](#shopify-endpoints): where the Admin API and OAuth go, and the App Bridge and Polaris the admin UI loads, for a simulator, a proxy or an API of your own | Each field from its environment variable, then Shopify's |
 | `worker` | `WorkerConfig` | See [Worker defaults](#worker-defaults) |
 | `retry_policy` | `RetryPolicy` | See [Retry defaults](#retry-defaults) |
 | `builtin_pages` | [`AdminPagesConfig`](#admin-pages), or `AdminPagesConfig::none()` for an admin made of the pages of the application | Every built-in page of the admin `visible` |
@@ -150,7 +152,15 @@ fn minimal() -> Result<OpenShopConfig> {
 
 A binary runs such a configuration with `openshop::cli::run(extended)`, which
 takes a function returning `Result<OpenShopConfig>`: `dev` loads `.env` before
-it builds the configuration.
+it builds the configuration. To add to the declaration at startup, and have
+`.env` loaded before the runtime starts, `APP.main_with` takes the builder of
+the declaration instead:
+
+```rust,ignore
+fn main() -> Result<()> {
+    APP.main_with(|app| app.shopify_endpoints(ShopifyEndpoints::new().admin_origin("http://localhost:9393")))
+}
+```
 
 | Method | Argument | Default when not called |
 | --- | --- | --- |
@@ -159,6 +169,7 @@ it builds the configuration.
 | `.provider_as(key, provider)` | Key and `Provider` | — |
 | `.flow(flow)` | `Flow`, registered under `flow.name` | No flows |
 | `.shopify(config)` | `ShopifyConfig` | Single app resolved from env and Shopify TOML |
+| `.shopify_endpoints(endpoints)` | [`ShopifyEndpoints`](#shopify-endpoints) | Each field from its environment variable, then Shopify's |
 | `.function(key, definition)` | Key and `Function` | No functions |
 | `.mcp(config)` | `McpConfig` | MCP enabled, with the core capabilities; no custom capabilities |
 | `.mcp_tool(name, definition)` | Tool name and `McpTool` | No custom tools |
@@ -205,6 +216,8 @@ Calling the other methods again:
   earlier value.
 - `.cron(…)`, `.crons(…)`, and `.admin_page(…)` append.
 - `.builtin_pages(…)` and `.builtin_page(…)` merge with earlier calls; later values win.
+- `.shopify_endpoints(…)` merges with earlier calls field by field: a field it
+  sets replaces the earlier one, a field it leaves `None` keeps it.
 - The remaining settings (`.shopify(…)`, `.worker(…)`, `.retry_policy(…)`,
   `.on_error(…)`, `.admin_menu(…)`, `.admin_ui(…)`,
   `.max_request_body_bytes(…)`, `.request_timeout(…)`,
@@ -285,6 +298,27 @@ or a TOML file without `client_id` stops the process at startup.
 
 See [Multi-app configuration](environment-variables.md#multi-app-configuration)
 for how variables you read yourself interact with `.env`.
+
+### Shopify endpoints
+
+`ShopifyEndpoints` says where the application reaches Shopify. Each field is
+independent, and `None` is Shopify's:
+
+| Field | Builder method | Replaces |
+| --- | --- | --- |
+| `admin_origin` | `.admin_origin(origin)` | `https://{shop}`, for the Admin API, the token requests, the install link and the redirect after OAuth (`{origin}/admin/apps/{client_id}?shop={shop}`). The admin UI may also be framed by this origin. |
+| `app_bridge` | `.app_bridge(url)` | `https://cdn.shopify.com/shopifycloud/app-bridge.js` in the admin UI |
+| `polaris` | `.polaris(url)` | `https://cdn.shopify.com/shopifycloud/polaris.js` in the admin UI and the page that says where the app opens from |
+
+`ShopifyEndpoints::new()` is Shopify for every field. Each field comes from a
+call at startup (`APP.main_with`), else from the `shopify_endpoints` of `app!`,
+else from `SHOPIFY_ADMIN_ORIGIN`, `SHOPIFY_APP_BRIDGE_URL` or
+`SHOPIFY_POLARIS_URL`, else is Shopify's. `shopify_endpoints` is its own
+setting: it does not turn on multi-app mode, and every app of a multi-app setup
+uses the same endpoints. `build()` and startup refuse an origin that is not
+`https://host[:port]` or `http://` to `localhost`, `127.0.0.1` or `[::1]`, and
+a script URL that is not absolute `https://` or `http://` to the same hosts.
+See [Custom Shopify endpoints](../guides/custom-shopify-endpoints.md).
 
 ## Split the registration
 
