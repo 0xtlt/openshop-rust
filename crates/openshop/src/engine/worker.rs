@@ -297,6 +297,7 @@ impl Worker {
         *self.inner.wake.lock().await = stop.clone();
         let inner = self.inner.clone();
         *self.inner.loop_handle.lock().await = Some(tokio::spawn(async move {
+            warn_about_unregistered_flows(&inner.app).await;
             tokio::join!(
                 inner.claim_loop(&stop),
                 inner.expire_loop(&stop),
@@ -672,10 +673,58 @@ impl Inner {
     }
 }
 
+/// The flows that unfinished runs wait for and `is_registered` does not know.
+async fn unregistered_flows(db: &sqlx::PgPool, is_registered: impl Fn(&str) -> bool) -> sqlx::Result<Vec<String>> {
+    let names: Vec<String> = sqlx::query_scalar(
+        "SELECT DISTINCT flow_name FROM flow_runs WHERE status IN ('pending', 'sleeping', 'running') ORDER BY flow_name",
+    )
+    .fetch_all(db)
+    .await?;
+    Ok(names.into_iter().filter(|name| !is_registered(name)).collect())
+}
+
+/// Says, before the first claim, which waiting runs name a flow the
+/// application does not register: the worker fails them as soon as it claims
+/// them. It happens when a flow is renamed, or comes from the TypeScript
+/// version under another name.
+async fn warn_about_unregistered_flows(app: &OpenShop) {
+    let flows = &app.config().flows;
+    match unregistered_flows(app.db(), |name| flows.contains_key(name)).await {
+        Ok(unknown) if unknown.is_empty() => {}
+        Ok(unknown) => logger::warn(format!(
+            "[openshop] Runs are waiting for flows this application does not register: {}. \
+             A worker fails them when it claims them. If a flow was renamed, give it its previous name with `#[flow(\"…\")]`.",
+            unknown.iter().map(|name| format!("\"{name}\"")).collect::<Vec<_>>().join(", ")
+        )),
+        Err(error) => logger::warn(format!(
+            "[openshop] Could not check the flows of the waiting runs: {error}"
+        )),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::testing::TestDb;
+
+    #[tokio::test]
+    async fn names_the_flows_of_waiting_runs_that_are_not_registered() {
+        let db = TestDb::create().await.unwrap();
+        sqlx::raw_sql(
+            "INSERT INTO flow_runs (shop, flow_name, status) VALUES \
+               ('s', 'syncOrders', 'pending'), ('s', 'sync-orders', 'pending'), ('s', 'oldSleep', 'sleeping'), \
+               ('s', 'oldRunning', 'running'), ('s', 'oldDone', 'completed'), ('s', 'oldFailed', 'failed')",
+        )
+        .execute(&db.pool)
+        .await
+        .unwrap();
+
+        let unknown = unregistered_flows(&db.pool, |name| name == "syncOrders").await.unwrap();
+
+        // Finished runs are history: only those a worker would claim count.
+        assert_eq!(unknown, ["oldRunning", "oldSleep", "sync-orders"]);
+        db.cleanup().await.unwrap();
+    }
 
     /// The plan PostgreSQL chooses for a statement of the worker, as JSON text.
     async fn plan(db: &TestDb, statement: &str, limit: Option<i64>) -> String {

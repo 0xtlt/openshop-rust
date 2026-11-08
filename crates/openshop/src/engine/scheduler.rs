@@ -455,6 +455,33 @@ async fn fire_on_schedule(app: &OpenShop, entry: &Cron, tick_key: &str, schedule
     }
 }
 
+/// The crons disabled for a shop whose key no cron in `keys` has.
+async fn orphaned_overrides(db: &sqlx::PgPool, keys: &[String]) -> sqlx::Result<Vec<String>> {
+    let disabled: Vec<String> =
+        sqlx::query_scalar("SELECT DISTINCT cron_key FROM cron_overrides WHERE NOT enabled ORDER BY cron_key")
+            .fetch_all(db)
+            .await?;
+    Ok(disabled.into_iter().filter(|key| !keys.contains(key)).collect())
+}
+
+/// Says which crons a shop disabled no longer match a cron of the
+/// application. A cron is known by its flow and its schedule: when either
+/// changes, as when a cron is ported from the TypeScript version with another
+/// spelling, the shops that disabled it run it again.
+async fn warn_about_orphaned_overrides(app: &OpenShop) {
+    let keys: Vec<String> = app.config().crons.iter().map(Cron::key).collect();
+    match orphaned_overrides(app.db(), &keys).await {
+        Ok(orphaned) if orphaned.is_empty() => {}
+        Ok(orphaned) => logger::warn(format!(
+            "[openshop] Some shops disabled crons that no longer exist: {}. \
+             A cron is known by `flow:schedule`: if one of them was changed, the shops that disabled it run it again. \
+             Write its schedule as it was to keep them disabled.",
+            orphaned.iter().map(|key| format!("\"{key}\"")).collect::<Vec<_>>().join(", ")
+        )),
+        Err(error) => logger::warn(format!("[openshop] Could not check the disabled crons: {error}")),
+    }
+}
+
 /// Running cron jobs. Dropping the scheduler stops them.
 pub struct Scheduler {
     jobs: Vec<JoinHandle<()>>,
@@ -490,6 +517,10 @@ impl Scheduler {
             ));
         }
 
+        let check = app.clone();
+        // Not one of the jobs: it ends once it has looked.
+        tokio::spawn(async move { warn_about_orphaned_overrides(&check).await });
+
         Ok(Self { jobs })
     }
 
@@ -518,6 +549,23 @@ mod tests {
     use crate::testing::{MockTransport, TestDb};
     use crate::{Concurrency, OpenShopConfig};
     use serde_json::json;
+
+    #[tokio::test]
+    async fn names_the_disabled_crons_that_no_longer_exist() {
+        let db = TestDb::create().await.unwrap();
+        sqlx::raw_sql(
+            "INSERT INTO cron_overrides (shop, cron_key, enabled) VALUES \
+               ('a', 'sync:*/5 * * * *', false), ('b', 'sync:0 * * * *', false), ('a', 'gone:0 * * * *', true)",
+        )
+        .execute(&db.pool)
+        .await
+        .unwrap();
+
+        let keys = [Cron::new("*/5 * * * *", "sync").key()];
+        // An enabled override changes nothing, so it is not worth a warning.
+        assert_eq!(orphaned_overrides(&db.pool, &keys).await.unwrap(), ["sync:0 * * * *"]);
+        db.cleanup().await.unwrap();
+    }
 
     #[test]
     fn accepts_five_and_six_field_schedules_and_nicknames() {
