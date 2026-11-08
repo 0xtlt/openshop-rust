@@ -19,10 +19,10 @@
   installation is marked uninstalled and its access token deleted, whether
   the app has a handler for the topic or not, then its handler runs. Only
   `/auth/webhooks/app-uninstalled` did it before, which keeps working.
-  A delivery whose signed payload names another shop than
-  `X-Shopify-Shop-Domain`, or none, is answered `400` and runs nothing,
-  where a handler of `app/uninstalled` used to run for it; a database failure
-  is a `500`, which Shopify retries.
+  As there, the shop is the one both the signed payload (`myshopify_domain`)
+  and `X-Shopify-Shop-Domain` name: a delivery where they differ, or whose
+  payload names no shop, uninstalls nothing, and its handler runs as before.
+  A database failure is a `500`, which Shopify retries.
 - `openshop::billing`, for Shopify's managed pricing:
   `ctx.shopify.active_subscriptions()` reads
   `currentAppInstallation.activeSubscriptions` (`ActiveSubscriptions`,

@@ -188,14 +188,6 @@ async fn handle(State(app): State<OpenShop>, headers: HeaderMap, body: Bytes) ->
     let Some(shop) = strict_shop_domain(&shop).filter(|domain| *domain == shop.trim().to_ascii_lowercase()) else {
         return json_error(StatusCode::BAD_REQUEST, "Invalid shop domain");
     };
-    // An uninstallation is of the shop its signed payload names: one whose
-    // header names another shop runs nothing, the handler included.
-    if uninstalled && webhook.verify_payload_shop().is_err() {
-        return json_error(
-            StatusCode::BAD_REQUEST,
-            "The payload does not name the shop of X-Shopify-Shop-Domain",
-        );
-    }
     report::describe(|delivery| {
         delivery.unit("webhook", &topic).shop(&shop, &shopify_app.handle);
     });
@@ -224,17 +216,24 @@ async fn handle(State(app): State<OpenShop>, headers: HeaderMap, body: Bytes) ->
     };
 
     // The installation is marked uninstalled and its token deleted before the
-    // handler runs. A failure is the server's: Shopify sends the delivery
-    // again, and the claim is given up for it.
+    // handler runs, when the signed payload names the shop of the header: the
+    // header is not signed, and a body signed for another shop or another
+    // topic proves nothing. A failure is the server's: Shopify sends the
+    // delivery again, and the claim is given up for it.
     if uninstalled {
-        if let Err(error) = record_uninstall(&app, &shopify_app.handle, &webhook).await {
-            report_failure(format!("[openshop] Uninstallation of {shop} could not be recorded"), &error);
-            return json_error(StatusCode::INTERNAL_SERVER_ERROR, "Internal server error");
+        match record_uninstall(&app, &shopify_app.handle, &webhook).await {
+            Ok(true) => logger::info(format!(
+                "[openshop] {shop} uninstalled app \"{}\": its access token is deleted",
+                shopify_app.handle
+            )),
+            Ok(false) => logger::warn(format!(
+                "[openshop] app/uninstalled for {shop} not recorded: its payload does not name that shop"
+            )),
+            Err(error) => {
+                report_failure(format!("[openshop] Uninstallation of {shop} could not be recorded"), &error);
+                return json_error(StatusCode::INTERNAL_SERVER_ERROR, "Internal server error");
+            }
         }
-        logger::info(format!(
-            "[openshop] {shop} uninstalled app \"{}\": its access token is deleted",
-            shopify_app.handle
-        ));
     }
     let Some(handler) = handler else {
         if let Some(delivery) = claim {

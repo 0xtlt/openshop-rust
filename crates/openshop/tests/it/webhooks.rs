@@ -765,17 +765,11 @@ async fn post_webhooks_uninstalls_only_the_shop_the_payload_names() {
     .await;
 
     // The header is not signed: a signed body of another shop, or of none,
-    // uninstalls nothing and runs no handler.
+    // uninstalls nothing. The handler still runs, as for any topic.
     for body in [r#"{"myshopify_domain":"other.myshopify.com"}"#, r#"{"id":1}"#] {
-        let response = deliver(&ctx, "app/uninstalled", "test.myshopify.com", body).await;
-        assert_error(
-            response,
-            400,
-            "The payload does not name the shop of X-Shopify-Shop-Domain",
-        )
-        .await;
+        assert_ok(deliver(&ctx, "app/uninstalled", "test.myshopify.com", body).await).await;
     }
-    assert_eq!(recorder.count(), 0);
+    assert_eq!(recorder.count(), 2);
     assert_eq!(
         installation_state(&ctx, "test.myshopify.com").await,
         (Some("test-access-token".to_string()), false)
@@ -795,7 +789,8 @@ async fn post_webhooks_uninstalls_only_the_shop_the_payload_names() {
         .unwrap();
     assert_ok(response).await;
     assert_eq!(installation_state(&ctx, "test.myshopify.com").await, (None, true));
-    assert_eq!(recorder.count(), 0);
+    // It runs no handler.
+    assert_eq!(recorder.count(), 2);
     ctx.shutdown().await.unwrap();
 }
 

@@ -10,13 +10,14 @@ async fn a_shop_that_uninstalls_takes_its_settings_with_it(ctx: &TestContext) {
         settings.insert(NewStockSettings { threshold: 12 }).await.unwrap();
     }
 
-    // Shopify signs what it sends with the secret of the app.
-    let body = "{}";
+    // Shopify signs what it sends with the secret of the app. The payload of
+    // `app/uninstalled` is the shop, which OpenShop marks uninstalled.
+    let body = openshop::json!({ "myshopify_domain": ctx.shop }).to_string();
     let delivered = ctx
         .http
         .post(ctx.url_for("/webhooks"))
         .header("content-type", "application/json")
-        .header("x-shopify-hmac-sha256", sign_webhook_body(body, &ctx.secret))
+        .header("x-shopify-hmac-sha256", sign_webhook_body(&body, &ctx.secret))
         .header("x-shopify-topic", "app/uninstalled")
         .header("x-shopify-shop-domain", &ctx.shop)
         .body(body)

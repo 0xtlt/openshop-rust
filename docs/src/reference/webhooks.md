@@ -157,9 +157,10 @@ pub async fn app_uninstalled(ctx: WebhookContext) -> Result<()> {
 ```
 
 The shop is the one both the signed payload (`myshopify_domain`) and the
-unsigned `X-Shopify-Shop-Domain` header name: a delivery where they differ, or
-whose payload names no shop, is answered `400` and runs nothing, the handler
-included. Shopify always sends both. A repeat of a delivery that was recorded
+unsigned `X-Shopify-Shop-Domain` header name, as Shopify always sends them: a
+delivery where they differ, or whose payload names no shop, uninstalls nothing,
+and OpenShop logs a warning. Its handler still runs, as the handler of any topic
+does. A repeat of a delivery that was recorded
 is acknowledged as any other (see
 [Idempotence](#idempotence-and-durable-work)), and recording the same
 uninstallation twice changes nothing but its date. When the database cannot
@@ -187,7 +188,6 @@ Shopify version used by your app.
 | `200 { "ok": true }` | Handler returned an error or panicked, or the payload could not be read into the type of its second argument; OpenShop logs the error. |
 | `400 { "error": "Invalid JSON body" }` | Authenticated body is not valid JSON and a handler matched. |
 | `400 { "error": "Invalid shop domain" }` | A handler matched, or the topic is `app/uninstalled`, and `X-Shopify-Shop-Domain` is not a shop written as `<name>.myshopify.com`. |
-| `400 { "error": "The payload does not name the shop of X-Shopify-Shop-Domain" }` | `app/uninstalled` whose signed payload names another shop, or none. |
 | `401 { "error": "Invalid webhook HMAC" }` | The signature did not verify with exactly one configured app, the body is not a JSON object, or a header Shopify always sends (`X-Shopify-Topic`, a valid `X-Shopify-Shop-Domain`) is missing. |
 | `413` | Request body is larger than the request body limit (2 MB unless the `max_request_body_bytes` setting of `app!` is set). |
 | `500 { "error": "SHOPIFY_API_SECRET is not configured" }` | No Shopify app secret is configured. A secret that is empty or only whitespace counts as not configured. |
