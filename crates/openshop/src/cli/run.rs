@@ -19,8 +19,8 @@ use crate::runtime::RuntimeEnv;
 use crate::server::shop_domain::strict_shop_domain;
 use crate::types::{Cron, CronShops, WorkerConfig};
 
-const RUN_USAGE: &str = "Usage: run <flow> [--shop=<domain> | --all-shops] [--input=<json object>]";
-const CRON_USAGE: &str = "Usage: cron run <name>, the name of a cron, its key `<flow>:<schedule>`, or its flow";
+pub(crate) const RUN_USAGE: &str = "Usage: run <flow> [--shop=<domain> | --all-shops] [--input=<json object>]";
+pub(crate) const CRON_USAGE: &str = "Usage: cron run <name>, the name of a cron, its key `<flow>:<schedule>`, or its flow";
 
 /// How often the runs are looked at, until they are over.
 const POLL: Duration = Duration::from_millis(250);

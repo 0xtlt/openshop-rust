@@ -26,6 +26,14 @@ An unknown command fails with status `2` and the usage text (see the end of
 this page). When `cargo` fails, `openshop` prints the error and exits with
 status `1`.
 
+`openshop`, `openshop help`, `--help` and `-h` print the usage text and exit
+with status `0`, and so do `--help` and `-h` after `init`, `init-ui` or
+`build-ui`, which then do nothing else. A command forwarded to cargo passes
+them on with its arguments: `openshop run --help` is `cargo run -- run --help`,
+which the application binary answers with the usage of `run` (see
+[Command behavior](#command-behavior)); `openshop test --help` and
+`openshop build --help` print the help of cargo.
+
 Install the CLI from the repository. `--locked` builds it with the versions of
 the dependencies the repository tested:
 
@@ -161,10 +169,22 @@ and the usage text on stderr, with status `2`. An unknown `migrate` subcommand
 fails with `[openshop] Unknown migrate command: <name>`. A failing command
 prints its error and exits with a non-zero status.
 
+`--help` or `-h` anywhere after a command prints its usage and exits with
+status `0`, and the command does not run: the configuration is not built and
+nothing connects to the database.
+
+| Command | `--help` prints |
+| --- | --- |
+| `run`, `run <flow> …` | `Usage: run <flow> [--shop=<domain> \| --all-shops] [--input=<json object>]` |
+| `cron`, `cron run`, `cron run <name>` | ``Usage: cron run <name>, the name of a cron, its key `<flow>:<schedule>`, or its flow`` |
+| `migrate`, `migrate generate`, `migrate check`, `migrate status` | `Usage: migrate [generate [--name=<name>] [--allow-destructive] [--allow-generate-in-production] \| check \| status]` |
+| `dev`, `start`, `worker` | The usage text. |
+
 Details:
 
-- Every command builds the configuration before it runs, including `migrate`.
-  Variables the configuration requires must be set for all of them.
+- Every command builds the configuration before it runs, including `migrate`
+  (but not its `--help`). Variables the configuration requires must be set for
+  all of them.
 - `dev` and `start` listen on `0.0.0.0` at `PORT` (default `3000`).
 - In `dev`, a page of the admin UI reloads by itself when the app has been
   started again, or when the bundle it is served from disk has been built

@@ -10,6 +10,7 @@ mod db;
 mod fake;
 mod shopify;
 mod transport;
+mod webhook;
 
 pub use admin::{AdminTestOptions, admin_context};
 pub use context::{
@@ -24,6 +25,7 @@ pub(crate) use db::connect;
 pub use fake::{FakeCall, FakeMethod, FakeProviders, TypedCall, TypedFake};
 pub use shopify::{FakeShopify, GraphqlCall, subscription};
 pub use transport::{FORM_CONTENT_TYPE, MockTransport, OutboundRequest, OutboundResponse};
+pub use webhook::WebhookRequestBuilder;
 
 pub use crate::admin::invoke_admin_function;
 

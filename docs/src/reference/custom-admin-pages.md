@@ -530,9 +530,13 @@ status, but not request or response payloads.
 
 ## Testing
 
-`openshop::testing` exports `admin_context` and
-`invoke_admin_function` for handler tests. Keep HTTP integration tests for
-session token validation, policies, route params, and tenant isolation. See
+`ctx.call_loader(path, name, input)` and `ctx.call_action(path, name, input)`
+call a function of a page as its view does, without HTTP: the access rules,
+the `authorize` rule, the input schema and the errors above, typed output
+(`call_loader_as` and `call_action_as` for another shop or staff user).
+`admin_context` and `invoke_admin_function` call a function, or code that
+takes an `AdminContext`, directly. Keep HTTP integration tests for session
+token validation and tenant isolation. See
 [Testing](testing.md#test-admin-functions).
 
 ## Without the attribute

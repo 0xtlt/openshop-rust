@@ -102,6 +102,23 @@ fn parse_concurrency(args: &[String]) -> Result<Option<usize>> {
     }
 }
 
+/// The usage a command prints when its arguments ask for it with `--help`
+/// or `-h`, wherever they are: `run --help`, `cron run -h`. It is printed
+/// before the configuration is built or the database opened, and the
+/// command does not run.
+fn help(args: &[String]) -> Option<&'static str> {
+    let (command, rest) = args.split_first()?;
+    if !rest.iter().any(|arg| arg == "--help" || arg == "-h") {
+        return None;
+    }
+    Some(match command.as_str() {
+        "run" => run::RUN_USAGE,
+        "cron" => run::CRON_USAGE,
+        "migrate" => migrate::MIGRATE_USAGE,
+        _ => USAGE,
+    })
+}
+
 /// Runs the command given on the command line. `config` builds the
 /// configuration once the command is known: in `dev`, after the `.env` file
 /// is loaded, so that it can read the values of the file.
@@ -111,6 +128,10 @@ pub async fn run(config: impl FnOnce() -> Result<OpenShopConfig>) -> Result<()> 
 }
 
 pub async fn run_with_args(config: impl FnOnce() -> Result<OpenShopConfig>, args: &[String]) -> Result<()> {
+    if let Some(usage) = help(args) {
+        println!("{usage}");
+        return Ok(());
+    }
     let command = args.first().map(String::as_str);
     // Before logging and the configuration, so that both can read `.env` values.
     // `App::main` has done it before starting the runtime: this finds nothing
@@ -169,6 +190,42 @@ mod tests {
 
     fn args(args: &[&str]) -> Vec<String> {
         args.iter().map(|arg| arg.to_string()).collect()
+    }
+
+    #[test]
+    fn help_after_a_command_is_its_usage() {
+        for (command, usage) in [
+            (&["run", "--help"][..], run::RUN_USAGE),
+            (&["run", "syncOrders", "--shop=a.myshopify.com", "-h"], run::RUN_USAGE),
+            (&["cron", "--help"], run::CRON_USAGE),
+            (&["cron", "run", "--help"], run::CRON_USAGE),
+            (&["cron", "run", "Nightly sync", "-h"], run::CRON_USAGE),
+            (&["migrate", "-h"], migrate::MIGRATE_USAGE),
+            (&["migrate", "generate", "--help"], migrate::MIGRATE_USAGE),
+            (&["worker", "--help"], USAGE),
+            (&["dev", "-h"], USAGE),
+            (&["start", "--help"], USAGE),
+        ] {
+            assert_eq!(help(&args(command)), Some(usage), "{command:?}");
+        }
+        for command in [
+            &[][..],
+            &["--help"],
+            &["run", "syncOrders"],
+            &["cron", "run", "--helpful"],
+            &["migrate", "status"],
+        ] {
+            assert_eq!(help(&args(command)), None, "{command:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn help_succeeds_without_running_the_command() {
+        for command in [&["run", "--help"][..], &["cron", "run", "--help"], &["migrate", "generate", "-h"]] {
+            run_with_args(|| panic!("the configuration is built"), &args(command))
+                .await
+                .unwrap();
+        }
     }
 
     #[test]

@@ -4,10 +4,12 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::common::{LogCapture, TEST_SHOP, install, json_body, two_shopify_apps, vault_provider};
+use futures::FutureExt;
+use openshop::billing;
 use openshop::builder::{AdminFunction, AdminPage, InputSchema, OpenShopBuilder};
 use openshop::testing::{
     AdminTestOptions, MockTransport, TestContext, TestOptions, admin_context, invoke_admin_function, session_token,
-    sign_session_token,
+    sign_session_token, subscription,
 };
 use openshop::{
     AdminActor, AdminContext, AdminMenuItem, AdminPublicError, OpenShopConfig, Result, Value, anyhow, json,
@@ -1268,6 +1270,93 @@ async fn functions_can_be_invoked_without_http(ctx: &TestContext) {
         .await
         .unwrap_err();
     assert_eq!(error.to_string(), "Admin function authorization rejected");
+}
+
+/// The review pages, with an action only [`REVIEWER`] may run and that
+/// needs a plan, a home with a loader that fails, and the shop installed.
+fn reviews_app_with_functions() -> OpenShopConfig {
+    let save = AdminFunction::typed_action(|ctx, input: SaveReview| async move {
+        Ok(json!({ "title": input.title, "rating": input.rating, "savedBy": ctx.actor.id }))
+    })
+    .authorize(|ctx| async move { Ok(ctx.actor.id == REVIEWER && billing::any_plan(ctx).await?) });
+    OpenShopConfig::builder()
+        .admin_page(reviews_page())
+        .admin_page(review_details_page().function("save", save))
+        .admin_page(AdminPage::new("/").loader("home", |_ctx, _input| async { anyhow::bail!("the shop is closed") }))
+        .build()
+        .unwrap()
+}
+
+#[openshop::test(context(reviews_app_with_functions()))]
+async fn a_test_calls_the_functions_of_a_page_by_its_path_as_the_view_does(ctx: &TestContext) {
+    // The loader of `/reviews/:id` at `/reviews/42`, as the reviewer: the
+    // rule of `/reviews`, which the page is nested under, lets them in.
+    let details: Value = ctx
+        .call_loader_as("/reviews/42", "details", (), TEST_SHOP, REVIEWER)
+        .await
+        .unwrap();
+    assert_eq!(
+        details,
+        json!({ "id": "42", "actorId": REVIEWER, "shop": TEST_SHOP, "shopifyApp": "default" })
+    );
+    // Staff user `1` of the shop of the test, which the rule refuses.
+    let error = ctx
+        .call_loader::<Value>("/reviews/42", "details", ())
+        .await
+        .unwrap_err();
+    assert_eq!((error.code.as_str(), error.status), ("FORBIDDEN", 403));
+
+    // An action, typed, with a plan.
+    ctx.shopify.active_subscriptions([subscription("Pro")]);
+    let saved: SavedReview = ctx
+        .call_action_as(
+            "/reviews/42",
+            "save",
+            json!({ "title": "Great", "rating": 5 }),
+            TEST_SHOP,
+            REVIEWER,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        saved,
+        SavedReview {
+            title: "Great".into(),
+            saved_by: REVIEWER.into()
+        }
+    );
+    // What the page is told: the input does not fit, the shop has no plan.
+    let save = |input| ctx.call_action_as::<SavedReview>("/reviews/42", "save", input, TEST_SHOP, REVIEWER);
+    let error = save(json!({ "title": "", "rating": 5 })).await.unwrap_err();
+    assert_eq!((error.code.as_str(), error.status), ("INVALID_INPUT", 422));
+    ctx.shopify.active_subscriptions([]);
+    let error = save(json!({ "title": "Great", "rating": 5 })).await.unwrap_err();
+    assert_eq!((error.code.as_str(), error.status), (billing::PLAN_REQUIRED, 402));
+    assert!(error.details.unwrap().contains_key("pricingUrl"));
+
+    // Any other error is the `500` of the page, with its message for the test.
+    let error = ctx.call_loader::<Value>("/", "home", ()).await.unwrap_err();
+    assert_eq!(
+        (error.code.as_str(), error.status, error.message.as_str()),
+        ("INTERNAL_ERROR", 500, "the shop is closed")
+    );
+}
+
+#[openshop::test(context(reviews_app_with_functions()))]
+async fn a_test_that_names_no_function_of_a_page_is_told_what_the_page_has(ctx: &TestContext) {
+    for (call, expected) in [
+        (
+            ctx.call_action::<Value>("/reviews/42", "details", ()).boxed(),
+            "[openshop] The admin page `/reviews/:id` has no action `details`. Its loaders: details; its actions: save",
+        ),
+        (
+            ctx.call_loader::<Value>("/orders", "list", ()).boxed(),
+            "[openshop] No admin page of the application is at `/orders`. Its pages: /, /reviews, /reviews/:id",
+        ),
+    ] {
+        let panic = std::panic::AssertUnwindSafe(call).catch_unwind().await.unwrap_err();
+        assert_eq!(panic.downcast_ref::<String>().map(String::as_str), Some(expected));
+    }
 }
 
 #[tokio::test]

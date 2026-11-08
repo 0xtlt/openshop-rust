@@ -16,7 +16,7 @@ use uuid::Uuid;
 
 use super::http::{catch_panic, header, json_response, parse_query};
 use super::shop::ShopSession;
-use crate::admin::{AdminAuthorize, AdminContext, AdminFunctionKind, AdminPublicError, CustomAdminPage};
+use crate::admin::{AdminAuthorize, AdminContext, AdminFunction, AdminFunctionKind, AdminPublicError, CustomAdminPage};
 use crate::app::OpenShop;
 use crate::engine::step::error_message;
 use crate::runtime::context_logger::ContextLogger;
@@ -43,7 +43,7 @@ fn ancestor_access<'a>(pages: &'a [CustomAdminPage], page: &CustomAdminPage) -> 
         .collect()
 }
 
-fn create_context(
+pub(crate) fn create_context(
     app: &OpenShop,
     session: &ShopSession,
     params: IndexMap<String, String>,
@@ -172,6 +172,52 @@ fn rpc_not_found() -> anyhow::Error {
     public_error("NOT_FOUND", "Not found", 404)
 }
 
+/// The loader or the action `name` of the page at `page_path`, with the
+/// values of the dynamic segments of the path: what the admin UI calls there.
+/// `None` when no page matches the path, or the page has no function of that
+/// kind by that name.
+pub(crate) fn find_function<'a>(
+    pages: &'a [CustomAdminPage],
+    page_path: &str,
+    kind: AdminFunctionKind,
+    name: &str,
+) -> Option<(&'a CustomAdminPage, IndexMap<String, String>, &'a AdminFunction)> {
+    let page = find_matching_page(pages, page_path)?;
+    let params = custom_admin_route_params(&page.route_pattern, page_path)?;
+    let function = page
+        .page
+        .functions
+        .get(name)
+        .filter(|function| function.kind == kind)?;
+    Some((page, params, function))
+}
+
+/// Runs `function` of `page` as the admin UI calls it: the access rules of
+/// the page and of the pages it is nested under and the rule of the function
+/// first (`403 FORBIDDEN` when one says no), then the input schema
+/// (`422 INVALID_INPUT`), then the function.
+pub(crate) async fn call_function(
+    pages: &[CustomAdminPage],
+    page: &CustomAdminPage,
+    function: &AdminFunction,
+    context: AdminContext,
+    input: Value,
+) -> anyhow::Result<Value> {
+    if !is_allowed(&ancestor_access(pages, page), &context, function.authorize.as_ref()).await? {
+        return Err(public_error("FORBIDDEN", "Forbidden", 403));
+    }
+    let input = match &function.input {
+        Some(schema) => schema
+            .parse(input)
+            .map_err(|summary| public_error("INVALID_INPUT", &summary, 422))?,
+        None if function.kind == AdminFunctionKind::Action => {
+            return Err(public_error("INVALID_ACTION", "Action input schema is required", 500));
+        }
+        None => input,
+    };
+    (function.handler)(context, input).await
+}
+
 async fn execute_rpc(
     app: &OpenShop,
     session: &ShopSession,
@@ -206,41 +252,18 @@ async fn execute_rpc(
     let name = decode_uri_component(encoded_name).ok_or_else(rpc_not_found)?;
 
     let pages = app.custom_pages();
-    let page = find_matching_page(pages, page_path).ok_or_else(rpc_not_found)?;
-    let params = custom_admin_route_params(&page.route_pattern, page_path).ok_or_else(rpc_not_found)?;
-    let definition = page
-        .page
-        .functions
-        .get(&name)
-        .filter(|definition| definition.kind == kind)
-        .ok_or_else(rpc_not_found)?;
+    let (page, params, definition) = find_function(pages, page_path, kind, &name).ok_or_else(rpc_not_found)?;
     report::describe(|request| {
         request.unit("admin", format_args!("{} {name}", page.route_pattern));
     });
 
     let idempotency_key = header(headers, "idempotency-key").map(str::to_string);
     let context = create_context(app, session, params, request_id.to_string(), idempotency_key);
-    if !is_allowed(&ancestor_access(pages, page), &context, definition.authorize.as_ref()).await? {
-        return Err(public_error("FORBIDDEN", "Forbidden", 403));
-    }
-
-    let mut input = serde_json::from_slice::<Value>(body)
+    let input = serde_json::from_slice::<Value>(body)
         .ok()
         .and_then(|body| body.get("input").cloned())
         .unwrap_or(Value::Null);
-    match &definition.input {
-        Some(schema) => {
-            input = schema
-                .parse(input)
-                .map_err(|summary| public_error("INVALID_INPUT", &summary, 422))?;
-        }
-        None if kind == AdminFunctionKind::Action => {
-            return Err(public_error("INVALID_ACTION", "Action input schema is required", 500));
-        }
-        None => {}
-    }
-
-    let output = (definition.handler)(context, input).await?;
+    let output = call_function(pages, page, definition, context, input).await?;
 
     metadata.insert("pageId".into(), Value::from(page.id.clone()));
     metadata.insert("functionName".into(), Value::from(name));

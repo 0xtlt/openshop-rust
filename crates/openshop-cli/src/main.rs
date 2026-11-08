@@ -64,9 +64,21 @@ async fn cargo(args: &[&str], passthrough: &[String]) -> Result<()> {
     Ok(())
 }
 
+/// Whether the arguments of a command ask for its usage.
+fn asks_for_help(args: &[String]) -> bool {
+    args.iter().any(|arg| arg == "--help" || arg == "-h")
+}
+
 async fn run(args: &[String]) -> Result<()> {
     let rest = args.get(1..).unwrap_or_default();
     match args.first().map(String::as_str) {
+        // `--help` after a command the CLI runs itself is the usage. The
+        // others pass their arguments on: to the application binary, which
+        // prints the usage of its commands (`run --help`), or to cargo.
+        Some("init" | "init-ui" | "build-ui") if asks_for_help(rest) => {
+            println!("{USAGE}");
+            Ok(())
+        }
         Some("init") => {
             init::run_init(&std::env::current_dir()?, rest)?;
             Ok(())

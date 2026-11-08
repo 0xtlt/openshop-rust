@@ -212,6 +212,9 @@ fn another_shop() -> TestOptions {
 | `run_flow(flow, input)` / `run_flow_for(flow, input, shop)` | Executes a flow immediately with the fakes. |
 | `dispatch_flow(flow, input)` / `dispatch_flow_for(flow, input, shop)` | Queues a run and returns its `Uuid`. |
 | `proxy()` / `proxy_for(shop, secret)` | App proxy client that signs requests. |
+| `call_loader(path, name, input)` / `call_loader_as(path, name, input, shop, sub)` | Calls a loader of the admin page at `path` as its view does, for staff user `1` of the shop of the test or `sub` of `shop`. See [Test admin functions](#test-admin-functions). |
+| `call_action(path, name, input)` / `call_action_as(path, name, input, shop, sub)` | The same for an action. |
+| `webhook(topic, payload)` | A delivery of a webhook to `/webhooks`, signed with the secret of the test and with the headers Shopify sends. See [Deliver a webhook](#deliver-a-webhook). |
 | `get`, `post`, `put`, `patch`, `delete`, `request(method, path)` | Request builders authenticated with a session token for the default shop. |
 | `request_as(method, path, shop, sub)` | Request authenticated as staff user `sub` of `shop`. |
 | `session_token()` / `session_token_for(shop, sub)` | A signed session token, valid for one minute. |
@@ -582,6 +585,61 @@ The builders are `reqwest::RequestBuilder` values: finish them with
 `.json(&body)`, `.send()`, and the usual `reqwest` response methods. For custom
 claims, `ctx.session_token_for(shop, sub)` returns the raw JWT.
 
+## Deliver a webhook
+
+`ctx.webhook(topic, payload)` delivers a webhook to the application as Shopify
+delivers it: `payload` serialized as the JSON body, signed with the secret of
+the test, without a session token.
+
+```rust,ignore
+use my_app::APP;
+use openshop::prelude::*;
+use openshop::testing::TestContext;
+
+#[openshop::test(APP)]
+async fn an_order_is_received(ctx: &TestContext) {
+    let response = ctx
+        .webhook("orders/create", json!({ "id": 1, "name": "#1001" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+
+    // What Shopify did not send is refused.
+    let forged = ctx
+        .webhook("orders/create", json!({ "id": 1 }))
+        .signature("forged")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(forged.status(), 401);
+}
+```
+
+| Header | Value |
+| --- | --- |
+| `Content-Type` | `application/json` |
+| `X-Shopify-Topic` | `topic`, as Shopify writes it: `orders/create`. |
+| `X-Shopify-Shop-Domain` | The shop of the test. |
+| `X-Shopify-Hmac-Sha256` | The signature of the body with the secret of the test. |
+| `X-Shopify-Webhook-Id`, `X-Shopify-Event-Id` | New UUIDs, for each delivery: two deliveries of one payload both run. |
+| `X-Shopify-API-Version` | The version of the Admin API the application calls, `ApiVersion::DEFAULT` (`2026-10`). |
+| `X-Shopify-Triggered-At` | Now, in RFC 3339. |
+
+The `WebhookRequestBuilder` it returns takes, before `send()`:
+
+| Method | Changes |
+| --- | --- |
+| `path(path)` | The route the delivery goes to, `/webhooks` by default: `/auth/webhooks/app-uninstalled`, or a [server route](server-routes.md) under `/routes/`. |
+| `shop(shop)` | `X-Shopify-Shop-Domain`. |
+| `secret(secret)` | The secret the body is signed with: the one of another app. A secret the application does not have is answered `401`. |
+| `signature(value)` | `X-Shopify-Hmac-Sha256`, as given: a forged signature, answered `401`. |
+| `webhook_id(id)` | `X-Shopify-Webhook-Id`: the same id and body sent again is a delivery Shopify retries, which runs once. |
+| `header(name, value)` | Any header, in place of the one of the same name: `header("X-Shopify-API-Version", "2026-07")`. |
+
+`send()` returns the `reqwest::Response` of the application. The
+[webhooks reference](webhooks.md#response-behavior) lists what it answers.
+
 ## Sign other requests
 
 `openshop::testing` exports the signing primitives for requests the context
@@ -596,12 +654,15 @@ does not build:
 | `proxy_signature(&query, secret)` | The `signature` parameter of an app proxy query. The query needs a `timestamp` within five minutes of now to be accepted. |
 | `to_query_string(&query)` | A query map serialized for a URL. |
 
+`sign_webhook_body` signs a body `ctx.webhook` does not make from a value,
+such as a delivery recorded byte for byte:
+
 ```rust,ignore
 use my_app::APP;
 use openshop::testing::{TestContext, sign_webhook_body};
 
 #[openshop::test(APP)]
-async fn delivers_a_webhook(ctx: &TestContext) {
+async fn replays_a_recorded_delivery(ctx: &TestContext) {
     let body = r##"{"id":1,"name":"#1001"}"##;
     let response = ctx
         .http
@@ -651,7 +712,75 @@ server. `models` are `Table`s, such as `Review::table()`.
 
 ## Test admin functions
 
-Call a custom admin page loader or action without HTTP:
+`ctx.call_loader` and `ctx.call_action` call a loader or an action of a
+custom admin page as the view of the page does, without HTTP, and return what
+it returns, typed, or the error the page receives:
+
+```rust,ignore
+use my_app::APP;
+use my_app::admin::reviews::{Review, ReviewPage};
+use openshop::billing::PLAN_REQUIRED;
+use openshop::prelude::*;
+use openshop::testing::{TestContext, subscription};
+
+#[openshop::test(APP)]
+async fn saves_a_review_with_a_plan(ctx: &TestContext) {
+    ctx.shopify.active_subscriptions([subscription("Pro")]);
+    // The page `/reviews/:id`, at the path of the review 42.
+    let review: Review = ctx.call_loader("/reviews/42", "review", ()).await.unwrap();
+    assert_eq!(review.id, 42);
+
+    let saved: Review = ctx
+        .call_action("/reviews/42", "saveReview", json!({ "title": "Great" }))
+        .await
+        .unwrap();
+    assert_eq!(saved.title, "Great");
+
+    // `#[action(authorize = billing::any_plan)]`, without a plan.
+    ctx.shopify.active_subscriptions([]);
+    let error = ctx
+        .call_action::<Review>("/reviews/42", "saveReview", json!({ "title": "Great" }))
+        .await
+        .unwrap_err();
+    assert_eq!((error.code.as_str(), error.status), (PLAN_REQUIRED, 402));
+    assert!(error.details.unwrap().contains_key("pricingLink"));
+}
+```
+
+| Method | Calls |
+| --- | --- |
+| `call_loader::<T>(path, name, input)` | The loader `name` of the page at `path`, as staff user `1` of the shop of the test. |
+| `call_loader_as::<T>(path, name, input, shop, sub)` | The same, as staff user `sub` of `shop`. |
+| `call_action::<T>(path, name, input)`, `call_action_as::<T>(path, name, input, shop, sub)` | The action `name`, the same way. |
+
+`path` is a path of the admin, as the address bar shows it: `/` for the home,
+`ReviewsPage::PATH` for a static page, `/reviews/42` for the page
+`/reviews/:id`, whose `ctx.params["id"]` is then `42`. `name` is the name the
+view calls the function by: `saveReview` for a function `save_review` marked
+`#[action]`. `input` is any serializable value; `()` for none. The call is
+the one of the RPC of the page: for the Shopify app `default`, the access
+rules (`#[access]`) of the page and of the pages it is nested under, then the
+`authorize` rule of the function, its input schema, then the function, whose
+output is deserialized into `T`.
+
+The error is an `AdminPublicError`, the one the page receives, with its
+`code`, `status`, `message`, `field_errors` and `details`:
+
+| Error | When |
+| --- | --- |
+| The function's own | It, or a rule, returned an `AdminPublicError`: `402 PLAN_REQUIRED` of `billing::require_plan` and `billing::any_plan`. |
+| `403 FORBIDDEN` | An access rule or the `authorize` rule answered `false`. |
+| `422 INVALID_INPUT` | The input does not fit the schema of the function. |
+| `500 INTERNAL_ERROR` | Any other error. Its `message` is the error, for the test; the page receives `Internal server error`. |
+
+A path that matches no page, a page without a loader (or an action) of that
+name, or an output that is not a `T` panics, with the pages or the functions
+there are.
+
+### Without a context
+
+`admin_context(&app, options)` builds the `AdminContext` a function receives,
+to call a function, or code that takes a context, directly:
 
 ```rust,ignore
 use my_app::APP;
@@ -682,22 +811,19 @@ async fn saves_a_review(ctx: &TestContext) {
 ```
 
 `config.admin_pages` holds the pages of the application, in the order of the
-`admin_pages` list of `app!`. The `functions` of a page are its loaders and
-actions, by the name the page view calls them with: `saveReview` for a function
-`save_review` marked `#[action]`.
-
-`admin_context(&app, options)` builds the `AdminContext` a function receives,
-with `ctx.db`, `ctx.shopify` and `ctx.connectors` for the shop of the options.
-`ctx.shopify` is the client of an admin request, as in production: for that
-shop and app, a token the Admin API refuses is renewed once with the
+`admin_pages` list of `app!`, and the `functions` of a page are its loaders
+and actions by name. The context has `ctx.db`, `ctx.shopify` and
+`ctx.connectors` for the shop of the options. `ctx.shopify` is the client of
+an admin request, as in production: for that shop and app, a token the Admin
+API refuses is renewed once with the
 [client credentials grant](authentication.md#client-credentials-grant), from
 the mock transport.
 `AdminTestOptions` has the fields `shop` (`test.myshopify.com`),
 `shopify_app` (`default`), `actor_id` (`test-actor`), `params` (empty), and
 `request_id` (`test-request`). `invoke_admin_function` applies the function's
-own `authorize` rule and input schema, then deserializes the output. It does
-not evaluate page access rules (`#[access]`); cover those with HTTP tests
-through `ctx.post("/api/pages/custom/…")`.
+own `authorize` rule and input schema, then deserializes the output: its
+errors are `anyhow` errors, not the ones the page receives, and it does not
+evaluate page access rules (`#[access]`), which `ctx.call_loader` does.
 
 ## Test runner integration
 

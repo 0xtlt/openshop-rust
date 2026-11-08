@@ -2,9 +2,12 @@
 
 use std::sync::{Arc, Mutex};
 
-use crate::common::{LogCapture, assert_error, noop_flow, two_shopify_apps, two_shopify_apps_with_one_secret};
-use openshop::builder::{OpenShopBuilder, Webhook};
+use crate::common::{
+    LogCapture, assert_error, json_body, noop_flow, two_shopify_apps, two_shopify_apps_with_one_secret,
+};
+use openshop::builder::{OpenShopBuilder, Route, Webhook};
 use openshop::db::schema::FlowRun;
+use openshop::response;
 use openshop::testing::{TestContext, TestOptions, sign_webhook_body};
 use openshop::{DispatchOptions, OpenShopConfig, Value, WebhookContext, bail, json};
 use reqwest::Response;
@@ -826,5 +829,123 @@ async fn a_handler_logs_for_its_shop_and_topic() {
             .any(|line| line.level == "warn" && line.message == "Webhook logger warning")
     );
     drop(logs);
+    ctx.shutdown().await.unwrap();
+}
+
+// ─── ctx.webhook ─────────────────────────────────────────────────────
+
+/// What a route reads of a delivery once `shopify_api` has verified it.
+fn delivery_route() -> Route {
+    Route::public().post(|ctx| async move {
+        let request = &ctx.request;
+        let webhook = shopify_api::webhooks::Webhook::verify(&request.headers, request.body.to_vec(), SECRET)?;
+        Ok(response::json(json!({
+            "topic": webhook.topic(),
+            "shop": webhook.shop().as_str(),
+            "webhookId": webhook.webhook_id(),
+            "eventId": webhook.event_id(),
+            "apiVersion": webhook.api_version(),
+            "triggeredAt": webhook.triggered_at(),
+            "contentType": request.header("content-type"),
+            "authorization": request.header("authorization"),
+            "payload": request.json::<Value>()?,
+        })))
+    })
+}
+
+#[tokio::test]
+async fn a_test_delivers_a_webhook_with_the_headers_shopify_sends() {
+    let config = builder().route("/delivery", delivery_route()).build().unwrap();
+    let ctx = TestContext::new(config).await.unwrap();
+    let deliver = async |topic: &str| -> Value {
+        let response = ctx
+            .webhook(topic, json!({ "id": 1 }))
+            .path("/routes/delivery")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200);
+        response.json().await.unwrap()
+    };
+
+    let first = deliver("orders/create").await;
+    assert_eq!(first["topic"], "orders/create");
+    assert_eq!(first["shop"], ctx.shop);
+    assert_eq!(first["apiVersion"], openshop::shopify::ApiVersion::DEFAULT.to_string());
+    assert_eq!(first["contentType"], "application/json");
+    assert_eq!(first["authorization"], Value::Null);
+    assert_eq!(first["payload"], json!({ "id": 1 }));
+    let triggered_at = chrono::DateTime::parse_from_rfc3339(first["triggeredAt"].as_str().unwrap()).unwrap();
+    assert!((chrono::Utc::now() - triggered_at.to_utc()).num_seconds() < 60);
+    // Each delivery has ids of its own.
+    let second = deliver("orders/create").await;
+    for id in ["webhookId", "eventId"] {
+        assert!(first[id].is_string() && second[id].is_string(), "{id}");
+        assert_ne!(first[id], second[id], "{id}");
+    }
+
+    // A header of the test replaces the one of the delivery.
+    let response = ctx
+        .webhook("orders/create", json!({ "id": 1 }))
+        .path("/routes/delivery")
+        .header("x-shopify-api-version", "2026-07")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(json_body(response).await["apiVersion"], "2026-07");
+    ctx.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_test_delivers_a_webhook_to_its_handler_or_has_it_refused() {
+    let recorder = Recorder::default();
+    let ctx = TestContext::new(orders_create_config(&recorder)).await.unwrap();
+    let payload = json!({ "id": 7 });
+    let delivery = |shop: &str| Delivery {
+        topic: "orders/create".into(),
+        shop: shop.into(),
+        shopify_app: "default".into(),
+        api_version: openshop::shopify::ApiVersion::DEFAULT.to_string(),
+        payload: payload.clone(),
+    };
+
+    assert_ok(ctx.webhook("orders/create", &payload).send().await.unwrap()).await;
+    // Another delivery of the same payload runs too.
+    assert_ok(ctx.webhook("orders/create", &payload).send().await.unwrap()).await;
+    assert_eq!(recorder.deliveries(), [delivery(&ctx.shop), delivery(&ctx.shop)]);
+
+    // The same delivery sent again runs once.
+    for _ in 0..2 {
+        let again = ctx.webhook("orders/create", &payload).webhook_id("delivery-1");
+        assert_ok(again.send().await.unwrap()).await;
+    }
+    assert_eq!(recorder.count(), 3);
+    let elsewhere = ctx.webhook("orders/create", &payload).shop("elsewhere.myshopify.com");
+    assert_ok(elsewhere.send().await.unwrap()).await;
+    assert_eq!(recorder.deliveries()[3], delivery("elsewhere.myshopify.com"));
+
+    // A signature that is not the one of the body, or another secret: `401`.
+    let forged = ctx.webhook("orders/create", &payload).signature("forged");
+    assert_error(forged.send().await.unwrap(), 401, "Invalid webhook HMAC").await;
+    let another_app = ctx.webhook("orders/create", &payload).secret("another-secret");
+    assert_error(another_app.send().await.unwrap(), 401, "Invalid webhook HMAC").await;
+    assert_eq!(recorder.count(), 4);
+    ctx.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_test_delivers_app_uninstalled_to_the_route_of_its_choice() {
+    let ctx = installed(builder().build().unwrap()).await;
+    let payload = json!({ "myshopify_domain": ctx.shop });
+
+    let response = ctx
+        .webhook("app/uninstalled", &payload)
+        .path("/auth/webhooks/app-uninstalled")
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), 200);
+    assert_eq!(installation_state(&ctx, &ctx.shop).await, (None, true));
     ctx.shutdown().await.unwrap();
 }

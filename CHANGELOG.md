@@ -2,6 +2,38 @@
 
 ## Unreleased
 
+- A test calls a loader or an action of an admin page by the path of the
+  page and the name of the function, as the view of the page does:
+  `ctx.call_loader::<T>(path, name, input)` and
+  `ctx.call_action::<T>(path, name, input)`, for staff user `1` of the shop
+  of the test, and `call_loader_as` / `call_action_as(path, name, input,
+  shop, sub)` for another. They run the access rules of the page and of the
+  pages it is nested under, the `authorize` rule, the input schema, then the
+  function, and return its output as a `T`, or the `AdminPublicError` the
+  page receives: `402 PLAN_REQUIRED` of `billing::require_plan`, `403
+  FORBIDDEN`, `422 INVALID_INPUT`, and `500 INTERNAL_ERROR` with the message
+  of any other error. `/reviews/42` calls the page `/reviews/:id` with its
+  `id`. A page or a function that does not exist panics, naming the ones
+  there are.
+- A test delivers a webhook as Shopify does:
+  `ctx.webhook(topic, payload).send().await` posts `payload` to `/webhooks`,
+  signed with the secret of the test, with `X-Shopify-Topic`,
+  `X-Shopify-Shop-Domain`, `X-Shopify-Hmac-Sha256`, a new
+  `X-Shopify-Webhook-Id` and `X-Shopify-Event-Id`, `X-Shopify-API-Version`
+  and `X-Shopify-Triggered-At`, and no session token, and returns the
+  response. The `WebhookRequestBuilder` takes `path(…)` (another route,
+  such as `/auth/webhooks/app-uninstalled`), `shop(…)`, `secret(…)` (another
+  app), `signature(…)` (a forged one, which gets `401`), `webhook_id(…)` (a
+  delivery Shopify retries) and `header(…)`.
+- `--help` and `-h` after a command of the application binary print its
+  usage and exit with status `0`, without building the configuration or
+  touching the database: `run --help` answered
+  `Unknown argument of run: --help`, `cron run --help`
+  `Unknown cron "--help"`, `migrate generate --help` ran the generation,
+  and `worker --help` started a worker. `run`, `cron` and `migrate` print
+  their usage line, `dev`, `start` and `worker` the usage text; so does
+  `openshop run --help`, through cargo. `openshop init`, `init-ui` and
+  `build-ui` print the usage text on `--help` and do nothing else.
 - `openshop dev` stops the whole app at a restart. It sent `SIGTERM` to the
   process it started and waited for that one: when the `cargo` on the `PATH`
   is a wrapper that runs the real cargo as its child (a tool manager's shim,

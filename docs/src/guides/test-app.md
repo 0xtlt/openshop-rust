@@ -163,14 +163,19 @@ tests.
 - Use the proxy test client, `ctx.proxy().get("/api/reviews").send()`, for
   signed storefront requests. `ctx.proxy_for(shop, secret)` signs for another
   shop or app secret.
+- Use `ctx.webhook(topic, payload).send()` to deliver a webhook signed as
+  Shopify signs it, with the headers it sends; `.signature("forged")` is one
+  the app refuses. See [Deliver a webhook](../reference/testing.md#deliver-a-webhook).
 - Use `ctx.http` with `ctx.url_for(path)` for requests without a session token,
-  such as a server route or an unsigned webhook.
+  such as a server route.
 - Start a context by hand with `TestContext::with_options(config, options)`
   for a configuration built in the test or for other options, such as another
   shop. `TestOptions::installed()` is the options of a shop that has installed
   the application. A test that starts its context ends with
   `ctx.shutdown().await`.
-- See [custom admin page testing](../reference/custom-admin-pages.md#testing) for
-  loader and action helpers.
+- Use `ctx.call_loader(path, name, input)` and `ctx.call_action(…)` to call a
+  loader or an action of an admin page as its view does, and assert on what it
+  returns or on the error the page receives, such as `402 PLAN_REQUIRED`. See
+  [Test admin functions](../reference/testing.md#test-admin-functions).
 
 All helper options and lifecycle contracts are in the [testing reference](../reference/testing.md).
