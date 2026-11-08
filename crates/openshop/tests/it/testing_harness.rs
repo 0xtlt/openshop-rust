@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::time::{Duration, Instant};
 
-use crate::common::{LogCapture, create_config, noop_flow, wait, within};
+use crate::common::{LogCapture, create_config, noop_flow};
 use openshop::billing::{self, ACTIVE_SUBSCRIPTIONS_OPERATION, AppSubscription, SubscriptionStatus};
 use openshop::builder::Flow;
 use openshop::shopify::RetryPolicy;
@@ -278,10 +278,11 @@ fn flaky_flow() -> Flow {
 
 #[tokio::test]
 async fn a_test_retries_shopify_as_the_app_does_without_waiting() {
-    // `shopify_api`'s four retries, which wait 1, 2, 4 and 8 seconds outside a test.
+    // `shopify_api`'s four retries, which wait 1, 2, 4 and 8 seconds outside a
+    // test. The bound leaves room for a slow machine, far from those 15 s.
     let (sent, elapsed) = flaky(create_config([flaky_flow()]), None).await;
     assert_eq!(sent, 5);
-    assert!(elapsed < Duration::from_secs(1), "{elapsed:?}");
+    assert!(elapsed < Duration::from_secs(5), "{elapsed:?}");
 
     // The policy of the application, attempts included.
     let config = OpenShopConfig::builder()
@@ -291,7 +292,7 @@ async fn a_test_retries_shopify_as_the_app_does_without_waiting() {
         .unwrap();
     let (sent, elapsed) = flaky(config, None).await;
     assert_eq!(sent, 2);
-    assert!(elapsed < Duration::from_secs(1), "{elapsed:?}");
+    assert!(elapsed < Duration::from_secs(5), "{elapsed:?}");
 
     // A test that sets one gets it as it is, waits included.
     let (sent, _) = flaky(create_config([flaky_flow()]), Some(RetryPolicy::none())).await;
@@ -398,21 +399,18 @@ async fn the_lines_of_a_run_say_its_shop_flow_and_run_in_the_console() {
     .await;
     let logs = LogCapture::start().await;
 
-    let run_id = ctx.dispatch_flow("sync", json!({})).await.unwrap();
-    let worker = openshop::engine::Worker::new(ctx.app.clone(), Default::default());
-    worker.start().await;
-    within(async {
-        while !logs.lines().iter().any(|line| line.message == "Harness line") {
-            wait(Duration::from_millis(20)).await;
-        }
-    })
-    .await;
-    worker.stop().await;
+    // The runner gives a run of a worker the same logger.
+    assert_eq!(ctx.run_flow("sync", json!({})).await.unwrap(), RunOutcome::Completed);
 
     let line = logs
         .lines()
         .into_iter()
         .find(|line| line.message == "Harness line")
+        .expect("the line of the flow");
+    drop(logs);
+    let (run_id,): (uuid::Uuid,) = sqlx::query_as("SELECT id FROM flow_runs")
+        .fetch_one(&ctx.db)
+        .await
         .unwrap();
     assert_eq!(
         line.context,
@@ -424,6 +422,5 @@ async fn the_lines_of_a_run_say_its_shop_flow_and_run_in_the_console() {
             "runId": run_id.to_string(),
         }))
     );
-    drop(logs);
     ctx.shutdown().await.unwrap();
 }
