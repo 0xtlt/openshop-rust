@@ -2,6 +2,55 @@
 
 ## Unreleased
 
+- `openshop dev` stops the whole app at a restart. It sent `SIGTERM` to the
+  process it started and waited for that one: when the `cargo` on the `PATH`
+  is a wrapper that runs the real cargo as its child (a tool manager's shim,
+  a `runner` of the cargo configuration), the old app kept its port and
+  served the code it was built from, while the new one failed with
+  `Address already in use`, silently. On Unix the app now leads a process
+  group of its own: a restart sends `SIGTERM` to the group, `SIGKILL` to what
+  is left after 35 seconds, and waits until nothing of it is left. The app no
+  longer reads the terminal, and Ctrl-C, `SIGTERM` or `SIGHUP` to
+  `openshop dev` stop it the same way. Before it starts the app,
+  `openshop dev` checks its port (`PORT`, else the one of `.env`, else 3000)
+  and says loudly when it is still taken, naming the process when `lsof`
+  can; an app that exits by itself is said too.
+- `app/uninstalled` delivered to `POST /webhooks` is recorded: the
+  installation is marked uninstalled and its access token deleted, whether
+  the app has a handler for the topic or not, then its handler runs. Only
+  `/auth/webhooks/app-uninstalled` did it before, which keeps working.
+  A delivery whose signed payload names another shop than
+  `X-Shopify-Shop-Domain`, or none, is answered `400` and runs nothing,
+  where a handler of `app/uninstalled` used to run for it; a database failure
+  is a `500`, which Shopify retries.
+- `openshop::billing`, for Shopify's managed pricing:
+  `ctx.shopify.active_subscriptions()` reads
+  `currentAppInstallation.activeSubscriptions` (`ActiveSubscriptions`,
+  `AppSubscription`, `has_plan(&["Pro"])`), `billing::require_plan(&ctx,
+  &plans)` and `billing::any_plan` guard a loader or an action of an admin
+  page with `402 PLAN_REQUIRED` and the pricing page in the error,
+  `billing::pricing_url` / `pricing_link` give the plan selection page, and
+  `AppSubscriptionsUpdate` is the payload of `app_subscriptions/update`.
+  `ShopScope` gains `app_handle()`, the `handle` of `shopify.app.toml` that the
+  URLs of the admin name the app by (`shopify_app` keeps its meaning), and
+  `admin_url(path)`; `ShopifyEndpoints` gains `admin_url` and
+  `pricing_plans_url`. All of them follow `admin_origin`.
+  `ResolvedShopifyApp` has `app_handle`. See the new guide, Charge with
+  managed pricing.
+- `AdminPublicError::detail(name, value)` sends texts with the error, in
+  `details` of the response and of `AdminRpcError` (`error.detail(name)`).
+  Breaking: `AdminPublicError` and `AdminRpcError` have a `details` field.
+- `WebhookContext` and `AdminContext` have a `logger`, a `ContextLogger` with
+  the methods of the flow logger, whose lines go to the runtime logger with
+  the shop and the topic or the request, and are the breadcrumbs of the
+  handler's Sentry reports. `openshop::tracing` re-exports `tracing`, also in
+  the prelude. Breaking: a context built by hand needs
+  `logger: ContextLogger::new(json!({ … }))` or `ContextLogger::default()`.
+- The admin UI shares a session token between its requests until 15 seconds
+  before it expires, instead of asking App Bridge for one per request, and
+  the requests made while one is asked for wait for it. A `401` makes the
+  next request ask for another.
+
 - `ShopifyEndpoints` says where an app reaches Shopify, for a simulator of
   Shopify such as [local-storefront](https://github.com/0xtlt/local-storefront),
   a proxy or an API of your own. Each field is independent, and none set is
