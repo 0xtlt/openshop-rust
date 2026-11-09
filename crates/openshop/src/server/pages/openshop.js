@@ -12,9 +12,10 @@
  *   errors on its fields. `X-OpenShop-Location` sends the page elsewhere; `X-OpenShop-Toast` and
  *   `X-OpenShop-Toast-Error` are shown with `shopify.toast.show`.
  *
- * - What only a browser knows: a `<time datetime>` is written in its language and time zone; an
- *   element with `data-openshop-refresh="3000"` has the page fetched again after that many
- *   milliseconds (a run in progress), unless a field of the page has the focus; a button with
+ * - What only a browser knows: a `<time datetime>` is written in its language and time zone; a
+ *   modal with `data-openshop-open` is opened (its form was refused); an element with
+ *   `data-openshop-refresh="3000"` has the page fetched again after that many milliseconds (a run
+ *   in progress), unless a field of the page has the focus or a modal is open; a button with
  *   `data-openshop-copy` copies that text; one with `data-openshop-download="/api/…"` saves what
  *   that URL answers, under the name of its `data-openshop-filename`.
  *
@@ -31,6 +32,7 @@
   const SERVER = /^\/(api|auth|webhooks|proxy|ext|routes|health|ops|__openshop)(\/|$)/
   let current = null // the request in flight: a newer one replaces it
   let refresh = null // the timer of `data-openshop-refresh`
+  const shown = new Set() // the modals open: a refresh would close them
 
   const app = () => window.shopify
   const attempt = (action) => {
@@ -76,10 +78,15 @@
       const date = new Date(time.getAttribute('datetime'))
       if (!Number.isNaN(date.getTime())) time.textContent = date.toLocaleString()
     }
+    for (const modal of root.querySelectorAll('[data-openshop-open]')) {
+      customElements.whenDefined(modal.localName).then(() => attempt(() => modal.showOverlay()))
+    }
+    for (const modal of shown) if (!modal.isConnected) shown.delete(modal)
     clearTimeout(refresh)
     const every = Number(root.querySelector('[data-openshop-refresh]')?.getAttribute('data-openshop-refresh'))
     if (every > 0) refresh = setTimeout(function again() {
-      const busy = current || (document.activeElement !== document.body && root.contains(document.activeElement))
+      const focused = document.activeElement !== document.body && root.contains(document.activeElement)
+      const busy = current || focused || [...shown].some((modal) => modal.isConnected)
       if (busy) refresh = setTimeout(again, every)
       else visit(location.href, { push: false, quiet: true })
     }, every)
@@ -181,6 +188,9 @@
     if (link && !event.defaultPrevented && event.button === 0) follow(event, link)
   })
   addEventListener('popstate', () => visit(location.href, { push: false }))
+  // Polaris says when a modal opens and closes; the events do not bubble, a capture sees them.
+  document.addEventListener('show', (event) => shown.add(event.target), true)
+  document.addEventListener('afterhide', (event) => shown.delete(event.target), true)
   ready()
 
   window.openshop = { visit, toast }
