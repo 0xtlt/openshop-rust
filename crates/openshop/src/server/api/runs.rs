@@ -38,19 +38,21 @@ fn number_param(query: &IndexMap<String, String>, name: &str, fallback: i64) -> 
         .unwrap_or(fallback)
 }
 
-async fn list_runs_for(
+/// The runs of the session's shop and app, newest first, as `query` asks:
+/// `limit` (50, at most 200), `offset`, `search` (in the flow, the status
+/// and the id), `status`, `from` and `to`; those of `flow_name` only when it
+/// is given. The inner `Err` is a query that cannot be answered, said for the
+/// merchant (`offset must be at most 10000`).
+pub(crate) async fn query_runs(
     app: &OpenShop,
     session: &ShopSession,
     flow_name: Option<&str>,
     query: &IndexMap<String, String>,
-) -> ApiResult {
+) -> Result<Result<Vec<FlowRun>, String>, sqlx::Error> {
     let limit = number_param(query, "limit", 50).clamp(1, 200);
     let offset = number_param(query, "offset", 0).max(0);
     if offset > MAX_OFFSET {
-        return Ok(json_error(
-            StatusCode::BAD_REQUEST,
-            format!("offset must be at most {MAX_OFFSET}"),
-        ));
+        return Ok(Err(format!("offset must be at most {MAX_OFFSET}")));
     }
     let param = |name: &str| query.get(name).filter(|value| !value.is_empty());
 
@@ -79,8 +81,19 @@ async fn list_runs_for(
     sql.push(" ORDER BY created_at DESC LIMIT ").push_bind(limit);
     sql.push(" OFFSET ").push_bind(offset);
 
-    let runs: Vec<FlowRun> = sql.build_query_as().fetch_all(app.db()).await?;
-    Ok(json_response(StatusCode::OK, json!(runs)))
+    Ok(Ok(sql.build_query_as().fetch_all(app.db()).await?))
+}
+
+async fn list_runs_for(
+    app: &OpenShop,
+    session: &ShopSession,
+    flow_name: Option<&str>,
+    query: &IndexMap<String, String>,
+) -> ApiResult {
+    Ok(match query_runs(app, session, flow_name, query).await? {
+        Ok(runs) => json_response(StatusCode::OK, json!(runs)),
+        Err(refused) => json_error(StatusCode::BAD_REQUEST, refused),
+    })
 }
 
 async fn list_runs(
@@ -101,7 +114,7 @@ async fn list_flow_runs(
 }
 
 /// The run when it exists and belongs to the session's shop and app.
-async fn find_run(app: &OpenShop, session: &ShopSession, id: &str) -> Result<Option<FlowRun>, sqlx::Error> {
+pub(crate) async fn find_run(app: &OpenShop, session: &ShopSession, id: &str) -> Result<Option<FlowRun>, sqlx::Error> {
     let Ok(id) = Uuid::parse_str(id) else {
         return Ok(None);
     };
@@ -405,7 +418,7 @@ async fn cancel(
 /// Deletes the runs of the session that are over, with their steps and logs, and
 /// returns the ones that were deleted. A run is deleted only while it is not
 /// active, whatever its status was when the caller read it.
-async fn delete_runs(app: &OpenShop, session: &ShopSession, ids: &[Uuid]) -> Result<Vec<Uuid>, sqlx::Error> {
+pub(crate) async fn delete_runs(app: &OpenShop, session: &ShopSession, ids: &[Uuid]) -> Result<Vec<Uuid>, sqlx::Error> {
     let mut tx = app.db().begin().await?;
     let deleted: Vec<(Uuid,)> = sqlx::query_as(
         "DELETE FROM flow_runs \
