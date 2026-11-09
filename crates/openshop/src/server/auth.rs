@@ -124,11 +124,23 @@ async fn start(State(app): State<OpenShop>, headers: HeaderMap, RawQuery(raw): R
     let browser = browser_id(&headers).unwrap_or_else(random_hex);
     let expiry = Utc::now().timestamp() + STATE_TTL;
     let nonce = random_hex();
-    let signature = sign_state(&shopify_app.api_secret, &shopify_app.handle, shop.as_str(), expiry, &nonce, &browser);
+    let signature = sign_state(
+        &shopify_app.api_secret,
+        &shopify_app.handle,
+        shop.as_str(),
+        expiry,
+        &nonce,
+        &browser,
+    );
     let state = format!("{expiry}.{nonce}.{signature}");
 
-    let request = AuthorizationRequest::new(format!("{}/auth/callback", shopify_app.app_url), state)
-        .scopes(shopify_app.scopes.split(',').map(str::trim).filter(|scope| !scope.is_empty()));
+    let request = AuthorizationRequest::new(format!("{}/auth/callback", shopify_app.app_url), state).scopes(
+        shopify_app
+            .scopes
+            .split(',')
+            .map(str::trim)
+            .filter(|scope| !scope.is_empty()),
+    );
     let auth_url = shopify_app.oauth.authorization_url(&shop, &request);
     let mut response = redirect(&auth_url);
     let secure = shopify_app.app_url.starts_with("https://");
@@ -198,11 +210,13 @@ pub(crate) async fn record_uninstall(app: &OpenShop, shopify_app: &str, webhook:
         return Ok(false);
     }
     let shop = webhook.shop().to_string();
-    sqlx::query("UPDATE installations SET uninstalled_at = now(), access_token = NULL WHERE app_handle = $1 AND shop = $2")
-        .bind(shopify_app)
-        .bind(&shop)
-        .execute(app.db())
-        .await?;
+    sqlx::query(
+        "UPDATE installations SET uninstalled_at = now(), access_token = NULL WHERE app_handle = $1 AND shop = $2",
+    )
+    .bind(shopify_app)
+    .bind(&shop)
+    .execute(app.db())
+    .await?;
     app.client_credentials().forget(shopify_app, &shop);
     app.plans().forget(shopify_app, &shop).await;
     Ok(true)

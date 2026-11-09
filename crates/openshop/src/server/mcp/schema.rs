@@ -199,6 +199,51 @@ pub fn validate_json_schema(value: &Value, schema: &Value, path: &str) -> Result
     }
 }
 
+/// The error of each property of the object `value`, by name, in the order
+/// of the schema: what a form shows next to its fields. A required property
+/// that is missing `is required`; another one has the first error of its
+/// value, without its name (`must be at least 3 characters`). Empty when the
+/// schema does not describe an object.
+pub(crate) fn property_errors(value: &Value, schema: &Value) -> Vec<(String, String)> {
+    let mut errors = Vec::new();
+    let described = schema
+        .get("$ref")
+        .and_then(Value::as_str)
+        .and_then(|reference| resolve_ref(schema, reference))
+        .unwrap_or(schema);
+    let Some(object) = value.as_object() else {
+        return errors;
+    };
+    let required: Vec<&str> = described
+        .get("required")
+        .and_then(Value::as_array)
+        .map(|required| required.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+    let empty = JsonMap::new();
+    let properties = described.get("properties").and_then(Value::as_object).unwrap_or(&empty);
+    for (key, property) in properties {
+        let error = match object.get(key) {
+            None if required.contains(&key.as_str()) => Some("is required".to_string()),
+            None => None,
+            Some(child) => validate_value(child, property, schema, key, 1).map(|error| {
+                error
+                    .strip_prefix(&format!("{key} "))
+                    .map(str::to_string)
+                    .unwrap_or(error)
+            }),
+        };
+        if let Some(error) = error {
+            errors.push((key.clone(), error));
+        }
+    }
+    for key in required {
+        if !properties.contains_key(key) && !object.contains_key(key) {
+            errors.push((key.to_string(), "is required".to_string()));
+        }
+    }
+    errors
+}
+
 /// Missing arguments are treated as `{}`. Without a schema any object is accepted.
 pub fn validate_mcp_tool_arguments(input_schema: Option<&Value>, value: Option<&Value>) -> Result<JsonMap, String> {
     let arguments = match value {
@@ -351,5 +396,37 @@ mod tests {
     #[test]
     fn ignores_schemas_that_are_not_objects() {
         assert_eq!(validate_json_schema(&json!(1), &json!(true), "input"), Ok(()));
+    }
+
+    #[test]
+    fn reports_the_error_of_each_property() {
+        let schema = json!({
+            "type": "object",
+            "required": ["title", "rating", "author"],
+            "properties": {
+                "title": { "type": "string", "minLength": 3 },
+                "rating": { "$ref": "#/$defs/Rating" },
+                "note": { "type": ["string", "null"] },
+                "tags": { "type": "array", "items": { "type": "string" } },
+            },
+            "$defs": { "Rating": { "type": "integer", "minimum": 1, "maximum": 5 } },
+        });
+        let errors = property_errors(
+            &json!({ "title": "ok", "rating": 9, "note": null, "tags": ["a", 2] }),
+            &schema,
+        );
+        assert_eq!(
+            errors,
+            [
+                ("title".to_string(), "must be at least 3 characters".to_string()),
+                ("rating".to_string(), "must be <= 5".to_string()),
+                ("tags".to_string(), "tags[1] must be string".to_string()),
+                ("author".to_string(), "is required".to_string()),
+            ]
+        );
+        let missing = property_errors(&json!({}), &schema);
+        assert_eq!(missing[0], ("title".to_string(), "is required".to_string()));
+        assert!(property_errors(&json!({ "title": "fine", "rating": 3, "author": "a" }), &schema).is_empty());
+        assert!(property_errors(&json!("text"), &schema).is_empty());
     }
 }

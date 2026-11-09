@@ -1,12 +1,12 @@
 # OpenShop (Rust)
 
 Build Shopify integrations in Rust with background flows, configurable
-service providers, and an embedded admin UI.
+service providers, and an admin rendered by the server.
 
 This is the Rust implementation of [OpenShop](https://github.com/0xtlt/OpenShop).
 It keeps the same model, HTTP API, database schema and admin screens as the
 TypeScript framework, compiled into a single binary: the server, the worker,
-the scheduler and the WebAssembly admin UI.
+the scheduler and the admin, whose pages the server renders.
 
 This implementation is a v0 in development and has no users yet. APIs,
 generated files, and workflows change without a transition period before `1.0`.
@@ -167,7 +167,7 @@ Rust conventions.
 | `openshop.config.ts` loaded by the `openshop` CLI | your own binary running the application it declares: `APP.main()` |
 | `defineModel('reviews', { … })` and Drizzle queries | `#[derive(Model)]` on a struct, with typed rows: `Review::of(&ctx).filter(Review::RATING.gte(4))` |
 | `drizzle-kit` migrations in `./drizzle` | SQL migrations in `./migrations`, generated from what changed in the models (`migrate generate` / `migrate`) |
-| Preact admin UI built with Vite | Leptos admin UI compiled to WebAssembly and embedded in the binary |
+| Preact admin UI built with Vite | admin pages the server renders with Polaris web components, and one small script: no bundle to build |
 | `createTestContext()` from `openshop/test` | `#[openshop::test(APP)]` on an `async fn(ctx: &TestContext)` (feature `testing`) |
 | `shopify.graphql(\`#graphql …\`)` typed by codegen | `ctx.shopify.execute(graphql!("…", var = value))`, checked and typed at compile time |
 | ESLint preset | not needed |
@@ -181,11 +181,10 @@ robust; they are listed in [Differences](docs/src/reference/differences.md).
 
 | Path | Contents |
 | --- | --- |
-| `crates/openshop` | The framework: engine, server, MCP, testing harness, embedded UI assets |
-| `crates/openshop-shared` | Types and rules shared by the server and the WebAssembly UI |
+| `crates/openshop` | The framework: engine, server, admin pages, MCP, testing harness |
+| `crates/openshop-shared` | Types and rules of the paths and modes of the admin pages |
 | `crates/openshop-macros` | The macros: `app!`, and the attributes and derives that declare building blocks |
-| `crates/openshop-ui` | The admin UI (Leptos, built with trunk into `crates/openshop/ui-dist`) |
-| `crates/openshop-cli` | The `openshop` command: `init`, `init-ui`, `dev`, `build` and `build-ui` |
+| `crates/openshop-cli` | The `openshop` command: `init`, `init-ui`, `dev` and `build` |
 | `templates/minimal` | The template of `openshop init --template=minimal`: one provider and one flow |
 | `templates/custom` | The template of a custom app: every building block, with the built-in admin open to the merchant and a custom admin page |
 | `templates/public` | The template of a public app: an admin made of its own pages for the merchants, the operator dashboard for whoever runs it |

@@ -9,11 +9,11 @@ pub(crate) mod token_exchange;
 pub use client::ShopifyClient;
 pub use endpoints::ShopifyEndpoints;
 pub use partner::{PartnerApi, PartnerApiClient};
-pub use shopify_api::{ApiVersion, IntoVariable, Operation, Page};
 /// How the Shopify client retries what Shopify did not run: the
 /// [`shopify_retry`](crate::builder::OpenShopBuilder::shopify_retry) setting.
 /// Not the [`RetryPolicy`](crate::RetryPolicy) of a flow run.
 pub use shopify_api::RetryPolicy;
+pub use shopify_api::{ApiVersion, IntoVariable, Operation, Page};
 
 /// A Shopify app and a shop, what the process keeps its tokens and clients by.
 type AppShop = (String, String);

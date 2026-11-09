@@ -71,10 +71,10 @@ answers `404`. The access token of a shop and the configuration of a provider
 are never read: of a provider, a page says whether the shop saved it and how
 its last check went.
 
-The pages are HTML rendered by the server, without script, App Bridge, or the
-WebAssembly bundle of the admin, and load nothing from another host: charts
-are drawn by the server as SVG. They work in any browser, with or without an
-[admin UI](custom-admin-pages.md#serve-the-bundle), follow its light or dark
+The pages are HTML rendered by the server, without script or App Bridge, and
+load nothing from another host: charts are drawn by the server as SVG. They
+work in any browser, with or without the
+[admin](custom-admin-pages.md#how-pages-are-served), follow its light or dark
 theme, and on a narrow screen show each row of a table as a card.
 
 Counting over a period reads the runs and the log lines of that period. On a

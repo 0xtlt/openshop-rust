@@ -1,11 +1,10 @@
 # cargo-deny: `cargo deny check`, run by the `deny` job of CI. It covers the
-# workspace; the admin UI workspace (`crates/openshop-ui`) has its own
-# lockfile and is checked with `--manifest-path crates/openshop-ui/Cargo.toml`.
+# workspace.
 
 [advisories]
 # A vulnerability or a yanked crate fails the check. An unmaintained crate
 # fails it only when the workspace depends on it directly, not through a
-# dependency we cannot change (`paste`, a build-time proc-macro of leptos).
+# dependency we cannot change.
 #
 # RUSTSEC-2023-0071 (`rsa`, no fix) is not ignored because it is not reached:
 # `rsa` is in Cargo.lock only through `sqlx-mysql`, an optional dependency of

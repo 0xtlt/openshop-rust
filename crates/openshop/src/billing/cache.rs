@@ -195,7 +195,9 @@ mod tests {
         kept(pro()).await;
         cache.forget_on_welcome("default", "a.myshopify.com", Some("pro")).await;
         assert!(is_kept().await);
-        cache.forget_on_welcome("default", "a.myshopify.com", Some("plus")).await;
+        cache
+            .forget_on_welcome("default", "a.myshopify.com", Some("plus"))
+            .await;
         assert!(!is_kept().await);
         kept(None).await;
         cache.forget_on_welcome("default", "a.myshopify.com", Some("pro")).await;

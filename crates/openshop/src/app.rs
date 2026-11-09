@@ -9,6 +9,7 @@ use indexmap::IndexMap;
 use sqlx::PgPool;
 
 use crate::admin::{AdminPage, CustomAdminPage};
+use crate::billing::{BillingSource, PlanCache};
 use crate::config::validate::validate_openshop_config;
 use crate::db::Table;
 use crate::declare::Declared;
@@ -16,18 +17,17 @@ use crate::engine::dispatch::{DispatchOptions, QueuedRun, dispatch_flow};
 #[cfg(feature = "sentry")]
 use crate::runtime::SentryConfig;
 use crate::runtime::{ReqwestTransport, RuntimeEnv, Transport};
+use crate::server::UiSource;
 use crate::server::connectors::Connectors;
 use crate::server::crypto::Crypto;
 use crate::server::mcp::core::create_core_mcp_capabilities;
 use crate::server::mcp::registry::{McpRegistry, build_mcp_registry};
 use crate::server::shopify_apps::ShopifyApps;
-use crate::server::static_ui::UiSource;
+use crate::server::webhooks::WebhookDeliveries;
 use crate::shopify::client::ShopifyClient;
+use crate::shopify::client_credentials::ClientCredentials;
 use crate::shopify::endpoints::{Endpoints, ShopifyEndpoints};
 use crate::shopify::partner::{PartnerApi, PartnerApiClient};
-use crate::billing::{BillingSource, PlanCache};
-use crate::server::webhooks::WebhookDeliveries;
-use crate::shopify::client_credentials::ClientCredentials;
 use crate::types::{
     AdminMenuItem, AdminPageId, AdminPageMode, AdminPagesConfig, Cron, ErrorContext, Flow, Function, McpConfig,
     McpResource, McpTool, OnErrorFn, Provider, Proxy, RetryPolicy, Route, ShopifyConfig, Webhook, WorkerConfig,
@@ -72,8 +72,8 @@ pub struct OpenShopConfig {
     pub admin_pages: Vec<AdminPage>,
     /// Application tables created by the development schema push.
     pub models: Vec<Table>,
-    /// Admin UI bundle served by `dev` and `start` instead of the built-in one,
-    /// for applications with custom admin pages.
+    /// The admin `dev` and `start` serve: the one the server renders
+    /// (`UiSource::Server`) unless it is `UiSource::None`, an API-only server.
     pub admin_ui: Option<UiSource>,
     /// Maximum size of a request body. Defaults to 2 MB.
     pub max_request_body_bytes: Option<usize>,
@@ -412,7 +412,7 @@ impl OpenShopBuilder {
         self
     }
 
-    /// Serves a custom admin UI bundle instead of the built-in one.
+    /// The admin to serve: `UiSource::None` for an API-only server.
     pub fn admin_ui(mut self, ui: UiSource) -> Self {
         self.config.admin_ui = Some(ui);
         self

@@ -79,14 +79,14 @@ use crate::admin::{AdminContext, AdminPublicError};
 use crate::shopify::ShopifyClient;
 use crate::types::ShopScope;
 
-pub(crate) use cache::PlanCache;
 pub use cache::MIN_REFRESH;
-#[cfg(feature = "testing")]
-pub(crate) use partner::{partner_ids_data, partner_subscription_data};
+pub(crate) use cache::PlanCache;
 pub use partner::{
     AppPricingDiscount, AppPricingItem, AppPricingPrice, AppPricingSubscription, AppPricingUsage, BillingCycle,
     FlatRatePrice, PARTNER_IDS_OPERATION, PARTNER_SUBSCRIPTION_OPERATION, PendingUpdate, PriceTier, TieredPrice,
 };
+#[cfg(feature = "testing")]
+pub(crate) use partner::{partner_ids_data, partner_subscription_data};
 
 /// The `code` of the error [`require_plan`] answers when no plan fits.
 pub const PLAN_REQUIRED: &str = "PLAN_REQUIRED";
@@ -1074,14 +1074,20 @@ mod tests {
         // `AppFuturePricing` reads as `Other`, which is written as such.
         let read = read_active_subscriptions(active_subscriptions_data(&written)).unwrap();
         assert_eq!(read, written);
-        assert_eq!(read_active_subscriptions(active_subscriptions_data(&[])).unwrap(), ActiveSubscriptions::default());
+        assert_eq!(
+            read_active_subscriptions(active_subscriptions_data(&[])).unwrap(),
+            ActiveSubscriptions::default()
+        );
     }
 
     #[test]
     fn the_error_of_a_missing_plan_names_the_plans() {
         assert_eq!(plan_required_message(&[]), "Choose a plan to use this feature");
         assert_eq!(plan_required_message(&["Pro"]), "This feature needs the Pro plan");
-        assert_eq!(plan_required_message(&["Pro", "Plus"]), "This feature needs the Pro or Plus plan");
+        assert_eq!(
+            plan_required_message(&["Pro", "Plus"]),
+            "This feature needs the Pro or Plus plan"
+        );
         assert_eq!(
             plan_required_message(&["Basic", "Pro", "Plus"]),
             "This feature needs the Basic, Pro or Plus plan"

@@ -16,7 +16,7 @@ use super::run_logs::{
 use crate::app::OpenShop;
 use crate::db::schema::{FlowRun, StepResult};
 use crate::engine::abort::cancel_run;
-use crate::engine::dispatch::{DispatchOptions, lock_flow, reject_when_active};
+use crate::engine::dispatch::{DispatchOptions, QueuedRun, lock_flow, reject_when_active};
 use crate::engine::errors::{FlowConcurrencyError, InvalidFlowInput, UnknownFlowError};
 use crate::runtime::time::parse_date;
 use crate::server::http::{ApiResult, containing, json_error, json_object_body, json_response, parse_query};
@@ -38,19 +38,21 @@ fn number_param(query: &IndexMap<String, String>, name: &str, fallback: i64) -> 
         .unwrap_or(fallback)
 }
 
-async fn list_runs_for(
+/// The runs of the session's shop and app, newest first, as `query` asks:
+/// `limit` (50, at most 200), `offset`, `search` (in the flow, the status
+/// and the id), `status`, `from` and `to`; those of `flow_name` only when it
+/// is given. The inner `Err` is a query that cannot be answered, said for the
+/// merchant (`offset must be at most 10000`).
+pub(crate) async fn query_runs(
     app: &OpenShop,
     session: &ShopSession,
     flow_name: Option<&str>,
     query: &IndexMap<String, String>,
-) -> ApiResult {
+) -> Result<Result<Vec<FlowRun>, String>, sqlx::Error> {
     let limit = number_param(query, "limit", 50).clamp(1, 200);
     let offset = number_param(query, "offset", 0).max(0);
     if offset > MAX_OFFSET {
-        return Ok(json_error(
-            StatusCode::BAD_REQUEST,
-            format!("offset must be at most {MAX_OFFSET}"),
-        ));
+        return Ok(Err(format!("offset must be at most {MAX_OFFSET}")));
     }
     let param = |name: &str| query.get(name).filter(|value| !value.is_empty());
 
@@ -79,8 +81,19 @@ async fn list_runs_for(
     sql.push(" ORDER BY created_at DESC LIMIT ").push_bind(limit);
     sql.push(" OFFSET ").push_bind(offset);
 
-    let runs: Vec<FlowRun> = sql.build_query_as().fetch_all(app.db()).await?;
-    Ok(json_response(StatusCode::OK, json!(runs)))
+    Ok(Ok(sql.build_query_as().fetch_all(app.db()).await?))
+}
+
+async fn list_runs_for(
+    app: &OpenShop,
+    session: &ShopSession,
+    flow_name: Option<&str>,
+    query: &IndexMap<String, String>,
+) -> ApiResult {
+    Ok(match query_runs(app, session, flow_name, query).await? {
+        Ok(runs) => json_response(StatusCode::OK, json!(runs)),
+        Err(refused) => json_error(StatusCode::BAD_REQUEST, refused),
+    })
 }
 
 async fn list_runs(
@@ -101,7 +114,7 @@ async fn list_flow_runs(
 }
 
 /// The run when it exists and belongs to the session's shop and app.
-async fn find_run(app: &OpenShop, session: &ShopSession, id: &str) -> Result<Option<FlowRun>, sqlx::Error> {
+pub(crate) async fn find_run(app: &OpenShop, session: &ShopSession, id: &str) -> Result<Option<FlowRun>, sqlx::Error> {
     let Ok(id) = Uuid::parse_str(id) else {
         return Ok(None);
     };
@@ -117,6 +130,14 @@ fn run_not_found() -> axum::response::Response {
     json_error(StatusCode::NOT_FOUND, "Run not found")
 }
 
+/// The steps of a run, each attempt, in the order they were created.
+pub(crate) async fn run_steps(app: &OpenShop, run: &FlowRun) -> Result<Vec<StepResult>, sqlx::Error> {
+    sqlx::query_as("SELECT * FROM step_results WHERE flow_run_id = $1 ORDER BY created_at ASC")
+        .bind(run.id.to_string())
+        .fetch_all(app.db())
+        .await
+}
+
 async fn get_run(
     State(app): State<OpenShop>,
     Extension(session): Extension<ShopSession>,
@@ -125,11 +146,7 @@ async fn get_run(
     let Some(run) = find_run(&app, &session, &id).await? else {
         return Ok(run_not_found());
     };
-    let steps: Vec<StepResult> =
-        sqlx::query_as("SELECT * FROM step_results WHERE flow_run_id = $1 ORDER BY created_at ASC")
-            .bind(run.id.to_string())
-            .fetch_all(app.db())
-            .await?;
+    let steps = run_steps(&app, &run).await?;
 
     let mut body = serde_json::to_value(&run)?;
     body["steps"] = json!(steps);
@@ -205,18 +222,37 @@ async fn export_run_logs(
     }
 }
 
-async fn run_flow(
-    State(app): State<OpenShop>,
-    Extension(session): Extension<ShopSession>,
-    Path(name): Path<String>,
-    body: Bytes,
-) -> ApiResult {
-    let body = json_object_body(&body);
-    let input = match body.get("input") {
-        Some(Value::Null) | None => json!({}),
-        Some(input) => input.clone(),
-    };
+/// Why a flow was not started, for the merchant.
+pub(crate) enum NotStarted {
+    /// The flow rejects concurrent runs and one is active (`409`).
+    Conflict(FlowConcurrencyError),
+    /// No flow has this name (`404`).
+    Unknown(String),
+    /// The input fails the input schema of the flow (`422`).
+    Invalid(InvalidFlowInput),
+}
 
+impl NotStarted {
+    /// What the merchant is told: `Flow "syncOrders" not found`.
+    pub(crate) fn message(&self) -> String {
+        match self {
+            Self::Conflict(conflict) => conflict.to_string(),
+            Self::Unknown(name) => format!("Flow \"{name}\" not found"),
+            Self::Invalid(invalid) => invalid.to_string(),
+        }
+    }
+}
+
+/// Queues a run of the flow `name` for the session's shop and app, with
+/// `input` (`null` is `{}`). The inner `Err` is a start the merchant is told
+/// about; any other failure is unexpected.
+pub(crate) async fn start_flow(
+    app: &OpenShop,
+    session: &ShopSession,
+    name: &str,
+    input: Value,
+) -> anyhow::Result<Result<QueuedRun, NotStarted>> {
+    let input = if input.is_null() { json!({}) } else { input };
     let dispatched = app
         .dispatch_flow(
             DispatchOptions::new(name, session.shop.clone())
@@ -225,22 +261,35 @@ async fn run_flow(
         )
         .await;
     match dispatched {
-        Ok(result) => Ok(json_response(StatusCode::ACCEPTED, json!(result))),
+        Ok(result) => Ok(Ok(result)),
         Err(error) => {
             if let Some(conflict) = error.downcast_ref::<FlowConcurrencyError>() {
-                Ok(concurrency_conflict(conflict))
+                Ok(Err(NotStarted::Conflict(conflict.clone())))
             } else if let Some(unknown) = error.downcast_ref::<UnknownFlowError>() {
-                Ok(json_error(
-                    StatusCode::NOT_FOUND,
-                    format!("Flow \"{}\" not found", unknown.flow_name),
-                ))
+                Ok(Err(NotStarted::Unknown(unknown.flow_name.clone())))
             } else if let Some(invalid) = error.downcast_ref::<InvalidFlowInput>() {
-                Ok(json_error(StatusCode::UNPROCESSABLE_ENTITY, invalid.to_string()))
+                Ok(Err(NotStarted::Invalid(invalid.clone())))
             } else {
-                Err(error.into())
+                Err(error)
             }
         }
     }
+}
+
+async fn run_flow(
+    State(app): State<OpenShop>,
+    Extension(session): Extension<ShopSession>,
+    Path(name): Path<String>,
+    body: Bytes,
+) -> ApiResult {
+    let body = json_object_body(&body);
+    let input = body.get("input").cloned().unwrap_or(Value::Null);
+    Ok(match start_flow(&app, &session, &name, input).await? {
+        Ok(result) => json_response(StatusCode::ACCEPTED, json!(result)),
+        Err(NotStarted::Conflict(conflict)) => concurrency_conflict(&conflict),
+        Err(refused @ NotStarted::Unknown(_)) => json_error(StatusCode::NOT_FOUND, refused.message()),
+        Err(refused @ NotStarted::Invalid(_)) => json_error(StatusCode::UNPROCESSABLE_ENTITY, refused.message()),
+    })
 }
 
 /// `409` for a flow that rejects concurrent runs, with the run that is active.
@@ -251,41 +300,79 @@ fn concurrency_conflict(conflict: &FlowConcurrencyError) -> Response {
     )
 }
 
-/// The answer to a transition that matched no row: the run is gone (`404`), or
-/// it was not in a status the transition starts from (`409`, saying which). The
-/// run is read again because it can have changed since the request read it.
+/// Why a run was not retried, canceled or deleted: what the JSON API answers,
+/// and what the page of the run says.
+#[derive(Debug)]
+pub(crate) enum RunRefusal {
+    /// The run is not there, or is another shop's or app's: `404`.
+    NotFound,
+    /// The run is not in a status the transition starts from: `409`, saying why.
+    Conflict(String),
+    /// The flow rejects concurrent runs and has an active one: `409`, with its id.
+    Concurrent(FlowConcurrencyError),
+}
+
+impl RunRefusal {
+    pub(crate) fn status(&self) -> StatusCode {
+        match self {
+            Self::NotFound => StatusCode::NOT_FOUND,
+            Self::Conflict(_) | Self::Concurrent(_) => StatusCode::CONFLICT,
+        }
+    }
+
+    pub(crate) fn message(&self) -> String {
+        match self {
+            Self::NotFound => "Run not found".to_string(),
+            Self::Conflict(message) => message.clone(),
+            Self::Concurrent(conflict) => conflict.to_string(),
+        }
+    }
+
+    fn response(&self) -> Response {
+        match self {
+            Self::NotFound => run_not_found(),
+            Self::Conflict(message) => json_error(StatusCode::CONFLICT, message.clone()),
+            Self::Concurrent(conflict) => concurrency_conflict(conflict),
+        }
+    }
+}
+
+/// Why a transition matched no row: the run is gone (`404`), or it was not in
+/// a status the transition starts from (`409`, saying which). The run is read
+/// again because it can have changed since the request read it.
 async fn refused_transition(
     app: &OpenShop,
     session: &ShopSession,
     id: &str,
     allowed: &[&str],
     conflict: impl FnOnce(&FlowRun) -> String,
-) -> ApiResult {
+) -> Result<RunRefusal, sqlx::Error> {
     let Some(run) = find_run(app, session, id).await? else {
-        return Ok(run_not_found());
+        return Ok(RunRefusal::NotFound);
     };
     if allowed.contains(&run.status.as_str()) {
-        return Ok(json_error(
-            StatusCode::CONFLICT,
-            "The run changed while the request was processed — try again",
+        return Ok(RunRefusal::Conflict(
+            "The run changed while the request was processed — try again".to_string(),
         ));
     }
-    Ok(json_error(StatusCode::CONFLICT, conflict(&run)))
+    Ok(RunRefusal::Conflict(conflict(&run)))
 }
 
 /// Runs that are over, and so that can be retried.
 const FINISHED_RUN_STATUSES: [&str; 3] = ["failed", "completed", "canceled"];
 
-async fn retry_run(
-    State(app): State<OpenShop>,
-    Extension(session): Extension<ShopSession>,
-    Path(id): Path<String>,
-    RawQuery(raw_query): RawQuery,
-) -> ApiResult {
-    let query = parse_query(raw_query.as_deref());
-    let mode = query.get("mode").map(String::as_str).unwrap_or("resume");
-    let Some(run) = find_run(&app, &session, &id).await? else {
-        return Ok(run_not_found());
+/// Retries a run of the session that is over, and returns its id: `mode`
+/// `reset` discards its steps, any other (`resume`) keeps those that
+/// completed. Refused when the run is not there, is not over, or its flow
+/// rejects concurrent runs and has an active one.
+pub(crate) async fn retry_finished_run(
+    app: &OpenShop,
+    session: &ShopSession,
+    id: &str,
+    mode: &str,
+) -> anyhow::Result<Result<String, RunRefusal>> {
+    let Some(run) = find_run(app, session, id).await? else {
+        return Ok(Err(RunRefusal::NotFound));
     };
 
     let flow = app.config().flows.get(&run.flow_name);
@@ -317,17 +404,18 @@ async fn retry_run(
     .await?;
     if retried.rows_affected() == 0 {
         tx.rollback().await?;
-        return refused_transition(&app, &session, &id, &FINISHED_RUN_STATUSES, |run| {
+        let refusal = refused_transition(app, session, id, &FINISHED_RUN_STATUSES, |run| {
             format!("Cannot retry a run with status \"{}\"", run.status)
         })
-        .await;
+        .await?;
+        return Ok(Err(refusal));
     }
     if rejects_concurrency
         && let Err(error) = reject_when_active(&mut tx, &run.app_handle, &run.shop, &run.flow_name, Some(run.id)).await
     {
-        return match error.downcast_ref::<FlowConcurrencyError>() {
-            Some(conflict) => Ok(concurrency_conflict(conflict)),
-            None => Err(error.into()),
+        return match error.downcast::<FlowConcurrencyError>() {
+            Ok(conflict) => Ok(Err(RunRefusal::Concurrent(conflict))),
+            Err(error) => Err(error),
         };
     }
 
@@ -356,11 +444,21 @@ async fn retry_run(
         .execute(&mut *tx)
         .await?;
     tx.commit().await?;
+    Ok(Ok(run_id))
+}
 
-    Ok(json_response(
-        StatusCode::OK,
-        json!({ "ok": true, "runId": run_id, "mode": mode }),
-    ))
+async fn retry_run(
+    State(app): State<OpenShop>,
+    Extension(session): Extension<ShopSession>,
+    Path(id): Path<String>,
+    RawQuery(raw_query): RawQuery,
+) -> ApiResult {
+    let query = parse_query(raw_query.as_deref());
+    let mode = query.get("mode").map(String::as_str).unwrap_or("resume");
+    Ok(match retry_finished_run(&app, &session, &id, mode).await? {
+        Ok(run_id) => json_response(StatusCode::OK, json!({ "ok": true, "runId": run_id, "mode": mode })),
+        Err(refusal) => refusal.response(),
+    })
 }
 
 async fn cancel(
@@ -387,10 +485,11 @@ async fn cancel(
     .await?;
     if canceled.rows_affected() == 0 {
         tx.rollback().await?;
-        return refused_transition(&app, &session, &id, &ACTIVE_RUN_STATUSES, |run| {
+        let refusal = refused_transition(&app, &session, &id, &ACTIVE_RUN_STATUSES, |run| {
             format!("Cannot cancel a run with status \"{}\"", run.status)
         })
-        .await;
+        .await?;
+        return Ok(refusal.response());
     }
 
     // The worker that executes the run, when it is this process, is told while
@@ -405,7 +504,7 @@ async fn cancel(
 /// Deletes the runs of the session that are over, with their steps and logs, and
 /// returns the ones that were deleted. A run is deleted only while it is not
 /// active, whatever its status was when the caller read it.
-async fn delete_runs(app: &OpenShop, session: &ShopSession, ids: &[Uuid]) -> Result<Vec<Uuid>, sqlx::Error> {
+pub(crate) async fn delete_runs(app: &OpenShop, session: &ShopSession, ids: &[Uuid]) -> Result<Vec<Uuid>, sqlx::Error> {
     let mut tx = app.db().begin().await?;
     let deleted: Vec<(Uuid,)> = sqlx::query_as(
         "DELETE FROM flow_runs \
@@ -433,21 +532,35 @@ async fn delete_runs(app: &OpenShop, session: &ShopSession, ids: &[Uuid]) -> Res
     Ok(deleted)
 }
 
+/// Deletes a run of the session that is over, with its steps and its logs.
+/// Refused when the run is not there, or is active.
+pub(crate) async fn delete_finished_run(
+    app: &OpenShop,
+    session: &ShopSession,
+    id: &str,
+) -> Result<Result<(), RunRefusal>, sqlx::Error> {
+    let Ok(run_id) = Uuid::parse_str(id) else {
+        return Ok(Err(RunRefusal::NotFound));
+    };
+    if delete_runs(app, session, &[run_id]).await?.is_empty() {
+        let refusal = refused_transition(app, session, id, &FINISHED_RUN_STATUSES, |_| {
+            "Cannot delete an active run — cancel it first".to_string()
+        })
+        .await?;
+        return Ok(Err(refusal));
+    }
+    Ok(Ok(()))
+}
+
 async fn delete_run(
     State(app): State<OpenShop>,
     Extension(session): Extension<ShopSession>,
     Path(id): Path<String>,
 ) -> ApiResult {
-    let Ok(run_id) = Uuid::parse_str(&id) else {
-        return Ok(run_not_found());
-    };
-    if delete_runs(&app, &session, &[run_id]).await?.is_empty() {
-        return refused_transition(&app, &session, &id, &FINISHED_RUN_STATUSES, |_| {
-            "Cannot delete an active run — cancel it first".to_string()
-        })
-        .await;
-    }
-    Ok(json_response(StatusCode::OK, json!({ "ok": true })))
+    Ok(match delete_finished_run(&app, &session, &id).await? {
+        Ok(()) => json_response(StatusCode::OK, json!({ "ok": true })),
+        Err(refusal) => refusal.response(),
+    })
 }
 
 async fn bulk_delete(
@@ -459,16 +572,41 @@ async fn bulk_delete(
     let Some(ids) = body.get("ids").and_then(Value::as_array).filter(|ids| !ids.is_empty()) else {
         return Ok(json_error(StatusCode::BAD_REQUEST, "No IDs provided"));
     };
-    if ids.len() > 100 {
-        return Ok(json_error(StatusCode::BAD_REQUEST, "Max 100 runs per batch"));
-    }
+    let ids: Vec<&str> = ids.iter().map(|id| id.as_str().unwrap_or_default()).collect();
+    Ok(match delete_run_batch(&app, &session, &ids).await? {
+        Ok(batch) => json_response(
+            StatusCode::OK,
+            json!({ "deleted": batch.deleted, "skipped": batch.skipped }),
+        ),
+        Err(refused) => json_error(StatusCode::BAD_REQUEST, refused),
+    })
+}
 
-    let candidates: Vec<Uuid> = ids.iter().filter_map(|id| Uuid::parse_str(id.as_str()?).ok()).collect();
-    let deleted = delete_runs(&app, &session, &candidates).await?;
-    Ok(json_response(
-        StatusCode::OK,
-        json!({ "deleted": deleted.len(), "skipped": ids.len() - deleted.len() }),
-    ))
+/// What a deletion of several runs did.
+pub(crate) struct DeletedBatch {
+    pub(crate) deleted: usize,
+    /// The ids that named no run of the session that is over: active, of
+    /// another shop, gone, or not an id.
+    pub(crate) skipped: usize,
+}
+
+/// Deletes the runs that `ids` names and that are over, at most 100 at a
+/// time. The inner `Err` is a batch refused, said for the merchant (`Max 100
+/// runs per batch`).
+pub(crate) async fn delete_run_batch(
+    app: &OpenShop,
+    session: &ShopSession,
+    ids: &[&str],
+) -> Result<Result<DeletedBatch, &'static str>, sqlx::Error> {
+    if ids.len() > 100 {
+        return Ok(Err("Max 100 runs per batch"));
+    }
+    let candidates: Vec<Uuid> = ids.iter().filter_map(|id| Uuid::parse_str(id).ok()).collect();
+    let deleted = delete_runs(app, session, &candidates).await?.len();
+    Ok(Ok(DeletedBatch {
+        deleted,
+        skipped: ids.len() - deleted,
+    }))
 }
 
 pub fn routes() -> Router<OpenShop> {

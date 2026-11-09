@@ -7,7 +7,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use openshop::Cron;
-use openshop::builder::{AdminPage, Flow, Proxy, Route, Webhook};
+use openshop::admin::PageRequest;
+use openshop::builder::{AdminPage, Flow, InputSchema, Proxy, Route, Webhook};
 use openshop::engine::{RunFlowOptions, Scheduler, Worker, run_flow};
 use openshop::response;
 use openshop::sentry::protocol::Event;
@@ -17,8 +18,6 @@ use openshop::{
     AdminPublicError, DispatchOptions, FlowContext, InvalidInput, OpenShopConfig, RunOutcome, SentryConfig, Uuid,
     WorkerConfig, bail, json,
 };
-use openshop_shared::build_admin_function_rpc_url;
-use reqwest::Method;
 
 const FLOW: &str = "syncOrders";
 const DSN: &str = "https://public@sentry.invalid/42";
@@ -487,42 +486,57 @@ fn each_request_has_a_scope_of_its_own() {
 }
 
 #[test]
-fn an_admin_function_that_fails_is_found_by_its_request_id() {
-    let mut request_id = None;
+fn an_admin_page_or_form_that_fails_is_reported_with_its_shop() {
     let events = captured(async {
+        let refused = || AdminPublicError::new("NOT_READY", "Come back later").status(409);
+        // A view whose loader fails (`?refused`: with an error written for the
+        // merchant), and an action that fails, and one that refuses.
         let page = AdminPage::new("/reviews")
-            .loader("list", |_ctx, _input| async { bail!("the reviews table is locked") })
-            .loader("refused", |_ctx, _input| async {
-                bail!(AdminPublicError::new("NOT_READY", "Come back later").status(409))
+            .action("save", InputSchema::any(), |_ctx, _input| async {
+                bail!("the reviews could not be saved")
+            })
+            .action("hold", InputSchema::any(), move |_ctx, _input| async move {
+                bail!(refused())
+            })
+            .view(move |request: PageRequest| async move {
+                let refuses = request.query == "refused";
+                let reviews: Vec<String> = request
+                    .load(|_ctx| async move {
+                        if refuses {
+                            bail!(refused());
+                        }
+                        bail!("the reviews table is locked")
+                    })
+                    .await?;
+                Ok(maud::html! { s-page { (reviews.join(", ")) } })
             });
         let ctx = context(OpenShopConfig::builder().admin_page(page).build().unwrap()).await;
-        let load = async |name: &str| {
-            let url = build_admin_function_rpc_url("loader", name, "/reviews");
-            let response = ctx
-                .request(Method::POST, &url)
-                .json(&json!({ "input": null }))
-                .send()
-                .await
-                .unwrap();
-            let status = response.status().as_u16();
-            (status, response.json::<openshop::Value>().await.unwrap())
-        };
+        let status = async |request: reqwest::RequestBuilder| request.send().await.unwrap().status().as_u16();
 
         // An error written for the merchant is an answer, not a failure.
-        assert_eq!(load("refused").await.0, 409);
-        let (status, body) = load("list").await;
-        assert_eq!(status, 500);
-        request_id = body["requestId"].as_str().map(str::to_string);
+        assert_eq!(status(ctx.page("/reviews?refused")).await, 409);
+        assert_eq!(status(ctx.submit("/reviews", &[("_action", "hold")])).await, 409);
+        assert_eq!(status(ctx.page("/reviews")).await, 500);
+        assert_eq!(status(ctx.submit("/reviews", &[("_action", "save")])).await, 500);
         ctx.shutdown().await.unwrap();
     });
 
-    let event = the_only(events);
-    assert_eq!(message(&event), "the reviews table is locked");
-    assert_eq!(event.transaction.as_deref(), Some("admin /reviews list"));
-    assert_eq!(tag(&event, "shop"), Some("test.myshopify.com"));
-    // The id the page shows the merchant is a tag of the event.
-    assert!(request_id.is_some());
-    assert_eq!(tag(&event, "request_id"), request_id.as_deref());
+    assert_eq!(events.len(), 2, "{events:#?}");
+    let [page, form] = &events[..] else { unreachable!() };
+    assert_eq!(message(page), "the reviews table is locked");
+    assert_eq!(message(form), "the reviews could not be saved");
+    // Named after the page, and the action of the form; found by the id of the request.
+    assert_eq!(page.transaction.as_deref(), Some("admin /reviews view"));
+    assert_eq!(form.transaction.as_deref(), Some("admin /reviews save"));
+    assert_eq!(tag(form, "admin"), Some("/reviews save"));
+    for event in [page, form] {
+        assert_eq!(tag(event, "shop"), Some("test.myshopify.com"));
+        assert_eq!(tag(event, "shopify_app"), Some("default"));
+        let user = event.user.as_ref().and_then(|user| user.id.as_deref());
+        assert_eq!(user, Some("test.myshopify.com"));
+        let request_id = tag(event, "request_id").expect("the request id");
+        assert!(Uuid::parse_str(request_id).is_ok(), "{request_id}");
+    }
 }
 
 #[test]

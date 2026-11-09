@@ -92,7 +92,9 @@ impl Delivery<'_> {
     /// The handler completed: the repeats of this delivery are not run.
     pub(crate) fn complete(mut self) {
         self.completed = true;
-        self.deliveries.lock().insert(self.key.clone(), Known::Done(self.started));
+        self.deliveries
+            .lock()
+            .insert(self.key.clone(), Known::Done(self.started));
     }
 }
 
@@ -197,7 +199,12 @@ async fn handle(State(app): State<OpenShop>, headers: HeaderMap, body: Bytes) ->
         .webhook_id()
         .or_else(|| webhook.event_id())
         .filter(|id| !id.is_empty());
-    let claim = match delivery_id.map(|id| (id, app.webhook_deliveries().claim(&shopify_app.handle, &topic, id, &hmac))) {
+    let claim = match delivery_id.map(|id| {
+        (
+            id,
+            app.webhook_deliveries().claim(&shopify_app.handle, &topic, id, &hmac),
+        )
+    }) {
         Some((id, Claim::Done)) => {
             logger::info(format!(
                 "[openshop] Webhook \"{topic}\" delivery {id} was already handled: not run again"
@@ -208,7 +215,9 @@ async fn handle(State(app): State<OpenShop>, headers: HeaderMap, body: Bytes) ->
         // the delivery has not been handled. Shopify sends it again.
         Some((_, Claim::Running)) => {
             let mut response = json_error(StatusCode::SERVICE_UNAVAILABLE, "Delivery in progress");
-            response.headers_mut().insert(RETRY_AFTER, HeaderValue::from_static("5"));
+            response
+                .headers_mut()
+                .insert(RETRY_AFTER, HeaderValue::from_static("5"));
             return response;
         }
         Some((_, Claim::First(delivery))) => Some(delivery),
@@ -230,7 +239,10 @@ async fn handle(State(app): State<OpenShop>, headers: HeaderMap, body: Bytes) ->
                 "[openshop] app/uninstalled for {shop} not recorded: its payload does not name that shop"
             )),
             Err(error) => {
-                report_failure(format!("[openshop] Uninstallation of {shop} could not be recorded"), &error);
+                report_failure(
+                    format!("[openshop] Uninstallation of {shop} could not be recorded"),
+                    &error,
+                );
                 return json_error(StatusCode::INTERNAL_SERVER_ERROR, "Internal server error");
             }
         }
@@ -329,16 +341,25 @@ mod tests {
         let start = Instant::now();
         let delivery = first(deliveries.claim_at(start, "app", "T", "id", "sig"));
         // While the handler runs, a repeat is neither run nor taken for handled.
-        assert!(matches!(deliveries.claim_at(start, "app", "T", "id", "sig"), Claim::Running));
+        assert!(matches!(
+            deliveries.claim_at(start, "app", "T", "id", "sig"),
+            Claim::Running
+        ));
         // The handler failed, or its request was cancelled: the claim is dropped.
         drop(delivery);
         let delivery = first(deliveries.claim_at(start, "app", "T", "id", "sig"));
         delivery.complete();
-        assert!(matches!(deliveries.claim_at(start, "app", "T", "id", "sig"), Claim::Done));
+        assert!(matches!(
+            deliveries.claim_at(start, "app", "T", "id", "sig"),
+            Claim::Done
+        ));
 
         // A handler that never ends does not hold the delivery for ever.
         let stuck = first(deliveries.claim_at(start, "app", "T", "stuck", "sig"));
-        assert!(matches!(deliveries.claim_at(start, "app", "T", "stuck", "sig"), Claim::Running));
+        assert!(matches!(
+            deliveries.claim_at(start, "app", "T", "stuck", "sig"),
+            Claim::Running
+        ));
         first(deliveries.claim_at(start + REMEMBER, "app", "T", "stuck", "sig")).complete();
         drop(stuck);
     }

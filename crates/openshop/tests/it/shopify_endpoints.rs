@@ -14,7 +14,6 @@ use openshop::testing::{
 use openshop::{App, OpenShop, OpenShopConfig, ShopifyEndpoints, UiSource, app, json};
 use reqwest::StatusCode;
 use reqwest::header::{CONTENT_SECURITY_POLICY, LOCATION};
-use uuid::Uuid;
 
 /// The origin as a developer writes it: the trailing `/` goes.
 const ORIGIN_AS_WRITTEN: &str = "http://localhost:9393/";
@@ -22,12 +21,6 @@ const ORIGIN: &str = "http://localhost:9393";
 const APP_BRIDGE: &str = "http://localhost:9393/admin/app-bridge.js";
 const POLARIS: &str = "http://localhost:9393/cdn/shopifycloud/polaris.js";
 const SECRET: &str = "test-secret";
-const SHELL: &str = concat!(
-    r#"<html><head><meta name="shopify-api-key" content="" />"#,
-    r#"<script src="https://cdn.shopify.com/shopifycloud/app-bridge.js"></script>"#,
-    r#"<script src="https://cdn.shopify.com/shopifycloud/polaris.js"></script>"#,
-    "</head><body>spa-shell</body></html>",
-);
 
 fn config() -> OpenShopConfig {
     OpenShopConfig::builder()
@@ -166,29 +159,11 @@ async fn oauth_goes_through_the_admin_origin_and_back_to_its_admin() {
     ctx.shutdown().await.unwrap();
 }
 
-/// A bundle whose shell loads App Bridge and Polaris from Shopify's CDN, as
-/// the one the framework embeds does. Removed on drop.
-struct Bundle(std::path::PathBuf);
-
-impl Bundle {
-    fn new() -> Self {
-        let dir = std::env::temp_dir().join(format!("openshop-endpoints-ui-{}", Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("index.html"), SHELL).unwrap();
-        Self(dir)
-    }
-
-    fn server(&self, dev: bool) -> ServerOptions {
-        ServerOptions {
-            ui: UiSource::Dir(self.0.clone()),
-            dev,
-        }
-    }
-}
-
-impl Drop for Bundle {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
+/// The admin the server renders, in development or not.
+fn server(dev: bool) -> ServerOptions {
+    ServerOptions {
+        ui: UiSource::Server,
+        dev,
     }
 }
 
@@ -201,7 +176,8 @@ async fn page(ctx: &TestContext, path: &str) -> (StatusCode, Option<String>, Str
     (response.status(), policy, response.text().await.unwrap())
 }
 
-fn assert_simulator_shell(body: &str) {
+/// A page of the admin, with App Bridge and Polaris of the endpoints.
+fn assert_simulator_page(body: &str) {
     assert!(
         body.contains(&format!(
             r#"<script data-api-key="test-app" src="{APP_BRIDGE}"></script><script src="{POLARIS}"></script>"#
@@ -209,27 +185,34 @@ fn assert_simulator_shell(body: &str) {
         "{body}"
     );
     assert!(
-        body.contains(r#"<meta name="shopify-api-key" content="test-app" />"#),
+        body.contains(r#"<meta name="shopify-api-key" content="test-app">"#),
         "{body}"
     );
     assert!(!body.contains("cdn.shopify.com"), "{body}");
-    assert!(body.contains("spa-shell"));
+    assert!(body.contains(r#"<main id="openshop-page">"#), "{body}");
 }
 
 #[tokio::test]
 async fn a_launch_loads_the_scripts_of_the_endpoints_and_may_be_framed_by_the_admin_origin() {
-    let bundle = Bundle::new();
     let ctx = with_simulator(TestOptions {
         access_token: Some("shpat_sim".to_string()),
-        server: bundle.server(false),
+        server: server(false),
         ..Default::default()
     })
     .await;
 
-    let launch = sign_query(&[("host", "localhost:9393/admin"), ("shop", ctx.shop.as_str())], SECRET);
+    let token = ctx.session_token();
+    let launch = sign_query(
+        &[
+            ("host", "localhost:9393/admin"),
+            ("shop", ctx.shop.as_str()),
+            ("id_token", token.as_str()),
+        ],
+        SECRET,
+    );
     let (status, policy, body) = page(&ctx, &format!("/?{}", to_query_string(&launch))).await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    assert_simulator_shell(&body);
+    assert_simulator_page(&body);
     assert_eq!(
         policy.as_deref(),
         Some("frame-ancestors https://test.myshopify.com https://admin.shopify.com http://localhost:9393;")
@@ -257,17 +240,17 @@ async fn a_launch_loads_the_scripts_of_the_endpoints_and_may_be_framed_by_the_ad
 }
 
 #[tokio::test]
-async fn in_development_the_shell_loads_the_scripts_of_the_endpoints() {
-    let bundle = Bundle::new();
+async fn in_development_a_page_loads_the_scripts_of_the_endpoints() {
     let ctx = with_simulator(TestOptions {
-        server: bundle.server(true),
+        server: server(true),
         ..Default::default()
     })
     .await;
 
-    let (status, policy, body) = page(&ctx, "/?shop=test.myshopify.com").await;
+    let token = ctx.session_token();
+    let (status, policy, body) = page(&ctx, &format!("/?shop=test.myshopify.com&id_token={token}")).await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    assert_simulator_shell(&body);
+    assert_simulator_page(&body);
     assert_eq!(
         policy.as_deref(),
         Some(
@@ -279,18 +262,18 @@ async fn in_development_the_shell_loads_the_scripts_of_the_endpoints() {
 
 #[tokio::test]
 async fn the_scripts_alone_leave_the_admin_api_and_the_frame_to_shopify() {
-    let bundle = Bundle::new();
     let ctx = TestContext::with_options(
         config(),
         TestOptions {
             shopify_endpoints: ShopifyEndpoints::new().app_bridge(APP_BRIDGE),
-            server: bundle.server(true),
+            server: server(true),
             ..TestOptions::installed()
         },
     )
     .await
     .unwrap();
-    let (status, policy, body) = page(&ctx, "/?shop=test.myshopify.com").await;
+    let token = ctx.session_token();
+    let (status, policy, body) = page(&ctx, &format!("/?shop=test.myshopify.com&id_token={token}")).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert!(
         body.contains(&format!(

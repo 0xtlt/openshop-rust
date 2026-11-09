@@ -8,48 +8,14 @@ FROM rust:1-bookworm@sha256:48b7f435b8fc6378ce43b44f15e3a47fd8919b2825f835c39bd4
 #   docker build --secret id=gitconfig,src=/path/outside/the/project/gitconfig .
 # The file stays outside the project: `COPY . .` would copy it into a layer.
 ENV CARGO_NET_GIT_FETCH_WITH_CLI=true GIT_CONFIG_GLOBAL=/run/secrets/gitconfig
-# if views
-# What builds the admin UI bundle: the WebAssembly target, trunk, and the
-# openshop CLI of the tag, branch or rev of openshop that Cargo.toml names.
-RUN rustup target add wasm32-unknown-unknown
-# trunk is checked against the checksums its v0.22.1 release publishes.
-RUN set -eu; \
-    case "$(uname -m)" in \
-      x86_64) sha256=2ab8d548fd5ed9cda50906f61fd8654204e7893bd52ebbfd90533862b7d71ee1 ;; \
-      aarch64) sha256=b4017d1e0bfcffb4f4bee2be37c48def21e6e6896c3d0f503c43c42f714e57ea ;; \
-      *) echo "No trunk for $(uname -m)" >&2; exit 1 ;; \
-    esac; \
-    curl -fsSL -o /tmp/trunk.tar.gz "https://github.com/trunk-rs/trunk/releases/download/v0.22.1/trunk-$(uname -m)-unknown-linux-gnu.tar.gz"; \
-    echo "$sha256  /tmp/trunk.tar.gz" | sha256sum --check --strict -; \
-    tar -xzf /tmp/trunk.tar.gz -C /usr/local/bin trunk; \
-    rm /tmp/trunk.tar.gz
-COPY Cargo.toml /tmp/openshop-cli/Cargo.toml
-RUN --mount=type=secret,id=gitconfig,required=false \
-    --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/usr/local/cargo/git \
-    --mount=type=cache,target=/tmp/openshop-cli/target \
-    source=$(grep -m1 '^openshop = ' /tmp/openshop-cli/Cargo.toml | grep -oE '(tag|branch|rev) = "[^"]+"' | head -1 | sed -E 's/ = "(.*)"/ \1/'); \
-    if [ -z "$source" ]; then echo "Cargo.toml names no tag, branch or rev of openshop" >&2; exit 1; fi; \
-    cargo install --locked --target-dir /tmp/openshop-cli/target \
-      --git https://github.com/0xtlt/openshop-rust --"${source%% *}" "${source#* }" openshop-cli
-# end
 WORKDIR /app
 COPY . .
 # `--locked` as soon as the project has its Cargo.lock.
-# if views
-# The admin UI bundle into dist/, then the app.
-RUN --mount=type=secret,id=gitconfig,required=false \
-    --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/usr/local/cargo/git \
-    --mount=type=cache,target=/app/target \
-    openshop build $(test -f Cargo.lock && echo --locked) && cp target/release/__PACKAGE_NAME__ /usr/local/bin/app
-# else
 RUN --mount=type=secret,id=gitconfig,required=false \
     --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=/app/target \
     cargo build --release $(test -f Cargo.lock && echo --locked) && cp target/release/__PACKAGE_NAME__ /usr/local/bin/app
-# end
 
 FROM debian:bookworm-slim@sha256:7ff6ba31527b9e336162fa061746c366c4b2032f4d2cff2078bea43f78efe3f8
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/*
@@ -58,10 +24,6 @@ RUN groupadd --system --gid 10001 app \
     && useradd --system --uid 10001 --gid app --no-create-home --shell /usr/sbin/nologin app
 WORKDIR /app
 COPY --from=build /usr/local/bin/app /usr/local/bin/app
-# if views
-COPY --from=build /app/dist ./dist
-ENV OPENSHOP_UI_DIR=/app/dist
-# end
 COPY migrations ./migrations
 COPY shopify.app*.toml ./
 ENV OPENSHOP_ENV=production PORT=3000

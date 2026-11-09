@@ -1,7 +1,6 @@
 //! The admin rendered by the server, page by page (`UiSource::Server`):
-//! HTML made of Shopify's Polaris web components, one hand-written script
-//! (`openshop.js`), no bundle and no WebAssembly. Experimental, next to the
-//! Leptos admin UI; see `docs/src/reference/server-rendered-ui.md`.
+//! HTML made of Shopify's Polaris web components and one hand-written script
+//! (`openshop.js`). See `docs/src/reference/custom-admin-pages.md`.
 //!
 //! A page is a URL. A request for it is authenticated with a session token:
 //! the `Authorization` header that App Bridge's `fetch` adds to the requests
@@ -12,12 +11,21 @@
 //! A form posts to the URL of its page, the name of its action in `_action`.
 //! The script's request is answered with the page rendered again (or
 //! `X-OpenShop-Location`) and the toast the action asked for, in a header; a
-//! plain post with a redirect to the page.
+//! plain post with a redirect to the page. A form the page refuses, field by
+//! field, is rendered again in place (`422`), with what was sent and the
+//! error of each field, when the view reads them.
 
 mod crons;
+mod flow_run;
+mod flows;
+mod functions;
+mod home;
+mod mcp;
+mod providers;
 mod shell;
+mod ui;
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use axum::body::to_bytes;
@@ -25,6 +33,7 @@ use axum::extract::{Request, State};
 use axum::http::header::{AUTHORIZATION, CONTENT_TYPE, LOCATION};
 use axum::http::{HeaderValue, Method, StatusCode};
 use axum::response::{IntoResponse, Response};
+use indexmap::IndexMap;
 use maud::{Markup, html};
 use serde_json::Value;
 use uuid::Uuid;
@@ -34,17 +43,17 @@ use super::admin_pages::{call_function, create_context, page_is_allowed};
 use super::api::pages::resolved_admin_pages;
 use super::http::{catch_panic, header, not_found, parse_query, report_failure};
 use super::jwt::read_jwt_audience;
+use super::launch::{forget_plan_on_welcome, is_installed_for_launch, is_ui_shell_path, open_from_shopify_admin};
 use super::reload::Served;
 use super::shop::{ShopSession, session_of};
 use super::shop_domain::normalize_shop_domain;
-use super::static_ui::{forget_plan_on_welcome, is_installed_for_launch, is_ui_shell_path, open_from_shopify_admin};
 use crate::admin::{
-    ACTION_FIELD, AdminFunctionKind, AdminPublicError, CustomAdminPage, Outcome, PageRequest, fields_to_json,
-    parse_fields, with_outcome,
+    ACTION_FIELD, AdminFunctionKind, AdminPublicError, CustomAdminPage, FormState, Outcome, PageRequest,
+    fields_to_json, parse_fields, with_outcome,
 };
 use crate::app::OpenShop;
 use crate::engine::step::error_message;
-use crate::runtime::logger;
+use crate::runtime::{logger, report};
 use crate::types::{AdminPageMode, JsonMap};
 use openshop_shared::rpc::encode_uri_component as encode;
 use openshop_shared::{ADMIN_HOME_PATH, AdminPageId, custom_admin_route_params, match_custom_admin_path};
@@ -97,7 +106,12 @@ fn target<'a>(app: &'a OpenShop, pathname: &str) -> Option<Target<'a>> {
     openshop_shared::admin_page_from_ui_path(pathname).map(Target::Builtin)
 }
 
-pub(crate) async fn serve(app: OpenShop, options: ServerOptions, reload: Option<Arc<Served>>, request: Request) -> Response {
+pub(crate) async fn serve(
+    app: OpenShop,
+    options: ServerOptions,
+    reload: Option<Arc<Served>>,
+    request: Request,
+) -> Response {
     let pathname = request.uri().path().to_string();
     if !is_ui_shell_path(&pathname) || !matches!(*request.method(), Method::GET | Method::HEAD | Method::POST) {
         return not_found();
@@ -108,7 +122,7 @@ pub(crate) async fn serve(app: OpenShop, options: ServerOptions, reload: Option<
     let fetch = header(&headers, FETCH_HEADER).is_some();
     let endpoints = app.endpoints();
 
-    // A launch Shopify signed: the shop is installed first, as for the Leptos admin.
+    // A launch Shopify signed: the shop is installed first.
     if !fetch
         && query.contains_key("hmac")
         && let Ok((shopify_app, signed)) = app.apps().by_signed_query(&raw_query)
@@ -153,6 +167,7 @@ pub(crate) async fn serve(app: OpenShop, options: ServerOptions, reload: Option<
         };
     };
 
+    let shop = session.shop.clone();
     let call = PageCall {
         app: &app,
         reload: reload.as_deref(),
@@ -166,18 +181,19 @@ pub(crate) async fn serve(app: OpenShop, options: ServerOptions, reload: Option<
         let body = to_bytes(request.into_body(), MAX_FORM_BYTES).await.unwrap_or_default();
         submit(&call, &body).await
     } else {
-        render(&call, StatusCode::OK, None).await
+        render(&call, StatusCode::OK, None, &FormState::default(), None).await
     };
-    finish(response, &app, options.dev)
+    finish(response, &app, options.dev, &shop)
 }
 
-/// The response with the headers of every page: framed by the admin only,
-/// never stored, never sniffed.
-fn finish(mut response: Response, app: &OpenShop, dev: bool) -> Response {
-    let mut ancestors = "https://*.myshopify.com https://admin.shopify.com".to_string();
-    if dev {
-        ancestors.push_str(" http://localhost:*");
-    }
+/// The response with the headers of every page: framed by the admin of its
+/// shop only (any shop in development), never stored, never sniffed.
+fn finish(mut response: Response, app: &OpenShop, dev: bool, shop: &str) -> Response {
+    let mut ancestors = if dev {
+        "https://*.myshopify.com https://admin.shopify.com http://localhost:*".to_string()
+    } else {
+        format!("https://{shop} https://admin.shopify.com")
+    };
     if let Some(origin) = &app.endpoints().admin_origin {
         ancestors.push_str(&format!(" {origin}"));
     }
@@ -205,13 +221,21 @@ fn see_other(location: &str) -> Response {
 }
 
 fn page_url(pathname: &str, query: &str) -> String {
-    if query.is_empty() { pathname.to_string() } else { format!("{pathname}?{query}") }
+    if query.is_empty() {
+        pathname.to_string()
+    } else {
+        format!("{pathname}?{query}")
+    }
 }
 
 /// The query of the URL without its `id_token`: App Bridge adds a fresh one.
 fn without_token(query: &str) -> String {
     url::form_urlencoded::Serializer::new(String::new())
-        .extend_pairs(parse_fields(query.as_bytes()).iter().filter(|(name, _)| name != "id_token"))
+        .extend_pairs(
+            parse_fields(query.as_bytes())
+                .iter()
+                .filter(|(name, _)| name != "id_token"),
+        )
         .finish()
 }
 
@@ -242,75 +266,256 @@ pub(crate) async fn bounce_page(State(app): State<OpenShop>, request: Request) -
     if !is_local_path(reload) {
         return not_found();
     }
-    let shopify_app = app.apps().by_handle(query.get("app").map(String::as_str)).ok().or_else(|| app.apps().all().first());
+    let shopify_app = app
+        .apps()
+        .by_handle(query.get("app").map(String::as_str))
+        .ok()
+        .or_else(|| app.apps().all().first());
     let api_key = shopify_app.map_or("", |shopify_app| shopify_app.api_key.as_str());
     let markup = shell::bounce(api_key, app.endpoints());
     (
-        [(CONTENT_TYPE, "text/html; charset=utf-8"), (axum::http::header::CACHE_CONTROL, "no-store")],
+        [
+            (CONTENT_TYPE, "text/html; charset=utf-8"),
+            (axum::http::header::CACHE_CONTROL, "no-store"),
+        ],
         markup.into_string(),
     )
         .into_response()
 }
 
 /// The page, rendered for the session. `notice` is a failure to show above
-/// it, for a plain post the action refused.
-async fn render(call: &PageCall<'_>, status: StatusCode, notice: Option<&str>) -> Response {
+/// it, for a plain post the action refused; `form`, the form the page
+/// refused, which its view shows again; `revealed`, what an action of a page
+/// of the framework gave it to show once.
+async fn render(
+    call: &PageCall<'_>,
+    status: StatusCode,
+    notice: Option<&str>,
+    form: &FormState,
+    revealed: Option<Value>,
+) -> Response {
     let app = call.app;
     let content = match target(app, &call.pathname) {
         None => Err(StatusCode::NOT_FOUND),
-        Some(Target::Custom(page)) => render_custom(call, page).await,
-        Some(Target::Home) => Ok(not_ported("Home")),
+        Some(Target::Custom(page)) => render_custom(call, page, form).await,
+        Some(Target::Home) => render_builtin(call, None, form, revealed).await,
         Some(Target::Builtin(page)) => {
             if resolved_admin_pages(app.config()).get(page) == AdminPageMode::Disabled {
                 Err(StatusCode::NOT_FOUND)
             } else {
-                match page {
-                    AdminPageId::Crons => crons::render(app, &call.session).await.map_err(|error| {
-                        report_failure("[openshop] The crons page could not be rendered", &error);
-                        StatusCode::INTERNAL_SERVER_ERROR
-                    }),
-                    other => Ok(not_ported(builtin_label(other))),
-                }
+                render_builtin(call, Some(page), form, revealed).await
             }
         }
     };
     let (status, page) = match content {
-        Ok(page) => (status, page),
+        Ok(Shown::Page(page)) => (status, page),
+        Ok(Shown::Refused(refused, page)) => (refused, page),
         Err(StatusCode::FORBIDDEN | StatusCode::NOT_FOUND) => (StatusCode::NOT_FOUND, disabled()),
         Err(failed) => (failed, unavailable()),
     };
     let menu = shell::Menu::of(app, &call.session).await;
     let document = shell::document(app, &call.session, &menu, notice, page, call.reload);
-    (status, [(CONTENT_TYPE, "text/html; charset=utf-8")], document.into_string()).into_response()
+    (
+        status,
+        [(CONTENT_TYPE, "text/html; charset=utf-8")],
+        document.into_string(),
+    )
+        .into_response()
 }
 
-async fn render_custom(call: &PageCall<'_>, page: &CustomAdminPage) -> Result<Markup, StatusCode> {
+/// What a page shows: itself, or what refused it, with its status.
+enum Shown {
+    Page(Markup),
+    Refused(StatusCode, Markup),
+}
+
+/// A failure of a page the merchant may read, `AdminPublicError`, as the page
+/// shows it; any other one is reported and the page is unavailable. A plan
+/// the page needs (`billing::require_plan`) links to the plans of the app.
+fn shown_failure(error: &anyhow::Error, failure: &str) -> Result<Shown, StatusCode> {
+    match error.downcast_ref::<AdminPublicError>() {
+        Some(public) => Ok(Shown::Refused(
+            StatusCode::from_u16(public.status).unwrap_or(StatusCode::BAD_REQUEST),
+            html! {
+                s-page {
+                    @match public.details.as_ref().and_then(|details| details.get("pricingLink")) {
+                        Some(plans) => {
+                            s-banner tone="warning" heading=(public.message) {
+                                s-button variant="primary" href=(plans) target="_top" { "See the plans" }
+                            }
+                        }
+                        None => {
+                            s-banner tone="critical" heading=(public.message) {}
+                        }
+                    }
+                }
+            },
+        )),
+        None => {
+            report_failure(failure, error);
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
+        }
+    }
+}
+
+/// A request for a page of the framework: what its `render` and its
+/// `submit` are given.
+pub(super) struct BuiltinPage<'a> {
+    pub(super) app: &'a OpenShop,
+    pub(super) session: &'a ShopSession,
+    /// The path of the page: `/flows/syncOrders`, `/runs/42`.
+    pub(super) pathname: &'a str,
+    /// The query string of its URL, without `?`.
+    pub(super) query: &'a str,
+    /// The form the page refused, which it shows again; empty otherwise.
+    pub(super) form: &'a FormState,
+    /// What an action gives the page to show once (a secret made for the
+    /// merchant): set by `submit` with [`BuiltinPage::reveal`], read by
+    /// `render` with [`BuiltinPage::revealed`].
+    revealed: Mutex<Option<Value>>,
+}
+
+impl BuiltinPage<'_> {
+    /// Called by `submit`: the page is rendered again with `value`, which
+    /// `render` reads with [`BuiltinPage::revealed`], in place of a redirect
+    /// (a plain post too, which would lose it). A secret shown once.
+    pub(super) fn reveal(&self, value: Value) {
+        *crate::locked(&self.revealed) = Some(value);
+    }
+
+    /// What the action that ran gave the page to show once, if one did.
+    pub(super) fn revealed(&self) -> Option<Value> {
+        crate::locked(&self.revealed).clone()
+    }
+
+    /// A parameter of the query string, `?flow=syncOrders`: the first one of that name.
+    pub(super) fn param(&self, name: &str) -> Option<String> {
+        parse_fields(self.query.as_bytes())
+            .into_iter()
+            .find(|(field, _)| field == name)
+            .map(|(_, value)| value)
+    }
+}
+
+/// The value of the field `name` of a form, the first one of that name.
+pub(super) fn field<'a>(fields: &'a [(String, String)], name: &str) -> Option<&'a str> {
+    fields
+        .iter()
+        .find(|(field, _)| field == name)
+        .map(|(_, value)| value.as_str())
+}
+
+/// Whether `pathname` is the page of a run, `/runs/42`, part of the flows.
+fn is_run_path(pathname: &str) -> bool {
+    pathname.starts_with("/runs/")
+}
+
+/// A page of the framework: the home of the admin (`None`) or one of the pages it lists.
+async fn render_builtin(
+    call: &PageCall<'_>,
+    id: Option<AdminPageId>,
+    form: &FormState,
+    revealed: Option<Value>,
+) -> Result<Shown, StatusCode> {
+    let page = BuiltinPage {
+        app: call.app,
+        session: &call.session,
+        pathname: &call.pathname,
+        query: &call.query,
+        form,
+        revealed: Mutex::new(revealed),
+    };
+    report::describe(|description| {
+        description.unit("admin", page.pathname);
+    });
+    let rendered = catch_panic("admin page", async {
+        match id {
+            None => home::render(&page).await,
+            Some(AdminPageId::Crons) => crons::render(&page).await,
+            Some(AdminPageId::Providers) => providers::render(&page).await,
+            Some(AdminPageId::Flows) if is_run_path(page.pathname) => flow_run::render(&page).await,
+            Some(AdminPageId::Flows) => flows::render(&page).await,
+            Some(AdminPageId::Functions) => functions::render(&page).await,
+            Some(AdminPageId::Mcp) => mcp::render(&page).await,
+        }
+    })
+    .await;
+    match rendered {
+        Ok(markup) => Ok(Shown::Page(markup)),
+        Err(error) => shown_failure(&error, "[openshop] A page of the admin could not be rendered"),
+    }
+}
+
+/// A form of a page of the framework: the action it names, and what it gave
+/// the page to show once.
+async fn submit_builtin(
+    call: &PageCall<'_>,
+    id: Option<AdminPageId>,
+    action: &str,
+    fields: &[(String, String)],
+) -> (anyhow::Result<Outcome>, Option<Value>) {
+    let form = FormState::default();
+    let page = BuiltinPage {
+        app: call.app,
+        session: &call.session,
+        pathname: &call.pathname,
+        query: &call.query,
+        form: &form,
+        revealed: Mutex::new(None),
+    };
+    report::describe(|description| {
+        description.unit("admin", format_args!("{} {action}", page.pathname));
+    });
+    let outcome = catch_panic("admin page action", async {
+        match id {
+            None => home::submit(&page, action, fields).await,
+            Some(AdminPageId::Crons) => crons::submit(&page, action, fields).await,
+            Some(AdminPageId::Providers) => providers::submit(&page, action, fields).await,
+            Some(AdminPageId::Flows) if is_run_path(page.pathname) => flow_run::submit(&page, action, fields).await,
+            Some(AdminPageId::Flows) => flows::submit(&page, action, fields).await,
+            Some(AdminPageId::Functions) => functions::submit(&page, action, fields).await,
+            Some(AdminPageId::Mcp) => mcp::submit(&page, action, fields).await,
+        }
+    })
+    .await;
+    (
+        outcome,
+        page.revealed
+            .into_inner()
+            .unwrap_or_else(std::sync::PoisonError::into_inner),
+    )
+}
+
+/// The answer of a page to an action it does not have.
+pub(super) fn no_action() -> anyhow::Error {
+    AdminPublicError::new("NOT_FOUND", "Not found").status(404).into()
+}
+
+async fn render_custom(call: &PageCall<'_>, page: &CustomAdminPage, form: &FormState) -> Result<Shown, StatusCode> {
     let app = call.app;
     if !page_is_allowed(app, &call.session, page, &call.pathname).await {
         return Err(StatusCode::FORBIDDEN);
     }
     let Some(view) = &page.page.view else {
-        return Ok(not_ported(&page.route_pattern));
+        return Ok(Shown::Page(without_view(&page.route_pattern)));
     };
     let params = custom_admin_route_params(&page.route_pattern, &call.pathname).ok_or(StatusCode::NOT_FOUND)?;
-    let ctx = create_context(app, &call.session, params, Uuid::new_v4().to_string(), None);
+    let request_id = Uuid::new_v4().to_string();
+    // What a failure of the view is reported as: the page and the request.
+    report::describe(|description| {
+        description
+            .unit("admin", format_args!("{} view", page.route_pattern))
+            .tag("request_id", &request_id);
+    });
+    let ctx = create_context(app, &call.session, params, request_id, None);
     let request = PageRequest {
         ctx,
         query: call.query.clone(),
+        form: form.clone(),
     };
     match catch_panic("admin view", view(request)).await {
-        Ok(markup) => Ok(markup),
-        Err(error) => match error.downcast_ref::<AdminPublicError>() {
-            Some(public) => Ok(html! {
-                s-page {
-                    s-banner tone="critical" heading=(public.message) {}
-                }
-            }),
-            None => {
-                report_failure("[openshop] Custom admin page could not be rendered", &error);
-                Err(StatusCode::INTERNAL_SERVER_ERROR)
-            }
-        },
+        Ok(markup) => Ok(Shown::Page(markup)),
+        Err(error) => shown_failure(&error, "[openshop] Custom admin page could not be rendered"),
     }
 }
 
@@ -322,45 +527,138 @@ async fn submit(call: &PageCall<'_>, body: &[u8]) -> Response {
         .find(|(name, _)| name == ACTION_FIELD)
         .map(|(_, value)| value.clone())
         .unwrap_or_default();
-    let outcome = match target(call.app, &call.pathname) {
-        Some(Target::Custom(page)) => run_action(call, page, &action, &fields).await,
-        Some(Target::Builtin(AdminPageId::Crons))
-            if resolved_admin_pages(call.app.config()).get(AdminPageId::Crons) != AdminPageMode::Disabled =>
+    let target = target(call.app, &call.pathname);
+    let (outcome, revealed) = match &target {
+        Some(Target::Custom(page)) => (run_action(call, page, &action, &fields).await, None),
+        Some(Target::Home) => submit_builtin(call, None, &action, &fields).await,
+        Some(Target::Builtin(page))
+            if resolved_admin_pages(call.app.config()).get(*page) != AdminPageMode::Disabled =>
         {
-            crons::submit(call.app, &call.session, &action, &fields).await
+            submit_builtin(call, Some(*page), &action, &fields).await
         }
-        _ => Err(AdminPublicError::new("NOT_FOUND", "Not found").status(404).into()),
+        _ => (Err(no_action()), None),
+    };
+    // The view shows a refused form itself: every page of the framework, and a
+    // view of the application that reads its `form`.
+    let reads_form = match &target {
+        Some(Target::Custom(page)) => page.page.view_reads_form,
+        Some(_) => true,
+        None => false,
+    };
+    let refused = |errors: IndexMap<String, String>, message: Option<String>| FormState {
+        action: Some(action.clone()),
+        values: fields.clone(),
+        errors,
+        message,
     };
     match outcome {
-        Ok(outcome) => answer(call, outcome).await,
+        Ok(outcome) if !outcome.field_errors.is_empty() => {
+            let form = refused(outcome.field_errors.clone(), outcome.toast.clone());
+            let message = outcome.toast.clone().unwrap_or_else(|| first_error(&form.errors));
+            refuse(
+                call,
+                reads_form,
+                &form,
+                StatusCode::UNPROCESSABLE_ENTITY,
+                &message,
+                outcome.toast.as_deref(),
+            )
+            .await
+        }
+        Ok(outcome) => answer(call, outcome, revealed).await,
         Err(error) => {
-            let (status, message) = match error.downcast_ref::<AdminPublicError>() {
+            let (status, message, errors) = match error.downcast_ref::<AdminPublicError>() {
                 Some(public) => (
                     StatusCode::from_u16(public.status).unwrap_or(StatusCode::BAD_REQUEST),
                     public.message.clone(),
+                    public.field_errors.clone().unwrap_or_default(),
                 ),
                 None => {
                     report_failure("[openshop] Admin page action failed", &error);
-                    (StatusCode::INTERNAL_SERVER_ERROR, "Internal server error".to_string())
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "Internal server error".to_string(),
+                        IndexMap::new(),
+                    )
                 }
             };
-            if call.fetch {
-                // The page stays as it is, with an error toast.
-                (status, [(TOAST_ERROR_HEADER, encode(&message))]).into_response()
-            } else {
-                render(call, status, Some(&message)).await
+            if errors.is_empty() {
+                return fail(call, status, &message).await;
             }
+            // The schema's summary is for the fields; the action's message is the action's to say.
+            let said = (error
+                .downcast_ref::<AdminPublicError>()
+                .map(|public| public.code.as_str())
+                != Some("INVALID_INPUT"))
+            .then(|| message.clone());
+            let form = refused(errors, said);
+            refuse(call, reads_form, &form, status, &message, None).await
         }
     }
 }
 
+/// The first error of a refused form, `title: Required`: what a toast says
+/// when the view does not show the fields.
+fn first_error(errors: &IndexMap<String, String>) -> String {
+    errors
+        .first()
+        .map(|(field, error)| format!("{field}: {error}"))
+        .unwrap_or_default()
+}
+
+/// A failure of the form: the script keeps the page as it is, with an error
+/// toast; a plain post gets the page with the message above it.
+async fn fail(call: &PageCall<'_>, status: StatusCode, message: &str) -> Response {
+    if call.fetch {
+        (status, [(TOAST_ERROR_HEADER, encode(message))]).into_response()
+    } else {
+        render(call, status, Some(message), &FormState::default(), None).await
+    }
+}
+
+/// A form refused field by field: rendered again in place, with what was
+/// sent and the errors, when the view shows them (`toast`, an error toast the
+/// action asked for); a failure of the form otherwise.
+async fn refuse(
+    call: &PageCall<'_>,
+    reads_form: bool,
+    form: &FormState,
+    status: StatusCode,
+    message: &str,
+    toast: Option<&str>,
+) -> Response {
+    if !reads_form {
+        return fail(call, status, message).await;
+    }
+    let mut response = render(call, status, None, form, None).await;
+    if let Some(toast) = toast.filter(|_| call.fetch)
+        && let Ok(value) = HeaderValue::from_str(&encode(toast))
+    {
+        response.headers_mut().insert(TOAST_ERROR_HEADER, value);
+    }
+    response
+}
+
 /// What a form gets after its action: the page again, or the page the
-/// action sent it to, with its toast.
-async fn answer(call: &PageCall<'_>, outcome: Outcome) -> Response {
-    let next = outcome
-        .redirect
-        .as_deref()
-        .filter(|path| is_local_path(path));
+/// action sent it to, with its toast. A page given something to show once is
+/// rendered again with it, never redirected.
+async fn answer(call: &PageCall<'_>, outcome: Outcome, revealed: Option<Value>) -> Response {
+    if revealed.is_some() {
+        let mut response = render(call, StatusCode::OK, None, &FormState::default(), revealed).await;
+        if call.fetch
+            && let Some(toast) = &outcome.toast
+            && let Ok(value) = HeaderValue::from_str(&encode(toast))
+        {
+            let name = if outcome.error {
+                TOAST_ERROR_HEADER
+            } else {
+                TOAST_HEADER
+            };
+            response.headers_mut().insert(name, value);
+        }
+        return response;
+    }
+    let next = outcome.redirect.as_deref().filter(|path| is_local_path(path));
     if !call.fetch {
         return see_other(next.unwrap_or(&page_url(&call.pathname, &call.query)));
     }
@@ -372,10 +670,14 @@ async fn answer(call: &PageCall<'_>, outcome: Outcome) -> Response {
             }
             response
         }
-        None => render(call, StatusCode::OK, None).await,
+        None => render(call, StatusCode::OK, None, &FormState::default(), None).await,
     };
     if let Some(toast) = &outcome.toast {
-        let name = if outcome.error { TOAST_ERROR_HEADER } else { TOAST_HEADER };
+        let name = if outcome.error {
+            TOAST_ERROR_HEADER
+        } else {
+            TOAST_HEADER
+        };
         if let Ok(value) = HeaderValue::from_str(&encode(toast)) {
             response.headers_mut().insert(name, value);
         }
@@ -401,7 +703,16 @@ async fn run_action(
         .ok_or_else(not_found)?;
     let params = custom_admin_route_params(&page.route_pattern, &call.pathname).ok_or_else(not_found)?;
     let request_id = Uuid::new_v4().to_string();
-    let schema = function.input.as_ref().map_or(Value::Null, |input| input.json_schema.clone());
+    // What a failure of the action is reported as: the page, the action and the request.
+    report::describe(|description| {
+        description
+            .unit("admin", format_args!("{} {name}", page.route_pattern))
+            .tag("request_id", &request_id);
+    });
+    let schema = function
+        .input
+        .as_ref()
+        .map_or(Value::Null, |input| input.json_schema.clone());
     let input = fields_to_json(&schema, fields);
     let context = create_context(call.app, &call.session, params, request_id.clone(), None);
     let started = Instant::now();
@@ -434,22 +745,12 @@ async fn run_action(
     result.map(|_| outcome.unwrap_or_default())
 }
 
-fn builtin_label(page: AdminPageId) -> &'static str {
-    match page {
-        AdminPageId::Flows => "Flows",
-        AdminPageId::Providers => "Providers",
-        AdminPageId::Crons => "Crons",
-        AdminPageId::Mcp => "MCP",
-        AdminPageId::Functions => "Functions",
-    }
-}
-
-/// A page of the framework that the server does not render yet.
-fn not_ported(name: &str) -> Markup {
+/// A page of the application without a view: its functions, and nothing to show.
+fn without_view(name: &str) -> Markup {
     html! {
         s-page heading=(name) {
-            s-banner tone="info" heading="Not rendered by the server yet" {
-                s-paragraph { "This page of the admin is still part of the WebAssembly admin UI." }
+            s-banner tone="info" heading="This page has nothing to show" {
+                s-paragraph { "It declares no view." }
             }
         }
     }

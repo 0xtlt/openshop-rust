@@ -143,8 +143,7 @@ larger configurations easier to split:
   sibling: `/reviews/new` is handled by its own page rather than rejected as
   ambiguous with `/reviews/:id`.
 - A custom admin page can be declared at `/`: it is the home of the admin,
-  in place of the built-in dashboard, and its functions are called at
-  `/api/pages/custom/_rpc/<kind>/<name>`. `AdminPagesConfig::none()` disables
+  in place of the built-in dashboard. `AdminPagesConfig::none()` disables
   every built-in page, and such an application must declare that home.
 - Turning MCP off, with `mcp: McpConfig::disabled()` or `.enabled(false)`,
   also disables the MCP page of the admin and `/api/mcp/*`, unless the
@@ -184,34 +183,27 @@ larger configurations easier to split:
   header name, and nothing when they differ.
 - App proxy signatures are compared as strict hexadecimal. A valid signature
   followed by other characters is rejected.
-- Static asset paths are decoded and checked segment by segment; a path that
-  would leave the UI directory is answered with `404`.
-- The admin UI shell is sent with
-  `Content-Security-Policy: frame-ancestors https://<shop> https://admin.shopify.com;`
-  and `Cache-Control: no-store`.
+- A page of the admin is sent with
+  `Content-Security-Policy: frame-ancestors https://<shop> https://admin.shopify.com;`,
+  the shop of its session token, and `Cache-Control: no-store`.
 - MCP token hashing and verification run outside the async runtime.
 
 ## Admin UI
 
-- The UI is written in Rust with Leptos and compiled to WebAssembly. It is
-  embedded in the framework crate. An application with custom admin pages
-  serves its own bundle with the setting `admin_ui: UiSource::Dir(…)`,
-  `admin_ui: UiSource::Assets(…)` for a bundle compiled into the binary, or
-  the `OPENSHOP_UI_DIR` environment variable.
-- Assets whose file name carries a content hash are served with
-  `Cache-Control: public, max-age=31536000, immutable`; other files with
-  `no-cache`. They have an `ETag` and answer `304` to `If-None-Match`, and are
-  sent with `X-Content-Type-Options: nosniff`.
-- Custom admin pages are Rust components registered in your own UI bundle
-  instead of `page.tsx` files compiled by Vite.
-- In `dev`, the shell is served by the application itself (there is no separate
-  UI port) and without the signed-query check. There is no Vite server and no
-  module replacement: the shell reloads the whole page when the app has been
-  started again or its bundle rebuilt, which `GET /__openshop/reload`, a route
+- The admin is rendered by the server: each page is HTML made of Polaris web
+  components, with one small script, `openshop.js`, that sends its forms and
+  follows its links. There is no bundle to build or to serve. A page is
+  authenticated with a Shopify session token, the one of the launch URL, or the
+  one App Bridge's `fetch` adds; a page loaded without one goes through
+  `/auth/session-token`, the bounce page of Shopify's libraries.
+- Custom admin pages are `#[admin_page]` blocks whose view returns `Markup`,
+  in place of `page.tsx` files compiled by Vite.
+- In `dev`, there is no Vite server and no module replacement: a page reloads
+  when the app has been started again, which `GET /__openshop/reload`, a route
   of `dev` only, tells it.
 - A visitor without a valid launch receives a page written with Polaris web
   components, with the same `401` and the same sentence. `dev` answers its
-  `403` with that page instead of plain text, and the admin UI shows it to a
+  `403` with that page instead of plain text, and the admin shows it to a
   visitor without a session.
 - The [operator dashboard](operator-dashboard.md) under `/ops` has no
   TypeScript counterpart: pages rendered by the server, without script, that
@@ -272,7 +264,6 @@ larger configurations easier to split:
   `development` or `test` (`NODE_ENV` does not count), or the command is `dev`. The application does not
   start without it, in production or in any environment that is not explicitly
   a development one.
-- `OPENSHOP_UI_DIR` replaces the embedded admin UI.
 
 ## Not ported
 

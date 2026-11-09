@@ -1,18 +1,13 @@
 # Add a custom admin page
 
 Use this guide to add a **Store** page to an existing app. It displays the trusted
-shop identity returned by a server loader. You need a running app installed on a
-development store.
+shop identity returned by a server loader, and saves a note with an action.
+You need a running app installed on a development store.
 
-A custom page is one file: a loader, which the server runs, and a view, which
-the browser shows. The view is compiled to WebAssembly into the admin UI
-bundle of your application, built with [trunk](https://trunkrs.dev). Install
-the toolchain once:
-
-```bash
-rustup target add wasm32-unknown-unknown
-cargo install trunk --locked
-```
+A custom page is one file: a loader, which reads what the page shows, and a
+view, a function of what the loader returns, which the server renders into
+HTML made of Shopify's Polaris web components. There is nothing to build
+besides your application.
 
 > **Caution: experimental API.**
 > Custom admin pages are experimental. Check the
@@ -26,24 +21,29 @@ From the project root:
 openshop init-ui
 ```
 
-In `Cargo.toml`, this enables the `ui` feature of `openshop` and adds
-`leptos`, the library views are written with. It also writes an example page,
-`src/admin/hello.rs`, declared in `src/admin/mod.rs`.
+In `Cargo.toml`, this adds `maud`, the crate whose `html!` the views are
+written with. It also writes an example page, `src/admin/hello.rs`, declared
+in `src/admin/mod.rs`.
 
 ## 2. Write the page
 
 Create `src/admin/store.rs`:
 
 ```rust,ignore
-use leptos::prelude::*;
+use maud::html;
 use openshop::prelude::*;
-use openshop::ui::use_loader;
 use serde::{Deserialize, Serialize};
 
 // What the loader returns, and the view reads.
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct StoreSummary {
     pub shop: String,
+}
+
+#[input]
+pub struct SaveNote {
+    #[schemars(length(min = 1, max = 200))]
+    pub note: String,
 }
 
 pub struct StorePage;
@@ -55,16 +55,30 @@ impl StorePage {
         Ok(StoreSummary { shop: ctx.shop })
     }
 
-    #[view]
-    fn view() -> impl IntoView {
-        let summary = use_loader(Self::STORE_SUMMARY, || ());
+    #[action]
+    async fn save_note(ctx: AdminContext, input: SaveNote) -> Result<Outcome> {
+        ctx.logger.info_with("Note saved", json!({ "note": input.note }));
+        Ok(Outcome::toast("Note saved"))
+    }
 
-        view! {
-            <s-page heading="Store">
-                {move || summary.loading.get().then(|| view! { <s-spinner accessibilityLabel="Loading store" /> })}
-                {move || summary.error.get().map(|error| view! { <s-banner tone="critical">{error.message}</s-banner> })}
-                {move || summary.data.get().map(|summary| view! { <s-paragraph>{summary.shop}</s-paragraph> })}
-            </s-page>
+    #[view]
+    fn view(store_summary: StoreSummary, form: FormState) -> Markup {
+        html! {
+            s-page heading="Store" {
+                s-section {
+                    s-paragraph { (store_summary.shop) }
+                }
+                s-section heading="Note" {
+                    form method="post" {
+                        input type="hidden" name="_action" value=(Self::SAVE_NOTE);
+                        s-stack gap="base" {
+                            s-text-field name="note" label="Note"
+                                value=(form.value_or("note", "")) error=[form.error("note")] {}
+                            s-button type="submit" variant="primary" { "Save" }
+                        }
+                    }
+                }
+            }
         }
     }
 }
@@ -74,24 +88,21 @@ Declare the module in `src/admin/mod.rs`: `pub mod store;`.
 
 `#[admin_page("/store")]` makes the `impl` block of `StorePage` a page, and
 `nav = "Store"` gives it an entry in the menu of the admin. `#[loader]` makes
-`store_summary` a loader of that page, and `#[view]` makes `view` what the
-page shows.
+`store_summary` a loader of that page, `#[action]` makes `save_note` an
+action, and `#[view]` makes `view` what the page shows.
 
-The view calls the loader through `Self::STORE_SUMMARY`, a constant the block
-gains for the loader: it carries the type the loader returns, so
-`summary.data` is a `StoreSummary`. The browser calls the loader with a fresh
-Shopify session token.
+The view's parameter `store_summary` is named after the loader: the server
+runs the loader and gives the view what it returns, a `StoreSummary`. The
+form posts to the page, the name of the action in `_action`
+(`Self::SAVE_NOTE`, a constant the block gains for each function); the action
+answers `Outcome::toast(…)`, and the page is rendered again with the toast. A
+note the input schema refuses (empty, or too long) renders the page again
+with the error under the field: that is what the `form` parameter carries.
 
-The loader receives the identity verified by OpenShop. Keep database access,
-provider credentials, and other server-only work in loaders and actions: their
-context also carries `ctx.db`, `ctx.shopify`, and `ctx.connectors`.
-
-A loader or an action can take what the page sends as a second argument. Mark
-the type of that argument with `#[input]`: the input is validated against it
-before the function runs, and its fields are named in camel case outside Rust
-(`display_name` is `displayName`). The
-[custom admin page reference](../reference/custom-admin-pages.md#views)
-shows an action with its input.
+The loader and the action receive the identity verified by OpenShop, from the
+Shopify session token of the request. Keep database access, provider
+credentials, and other server-only work in loaders and actions: their context
+also carries `ctx.db`, `ctx.shopify`, and `ctx.connectors`.
 
 ## 3. List the page
 
@@ -101,7 +112,6 @@ page where the application is declared, keeping your flows and other settings:
 ```rust,ignore
 mod admin;
 
-use openshop::UiSource;
 use openshop::prelude::*;
 
 use admin::store::StorePage;
@@ -109,14 +119,11 @@ use admin::store::StorePage;
 static APP: App = app! {
     // ... providers, flows and other settings ...
     admin_pages: [StorePage],
-    admin_ui: UiSource::Dir("dist".into()),
 };
 ```
 
 Listing the page in `admin_pages` is enough to serve it, and its `nav` label
-is its entry in the menu. `admin_ui` replaces the built-in bundle with yours;
-the directory is resolved from the working directory of the process. The
-`OPENSHOP_UI_DIR` environment variable overrides it.
+is its entry in the menu.
 
 To set the menu by hand, for another order or another label, add the
 `admin_menu` setting:
@@ -127,59 +134,13 @@ when a path of that list does not match a listed page.
 
 ## 4. Open the page
 
-Restart `openshop dev`. When a page has a view, it builds the admin UI bundle
-of the application from the module of the pages, here `admin`, rebuilds it
-when a page changes, and serves it. Open the app from Shopify admin and select
-**Store**. You should see the current shop domain. From then on, the page
-reloads by itself when you change it. A **Page unavailable**
-message means the server knows the page but the bundle being served does not
-contain it: check the `trunk` output in the terminal and the directory being
-served.
+`openshop dev` restarts the application when a file changes, and the page
+reloads. Open the app from Shopify admin and select **Store**. You should see
+the current shop domain. Save a note: a toast says so. Save an empty one: the
+field says it is required.
 
-`cargo run -- dev` does not build the bundle: use `openshop dev`, or run
-`openshop build-ui` after a change.
-
-`cargo check` reports the errors of the page, view included. The bundle is
-compiled from the module of the pages on its own, so an error that only its
-build reports names something it does not have: import what only a loader or
-an action needs inside that function. See
-[What the bundle is made of](../reference/custom-admin-pages.md#what-the-bundle-is-made-of).
-
-## Ship the bundle
-
-`openshop build` builds the bundle into `dist/`, optimized for size, then the
-application. With `UiSource::Dir`, or `OPENSHOP_UI_DIR`, deploy `dist` next
-to the binary.
-
-The `Dockerfile` of a project made from the `custom` or `public` template
-builds the bundle too: it installs the WebAssembly target, trunk and the
-`openshop` CLI of the tag, branch or rev of `openshop` that `Cargo.toml`
-names, runs `openshop build`,
-copies `dist` into the image and names it with `OPENSHOP_UI_DIR`. The
-`Dockerfile` of the `minimal` template does not; after `openshop init-ui`, take
-those steps from the `# if views` blocks of `templates/shared/Dockerfile` in
-the OpenShop repository.
-
-To keep a single binary, compile the bundle into it instead. Add the
-`rust-embed` crate (`cargo add rust-embed`) and serve the embedded files:
-
-```rust,ignore
-use openshop::UiSource;
-use openshop::prelude::*;
-use rust_embed::RustEmbed;
-
-#[derive(RustEmbed)]
-#[folder = "dist/"]
-struct AdminUi;
-
-static APP: App = app! {
-    // ... providers, flows, pages and other settings ...
-    admin_ui: UiSource::Assets(|path| AdminUi::get(path).map(|file| file.data)),
-};
-```
-
-`dist` must then exist when the server is compiled, so build the bundle
-first: `openshop build` does.
+`cargo check` reports the errors of the page, view included: it is compiled
+with the server, as the rest of the application.
 
 ## Restrict access when adding business data
 
@@ -206,7 +167,8 @@ impl StorePage {
 }
 ```
 
-`ctx.actor.id` is the Shopify staff user of the session token. The rules are
+A page whose rule says no shows "This page is disabled." and has no entry in
+the menu. `ctx.actor.id` is the Shopify staff user of the session token. The rules are
 described in the
 [authorization reference](../reference/custom-admin-pages.md#authorization-and-errors).
 When querying app-owned tables, read a model through the rows of the shop of

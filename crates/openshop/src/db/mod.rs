@@ -150,7 +150,12 @@ mod tests {
         // A pool without timeouts retries a refused connection forever: check
         // that PostgreSQL answers, and fail with what to do if it does not.
         let connect_options = url.parse().unwrap();
-        crate::testing::connect(&connect_options).await.unwrap().close().await.unwrap();
+        crate::testing::connect(&connect_options)
+            .await
+            .unwrap()
+            .close()
+            .await
+            .unwrap();
         let pool = options(&ZEROS).connect(&url).await.unwrap();
 
         sqlx::query("SELECT 1").execute(&pool).await.unwrap();

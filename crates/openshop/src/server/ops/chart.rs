@@ -98,7 +98,14 @@ fn draw(shape: &Shape, start: DateTime<Utc>, bucket: Duration, series: &[Series<
         return String::new();
     }
     let (width, right) = (shape.width, shape.width - END);
-    let top = ceiling(series.iter().flat_map(|series| series.values).copied().max().unwrap_or(0));
+    let top = ceiling(
+        series
+            .iter()
+            .flat_map(|series| series.values)
+            .copied()
+            .max()
+            .unwrap_or(0),
+    );
     let x = |index: usize| LEFT + (right - LEFT) * index as f64 / (buckets - 1) as f64;
     let y = |value: i64| BOTTOM - (BOTTOM - TOP) * value as f64 / top as f64;
 
@@ -238,14 +245,29 @@ mod tests {
                 },
             ],
         );
-        assert!(svg.starts_with("<svg class=\"chart wide\" viewBox=\"0 0 1000 220\""), "{svg}");
+        assert!(
+            svg.starts_with("<svg class=\"chart wide\" viewBox=\"0 0 1000 220\""),
+            "{svg}"
+        );
         // The same chart follows, drawn for a narrow screen.
-        assert!(svg.contains("</svg><svg class=\"chart narrow\" viewBox=\"0 0 420 220\""), "{svg}");
-        assert!(svg.contains("<path class=\"line total\" d=\"M48.0,186.0 L230.0,12.0 L412.0,99.0\"/>"), "{svg}");
+        assert!(
+            svg.contains("</svg><svg class=\"chart narrow\" viewBox=\"0 0 420 220\""),
+            "{svg}"
+        );
+        assert!(
+            svg.contains("<path class=\"line total\" d=\"M48.0,186.0 L230.0,12.0 L412.0,99.0\"/>"),
+            "{svg}"
+        );
         assert!(svg.contains("aria-label=\"runs and failed over time\""), "{svg}");
         // 10 is the top of the scale: the second point of the runs touches it, half way for the failures.
-        assert!(svg.contains("<path class=\"line total\" d=\"M48.0,186.0 L520.0,12.0 L992.0,99.0\"/>"), "{svg}");
-        assert!(svg.contains("<path class=\"line bad\" d=\"M48.0,186.0 L520.0,99.0 L992.0,186.0\"/>"), "{svg}");
+        assert!(
+            svg.contains("<path class=\"line total\" d=\"M48.0,186.0 L520.0,12.0 L992.0,99.0\"/>"),
+            "{svg}"
+        );
+        assert!(
+            svg.contains("<path class=\"line bad\" d=\"M48.0,186.0 L520.0,99.0 L992.0,186.0\"/>"),
+            "{svg}"
+        );
         // Only the first series is filled.
         assert_eq!(svg.matches("class=\"area ").count(), 2, "{svg}");
         assert!(svg.contains("<title>Oct 10, 09:00: 10 runs, 5 failed</title>"), "{svg}");

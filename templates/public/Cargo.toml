@@ -14,10 +14,10 @@ publish = false
 api-version = "2026-10"
 
 [dependencies]
-openshop = { workspace = true, features = ["ui"] }
+openshop.workspace = true
 serde.workspace = true
-# The views of the admin pages.
-leptos = "0.8"
+# The HTML of the views of the admin pages, which the server renders: `html!`.
+maud.workspace = true
 
 [dev-dependencies]
 openshop = { workspace = true, features = ["testing"] }

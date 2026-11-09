@@ -236,7 +236,13 @@ mod tests {
         assert_eq!(sent(), 1);
         transport.send_envelope(Event::default().into());
         assert_eq!(sent(), 2);
-        assert!(received.lock().unwrap().iter().all(|body| body.contains(r#""type":"event""#)));
+        assert!(
+            received
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|body| body.contains(r#""type":"event""#))
+        );
     }
 
     #[test]

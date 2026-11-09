@@ -366,7 +366,11 @@ pub(crate) async fn handle(State(app): State<OpenShop>, request: Request) -> Res
 
     let token = match resolve_mcp_bearer_token(&app, authorization.as_deref()).await {
         Ok(McpAuthResult::Ok(token)) => token,
-        Ok(McpAuthResult::Rejected { status, error, token_id }) => {
+        Ok(McpAuthResult::Rejected {
+            status,
+            error,
+            token_id,
+        }) => {
             // The token id names a token, never its secret.
             crate::runtime::logger::warn_with(
                 "[openshop] MCP token refused",

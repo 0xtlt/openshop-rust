@@ -1,7 +1,7 @@
 //! Retry policies and exponential backoff.
 
-use rand::RngExt;
 use chrono::{DateTime, Duration, Utc};
+use rand::RngExt;
 
 use crate::runtime::time::millis;
 use crate::types::{ResolvedRetryPolicy, RetryPolicy};

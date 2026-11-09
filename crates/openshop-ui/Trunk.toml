@@ -1,8 +1,0 @@
-[build]
-target = "index.html"
-# The server crate embeds this directory.
-dist = "../openshop/ui-dist"
-public_url = "/"
-# The server rewrites head tags of index.html at serve time: keep them byte-for-byte.
-minify = "never"
-no_sri = true

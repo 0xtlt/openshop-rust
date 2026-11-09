@@ -2,13 +2,14 @@
 
 To build a screen, see [Add a custom admin page](../guides/add-admin-page.md).
 
-Custom admin pages let an OpenShop app add embedded screens without forking the
-framework UI. The API is experimental.
+Custom admin pages let an OpenShop app add embedded screens next to the pages
+of the framework. The API is experimental.
 
 A custom page is one `impl` block, marked `#[admin_page("/path")]`. It holds
-what the server runs, the access rule, the loaders, and the actions of the
-page, and what the browser shows: the view of the page, compiled to
-WebAssembly into the admin UI bundle of the application.
+the access rule, the loaders and the actions of the page, and its view: a
+function of what the loaders return, which the server renders into HTML made
+of Shopify's Polaris web components. There is no bundle to build and no
+WebAssembly: the admin is pages the server renders, and one small script.
 
 ```rust,ignore
 // src/main.rs
@@ -75,9 +76,8 @@ impl HomePage {
     }
 
     #[view]
-    fn view() -> impl IntoView {
-        let summary = use_loader(Self::SUMMARY, || ());
-        view! { <s-page heading="Welcome">{move || summary.data.get().map(|summary| summary.shop)}</s-page> }
+    fn view(summary: Summary) -> Markup {
+        html! { s-page heading="Welcome" { (summary.shop) } }
     }
 }
 ```
@@ -129,15 +129,12 @@ impl ReviewsPage {
     }
 
     #[action]
-    async fn save_review(ctx: AdminContext, input: SaveReview) -> Result<Value> {
+    async fn save_review(ctx: AdminContext, input: SaveReview) -> Result<Outcome> {
         if input.title.len() > 120 {
-            bail!(
-                AdminPublicError::new("TITLE_TOO_LONG", "Title is too long")
-                    .status(422)
-                    .field_errors([("title", "At most 120 characters")])
-            );
+            return Ok(Outcome::invalid([("title", "At most 120 characters")]));
         }
-        Ok(json!({ "id": "2", "title": input.title, "savedBy": ctx.actor.id }))
+        ctx.logger.info_with("Review saved", json!({ "title": input.title }));
+        Ok(Outcome::toast("Review saved"))
     }
 }
 
@@ -182,10 +179,10 @@ name. The view of the page calls them through a
 
 | Function | Input |
 | --- | --- |
-| `#[loader] async fn(ctx: AdminContext) -> Result<T>` | None. Whatever the page sends is ignored. |
-| `#[loader] async fn(ctx: AdminContext, input: I) -> Result<T>` | Validated against the JSON Schema of `I` and deserialized into it. |
-| `#[action] async fn(ctx: AdminContext) -> Result<T>` | None. Any JSON value is accepted and ignored. |
-| `#[action] async fn(ctx: AdminContext, input: I) -> Result<T>` | Validated against the JSON Schema of `I` and deserialized into it. |
+| `#[loader] async fn(ctx: AdminContext) -> Result<T>` | None. |
+| `#[loader] async fn(ctx: AdminContext, input: I) -> Result<T>` | The query string of the page URL (`?status=active&page=2`), each parameter converted to the type the JSON Schema of `I` gives it, then validated against that schema and deserialized into `I`. |
+| `#[action] async fn(ctx: AdminContext) -> Result<T>` | None. The fields of the form are ignored. |
+| `#[action] async fn(ctx: AdminContext, input: I) -> Result<T>` | The fields of the form, converted and validated the same way. |
 
 `I` is a type marked `#[input]`. The attribute derives `Deserialize`,
 `Serialize`, and `JsonSchema` for it, without `serde` or `schemars` among the
@@ -193,8 +190,9 @@ dependencies of the application, and names its fields in camel case outside
 Rust: `product_id` is `productId` in what the page sends. A
 `#[serde(rename_all = "…")]` on the type states another rule. The attributes
 of `serde` and `schemars` work on the type and on its fields; put `#[input]`
-above the other attributes of the type. A typed input needs the `schema` cargo
-feature, which is enabled by default. `T` is any `Serialize` value.
+above the other attributes of the type. `T` is any `Serialize` value; an
+action returns an [`Outcome`](#forms-and-actions) to say what the page does
+next.
 `authorize = <rule>` in the marker adds an
 [access rule](#authorization-and-errors) of its own to the function. A function
 of the block without a marker is an ordinary helper.
@@ -230,37 +228,35 @@ must filter by the trusted shop, and by the app handle where applicable.
 Custom actions are synchronous and use the hosting platform's request limits. Use
 an ordinary server route or an OpenShop flow for long-running or retryable work.
 
-Loaders and actions are called over an internal
-`POST /api/pages/custom/<page path>/_rpc/<loader|action>/<name>` transport
-(`/api/pages/custom/_rpc/…` for the home)
-authenticated with a fresh Shopify App Bridge session token. Endpoint URLs are
-not a public API; use `use_loader` and `use_action` in the view of the page.
-
 ## Views
 
 The view of a page is the function of its block marked `#[view]`, in the same
-file as the loaders and the actions it calls. It is written with
-[Leptos](https://leptos.dev) and Shopify's Polaris web components:
+file as its loaders and its actions. The server renders it: it runs the access
+rules, then the loaders the view names, then the view, a function of what they
+return, written with [maud](https://maud.lambda.xyz)'s `html!` and Shopify's
+Polaris web components (`s-page`, `s-section`, `s-table`, `s-text-field`…):
 
 ```rust,ignore
 // src/admin/reviews.rs
-use leptos::prelude::*;
-use leptos::task::spawn_local;
+use maud::html;
 use openshop::prelude::*;
-use openshop::ui::{AdminActionOptions, RouteParams, shopify, use_action, use_loader};
 use serde::{Deserialize, Serialize};
 
 #[input]
 pub struct SaveReview {
+    #[schemars(length(min = 1, max = 120))]
     pub title: String,
 }
 
-// What a loader or an action returns is written by the server and read by
-// the view.
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct Review {
     pub id: String,
     pub title: String,
+}
+
+#[input]
+pub struct Filter {
+    pub search: Option<String>,
 }
 
 pub struct ReviewsPage;
@@ -268,45 +264,38 @@ pub struct ReviewsPage;
 #[admin_page("/reviews", nav = "Reviews")]
 impl ReviewsPage {
     #[loader]
-    async fn list_reviews(ctx: AdminContext) -> Result<Vec<Review>> {
-        Ok(vec![Review { id: "1".to_string(), title: format!("First review of {}", ctx.shop) }])
+    async fn list_reviews(ctx: AdminContext, input: Filter) -> Result<Vec<Review>> {
+        let title = format!("First review of {}", ctx.shop);
+        let matches = input.search.is_none_or(|search| title.contains(&search));
+        Ok(matches.then(|| Review { id: "1".to_string(), title }).into_iter().collect())
     }
 
     #[action]
-    async fn save_review(_ctx: AdminContext, input: SaveReview) -> Result<Review> {
-        Ok(Review { id: "2".to_string(), title: input.title })
+    async fn save_review(_ctx: AdminContext, input: SaveReview) -> Result<Outcome> {
+        Ok(Outcome::redirect("/reviews/2").with_toast(format!("Saved {}", input.title)))
     }
 
     #[view]
-    fn view() -> impl IntoView {
-        let reviews = use_loader(Self::LIST_REVIEWS, || ());
-        let save = use_action(Self::SAVE_REVIEW);
-        let add = move |_| {
-            spawn_local(async move {
-                let input = SaveReview { title: "New review".to_string() };
-                let options = AdminActionOptions::new().revalidate(Self::LIST_REVIEWS);
-                if let Ok(Some(review)) = save.invoke(input, options).await {
-                    shopify::toast(&format!("Saved {}", review.title));
+    fn view(list_reviews: Vec<Review>, form: FormState) -> Markup {
+        html! {
+            s-page heading="Reviews" {
+                s-section {
+                    form method="get" {
+                        s-search-field name="search" label="Search" {}
+                    }
+                    @for review in &list_reviews {
+                        s-link href=(format!("/reviews/{}", review.id)) { (review.title) }
+                    }
                 }
-            });
-        };
-
-        view! {
-            <s-page heading="Reviews">
-                {move || reviews.error.get().map(|error| view! { <s-banner tone="critical">{error.message}</s-banner> })}
-                {move || {
-                    reviews
-                        .data
-                        .get()
-                        .unwrap_or_default()
-                        .into_iter()
-                        .map(|review| view! { <s-link href=format!("/reviews/{}", review.id)>{review.title}</s-link> })
-                        .collect_view()
-                }}
-                <s-button variant="primary" loading=move || save.pending.get() on:click=add>
-                    "Add review"
-                </s-button>
-            </s-page>
+                s-section heading="New review" {
+                    form method="post" {
+                        input type="hidden" name="_action" value=(Self::SAVE_REVIEW);
+                        s-text-field name="title" label="Title"
+                            value=(form.value_or("title", "")) error=[form.error("title")] {}
+                        s-button type="submit" variant="primary" { "Add review" }
+                    }
+                }
+            }
         }
     }
 }
@@ -317,178 +306,171 @@ pub struct ReviewDetailPage;
 impl ReviewDetailPage {
     #[loader]
     async fn review(ctx: AdminContext) -> Result<Review> {
+        // The dynamic segments of the path are in `ctx.params`.
         let id = ctx.params.get("id").cloned().unwrap_or_default();
         let title = format!("Review {id}");
         Ok(Review { id, title })
     }
 
-    // The view of a page with dynamic segments takes the route params.
     #[view]
-    fn view(params: RouteParams) -> impl IntoView {
-        let id = params.get("id").unwrap_or_default().to_string();
-        let review = use_loader(Self::REVIEW, || ());
-        view! {
-            <s-page heading=move || review.data.get().map_or_else(|| format!("Review {id}"), |review| review.title)></s-page>
-        }
+    fn view(review: Review) -> Markup {
+        html! { s-page heading=(review.title) {} }
     }
 }
 ```
 
-A page has at most one view: `fn() -> impl IntoView`, or
-`fn(params: RouteParams) -> impl IntoView`. Components it is made of are
-ordinary Leptos `#[component]` functions, written outside the block.
+A page has at most one view: `fn(…) -> Markup`, not `async`. Each parameter
+is named after a loader of the page and receives what it returns:
+`fn view(list_reviews: Vec<Review>, stats: Stats)`, by value or by reference.
+A parameter that names no loader is refused at compile time. A loader with an
+input reads it from the query string of the page; a value the schema refuses
+answers `400 INVALID_INPUT`. A loader with its own `authorize` rule runs after
+it. The one other parameter a view may take is `form` (see
+[Form errors](#form-errors)).
 
-Polaris components are plain custom elements. Pass their props as attributes
-(`listSlot="primary"`, `disabled=move || busy.get()`), except the `value` and
-`checked` of form fields, which only follow the property: use `prop:value` /
-`prop:checked` together with `on:input` / `on:change`. Wrap attribute values
-that contain `>` in braces.
+A loader that fails fails the page: an `AdminPublicError` is shown in a
+critical banner with its status, any other error is logged and the page shows
+"This page could not be displayed." (`500`). A page whose access rule says no
+shows "This page is disabled." (`404`). There is no loading state: the server
+renders the page once it has the data.
 
-With a view, the block gains a constant per loader and action, named after the
-function: `list_reviews` is `ReviewsPage::LIST_REVIEWS`. The constant is an
-`AdminFunctionRef<Input, Output>`: it carries the kind and the name of the
-function, the type it takes, and the type it returns. The function states
-what it returns as `Result<Output>`, and `Output` implements `Serialize`, for
-the server, and `Deserialize`, for the view.
+The view, like the loaders and the actions, is compiled with the server, and
+its HTML is escaped: `(review.title)` writes text, never markup. Polaris
+components are plain custom elements; their props are attributes
+(`listSlot="primary"`, `tone=(tone)`). Components the view is made of are
+ordinary functions that return `Markup`. Markup is written with
+`maud::html!`, which names the `maud` crate: the application depends on it
+(see [Set up the application](#set-up-the-application)).
 
-| Item | Contract |
+### Forms and actions
+
+An action is a `<form method="post">` of the page. Without an `action`
+attribute it posts to the URL of the page, query string included, so the page
+is rendered again with the same filters. The name of the action travels in the
+field `_action`, written with the constant the block gains for each function,
+named after it: `save_review` is `ReviewsPage::SAVE_REVIEW`. Polaris fields
+(`s-text-field`, `s-number-field`, `s-select`, `s-checkbox`…) take part in the
+form with their `name`.
+
+The fields are converted to the JSON the input schema of the action describes,
+then go through the access rules, the action's `authorize`, the schema and the
+action. A boolean property without a field is `false` (an unchecked checkbox
+sends nothing); a property that is an array collects every field of its name;
+an empty field is `null` for an `Option`, and missing for a number; fields
+that start with `_` are the page's.
+
+An action returns any value, or an `Outcome`, which says what the page does
+next:
+
+| `Outcome` | What the merchant sees |
 | --- | --- |
-| `Page::FUNCTION` | The loader or the action `function` of the page: an `AdminFunctionRef<I, O>`, where `I` is the input sent as JSON, `()` for a function without input, and `O` the output. |
-| `use_loader(reference, input)` | Calls the loader when the page mounts, and again whenever the input closure yields a different JSON value or the loader is revalidated. Exposes the signals `data`, `error`, and `loading`, and `revalidate()`. Responses of superseded calls are discarded. |
-| `use_action(reference)` | Exposes the signals `data`, `error`, and `pending`, `invoke(input, options)`, and `reset()`. Never retries on its own. |
-| `AdminActionOptions` | `.revalidate(loader)` reloads mounted loaders after a success, `.idempotency_key(key)` sets the `Idempotency-Key` header, `.concurrency(ActionConcurrency::Allow)` permits overlapping calls. By default a call made while another one is in flight is skipped and `invoke` returns `Ok(None)`. |
-| `AdminRpcError` | Failure of a call: `message`, and the server's `code`, `request_id`, `field_errors` and `details` when it answered with a structured error; `detail(name)` reads one of the details. |
-| `RouteParams::get(name)` | The percent-decoded value of a dynamic segment. |
-| `openshop::ui::navigate(path)` | Switches to another embedded page without reloading. |
-| `openshop::ui::shopify` | `toast`, `toast_error`, and `toast_with` for App Bridge toasts; `id_token` for a session token. |
+| `Outcome::toast("Saved")` | The page rendered again, and a toast. |
+| `Outcome::error("…")` | The page rendered again, and an error toast. |
+| `Outcome::redirect("/reviews/42")`, `.with_toast(…)` | That page of the admin, and the toast. |
+| `Outcome::invalid([("title", "Already taken")])` | The form refused: see [Form errors](#form-errors). |
+| any other value | The page rendered again. |
+| `Err(AdminPublicError)` | The page as it was, and an error toast with its message. |
+| any other error | The page as it was, an error toast "Internal server error"; the error is logged and reported to Sentry. |
 
-The UI asks the server before showing a custom page. A page whose access rule
-rejects the staff member shows "This page is disabled." A page without a view,
-a page the server knows but the bundle being served does not contain, and a
-view that renders an `Err`, show a "Page unavailable" fallback.
+A `<form method="get">` is a navigation: its fields become the query string
+of the URL, which the loaders read. Every list, filter and page is a URL. A
+link to another page of the admin is a plain path: `a href="/reviews/42"`,
+`s-link href=…`, `s-button href=…`.
+
+### Form errors
+
+A view that declares a parameter `form: FormState` (or `&FormState`) shows a
+refused form itself. The form is refused field by field when the input schema
+refuses it (`Required`, `Must be at least 3 characters`, `Must be a whole
+number`), when the action answers `Outcome::invalid(…)`, and when it fails
+with an `AdminPublicError` that has `field_errors`. The page is then rendered
+again in place, with the status `422` (or the error's), and `form` holds:
+
+| `FormState` | Contract |
+| --- | --- |
+| `form.value_or("title", saved)` | The value sent for the field after a refusal, else `saved`: the `value` of a field. |
+| `form.error("title")` | The error of the field: `error=[form.error("title")]` gives the Polaris field its `error` attribute only when there is one. |
+| `form.of(Self::SAVE_REVIEW)` | The state of that action's form, empty when another form of the page was refused. |
+| `form.values("tags")` | Every value sent for a field. |
+| `form.message` | What the action said of the form as a whole: the message of its `AdminPublicError`. |
+| `form.is_refused()` | Whether the page is rendered again for a refused form. |
+
+A view without `form` keeps the page as it was, with an error toast that names
+the first field.
+
+### What the browser does
+
+The document around every page has App Bridge, Polaris, the menu of the admin
+(the built-in pages, then the pages of the application whose access rule lets
+the staff member in), and `openshop.js`, a script of 2 KB that only presents
+what the server rendered:
+
+- a form is sent in the background with App Bridge's `fetch`, which adds the
+  session token; its submit button shows `loading`, and the admin's loading bar
+  runs. A form with `data-openshop-native` is left to the browser;
+- a link to a page of the app, the menu, and back and forward fetch the page
+  and replace its content, without loading the document again;
+- the toasts the action asked for are shown with `shopify.toast`.
+
+It also does what only a browser can, when the page asks with an attribute:
+
+| Attribute | Effect |
+| --- | --- |
+| `<time datetime="…">` | The date written in the language and the time zone of the browser. |
+| `data-openshop-refresh="5000"` | The page is fetched again after that many milliseconds, unless a field has the focus or a modal is open: what runs is followed without a reload. |
+| `data-openshop-open` on an `s-modal` | The modal opens once the page is shown: a modal whose form was refused. |
+| `data-openshop-copy="text"` on a button | Copies the text, with a toast. |
+| `data-openshop-download="/api/…"` and `data-openshop-filename="name.csv"` | Fetches the URL with the session token and saves it as a file. |
+
+Without the script, a form posts and the server answers with a redirect to the
+page, and a link loads the page. Inside Shopify admin, where App Bridge
+already needs JavaScript, that costs a reload per click, and the toast of a
+plain post is lost.
 
 ### Set up the application
 
-Views need the `ui` feature of `openshop`, and `leptos`, in `Cargo.toml`:
+Views need `maud` in `Cargo.toml`, for `html!`:
 
 ```toml
 [dependencies]
-openshop = { git = "https://github.com/0xtlt/openshop-rust", tag = "v<version>", features = ["ui"] }
-leptos = "0.8"
+openshop = { git = "https://github.com/0xtlt/openshop-rust", tag = "v<version>" }
+maud = "0.27"
 serde = { version = "1", features = ["derive"] }
 ```
 
-`openshop init-ui` makes that change and writes an example page; see
-[CLI commands](cli.md#scaffold-a-custom-admin-page). Nothing else is added to
-the application: there is no second crate, and no file of the bundle to keep.
+`openshop init-ui` adds it and writes an example page; see
+[CLI commands](cli.md#scaffold-a-custom-admin-page). There is nothing to
+build besides the application: `openshop dev` restarts it when a page changes,
+and the page reloads.
 
-### What the bundle is made of
+## How pages are served
 
-`openshop dev` and `openshop build` build the admin UI bundle of an
-application whose pages have a view. They compile to WebAssembly, on their
-own, the modules of the crate root that declare such pages: with pages in
-`src/admin/`, the bundle is the module `admin`. The rest of the application is
-the server, and is not compiled into the bundle: `src/main.rs`, flows,
-providers, and models are written as in an application without a view.
+Every path that is not an API route, a webhook, a proxy or a route of the
+application is a page of the admin. A request for a page is authenticated with
+a Shopify session token: the `Authorization` header that App Bridge's `fetch`
+adds to the requests of the script, else the `id_token` of the URL Shopify
+opens the app with. A launch Shopify signed first checks that the shop is
+installed, and sends it to `/auth` when it is not.
 
-From a module of pages, the bundle keeps:
+A page loaded without a valid token, inside the admin, goes through
+`/auth/session-token`, the bounce page of Shopify's libraries: App Bridge gets
+a fresh token there and loads the page again with it. A request of the script
+gets `401` with `X-Shopify-Retry-Invalid-Session-Request`, and App Bridge asks
+again; outside Shopify admin the page says to open the app from there. With
+several Shopify apps on one server, a page loaded without any token bounces
+with the key of the first app; the `aud` of an expired token picks the right
+one, which covers the reload of a page.
 
-- the `#[view]` of each page, and the constants of its loaders and actions.
-  The access rule, the loaders, the actions, and the unmarked functions of the
-  block are the server's, with whatever their bodies name;
-- everything else the module declares: the inputs and the outputs of the
-  pages, components, other modules of views.
+Pages are sent with `Cache-Control: no-store`,
+`X-Content-Type-Options: nosniff`, and a `Content-Security-Policy` whose
+`frame-ancestors` allows Shopify admin only (and `localhost` in development).
+The title of the document is the name of the app: the `name` of the
+`shopify.app*.toml` of the app (the one whose `client_id` is its API key), else
+the key of the app in `shopify.apps`, else `OpenShop`. App Bridge titles a page
+with it when its `s-page` has no `heading`.
 
-So, outside the functions the server runs, a module of pages names itself
-(`super::components`, `crate::admin::…`) and crates, and nothing else of the
-application. What only the server functions need is imported inside them:
-
-```rust,ignore
-#[loader]
-async fn list_reviews(ctx: AdminContext) -> Result<Vec<Review>> {
-    use crate::models::review::ReviewRow;
-
-    let rows = ReviewRow::of(&ctx).all().await?;
-    Ok(rows.into_iter().map(Review::from).collect())
-}
-```
-
-What a view receives is a type of the module, here `Review`, not a model of
-the application.
-
-The bundle is compiled with `openshop`, `leptos`, and the dependencies of the
-application its modules of pages name outside the server functions, at the
-versions of the application's `Cargo.lock`. A crate that only the server
-functions use is not compiled for the browser.
-
-The view is also compiled with the server, where nothing calls it:
-`cargo check` and your editor report its errors. An error that only the build
-of the bundle reports names something the bundle does not have, such as an
-import of a server module at the top of the file of a page.
-
-The crate of the bundle is written under the `target` directory of the
-project, in `openshop-ui/<package>/`. It is rewritten from the application at
-every build: do not edit it.
-
-## Serve the bundle
-
-`openshop build` builds the bundle into `dist/`, optimized for size, then the
-application; `openshop build-ui` builds the bundle alone. Tell the server
-where the bundle is. During development, `openshop dev` rebuilds it when the
-pages change and serves `dist` for you. `dev` and `start` pick the first of:
-
-1. the directory named by the `OPENSHOP_UI_DIR` environment variable;
-2. the bundle given to the `admin_ui` setting of `app!`;
-3. the bundle built into the framework, which has no custom pages.
-
-| `UiSource` | Serves |
-| --- | --- |
-| `UiSource::Dir(path)` | The files of a directory on disk, such as `dist`. |
-| `UiSource::Assets(lookup)` | A bundle compiled into your binary. `lookup` is a `fn(&str) -> Option<Cow<'static, [u8]>>` that receives an asset path such as `index.html`. |
-| `UiSource::Embedded` | The bundle built into the framework. |
-| `UiSource::None` | No UI: the server is API-only. |
-
-```rust,ignore
-use std::borrow::Cow;
-
-use openshop::UiSource;
-use openshop::prelude::*;
-
-#[derive(rust_embed::RustEmbed)]
-#[folder = "dist/"]
-struct AdminUi;
-
-fn admin_ui(path: &str) -> Option<Cow<'static, [u8]>> {
-    AdminUi::get(path).map(|file| file.data)
-}
-
-static APP: App = app! {
-    admin_ui: UiSource::Assets(admin_ui),
-};
-```
-
-Every path that is not an API route or a file is answered with the
-`index.html` of the bundle, after the server has injected the Shopify API key
-into `<meta name="shopify-api-key">` and the App Bridge `<script>` tag, and
-the name of the app into its `<title>`, in place of `OpenShop`.
-
-The name is the `name` of the `shopify.app*.toml` of the app (the one whose
-`client_id` is its API key), else the key of the app in `shopify.apps`, else
-`OpenShop`. App Bridge titles a page with it in the title bar of the admin when
-its `s-page` has no `heading`, and the browser shows it in its tab; local-storefront
-does the same. A `heading` titles the page. A bundle whose `index.html` has a
-title of its own keeps it.
-
-Assets whose file name carries a content hash are served with
-`Cache-Control: public, max-age=31536000, immutable`, other files with
-`no-cache`, and the shell with `no-store`. Every asset has a strong `ETag`, a
-hash of its bytes (weak, and with `Vary: accept-encoding`, when the response may
-be compressed; a `304` carries the same), and a request whose
-`If-None-Match` names it is answered `304`. An asset is compressed once per
-encoding (Brotli or gzip) and kept in memory, up to 64 MB of compressed assets,
-the least recently requested dropped first: the next request sends it at once.
-Assets and shell carry `X-Content-Type-Options: nosniff`. An asset compiled into
-the binary is sent from the binary without being copied, and hashed once.
+`openshop.js` is served at `/__openshop/openshop.js?v=<hash>`, cached for a
+year under the URL of its version.
 
 ## Authorization and errors
 
@@ -503,42 +485,41 @@ every request. All of them must allow the request.
 
 Return an `AdminPublicError` for failures that are safe to show.
 `AdminPublicError::new(code, message)` has status `400`; `.status(…)` and
-`.field_errors(…)` change the status and attach per-field messages, and
-`.detail(name, value)` adds a text the page receives with the error. Any other
-error is logged with a request ID and returned without details. An access rule
-or a rule of the function may return one too: the call is answered with it.
+`.field_errors(…)` change the status and attach per-field messages (shown
+under the fields of [a view that reads the form](#form-errors)), and
+`.detail(name, value)` adds a text the error carries. Any other error is logged
+with a request ID and shown as "Internal server error". An access rule or a
+rule of the function may return one too: the request is answered with it.
 `billing::require_plan` and `billing::any_plan` answer `402 PLAN_REQUIRED` this
 way, with the pricing page of the app in the details; see
 [Billing](billing.md#guard-an-admin-page).
 
 | Status | `code` | Condition |
 | --- | --- | --- |
-| `200` | — | The handler's JSON output is the response body. |
+| `200` | — | The page, rendered again after an action. |
 | `402` | `PLAN_REQUIRED` | `billing::require_plan` or `billing::any_plan` found no active plan; `details` has `pricingUrl` and `pricingLink`. |
-| `403` | `FORBIDDEN` | A page or function rule rejected the request. |
-| `404` | `NOT_FOUND` | The page, function, or kind does not exist. |
-| `422` | `INVALID_INPUT` | The input does not satisfy the function's schema. |
+| `403` | `FORBIDDEN` | A rule of the function rejected the request. |
+| `404` | `NOT_FOUND` | The page or the action does not exist, or the page's access rule said no. |
+| `422` | `INVALID_INPUT` | The form does not satisfy the action's schema. |
 | Your status | Your code | The handler returned an `AdminPublicError`. |
 | `500` | `INTERNAL_ERROR` | Any other handler error, a panic, or an access rule that failed. |
 
-Error bodies have the form
-`{ "error": "<message>", "code": "<code>", "requestId": "<id>" }`, plus
-`fieldErrors` and `details` when the error carries them. Unexpected errors always use the
-message `Internal server error`.
-
-Each call writes one structured line to the runtime logger with the request
+Each action writes one structured line to the runtime logger with the request
 ID, shop, app handle, actor ID, page ID, function name, kind, duration, and
-status, but not request or response payloads.
+`"form": true`, but not the fields of the form or what the action returns.
 
 ## Testing
 
 `ctx.call_loader(path, name, input)` and `ctx.call_action(path, name, input)`
-call a function of a page as its view does, without HTTP: the access rules,
-the `authorize` rule, the input schema and the errors above, typed output
-(`call_loader_as` and `call_action_as` for another shop or staff user).
-`admin_context` and `invoke_admin_function` call a function, or code that
-takes an `AdminContext`, directly. Keep HTTP integration tests for session
-token validation and tenant isolation. See
+call a function of a page without HTTP: the access rules, the `authorize`
+rule, the input schema and the errors above, typed output (an action that
+returns an `Outcome` gives back an `Outcome`; `call_loader_as` and
+`call_action_as` for another shop or staff user). `ctx.page(path)` asks for
+the page as the admin does and gives its HTML, and `ctx.submit(path,
+&[("_action", Page::SAVE), …])` sends a form of it: the page rendered again,
+its toast in `x-openshop-toast`, `422` and the errors under the fields when
+the form is refused. `admin_context` and `invoke_admin_function` call a
+function, or code that takes an `AdminContext`, directly. See
 [Testing](testing.md#test-admin-functions).
 
 ## Without the attribute
@@ -564,8 +545,14 @@ pub fn reviews_page() -> AdminPage {
 ```
 
 Register it with `.admin_page(reviews_page())` on the builder:
-`APP.builder()?` is the builder of the declaration, to add to. A page made by
-hand has no view: only an `#[admin_page]` block has one.
+`APP.builder()?` is the builder of the declaration, to add to.
+
+`.view(|request: PageRequest| async move { … })` gives it a view: the closure
+runs the loaders it needs with `request.load(loader)` (an input read from
+the query string with `request.load_with(loader)`) and returns the `Markup` of
+the page; `request.form` is the form the page refused. `.view_with_form(…)`
+is the same for a view that shows a refused form itself. What `#[view]`
+declares is one of these.
 
 `AdminPage::new(path)` starts a page. `.nav(label)` gives it its entry in the
 menu, and `.access(rule)` its access rule.
@@ -590,4 +577,5 @@ closure that takes the `AdminContext` and returns `Result<bool>`. It is passed
 as it is: `.authorize(|ctx| async move { Ok(ctx.actor.id == "1") })`.
 
 Handlers receive the `AdminContext` and the input, and return a JSON
-value, or any `Serialize` value for the typed constructors.
+value, or any `Serialize` value for the typed constructors. An action made by
+hand answers an `Outcome` with `openshop::admin::output(Outcome::toast(…))`.

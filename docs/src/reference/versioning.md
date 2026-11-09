@@ -4,7 +4,7 @@ OpenShop is a v0 in development. Until `1.0`, any update can change public
 Rust APIs, configuration, generated template files, database migrations, CLI
 behavior, and documented workflows, without a transition period.
 
-The crates `openshop`, `openshop-shared`, `openshop-cli`, and `openshop-ui`
+The crates `openshop`, `openshop-shared`, `openshop-macros` and `openshop-cli`
 share one version number and require Rust 1.94 or newer.
 
 ## Pinning policy
@@ -43,7 +43,7 @@ app-owned after creation. Updating the dependency does not rewrite its
 | Generated template | Compare `Cargo.toml`, `src/main.rs`, Shopify TOML, Docker, and `Procfile` files with a freshly generated project. |
 | Configuration | Build the configuration, for example with `APP.config()` in a test, so validation checks registered names, paths, schedules, and positive numeric options. |
 | Database | Run `migrate generate`, review the SQL, and run `migrate check`; test forward migration and application rollback compatibility. |
-| Custom admin UI | Rebuild the bundle: it is compiled from the application, with the same `openshop`. |
+| Custom admin pages | Open each page and send each form: their views and `openshop.js` change with `openshop`. |
 | Web and worker | Deploy the exact same binary and configuration. |
 
 This implementation follows the behavior of OpenShop for TypeScript

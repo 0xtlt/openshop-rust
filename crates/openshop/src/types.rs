@@ -561,7 +561,14 @@ macro_rules! shop_scope {
     )+};
 }
 
-shop_scope!(FlowContext, WebhookContext, ProxyContext, RouteShopContext, McpContext, crate::admin::AdminContext);
+shop_scope!(
+    FlowContext,
+    WebhookContext,
+    ProxyContext,
+    RouteShopContext,
+    McpContext,
+    crate::admin::AdminContext
+);
 
 // ─── Flow ────────────────────────────────────────────────────────────
 
@@ -1520,7 +1527,9 @@ fn route_admin_url(app: &OpenShop, shop: RouteShopInput, path: &str) -> Result<S
 
 fn route_pricing_url(app: &OpenShop, shop: RouteShopInput) -> Result<String> {
     let (shop, shopify_app) = crate::server::connectors::resolve_route_shop(app, shop)?;
-    Ok(app.shopify_endpoints().pricing_plans_url(&shop, shopify_app.app_handle()?))
+    Ok(app
+        .shopify_endpoints()
+        .pricing_plans_url(&shop, shopify_app.app_handle()?))
 }
 
 /// What the handler of a route receives. `A` is what the authentication

@@ -1,7 +1,6 @@
 //! `openshop`: scaffold and develop OpenShop applications.
 #![forbid(unsafe_code)]
 
-mod bundle;
 mod dev;
 mod init;
 mod metadata;
@@ -20,15 +19,14 @@ const USAGE: &str = "
                                 depends on the commit this CLI was built from; name another
                                 source with --openshop-rev=<commit>, --openshop-tag=<tag>,
                                 --openshop-branch=<name> or --openshop-path=<dir>
-    init-ui                     Scaffold a custom admin page with its view
+    init-ui                     Scaffold a custom admin page with its view, which the server renders
     dev                         Start the app in dev mode and restart it when sources change
     worker [--concurrency=N]    Start worker only (production, scalable)
     migrate                     Apply client-owned migrations from ./migrations
     migrate generate            Generate migrations for the schema ./migrations does not cover yet
     migrate check               Check that ./migrations covers the current schema
     migrate status              Show client migration status
-    build                       Build for production: the admin UI bundle, if any, then the app
-    build-ui                    Build the admin UI bundle alone, into dist/
+    build                       Build the app for production
     start                       Start production server (API + UI + scheduler, no worker)
     run <flow> [--shop=<domain> | --all-shops] [--input=<json>]
                                 Run a flow once, through the queue and a worker, against the
@@ -75,7 +73,7 @@ async fn run(args: &[String]) -> Result<()> {
         // `--help` after a command the CLI runs itself is the usage. The
         // others pass their arguments on: to the application binary, which
         // prints the usage of its commands (`run --help`), or to cargo.
-        Some("init" | "init-ui" | "build-ui") if asks_for_help(rest) => {
+        Some("init" | "init-ui") if asks_for_help(rest) => {
             println!("{USAGE}");
             Ok(())
         }
@@ -85,16 +83,7 @@ async fn run(args: &[String]) -> Result<()> {
         }
         Some("init-ui") => init::run_init_ui(&std::env::current_dir()?),
         Some("dev") => dev::start_dev(rest).await,
-        Some("build") => {
-            bundle::build(&std::env::current_dir()?).await?;
-            cargo(&["build", "--release"], rest).await
-        }
-        Some("build-ui") => {
-            if !bundle::build(&std::env::current_dir()?).await? {
-                println!("[openshop] No admin page has a view: the admin UI is the one built into openshop.");
-            }
-            Ok(())
-        }
+        Some("build") => cargo(&["build", "--release"], rest).await,
         Some("test") => cargo(&["test"], rest).await,
         Some(command @ ("migrate" | "run" | "cron")) => cargo(&["run", "--", command], rest).await,
         Some(command @ ("start" | "worker")) => cargo(&["run", "--release", "--", command], rest).await,

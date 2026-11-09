@@ -1,0 +1,5 @@
+error: a `#[view]` is rendered by the server: `fn(loader: Output, …) -> Markup`, each parameter named after a loader of the page, or `form: FormState`
+  --> tests/macros/fail/admin_page_view_not_rendered_by_the_server.rs:10:8
+   |
+10 |     fn view() -> impl std::fmt::Display {
+   |        ^^^^

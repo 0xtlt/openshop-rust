@@ -75,7 +75,11 @@ impl std::fmt::Debug for OutboundRequest {
             .headers
             .iter()
             .map(|(name, value)| {
-                let shown = if is_secret_name(name) { "[redacted]" } else { value.as_str() };
+                let shown = if is_secret_name(name) {
+                    "[redacted]"
+                } else {
+                    value.as_str()
+                };
                 (name.as_str(), shown)
             })
             .collect();
@@ -159,8 +163,7 @@ impl MockTransport {
     }
 
     pub fn requests(&self) -> Vec<OutboundRequest> {
-        locked(&self.requests)
-            .clone()
+        locked(&self.requests).clone()
     }
 
     pub fn last_request(&self) -> Option<OutboundRequest> {
@@ -168,8 +171,7 @@ impl MockTransport {
     }
 
     pub fn clear(&self) {
-        locked(&self.requests)
-            .clear();
+        locked(&self.requests).clear();
     }
 }
 
@@ -177,8 +179,7 @@ impl Transport for MockTransport {
     fn send(&self, request: HttpRequest) -> BoxFuture<'_, std::result::Result<HttpResponse, TransportError>> {
         let responder = locked(&self.responder).clone();
         let request = OutboundRequest::of(&request);
-        locked(&self.requests)
-            .push(request.clone());
+        locked(&self.requests).push(request.clone());
         let delay = *locked(&self.delay);
         let shopify = self.shopify.clone();
         Box::pin(async move {

@@ -198,7 +198,9 @@ impl Schedule {
 
     /// The first occurrence after an instant.
     fn after(&self, instant: DateTime<Utc>) -> Option<DateTime<Utc>> {
-        let next = self.cron.find_next_occurrence(&instant.with_timezone(&self.zone), false);
+        let next = self
+            .cron
+            .find_next_occurrence(&instant.with_timezone(&self.zone), false);
         next.ok().map(|next| next.with_timezone(&Utc))
     }
 
@@ -281,7 +283,10 @@ fn tick_keys(crons: &[Cron]) -> Vec<String> {
         .iter()
         .map(|entry| {
             // The effective time zone: "UTC" and no time zone are the same cron.
-            let zone = parse_timezone(entry).map_or_else(|_| entry.timezone.clone().unwrap_or_default(), |zone| zone.name().to_string());
+            let zone = parse_timezone(entry).map_or_else(
+                |_| entry.timezone.clone().unwrap_or_default(),
+                |zone| zone.name().to_string(),
+            );
             let identity = serde_json::json!([entry.name, entry.shops_json(), entry.input, zone]).to_string();
             let digest = Sha256::digest(identity.as_bytes());
             let digest = hex::encode(digest);
@@ -295,10 +300,11 @@ fn tick_keys(crons: &[Cron]) -> Vec<String> {
 
 async fn prune_ticks(app: &OpenShop) {
     // The clock of the database, as the claim that reads these rows.
-    let result = sqlx::query("DELETE FROM cron_ticks WHERE scheduled_at < clock_timestamp() - make_interval(hours => $1)")
-        .bind(TICK_RETENTION_HOURS as i32)
-        .execute(app.db())
-        .await;
+    let result =
+        sqlx::query("DELETE FROM cron_ticks WHERE scheduled_at < clock_timestamp() - make_interval(hours => $1)")
+            .bind(TICK_RETENTION_HOURS as i32)
+            .execute(app.db())
+            .await;
     if let Err(error) = result {
         logger::warn(format!(
             "[openshop] Could not remove old cron ticks: {}",
@@ -361,7 +367,10 @@ async fn run_entry(app: &OpenShop, entry: &Cron, tick_key: &str, scheduled_at: D
     for target in targets {
         let outcome: Result<()> = async {
             if turned_off.contains(&(target.shopify_app.clone(), target.shop.clone())) {
-                logger::info(format!("[openshop] Cron \"{flow}\" disabled for {}, skipping", target.shop));
+                logger::info(format!(
+                    "[openshop] Cron \"{flow}\" disabled for {}, skipping",
+                    target.shop
+                ));
                 return Ok(());
             }
             // `None`: another process queued this occurrence.
@@ -540,7 +549,11 @@ async fn warn_about_unregistered_flows(app: &OpenShop) {
         Ok(unknown) => logger::warn(format!(
             "[openshop] Runs are waiting for flows this application does not register: {}. \
              A worker fails them when it claims them. If a flow was renamed, give it its previous name with `#[flow(\"…\")]`.",
-            unknown.iter().map(|name| format!("\"{name}\"")).collect::<Vec<_>>().join(", ")
+            unknown
+                .iter()
+                .map(|name| format!("\"{name}\""))
+                .collect::<Vec<_>>()
+                .join(", ")
         )),
         Err(error) => logger::warn(format!(
             "[openshop] Could not check the flows of the waiting runs: {error}"
@@ -569,7 +582,11 @@ async fn warn_about_orphaned_overrides(app: &OpenShop) {
             "[openshop] Some shops disabled crons that no longer exist: {}. \
              A cron is known by `flow:schedule`: if one of them was changed, the shops that disabled it run it again. \
              Write its schedule as it was to keep them disabled.",
-            orphaned.iter().map(|key| format!("\"{key}\"")).collect::<Vec<_>>().join(", ")
+            orphaned
+                .iter()
+                .map(|key| format!("\"{key}\""))
+                .collect::<Vec<_>>()
+                .join(", ")
         )),
         Err(error) => logger::warn(format!("[openshop] Could not check the disabled crons: {error}")),
     }
@@ -744,7 +761,10 @@ mod tests {
         // Paris is an hour ahead of UTC in winter, two in summer.
         let paris = schedule("0 9 * * *", Some("Europe/Paris"));
         assert_eq!(paris.after(after), Some(utc("2026-01-15T08:00:00Z")));
-        assert_eq!(paris.after(utc("2026-07-15T00:00:00Z")), Some(utc("2026-07-15T07:00:00Z")));
+        assert_eq!(
+            paris.after(utc("2026-07-15T00:00:00Z")),
+            Some(utc("2026-07-15T07:00:00Z"))
+        );
     }
 
     #[test]

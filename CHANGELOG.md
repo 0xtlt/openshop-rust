@@ -2,6 +2,72 @@
 
 ## Unreleased
 
+- The `custom` template asks for `read_discounts` and `write_discounts`: its
+  volume discount Function has instances, which the Functions page of the
+  admin lists, creates, updates and deletes, and Shopify refused without them.
+- **Breaking.** The Leptos admin UI is removed: `crates/openshop-ui`, the
+  committed bundle `crates/openshop/ui-dist`, trunk and the WebAssembly target,
+  the `ui` and `embedded-ui` features, `openshop::ui`, `openshop build-ui`,
+  `OPENSHOP_UI_DIR`, and `UiSource::{Embedded, Dir, Assets}`: `UiSource` is
+  `Server` or `None`. A `#[view]` that does not return `Markup` is refused at
+  compile time. The internal RPC transport of the Leptos views,
+  `/api/pages/custom/…/_rpc/…`, is removed with them; `GET /api/pages/custom`
+  and its `access` stay, and `ctx.call_loader` and `ctx.call_action` call a
+  function of a page in a test. `openshop dev` no longer runs trunk, and the
+  preview of the templates (`mise run dev:custom`) serves the admin the server
+  renders, with a stub of App Bridge. The CI jobs `ui`, `templates-ui` and
+  `ui-dist` are gone, and the lockfile has 83 crates fewer. An application with
+  Leptos views follows [Migrate to the server-rendered
+  admin](docs/src/guides/migrate-to-server-rendered-ui.md).
+- A page of the admin is framed by the admin of the shop of its session only
+  (`frame-ancestors https://<shop> https://admin.shopify.com`), as the Leptos
+  shell was; any shop in development. The failure of a page or of a form is
+  reported to Sentry as `admin <route> view` or `admin <route> <action>`, with
+  the `request_id` tag.
+- The `custom` and `public` templates write their admin pages as views the
+  server renders: `maud` in place of `leptos` and the `ui` feature, forms in
+  place of `use_action`, and their tests call the pages with `ctx.page` and
+  `ctx.submit`. Their `Dockerfile` builds the app alone: no WebAssembly target,
+  trunk, `openshop build` or `dist/`. `openshop init-ui` writes a page with a
+  view, an action and its form, and adds `maud`. The guides and the references
+  describe the server-rendered admin; [Migrate to the server-rendered
+  admin](docs/src/guides/migrate-to-server-rendered-ui.md) is the guide of an
+  application that has Leptos views.
+- `ctx.page(path)` asks for a page of the admin as the admin does, and
+  `ctx.submit(path, fields)` sends one of its forms. `Outcome` is
+  `Deserialize`, for `ctx.call_action::<Outcome>`, and
+  `openshop::admin::output` is public, for an action made by hand. A field
+  refused by its schema says `Must be at least 1` rather than `must be >= 1`,
+  and an empty text that needs a character `Required`.
+- The admin is rendered by the server by default: `UiSource::Server` is the
+  default of `admin_ui`, of `ServerOptions` and of the test harness, and
+  `OPENSHOP_UI=server` is no longer needed. A test or a server that served no
+  UI by default names `UiSource::None`, which keeps CORS on `/api`.
+- Every page of the framework is rendered by the server with
+  `admin_ui: UiSource::Server`: the home, the providers, the flows and their
+  runs, the page of a run with its logs, the Shopify Functions and their
+  instances, the MCP tokens, and the crons. Each keeps what its Leptos page
+  had; a list, a filter or a selection is a URL, and what runs is followed by
+  fetching the page again (`data-openshop-refresh`). A page whose loader needs
+  a plan (`billing::require_plan`) shows its message with a link to the plans.
+  A form of the admin posts to `/mcp` as a form; MCP clients post JSON there,
+  as before. `openshop.js` submits a form with Enter in a Polaris field,
+  sends a `GET` form with `data-openshop-autosubmit` when it changes, and
+  copies or downloads the text of an element (`data-openshop-copy-from`,
+  `data-openshop-download-from`).
+- A form of the server-rendered admin that is refused field by field is
+  rendered again in place (`422`), with what was sent and the error of each
+  field, for a view that declares a `form: FormState` parameter: when the
+  input schema refuses it (each property it can tell, `Required`, `Must be at
+  least 3 characters`), when the action answers `Outcome::invalid([("title",
+  "Already taken")])`, and when it fails with an `AdminPublicError` that has
+  `field_errors`. `form.value_or("title", saved)` and
+  `error=[form.error("title")]` show them on a Polaris field. A view without
+  it keeps the page as it was, with an error toast, as before. A field left
+  empty is a missing number, not the text `""`. The `422` of the input schema
+  of an admin function also names each field in `fieldErrors` of the RPC
+  transport. A provider's configuration refused names every field it refuses,
+  not only the first.
 - Experimental: the admin rendered by the server, page by page, with no
   WebAssembly bundle (`admin_ui: UiSource::Server`, or `OPENSHOP_UI=server`).
   A `#[view]` that returns `maud::Markup` takes what the page's loaders return,

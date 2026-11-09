@@ -620,7 +620,8 @@ mod tests {
 
     #[test]
     fn what_loses_data_is_told_apart() {
-        let destructive = |previous: &[Table], current: &[Table]| destructive(&diff(&SchemaSnapshot::of(previous), current));
+        let destructive =
+            |previous: &[Table], current: &[Table]| destructive(&diff(&SchemaSnapshot::of(previous), current));
 
         let votes = conventional("review_votes").with_column(ColumnDef::new("value", "integer"));
         assert_eq!(

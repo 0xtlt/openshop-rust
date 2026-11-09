@@ -5,6 +5,4 @@ target-agents/
 shopify.app.*.toml
 .DS_Store
 docs/book/
-crates/openshop-ui/target/
-crates/openshop-ui/dist/
 templates/*/dist/

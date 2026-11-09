@@ -47,7 +47,10 @@ pub(crate) async fn script(headers: HeaderMap) -> Response {
 }
 
 fn app_bridge(endpoints: &Endpoints) -> &str {
-    endpoints.app_bridge.as_ref().map_or(SHOPIFY_APP_BRIDGE, ScriptUrl::as_str)
+    endpoints
+        .app_bridge
+        .as_ref()
+        .map_or(SHOPIFY_APP_BRIDGE, ScriptUrl::as_str)
 }
 
 fn polaris(endpoints: &Endpoints) -> &str {

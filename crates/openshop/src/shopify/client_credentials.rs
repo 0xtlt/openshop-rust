@@ -510,7 +510,10 @@ impl ClientCredentials {
             return Ok(None);
         };
         let stored = stored(app, shopify_app, &shop).await?;
-        if let Some(token) = stored.as_ref().and_then(|stored| stored.usable(self, shopify_app, &shop)) {
+        if let Some(token) = stored
+            .as_ref()
+            .and_then(|stored| stored.usable(self, shopify_app, &shop))
+        {
             return Ok(Some(token.to_string()));
         }
         let Some(client) = self.client(app, shopify_app, &shop, grant, stored.as_ref()).await? else {
@@ -598,7 +601,10 @@ impl InstallationStore {
                 self.shopify_app
             )
         };
-        let encrypted = self.crypto.encrypt_string(&token.access_token).map_err(|_| unwritten())?;
+        let encrypted = self
+            .crypto
+            .encrypt_string(&token.access_token)
+            .map_err(|_| unwritten())?;
         let written: Option<(uuid::Uuid,)> = match &self.grant {
             Grant::Vouched { .. } => sqlx::query_as(
                 "INSERT INTO installations (app_handle, shop, access_token, scopes) VALUES ($1, $2, $3, $4) \
@@ -660,7 +666,9 @@ impl TokenStore for InstallationStore {
                         uninstalled: false,
                     };
                     *locked(&self.held) = Some(token.access_token.clone());
-                    let granted = token.expires_at.map(|expires_at| (digest(&token.access_token), expires_at));
+                    let granted = token
+                        .expires_at
+                        .map(|expires_at| (digest(&token.access_token), expires_at));
                     remember(&self.entries, &self.shopify_app, shop, |entry| {
                         *entry = Entry {
                             granted,
@@ -742,7 +750,11 @@ mod tests {
 
         let off = ClientCredentials::new(None).unwrap();
         assert!(!off.may_ask(&background, "dev-store-1.myshopify.com", None));
-        assert!(off.may_ask(&background, "dev-store-1.myshopify.com", Some(&stored(Some("t"), false))));
+        assert!(off.may_ask(
+            &background,
+            "dev-store-1.myshopify.com",
+            Some(&stored(Some("t"), false))
+        ));
     }
 
     #[test]
@@ -756,9 +768,18 @@ mod tests {
             }
         );
         assert_eq!(vouched.for_shop("first", "dev-store-2.myshopify.com"), vouched);
-        assert_eq!(vouched.for_shop("second", "dev-store-2.myshopify.com"), Grant::Background);
-        assert_eq!(vouched.for_shop("first", "dev-store-3.myshopify.com"), Grant::Background);
-        assert_eq!(Grant::vouched("first", "evil.example://dev-store-2.myshopify.com"), None);
+        assert_eq!(
+            vouched.for_shop("second", "dev-store-2.myshopify.com"),
+            Grant::Background
+        );
+        assert_eq!(
+            vouched.for_shop("first", "dev-store-3.myshopify.com"),
+            Grant::Background
+        );
+        assert_eq!(
+            Grant::vouched("first", "evil.example://dev-store-2.myshopify.com"),
+            None
+        );
     }
 
     #[test]
@@ -766,7 +787,9 @@ mod tests {
         let credentials = ClientCredentials::new(None).unwrap();
         let shop = "dev-store-1.myshopify.com";
         let set = |expires_at: DateTime<Utc>| {
-            credentials.remember("default", shop, |entry| entry.granted = Some((digest("granted"), expires_at)));
+            credentials.remember("default", shop, |entry| {
+                entry.granted = Some((digest("granted"), expires_at))
+            });
         };
         assert!(!credentials.expiring("default", shop, "granted"));
 
@@ -796,8 +819,10 @@ mod tests {
         fn send(
             &self,
             _request: shopify_api::transport::HttpRequest,
-        ) -> BoxFuture<'_, std::result::Result<shopify_api::transport::HttpResponse, shopify_api::transport::TransportError>>
-        {
+        ) -> BoxFuture<
+            '_,
+            std::result::Result<shopify_api::transport::HttpResponse, shopify_api::transport::TransportError>,
+        > {
             let response = shopify_api::transport::HttpResponse::json(self.0, &self.1);
             Box::pin(async move { Ok(response) })
         }

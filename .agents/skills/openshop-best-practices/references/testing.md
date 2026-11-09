@@ -55,23 +55,11 @@ Use targeted tests when the change is narrow:
 
 ## Admin UI
 
-The UI is its own workspace and has its own checks:
-
-```bash
-cd crates/openshop-ui
-cargo fmt --check
-cargo clippy --target wasm32-unknown-unknown -- -D warnings
-cargo test
-trunk build --release
-```
-
-`trunk build --release` writes `crates/openshop/ui-dist`. Commit that directory
-when the UI changes.
-
-The views of custom admin pages (`#[view]`, `openshop::ui`) are tested in
-`crates/openshop/tests/it/admin_views.rs`, and what the bundle of an application
-is made of in the unit tests of `crates/openshop-cli/src/bundle.rs`. The custom and public
-templates have views: `mise run templates:ui` builds their bundles.
+The admin is rendered by the server and tested with the workspace: the
+framework pages and the custom admin pages (rendering, forms, `FormState`,
+`Outcome`, the bounce) in `crates/openshop/tests/it/server_pages`. Check a page
+you change in a browser against lsf's admin as well: a test does not see a
+script error of `openshop.js`.
 
 ## Demo Apps
 

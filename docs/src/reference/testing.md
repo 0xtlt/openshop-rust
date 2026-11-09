@@ -215,6 +215,8 @@ fn another_shop() -> TestOptions {
 | `proxy()` / `proxy_for(shop, secret)` | App proxy client that signs requests. |
 | `call_loader(path, name, input)` / `call_loader_as(path, name, input, shop, sub)` | Calls a loader of the admin page at `path` as its view does, for staff user `1` of the shop of the test or `sub` of `shop`. See [Test admin functions](#test-admin-functions). |
 | `call_action(path, name, input)` / `call_action_as(path, name, input, shop, sub)` | The same for an action. |
+| `page(path)` | A request for the admin page at `path` as the admin asks for it: its HTML. See [Test a page](#test-a-page). |
+| `submit(path, fields)` | A form of the admin page at `path`, sent as the admin sends it. |
 | `webhook(topic, payload)` | A delivery of a webhook to `/webhooks`, signed with the secret of the test and with the headers Shopify sends. See [Deliver a webhook](#deliver-a-webhook). |
 | `get`, `post`, `put`, `patch`, `delete`, `request(method, path)` | Request builders authenticated with a session token for the default shop. |
 | `request_as(method, path, shop, sub)` | Request authenticated as staff user `sub` of `shop`. |
@@ -742,8 +744,8 @@ server. `models` are `Table`s, such as `Review::table()`.
 ## Test admin functions
 
 `ctx.call_loader` and `ctx.call_action` call a loader or an action of a
-custom admin page as the view of the page does, without HTTP, and return what
-it returns, typed, or the error the page receives:
+custom admin page without HTTP, through the rules the page applies, and
+return what it returns, typed, or the error the page receives:
 
 ```rust,ignore
 use my_app::APP;
@@ -759,16 +761,16 @@ async fn saves_a_review_with_a_plan(ctx: &TestContext) {
     let review: Review = ctx.call_loader("/reviews/42", "review", ()).await.unwrap();
     assert_eq!(review.id, 42);
 
-    let saved: Review = ctx
+    let saved: Outcome = ctx
         .call_action("/reviews/42", "saveReview", json!({ "title": "Great" }))
         .await
         .unwrap();
-    assert_eq!(saved.title, "Great");
+    assert_eq!(saved, Outcome::toast("Review saved"));
 
     // `#[action(authorize = billing::any_plan)]`, without a plan.
     ctx.shopify.active_subscriptions([]);
     let error = ctx
-        .call_action::<Review>("/reviews/42", "saveReview", json!({ "title": "Great" }))
+        .call_action::<Outcome>("/reviews/42", "saveReview", json!({ "title": "Great" }))
         .await
         .unwrap_err();
     assert_eq!((error.code.as_str(), error.status), (PLAN_REQUIRED, 402));
@@ -787,10 +789,10 @@ async fn saves_a_review_with_a_plan(ctx: &TestContext) {
 `/reviews/:id`, whose `ctx.params["id"]` is then `42`. `name` is the name the
 view calls the function by: `saveReview` for a function `save_review` marked
 `#[action]`. `input` is any serializable value; `()` for none. The call is
-the one of the RPC of the page: for the Shopify app `default`, the access
+the one a form of the page makes: for the Shopify app `default`, the access
 rules (`#[access]`) of the page and of the pages it is nested under, then the
 `authorize` rule of the function, its input schema, then the function, whose
-output is deserialized into `T`.
+output is deserialized into `T`: an `Outcome` for an action that returns one.
 
 The error is an `AdminPublicError`, the one the page receives, with its
 `code`, `status`, `message`, `field_errors` and `details`:
@@ -805,6 +807,49 @@ The error is an `AdminPublicError`, the one the page receives, with its
 A path that matches no page, a page without a loader (or an action) of that
 name, or an output that is not a `T` panics, with the pages or the functions
 there are.
+
+### Test a page
+
+`ctx.page(path)` asks for an admin page as the admin does, with a session
+token of staff user `1`: the answer is the HTML of the page, rendered by its
+view. `ctx.submit(path, fields)` sends a form of it, `fields` with the name of
+the action in `_action`, as the admin's script sends it:
+
+```rust,ignore
+use my_app::APP;
+use my_app::admin::settings::SettingsPage;
+use openshop::testing::TestContext;
+
+#[openshop::test(APP)]
+async fn saves_the_threshold(ctx: &TestContext) {
+    let page = ctx.page(SettingsPage::PATH).send().await.unwrap().text().await.unwrap();
+    assert!(page.contains(r#"<s-page heading="Settings">"#), "{page}");
+
+    let saved = ctx
+        .submit(SettingsPage::PATH, &[("_action", SettingsPage::SAVE_SETTINGS), ("threshold", "8")])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(saved.status(), 200);
+    assert_eq!(saved.headers()["x-openshop-toast"], "Saved");
+
+    let refused = ctx
+        .submit(SettingsPage::PATH, &[("_action", SettingsPage::SAVE_SETTINGS), ("threshold", "0")])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(refused.status(), 422);
+    assert!(refused.text().await.unwrap().contains(r#"error="Must be at least 1""#));
+}
+```
+
+| Answer | When |
+| --- | --- |
+| `200`, the page | The action ran; its toast in `x-openshop-toast` (an error toast in `x-openshop-toast-error`), percent-encoded. |
+| `204`, `x-openshop-location` | The action answered `Outcome::redirect(…)`. |
+| `422`, the page | The form was refused field by field, and the view reads `form`: the values sent and the error of each field. |
+| Its status, `x-openshop-toast-error` | The action failed with an `AdminPublicError`, or the form was refused and the view does not read `form`. |
+| `404`, "This page is disabled." | The page's access rule said no, or no page is at `path`. |
 
 ### Without a context
 

@@ -46,11 +46,9 @@ pub async fn admin_context(app: &OpenShop, options: AdminTestOptions) -> Result<
         db: app.db().clone(),
         // As in production: the client of the session's shop, which renews a
         // token the Admin API refuses.
-        shopify: app
-            .shopify_client(&options.shop, &options.shopify_app)
-            .granting(Some(
-                Grant::vouched(&options.shopify_app, &options.shop).unwrap_or(Grant::Background),
-            )),
+        shopify: app.shopify_client(&options.shop, &options.shopify_app).granting(Some(
+            Grant::vouched(&options.shopify_app, &options.shop).unwrap_or(Grant::Background),
+        )),
         connectors: app.connectors(&options.shop, &options.shopify_app),
         logger: ContextLogger::with_category(
             serde_json::json!({ "shop": options.shop, "shopifyApp": options.shopify_app, "requestId": options.request_id }),
@@ -189,7 +187,10 @@ fn no_such_function(pages: &[CustomAdminPage], path: &str, kind: AdminFunctionKi
             names.join(", ")
         }
     };
-    let Some(page) = pages.iter().find(|page| openshop_shared::match_custom_admin_path(&page.route_pattern, path)) else {
+    let Some(page) = pages
+        .iter()
+        .find(|page| openshop_shared::match_custom_admin_path(&page.route_pattern, path))
+    else {
         return format!(
             "[openshop] No admin page of the application is at `{path}`. Its pages: {}",
             list(pages.iter().map(|page| page.route_pattern.as_str()).collect())

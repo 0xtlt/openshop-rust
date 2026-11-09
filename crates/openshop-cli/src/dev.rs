@@ -12,7 +12,7 @@ use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use tokio::process::{Child, Command};
 use tokio::sync::{Mutex, mpsc, watch};
 
-use crate::{bundle, metadata};
+use crate::metadata;
 
 /// Directories watched recursively, including ones created after startup.
 const WATCHED_DIRECTORIES: [&str; 2] = ["src", "migrations"];
@@ -348,94 +348,19 @@ impl Drop for AppProcess {
 struct DevProcess {
     cwd: PathBuf,
     cargo_args: Vec<String>,
-    /// The admin UI bundle the app serves, when the project builds its own.
-    ui_dir: std::sync::Mutex<Option<PathBuf>>,
     child: Mutex<Option<AppProcess>>,
     /// Set once `dev` shuts down: a restart still under way then stops the
     /// app without starting it again.
     closing: AtomicBool,
 }
 
-/// The admin UI bundle of the project, rebuilt by trunk while `dev` runs.
-struct BundleWatch {
-    cwd: PathBuf,
-    /// The trunk process, while it runs: one that exited is started again at
-    /// the next refresh.
-    trunk: Option<Child>,
-    /// trunk could not be started: said once, not at every change. It is
-    /// still tried at every refresh, for a trunk installed meanwhile.
-    unavailable: bool,
-    /// Whether the project had a bundle at the last refresh that could tell:
-    /// sources that are half written leave it as it was.
-    bundled: bool,
-}
-
-impl BundleWatch {
-    /// Writes the crate of the bundle again, and starts or stops trunk to
-    /// match. Returns whether the project has a bundle of its own.
-    async fn refresh(&mut self) -> bool {
-        match bundle::prepare(&self.cwd).await {
-            Ok(Some(prepared)) => {
-                if prepared.watch_changed {
-                    self.stop().await;
-                }
-                if let Some(trunk) = &mut self.trunk
-                    && !matches!(trunk.try_wait(), Ok(None))
-                {
-                    self.trunk = None;
-                }
-                if self.trunk.is_none() {
-                    match bundle::watch(&prepared) {
-                        Ok(trunk) => {
-                            self.trunk = Some(trunk);
-                            self.unavailable = false;
-                        }
-                        Err(error) => {
-                            if !self.unavailable {
-                                eprintln!("{error}");
-                            }
-                            self.unavailable = true;
-                        }
-                    }
-                }
-                self.bundled = true;
-            }
-            Ok(None) => {
-                self.stop().await;
-                self.bundled = false;
-            }
-            // The sources may be half written: what is running is kept.
-            Err(error) => eprintln!("{error:#}"),
-        }
-        self.bundled
-    }
-
-    async fn stop(&mut self) {
-        if let Some(mut trunk) = self.trunk.take() {
-            let _ = trunk.kill().await;
-        }
-    }
-}
-
 impl DevProcess {
-    fn ui_dir(&self) -> Option<PathBuf> {
-        self.ui_dir
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clone()
-    }
-
-    fn serve(&self, ui_dir: Option<PathBuf>) {
-        *self.ui_dir.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = ui_dir;
-    }
-
     fn spawn(&self) -> Result<AppProcess> {
         AppProcess::spawn(
             Command::new("cargo")
                 .args(["run"])
                 .args(&self.cargo_args)
-                .args(["--", "dev"])
-                .envs(self.ui_dir().map(|directory| ("OPENSHOP_UI_DIR", directory))),
+                .args(["--", "dev"]),
         )
         .context("[openshop] Failed to run cargo")
     }
@@ -543,8 +468,6 @@ struct Change {
     due: tokio::time::Instant,
     /// The last file that changed: the one the restart is reported for.
     source: String,
-    /// A view may have been added to the project, or the last one removed.
-    pages: bool,
     /// A manifest changed: the project may be compiled with other crates.
     dependencies: bool,
 }
@@ -573,20 +496,9 @@ pub async fn start_dev(cargo_args: &[String]) -> Result<()> {
     let cwd = std::env::current_dir()?.canonicalize()?;
     println!("[openshop] Starting dev server...");
 
-    // A project whose admin pages have a view serves its own bundle, rebuilt by trunk.
-    let mut bundle = BundleWatch {
-        cwd: cwd.clone(),
-        trunk: None,
-        unavailable: false,
-        bundled: false,
-    };
-    let chosen = std::env::var_os("OPENSHOP_UI_DIR").is_some();
-    let ui_dir = |built: bool| (built && !chosen).then(|| bundle::dist(&cwd));
-
     let process = Arc::new(DevProcess {
         cwd: cwd.clone(),
         cargo_args: cargo_args.to_vec(),
-        ui_dir: std::sync::Mutex::new(ui_dir(bundle.refresh().await)),
         child: Mutex::new(None),
         closing: AtomicBool::new(false),
     });
@@ -641,12 +553,10 @@ pub async fn start_dev(cargo_args: &[String]) -> Result<()> {
                     .find(|name| cwd.join(name) == path)
                     .map(|name| name.to_string());
                 let project = watched_source(&cwd, &path).or(created_directory);
-                let pages = project.as_ref().is_some_and(|source| source.starts_with("src"));
                 if let Some(source) = project.or_else(|| local.source(&path)) {
                     let manifest = source.rsplit('/').next().is_some_and(|name| name.starts_with("Cargo."));
                     pending = Some(Change {
                         due: tokio::time::Instant::now() + DEBOUNCE,
-                        pages: pages || pending.as_ref().is_some_and(|change| change.pages),
                         dependencies: manifest || pending.as_ref().is_some_and(|change| change.dependencies),
                         source,
                     });
@@ -657,11 +567,6 @@ pub async fn start_dev(cargo_args: &[String]) -> Result<()> {
                     if change.dependencies && let Some(read) = LocalCrates::read(&cwd, cargo_args).await {
                         local = read;
                         watch_existing(&mut watcher, &cwd, &local, &mut watched);
-                    }
-                    // A view may have been added, or the last one removed, and
-                    // trunk builds the bundle again when one of the crates changes.
-                    if change.pages || change.dependencies {
-                        process.serve(ui_dir(bundle.refresh().await));
                     }
                     if restarting.swap(false, Ordering::SeqCst) {
                         println!(
@@ -681,7 +586,6 @@ pub async fn start_dev(cargo_args: &[String]) -> Result<()> {
     drop(restart);
     let _ = restarter.await;
     process.shutdown().await;
-    bundle.stop().await;
     Ok(())
 }
 

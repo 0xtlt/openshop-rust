@@ -7,6 +7,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::common::{LogCapture, LoggedLine, TEST_SECRET, TEST_SHOP, json_body};
+use maud::html;
+use openshop::admin::PageRequest;
 use openshop::billing::{
     self, ACTIVE_SUBSCRIPTIONS_OPERATION, BillingSource, PARTNER_IDS_OPERATION, PARTNER_SUBSCRIPTION_OPERATION,
     SubscriptionStatus,
@@ -18,9 +20,8 @@ use openshop::testing::{
     MockTransport, TEST_APP_GID, TEST_SHOP_GID, TestContext, TestOptions, app_pricing_subscription, sign_query,
     subscription, to_query_string,
 };
-use openshop::{AdminContext, OpenShopConfig, PartnerApi, ShopScope, ShopifyEndpoints, Value, json};
-use openshop_shared::build_admin_function_rpc_url;
-use reqwest::{Method, Response};
+use openshop::{AdminContext, AdminPublicError, OpenShopConfig, PartnerApi, ShopScope, ShopifyEndpoints, Value, json};
+use reqwest::Response;
 
 /// The Partner ID and the token of the tests of the Partner API, in lsf's shape.
 const PARTNER_ID: &str = "7438846";
@@ -82,14 +83,21 @@ fn welcome_route() -> Route {
     })
 }
 
-/// `/reports`: a loader for the Pro and Plus plans, a loader that shows a
-/// "no plan" state instead, and an action for any plan.
+/// The plan of the shop, which must be Pro or Plus.
+async fn plan_report(ctx: AdminContext, _input: Value) -> openshop::Result<Value> {
+    let plan = billing::require_plan(&ctx, &["Pro", "Plus", "pro", "plus"]).await?;
+    Ok(json!({ "plan": plan.name, "handle": plan.handle }))
+}
+
+/// `/reports`: a loader for the Pro and Plus plans, which its view shows, a
+/// loader that shows a "no plan" state instead, and an action for any plan.
 /// `/routes/plans`: the links a route gives for the shop of `?shop=`.
 fn config() -> OpenShopConfig {
     let page = AdminPage::new("/reports")
-        .loader("report", |ctx: AdminContext, _input: Value| async move {
-            let plan = billing::require_plan(&ctx, &["Pro", "Plus", "pro", "plus"]).await?;
-            Ok(json!({ "plan": plan.name, "handle": plan.handle }))
+        .loader("report", plan_report)
+        .view(|request: PageRequest| async move {
+            let report = request.load(|ctx| plan_report(ctx, Value::Null)).await?;
+            Ok(html! { s-page heading="Reports" { pre { (report["plan"].as_str().unwrap_or_default()) } } })
         })
         .loader("status", |ctx: AdminContext, _input: Value| async move {
             Ok(match ctx.shopify.plan_among(&["pro", "plus"]).await? {
@@ -160,7 +168,7 @@ async fn partner_context(transport: Arc<MockTransport>, cwd: PathBuf) -> TestCon
     let options = TestOptions {
         partner_api: PartnerApi::new().partner_id(PARTNER_ID).token(PARTNER_TOKEN),
         server: ServerOptions {
-            ui: UiSource::Embedded,
+            ui: UiSource::Server,
             dev: false,
         },
         ..options(
@@ -172,29 +180,48 @@ async fn partner_context(transport: Arc<MockTransport>, cwd: PathBuf) -> TestCon
     TestContext::with_options(config(), options).await.unwrap()
 }
 
-async fn call(ctx: &TestContext, kind: &str, name: &str) -> Response {
-    let url = build_admin_function_rpc_url(kind, name, "/reports");
-    ctx.request_as(Method::POST, &url, &ctx.shop, "42")
-        .json(&json!({ "input": null }))
-        .send()
-        .await
-        .unwrap()
+/// What a function of `/reports` answers staff member `42` of the shop, as
+/// the page receives it: `200` and its output, or the status of its error
+/// with its `code`, its message in `error` and its `details`.
+fn answered(result: Result<Value, AdminPublicError>) -> (u16, Value) {
+    match result {
+        Ok(output) => (200, output),
+        Err(error) => (
+            error.status,
+            json!({ "code": error.code, "error": error.message, "details": error.details }),
+        ),
+    }
 }
 
-/// The status and the body of a call.
-async fn answer(ctx: &TestContext, kind: &str, name: &str) -> (u16, Value) {
-    let response = call(ctx, kind, name).await;
-    (response.status().as_u16(), json_body(response).await)
+/// What the loader `name` of `/reports` answers: [`answered`].
+async fn load(ctx: &TestContext, name: &str) -> (u16, Value) {
+    answered(ctx.call_loader_as("/reports", name, (), &ctx.shop, "42").await)
 }
+
+/// What the action `name` of `/reports` answers: [`answered`].
+async fn act(ctx: &TestContext, name: &str) -> (u16, Value) {
+    answered(ctx.call_action_as("/reports", name, (), &ctx.shop, "42").await)
+}
+
+/// The page `/reports`, as staff member `1` of the shop opens it: its status and its HTML.
+async fn reports_page(ctx: &TestContext) -> (u16, String) {
+    let page = ctx.page("/reports").send().await.unwrap();
+    (page.status().as_u16(), page.text().await.unwrap())
+}
+
+const HOST: &str = "YWRtaW4uc2hvcGlmeS5jb20vc3RvcmUvdGVzdA";
 
 /// The launch of the app from the admin of the shop, signed, with `extra`
-/// in its query: the welcome link of a plan has `plan_handle`.
+/// in its query: the welcome link of a plan has `plan_handle`. The home of
+/// the app, with the session token Shopify opens it with, which its page
+/// needs.
 async fn launch(ctx: &TestContext, extra: &[(&str, &str)]) -> Response {
-    let mut params = vec![("host", "YWRtaW4uc2hvcGlmeS5jb20vc3RvcmUvdGVzdA"), ("shop", TEST_SHOP)];
+    let token = ctx.session_token();
+    let mut params = vec![("host", HOST), ("id_token", token.as_str()), ("shop", TEST_SHOP)];
     params.extend_from_slice(extra);
     let query = sign_query(&params, TEST_SECRET);
     ctx.http
-        .get(ctx.url_for(&format!("/welcome?{}", to_query_string(&query))))
+        .get(ctx.url_for(&format!("/?{}", to_query_string(&query))))
         .send()
         .await
         .unwrap()
@@ -208,9 +235,8 @@ async fn a_page_that_needs_a_plan_answers_402_with_the_pricing_page() {
     let ctx = context(transport.clone(), ShopifyEndpoints::new(), Some(cwd.clone())).await;
     assert_eq!(ctx.app.billing_source(), BillingSource::AdminApi);
 
-    let response = call(&ctx, "loader", "report").await;
-    assert_eq!(response.status(), 402);
-    let body = json_body(response).await;
+    let (status, body) = load(&ctx, "report").await;
+    assert_eq!(status, 402);
     assert_eq!(body["code"], "PLAN_REQUIRED");
     assert_eq!(body["error"], "This feature needs the Pro, Plus, pro or plus plan");
     assert_eq!(
@@ -231,22 +257,40 @@ async fn a_page_that_needs_a_plan_answers_402_with_the_pricing_page() {
     );
     assert!(request.body["query"].as_str().unwrap().contains("activeSubscriptions"));
 
+    // The page whose view loads it: the message, and a button to the plans.
+    let (status, page) = reports_page(&ctx).await;
+    assert_eq!(status, 402, "{page}");
+    assert!(
+        page.contains(
+            r#"<s-banner tone="warning" heading="This feature needs the Pro, Plus, pro or plus plan"><s-button variant="primary" href="shopify:admin/charges/my-app/pricing_plans" target="_top">See the plans</s-button></s-banner>"#
+        ),
+        "{page}"
+    );
+
     // Any plan is enough for the action.
-    let response = call(&ctx, "action", "export").await;
-    assert_eq!(response.status(), 200);
-    assert_eq!(json_body(response).await, json!({ "shop": TEST_SHOP }));
+    assert_eq!(act(&ctx, "export").await, (200, json!({ "shop": TEST_SHOP })));
 
     transport.respond_json(subscriptions(&[]));
-    let response = call(&ctx, "action", "export").await;
-    assert_eq!(response.status(), 402);
-    let body = json_body(response).await;
+    let (status, body) = act(&ctx, "export").await;
+    assert_eq!(status, 402);
     assert_eq!(body["error"], "Choose a plan to use this feature");
+    // Its form: the status and an error toast, the page stays as it was.
+    let refused = ctx.submit("/reports", &[("_action", "export")]).send().await.unwrap();
+    assert_eq!(refused.status(), 402);
+    assert_eq!(
+        refused.headers()["x-openshop-toast-error"],
+        "Choose%20a%20plan%20to%20use%20this%20feature"
+    );
 
     // The Admin API is asked at each check: nothing is kept.
     transport.respond_json(subscriptions(&[("Plus", "ACTIVE")]));
-    let response = call(&ctx, "loader", "report").await;
-    assert_eq!(response.status(), 200);
-    assert_eq!(json_body(response).await, json!({ "plan": "Plus", "handle": "plus" }));
+    assert_eq!(
+        load(&ctx, "report").await,
+        (200, json!({ "plan": "Plus", "handle": "plus" }))
+    );
+    let (status, page) = reports_page(&ctx).await;
+    assert_eq!(status, 200, "{page}");
+    assert!(page.contains("<pre>Plus</pre>"), "{page}");
     ctx.shutdown().await.unwrap();
     std::fs::remove_dir_all(cwd).ok();
 }
@@ -270,8 +314,12 @@ async fn without_a_handle_the_pricing_page_is_an_error_that_says_to_add_it() {
     assert!(billing::pricing_link(&ctx).is_err() && ctx.app_handle().is_err());
     assert!(billing::plan_required(&ctx, &[]).is_err());
     // A page without the plan is an error of the server, not a 402 without its pricing page.
-    let (status, body) = answer(&ctx, "loader", "report").await;
+    let (status, body) = load(&ctx, "report").await;
     assert_eq!((status, body["code"].as_str()), (500, Some("INTERNAL_ERROR")));
+    let (status, page) = reports_page(&ctx).await;
+    assert_eq!(status, 500);
+    assert!(page.contains("This page could not be displayed."), "{page}");
+    assert!(!page.contains("has no handle"), "{page}");
     // A route too.
     let links = ctx
         .http
@@ -300,9 +348,8 @@ async fn a_failure_of_shopify_is_not_a_missing_plan() {
     });
     let ctx = context(transport, ShopifyEndpoints::new(), None).await;
 
-    let response = call(&ctx, "loader", "report").await;
-    assert_eq!(response.status(), 500);
-    assert_eq!(json_body(response).await["code"], "INTERNAL_ERROR");
+    let (status, body) = load(&ctx, "report").await;
+    assert_eq!((status, body["code"].as_str()), (500, Some("INTERNAL_ERROR")));
     ctx.shutdown().await.unwrap();
 }
 
@@ -314,10 +361,10 @@ async fn the_pricing_page_is_at_the_admin_origin_and_names_the_app_by_its_handle
     let endpoints = ShopifyEndpoints::new().admin_origin("http://localhost:9393");
     let ctx = context(transport.clone(), endpoints, Some(cwd.clone())).await;
 
-    let response = call(&ctx, "loader", "report").await;
-    assert_eq!(response.status(), 402);
+    let (status, body) = load(&ctx, "report").await;
+    assert_eq!(status, 402);
     assert_eq!(
-        json_body(response).await["details"],
+        body["details"],
         json!({
             "pricingUrl": "http://localhost:9393/admin/charges/hide-paypal/pricing_plans?shop=test-integration.myshopify.com",
             "pricingLink": "shopify:admin/charges/hide-paypal/pricing_plans",
@@ -387,7 +434,7 @@ async fn with_the_partner_api_the_plan_is_read_there_and_kept() {
 
     ctx.shopify.active_subscription(app_pricing_subscription("pro"));
     assert_eq!(
-        answer(&ctx, "loader", "report").await,
+        load(&ctx, "report").await,
         (200, json!({ "plan": "pro", "handle": "pro" }))
     );
     // The GIDs from the Admin API of the shop, then the plan from the Partner
@@ -418,15 +465,15 @@ async fn with_the_partner_api_the_plan_is_read_there_and_kept() {
     // The answer is kept: the plan ends on Shopify's side, and the shop
     // keeps it until the answer is five minutes old.
     ctx.shopify.active_subscription(None);
-    assert_eq!(answer(&ctx, "action", "export").await.0, 200);
-    assert_eq!(answer(&ctx, "loader", "report").await.0, 200);
+    assert_eq!(act(&ctx, "export").await.0, 200);
+    assert_eq!(load(&ctx, "report").await.0, 200);
     assert_eq!(ctx.shopify.calls_to(PARTNER_SUBSCRIPTION_OPERATION).len(), 1);
 
     // The welcome link of a plan, a signed launch with `plan_handle`, makes
     // the next check ask again.
-    let shell = launch(&ctx, &[("plan_handle", "free")]).await;
-    assert_eq!(shell.status(), 200);
-    let (status, body) = answer(&ctx, "loader", "report").await;
+    let home = launch(&ctx, &[("plan_handle", "free")]).await;
+    assert_eq!(home.status(), 200);
+    let (status, body) = load(&ctx, "report").await;
     assert_eq!((status, body["code"].as_str()), (402, Some("PLAN_REQUIRED")));
     assert_eq!(
         body["details"]["pricingUrl"],
@@ -437,7 +484,7 @@ async fn with_the_partner_api_the_plan_is_read_there_and_kept() {
     // seconds of the answer.
     ctx.shopify.active_subscription(app_pricing_subscription("plus"));
     assert_eq!(launch(&ctx, &[]).await.status(), 200);
-    assert_eq!(answer(&ctx, "loader", "report").await.0, 402);
+    assert_eq!(load(&ctx, "report").await.0, 402);
     assert_eq!(ctx.shopify.calls_to(PARTNER_SUBSCRIPTION_OPERATION).len(), 2);
     // The GIDs were asked once.
     assert_eq!(ctx.shopify.calls_to(PARTNER_IDS_OPERATION).len(), 1);
@@ -476,7 +523,7 @@ async fn a_shop_the_partner_api_does_not_know_is_an_error_and_a_429_is_sent_agai
             json!({ "shop": { "id": "gid://shopify/Shop/9" }, "currentAppInstallation": { "app": { "id": TEST_APP_GID } } }),
         );
     // Not a missing plan: an error of the server.
-    let (status, body) = answer(&ctx, "loader", "report").await;
+    let (status, body) = load(&ctx, "report").await;
     assert_eq!((status, body["code"].as_str()), (500, Some("INTERNAL_ERROR")));
     let error = ctx
         .app
@@ -537,7 +584,7 @@ async fn with_the_partner_api_active_subscriptions_warns_once_where_it_is_called
     let logs = LogCapture::start().await;
 
     // The plan checks read the Partner API, and do not warn.
-    assert_eq!(answer(&ctx, "loader", "report").await.0, 200);
+    assert_eq!(load(&ctx, "report").await.0, 200);
     let client = ctx.app.shopify_client(TEST_SHOP, "default");
     assert!(client.active_plans().await.unwrap().has_plan(&["pro"]));
     assert!(admin_api_warnings(&logs).is_empty(), "{}", logs.text());
@@ -615,7 +662,7 @@ async fn a_welcome_route_reads_the_plan_again_only_for_a_launch_shopify_signed()
     let partner_calls = || ctx.shopify.calls_to(PARTNER_SUBSCRIPTION_OPERATION).len();
     // The check that sent the merchant to the plans: no plan, kept.
     ctx.shopify.active_subscription(None);
-    assert_eq!(answer(&ctx, "loader", "report").await.0, 402);
+    assert_eq!(load(&ctx, "report").await.0, 402);
     assert_eq!(partner_calls(), 1);
     ctx.shopify.active_subscription(app_pricing_subscription("pro"));
 
@@ -646,7 +693,7 @@ async fn a_welcome_route_reads_the_plan_again_only_for_a_launch_shopify_signed()
     assert_eq!(partner_calls(), 2);
     // The plan read there is kept: the next check passes without asking.
     assert_eq!(
-        answer(&ctx, "loader", "report").await,
+        load(&ctx, "report").await,
         (200, json!({ "plan": "pro", "handle": "pro" }))
     );
     assert_eq!(partner_calls(), 2);
@@ -674,7 +721,8 @@ async fn a_welcome_route_reads_the_plan_again_only_for_a_launch_shopify_signed()
     std::fs::remove_dir_all(cwd).ok();
 }
 
-/// The app's home at `/?{query}`, where the welcome route sends a signed launch.
+/// The app's home at `/?{query}`, where the welcome route sends a signed
+/// launch: its page, with the session token of the launch.
 async fn home(ctx: &TestContext, query: &str) -> u16 {
     ctx.http
         .get(ctx.url_for(&format!("/?{query}")))
@@ -692,14 +740,16 @@ async fn a_signed_welcome_through_the_route_then_the_home_asks_the_partner_api_o
     let partner_calls = || ctx.shopify.calls_to(PARTNER_SUBSCRIPTION_OPERATION).len();
     // The check that sent the merchant to the plans.
     ctx.shopify.active_subscription(None);
-    assert_eq!(answer(&ctx, "loader", "report").await.0, 402);
+    assert_eq!(load(&ctx, "report").await.0, 402);
     assert_eq!(partner_calls(), 1);
     ctx.shopify.active_subscription(app_pricing_subscription("pro"));
 
     // The route reads the plan, the home keeps it, and the page has it.
+    let token = ctx.session_token();
     let signed = to_query_string(&sign_query(
         &[
-            ("host", "YWRtaW4uc2hvcGlmeS5jb20vc3RvcmUvdGVzdA"),
+            ("host", HOST),
+            ("id_token", &token),
             ("plan_handle", "pro"),
             ("shop", TEST_SHOP),
         ],
@@ -708,7 +758,7 @@ async fn a_signed_welcome_through_the_route_then_the_home_asks_the_partner_api_o
     assert_eq!(welcome(&ctx, &signed).await, (302, format!("/?{signed}")));
     assert_eq!(home(&ctx, &signed).await, 200);
     assert_eq!(
-        answer(&ctx, "loader", "report").await,
+        load(&ctx, "report").await,
         (200, json!({ "plan": "pro", "handle": "pro" }))
     );
     assert_eq!(partner_calls(), 2, "one request for the welcome");
@@ -722,12 +772,12 @@ async fn a_welcome_launch_forgets_a_no_plan_answer_however_young() {
     let ctx = partner_context(MockTransport::new(), cwd.clone()).await;
     let partner_calls = || ctx.shopify.calls_to(PARTNER_SUBSCRIPTION_OPERATION).len();
     ctx.shopify.active_subscription(None);
-    assert_eq!(answer(&ctx, "loader", "report").await.0, 402);
+    assert_eq!(load(&ctx, "report").await.0, 402);
     // The merchant approves within ten seconds, and the welcome link is a
     // page of the app: the "no plan" answer is forgotten, young as it is.
     ctx.shopify.active_subscription(app_pricing_subscription("pro"));
     assert_eq!(launch(&ctx, &[("plan_handle", "pro")]).await.status(), 200);
-    assert_eq!(answer(&ctx, "loader", "report").await.0, 200);
+    assert_eq!(load(&ctx, "report").await.0, 200);
     assert_eq!(partner_calls(), 2);
     ctx.shutdown().await.unwrap();
     std::fs::remove_dir_all(cwd).ok();
@@ -743,18 +793,18 @@ async fn plan_among_is_the_check_of_require_plan_without_the_402() {
         200,
         json!({ "plan": null, "pricingLink": "shopify:admin/charges/hide-paypal/pricing_plans" }),
     );
-    assert_eq!(answer(&ctx, "loader", "status").await, no_plan);
+    assert_eq!(load(&ctx, "status").await, no_plan);
     assert_eq!(partner_calls(), 1);
 
     // A "no plan" answer younger than ten seconds is kept, as for `require_plan`.
     ctx.shopify.active_subscription(app_pricing_subscription("pro"));
-    assert_eq!(answer(&ctx, "loader", "status").await, no_plan);
-    assert_eq!(answer(&ctx, "loader", "report").await.0, 402);
+    assert_eq!(load(&ctx, "status").await, no_plan);
+    assert_eq!(load(&ctx, "report").await.0, 402);
     assert_eq!(partner_calls(), 1);
 
     // The welcome of the plan: read again, then kept while it has the plan.
     assert_eq!(launch(&ctx, &[("plan_handle", "pro")]).await.status(), 200);
-    assert_eq!(answer(&ctx, "loader", "status").await, (200, json!({ "plan": "pro" })));
+    assert_eq!(load(&ctx, "status").await, (200, json!({ "plan": "pro" })));
     let client = ctx.app.shopify_client(TEST_SHOP, "default");
     assert_eq!(
         client
@@ -776,7 +826,7 @@ async fn plan_among_is_the_check_of_require_plan_without_the_402() {
     ctx.shopify
         .on_with(PARTNER_SUBSCRIPTION_OPERATION, |_| anyhow::bail!("Throttled"));
     assert!(client.refresh_plans().await.is_err());
-    let (status, body) = answer(&ctx, "loader", "status").await;
+    let (status, body) = load(&ctx, "status").await;
     assert_eq!((status, body["code"].as_str()), (500, Some("INTERNAL_ERROR")));
     ctx.shutdown().await.unwrap();
     std::fs::remove_dir_all(cwd).ok();

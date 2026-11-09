@@ -1,5 +1,5 @@
-//! Server side of application-defined admin pages: page access rules, loaders
-//! and actions called by the WebAssembly admin UI over RPC.
+//! Admin pages of the application: their access rules, their loaders, their
+//! actions, and their view, which the server renders.
 
 use std::future::Future;
 use std::sync::Arc;
@@ -25,11 +25,9 @@ use openshop_shared::{
 pub use crate::types::{CustomAdminPageAccess, CustomAdminPagesResponse, ResolvedAdminPages};
 
 mod view;
-pub(crate) use view::{fields_to_json, parse_fields, with_outcome};
-#[doc(hidden)]
-pub use view::output;
-pub use view::{ACTION_FIELD, AdminView, Outcome, PageRequest};
 pub use openshop_shared::AdminFunctionKind;
+pub use view::{ACTION_FIELD, AdminView, FormState, Outcome, PageRequest, output};
+pub(crate) use view::{field_message, fields_to_json, parse_fields, with_outcome};
 
 /// The Shopify staff member behind the session token.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -178,6 +176,9 @@ pub struct AdminPage {
     /// The view the server renders the page with, when it has one: see
     /// [`AdminPage::view`].
     pub view: Option<AdminView>,
+    /// The view shows a refused form itself, from [`PageRequest::form`]: see
+    /// [`AdminPage::view_with_form`].
+    pub view_reads_form: bool,
 }
 
 impl AdminPage {
@@ -188,6 +189,7 @@ impl AdminPage {
             page_access: None,
             functions: IndexMap::new(),
             view: None,
+            view_reads_form: false,
         }
     }
 
@@ -201,7 +203,23 @@ impl AdminPage {
         Fut: Future<Output = Result<maud::Markup>> + Send + 'static,
     {
         self.view = Some(Arc::new(move |request| Box::pin(view(request))));
+        self.view_reads_form = false;
         self
+    }
+
+    /// [`AdminPage::view`] for a view that shows a refused form itself: it
+    /// reads [`PageRequest::form`], the values sent and the error of each
+    /// field, and the page is rendered again with them (`422`). What
+    /// `#[view] fn(…, form: FormState) -> Markup` declares.
+    pub fn view_with_form<F, Fut>(self, view: F) -> Self
+    where
+        F: Fn(PageRequest) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<maud::Markup>> + Send + 'static,
+    {
+        Self {
+            view_reads_form: true,
+            ..self.view(view)
+        }
     }
 
     /// Gives the page an entry in the menu of the admin. A page with a
@@ -524,7 +542,10 @@ mod tests {
 
         let error = AdminPublicError::new("PLAN_REQUIRED", "Choose a plan")
             .status(402)
-            .detail("pricingUrl", "https://admin.shopify.com/store/demo/charges/app/pricing_plans")
+            .detail(
+                "pricingUrl",
+                "https://admin.shopify.com/store/demo/charges/app/pricing_plans",
+            )
             .detail("pricingLink", "shopify:admin/charges/app/pricing_plans");
         let details = error.details.unwrap();
         assert_eq!(details.keys().collect::<Vec<_>>(), ["pricingUrl", "pricingLink"]);

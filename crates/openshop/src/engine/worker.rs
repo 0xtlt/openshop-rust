@@ -22,8 +22,8 @@ use super::runner::{HEARTBEAT_INTERVAL, HeartbeatFn, RunFlowOptions, describe_ru
 use super::step::error_message;
 use super::transient::{is_transient, retry};
 use crate::app::OpenShop;
-use crate::runtime::{logger, report};
 use crate::runtime::time::millis;
+use crate::runtime::{logger, report};
 use crate::types::{JsonMap, ResolvedWorkerConfig, WorkerConfig};
 
 pub const DEFAULT_WORKER_CONFIG: ResolvedWorkerConfig = ResolvedWorkerConfig {
@@ -660,7 +660,8 @@ impl Inner {
             Ok(Err(error)) => error_message(&error),
             Err(panic) => format!("panicked: {}", panic_message(&panic)),
         };
-        self.fail_run(claimed.id, claimed.lease_id, format!("Worker error: {failure}")).await;
+        self.fail_run(claimed.id, claimed.lease_id, format!("Worker error: {failure}"))
+            .await;
     }
 
     /// Extends the lease of a run, within the time it has to: a heartbeat that
@@ -673,7 +674,10 @@ impl Inner {
     /// server enforces it on the statement through `statement_timeout`.
     async fn extend_lease(&self, run_id: Uuid, lease_id: Option<Uuid>) -> Result<bool> {
         let limit = self.heartbeat_timeout();
-        let statement = bounded(limit, &heartbeat_sql(self.lease_ms(), run_id, &self.worker_id, lease_id));
+        let statement = bounded(
+            limit,
+            &heartbeat_sql(self.lease_ms(), run_id, &self.worker_id, lease_id),
+        );
         let extend = sqlx::raw_sql(sqlx::AssertSqlSafe(&*statement)).execute(self.app.db());
         match tokio::time::timeout(limit, extend).await {
             Ok(result) => Ok(result?.rows_affected() > 0),

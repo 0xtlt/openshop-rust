@@ -221,7 +221,11 @@ mod tests {
 
     #[tokio::test]
     async fn help_succeeds_without_running_the_command() {
-        for command in [&["run", "--help"][..], &["cron", "run", "--help"], &["migrate", "generate", "-h"]] {
+        for command in [
+            &["run", "--help"][..],
+            &["cron", "run", "--help"],
+            &["migrate", "generate", "-h"],
+        ] {
             run_with_args(|| panic!("the configuration is built"), &args(command))
                 .await
                 .unwrap();

@@ -146,8 +146,7 @@ impl FlowRun {
     /// The runs of the shop and the Shopify app of a context: a flow, a
     /// webhook, an admin function…
     pub fn of(scope: &impl ShopScope) -> Query<'_, Self> {
-        Query::new(scope.app().db(), Some(scope.shop().to_string()))
-            .filter(Self::APP_HANDLE.eq(scope.shopify_app()))
+        Query::new(scope.app().db(), Some(scope.shop().to_string())).filter(Self::APP_HANDLE.eq(scope.shopify_app()))
     }
 }
 

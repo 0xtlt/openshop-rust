@@ -175,7 +175,10 @@ mod tests {
             json!({ "payload": [1, 2], "shop": "demo.myshopify.com", "topic": "orders/create" })
         );
         assert_eq!(ContextLogger::default().context(json!({})), json!({}));
-        assert_eq!(ContextLogger::new(json!("not an object")).context(Value::Null), json!({}));
+        assert_eq!(
+            ContextLogger::new(json!("not an object")).context(Value::Null),
+            json!({})
+        );
     }
 
     #[test]

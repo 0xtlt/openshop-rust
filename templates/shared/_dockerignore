@@ -1,5 +1,4 @@
 target/
-dist/
 .shopify/
 .env
 .git/

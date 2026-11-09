@@ -9,7 +9,8 @@ use crate::db::migrate::{
 };
 use crate::runtime::RuntimeEnv;
 
-pub(crate) const MIGRATE_USAGE: &str = "Usage: migrate [generate [--name=<name>] [--allow-destructive] [--allow-generate-in-production] | check | status]";
+pub(crate) const MIGRATE_USAGE: &str =
+    "Usage: migrate [generate [--name=<name>] [--allow-destructive] [--allow-generate-in-production] | check | status]";
 
 fn print_status(status: &MigrationStatus) {
     println!("Client migrations:");

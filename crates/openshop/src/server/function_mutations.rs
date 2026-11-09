@@ -46,11 +46,7 @@ pub fn get_mutations(definition: &Function, mode: Option<DiscountMode>) -> Mutat
             "paymentCustomizationDelete",
         ),
         FunctionType::CheckoutValidation => ("validations", Some("validationUpdate"), "validationDelete"),
-        FunctionType::FulfillmentConstraints => (
-            "fulfillmentConstraintRules",
-            None,
-            "fulfillmentConstraintRuleDelete",
-        ),
+        FunctionType::FulfillmentConstraints => ("fulfillmentConstraintRules", None, "fulfillmentConstraintRuleDelete"),
     };
     MutationSet { list, update, delete }
 }
@@ -484,14 +480,12 @@ mod tests {
 
         let validation = Function::new(FunctionType::CheckoutValidation, "limits");
         let body = object(json!({ "blockOnFailure": true }));
-        let request =
-            build_create_mutation(&validation, "limits", DiscountMode::Automatic, "Limits", &empty, &body);
+        let request = build_create_mutation(&validation, "limits", DiscountMode::Automatic, "Limits", &empty, &body);
         assert_eq!(request.variables["input"]["enable"], true);
         assert_eq!(request.variables["input"]["blockOnFailure"], true);
 
         let delivery = Function::new(FunctionType::DeliveryCustomization, "hide");
-        let request =
-            build_create_mutation(&delivery, "hide", DiscountMode::Automatic, "Hide", &empty, &empty);
+        let request = build_create_mutation(&delivery, "hide", DiscountMode::Automatic, "Hide", &empty, &empty);
         assert_eq!(request.variables["input"]["enabled"], true);
     }
 

@@ -389,10 +389,19 @@ mod tests {
         // The thread kept the first client, closed since: it reports with the
         // one the process has. Other tests of this process may report too.
         let (first, second) = (messages(&first), messages(&second));
-        assert!(first.iter().any(|message| message == "with the first client"), "{first:?}");
-        assert!(second.iter().any(|message| message == "with the second client"), "{second:?}");
+        assert!(
+            first.iter().any(|message| message == "with the first client"),
+            "{first:?}"
+        );
+        assert!(
+            second.iter().any(|message| message == "with the second client"),
+            "{second:?}"
+        );
         let all: Vec<_> = first.iter().chain(&second).collect();
         assert!(!all.iter().any(|message| *message == "with no client"), "{all:?}");
-        assert!(!first.iter().any(|message| message == "with the second client"), "{first:?}");
+        assert!(
+            !first.iter().any(|message| message == "with the second client"),
+            "{first:?}"
+        );
     }
 }

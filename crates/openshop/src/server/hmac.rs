@@ -144,7 +144,9 @@ mod tests {
     /// The pairs as Shopify sends them: with the signature of the others.
     fn signed_pairs(params: &[(&str, &str)], secret: &str) -> Vec<(String, String)> {
         let mut signed = pairs(params);
-        let signature = ShopifyApp::new("api-key", secret).sign_app_proxy(&query_of(&signed)).unwrap();
+        let signature = ShopifyApp::new("api-key", secret)
+            .sign_app_proxy(&query_of(&signed))
+            .unwrap();
         signed.push(("signature".to_string(), signature));
         signed
     }
@@ -264,7 +266,12 @@ mod tests {
         let timestamp = TIMESTAMP.clone();
         let shop = ("shop", "a.myshopify.com");
         let at = ("timestamp", timestamp.as_str());
-        assert!(verifies(&[shop, at, ("path_prefix", "/apps/openshop-2"), ("logged_in_customer_id", "")]));
+        assert!(verifies(&[
+            shop,
+            at,
+            ("path_prefix", "/apps/openshop-2"),
+            ("logged_in_customer_id", "")
+        ]));
         for prefix in ["", "/apps/<b>", "/apps/x y", "/apps/x?y"] {
             assert!(!verifies(&[shop, at, ("path_prefix", prefix)]), "{prefix:?}");
         }
@@ -320,7 +327,10 @@ mod tests {
     }
 
     fn value_of(params: &[(String, String)], name: &str) -> Option<String> {
-        params.iter().find(|(key, _)| key == name).map(|(_, value)| value.clone())
+        params
+            .iter()
+            .find(|(key, _)| key == name)
+            .map(|(_, value)| value.clone())
     }
 
     /// Signs `params` as Shopify would, then tries every other cut of what was
@@ -341,7 +351,11 @@ mod tests {
             accepted += 1;
             let shown = format!("{params:?} read as {presented:?}");
             assert_eq!(proxy_shop(&presented), shop, "{shown}");
-            assert_eq!(value_of(&presented, "timestamp"), value_of(&original, "timestamp"), "{shown}");
+            assert_eq!(
+                value_of(&presented, "timestamp"),
+                value_of(&original, "timestamp"),
+                "{shown}"
+            );
             // A visitor can be taken for no one, not for another one.
             let who = customer(&presented);
             assert!(who.is_none() || who == customer(&original), "{shown}");
@@ -350,8 +364,18 @@ mod tests {
     }
 
     /// The parameters of a request as Shopify sends them, then the visitor's own.
-    fn shopify_request<'a>(customer: &'a str, shop: &'a str, prefix: &'a str, rest: &[(&'a str, &'a str)]) -> Vec<(&'a str, &'a str)> {
-        let mut params = vec![("logged_in_customer_id", customer), ("path_prefix", prefix), ("shop", shop), ("timestamp", TIMESTAMP.as_str())];
+    fn shopify_request<'a>(
+        customer: &'a str,
+        shop: &'a str,
+        prefix: &'a str,
+        rest: &[(&'a str, &'a str)],
+    ) -> Vec<(&'a str, &'a str)> {
+        let mut params = vec![
+            ("logged_in_customer_id", customer),
+            ("path_prefix", prefix),
+            ("shop", shop),
+            ("timestamp", TIMESTAMP.as_str()),
+        ];
         params.extend_from_slice(rest);
         params
     }
@@ -383,7 +407,6 @@ mod tests {
         );
         assert!(!verify_proxy_signature(&forged, SECRET));
         assert_eq!(accepted_recuts(&reviewed), 0);
-
     }
 
     #[test]
@@ -392,8 +415,19 @@ mod tests {
             &[][..],
             &[("q", "shoes"), ("page", "2")],
             &[("extra", "1,2"), ("sort", "price"), ("id", "7"), ("customer_id", "9")],
-            &[("shop_id", "5"), ("p", "x"), ("timestamp_ms", "1"), ("prefix", "y"), ("s", "sho")],
-            &[("tag", "a/b"), ("qr", "1"), ("search", "logged in"), ("view", "list&grid")],
+            &[
+                ("shop_id", "5"),
+                ("p", "x"),
+                ("timestamp_ms", "1"),
+                ("prefix", "y"),
+                ("s", "sho"),
+            ],
+            &[
+                ("tag", "a/b"),
+                ("qr", "1"),
+                ("search", "logged in"),
+                ("view", "list&grid"),
+            ],
         ] {
             for customer in ["", "4", "42"] {
                 let params = shopify_request(customer, "A.myshopify.com", "/apps/x", rest);
@@ -408,8 +442,30 @@ mod tests {
     fn no_cut_of_any_signed_proxy_query_changes_who_it_is_for() {
         // Short pieces to cut anywhere, and the names of Shopify, whole or by the end.
         const PIECES: [&str; 24] = [
-            "1", "2", "4", "o", "m", "_", "=", "/", ",", "p", "s", "h", "logged_in_customer_id", "logged_in_customer_id",
-            "ogged_in_customer_id", "shop", "shop", "hop", "timestamp", "stamp", "path_prefix", "prefix", "id", "t",
+            "1",
+            "2",
+            "4",
+            "o",
+            "m",
+            "_",
+            "=",
+            "/",
+            ",",
+            "p",
+            "s",
+            "h",
+            "logged_in_customer_id",
+            "logged_in_customer_id",
+            "ogged_in_customer_id",
+            "shop",
+            "shop",
+            "hop",
+            "timestamp",
+            "stamp",
+            "path_prefix",
+            "prefix",
+            "id",
+            "t",
         ];
         struct Rng(u64);
         impl Rng {
@@ -447,7 +503,10 @@ mod tests {
             if chosen.count_ones() > 3 {
                 continue;
             }
-            let rest: Vec<(&str, &str)> = (0..pairs.len()).filter(|bit| chosen >> bit & 1 == 1).map(|bit| pairs[bit]).collect();
+            let rest: Vec<(&str, &str)> = (0..pairs.len())
+                .filter(|bit| chosen >> bit & 1 == 1)
+                .map(|bit| pairs[bit])
+                .collect();
             accepted += accepted_recuts(&shopify_request("", "a.myshopify.com", "/apps/x", &rest));
             cases += 1;
         }
@@ -461,7 +520,10 @@ mod tests {
             let customer = ["", "4", "42"][rng.next(3)];
             let shop = ["a.myshopify.com", "b-2.myshopify.com"][rng.next(2)];
             let prefix = ["/apps/x", "/apps/lo", "/a/p"][rng.next(3)];
-            let rest: Vec<(&str, &str)> = extras.iter().map(|(key, value)| (key.as_str(), value.as_str())).collect();
+            let rest: Vec<(&str, &str)> = extras
+                .iter()
+                .map(|(key, value)| (key.as_str(), value.as_str()))
+                .collect();
             let params = shopify_request(customer, shop, prefix, &rest);
             // Duplicates of a key are one parameter, whose values are joined.
             if proxy_message(params.iter().copied()).len() > 90 {

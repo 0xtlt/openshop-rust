@@ -301,12 +301,11 @@ error of the server (`500`), so a paying merchant is not sent to the pricing
 page because Shopify did not answer. So is an app without a
 [handle](#the-handle-of-the-app), whose pricing page cannot be named.
 
-In a view, the error of `use_loader` or `use_action` carries the details:
-`error.code.as_deref() == Some("PLAN_REQUIRED")`, and
-`error.detail("pricingLink")` (the view names the code as text:
-`openshop::billing` is not compiled into the bundle). Open the link in the top
-window of the admin, as an App Bridge link: `window.open(link, "_top")`, or an
-`<a target="_top">` to it.
+A page of the admin whose loader answers it shows the message with a **See
+the plans** button to `pricingLink`, opened in the top window of the admin;
+an action refused this way shows the message in an error toast. A view that
+links to the plans itself opens the link in the top window too:
+`s-button href=(link) target="_top"`.
 
 ## The welcome link of a route
 

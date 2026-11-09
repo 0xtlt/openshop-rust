@@ -170,7 +170,11 @@ pub(crate) async fn store_access_token(
     token: &TokenData,
     reinstall: bool,
 ) -> anyhow::Result<()> {
-    let restart = if reinstall { ", nonce = NULL, installed_at = now()" } else { "" };
+    let restart = if reinstall {
+        ", nonce = NULL, installed_at = now()"
+    } else {
+        ""
+    };
     sqlx::query(sqlx::AssertSqlSafe(format!(
         "INSERT INTO installations (app_handle, shop, access_token, scopes) VALUES ($1, $2, $3, $4) \
          ON CONFLICT (app_handle, shop) DO UPDATE SET \

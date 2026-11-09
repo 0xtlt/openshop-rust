@@ -178,10 +178,7 @@ async fn level_counts(db: &PgPool, run_id: &str) -> Result<BTreeMap<String, usiz
             .bind(run_id)
             .fetch_all(db)
             .await?;
-    Ok(rows
-        .into_iter()
-        .map(|(level, count)| (level, count as usize))
-        .collect())
+    Ok(rows.into_iter().map(|(level, count)| (level, count as usize)).collect())
 }
 
 fn plain(log: LogRow) -> LogResponseRow {
@@ -528,7 +525,10 @@ mod tests {
             let message = format!("\"'{}\"", formula.replace('"', "\"\""));
             assert!(line.contains(&format!(",info,{message},")), "{formula:?}: {line}");
             // A cell that is a formula to a spreadsheet starts with the quote, not with the formula.
-            assert!(!line.contains(&format!(",\"{}", formula.replace('"', "\"\""))), "{formula:?}: {line}");
+            assert!(
+                !line.contains(&format!(",\"{}", formula.replace('"', "\"\""))),
+                "{formula:?}: {line}"
+            );
         }
         // A payload that is a JSON number or text keeps its meaning, and what is ordinary is left alone.
         let line = csv_row(&row(Some("a-b = c"), Some(json!(-5))).log);

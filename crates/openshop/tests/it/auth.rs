@@ -1331,7 +1331,7 @@ async fn a_shop_does_not_wait_for_the_token_exchange_of_another(ctx: &TestContex
     let other = ctx.session_token_for("other.myshopify.com", "1");
 
     let started = std::time::Instant::now();
-    let (first, second) = futures::join!(api_get(ctx, "/api/flows", &token), api_get(ctx, "/api/flows", &other));
+    let (first, second) = tokio::join!(api_get(ctx, "/api/flows", &token), api_get(ctx, "/api/flows", &other));
     assert_eq!((first.status().as_u16(), second.status().as_u16()), (200, 200));
     // Two exchanges, side by side: the second did not wait for the first.
     assert_eq!(exchange_requests(ctx), 2);

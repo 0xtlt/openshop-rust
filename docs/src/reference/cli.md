@@ -12,9 +12,8 @@ An OpenShop app has two command lines:
 | --- | --- | --- |
 | `openshop init [<dir>]` | — | Scaffold a new project from a template. |
 | `openshop init-ui` | — | Scaffold a custom admin page with its view. |
-| `openshop dev [cargo args]` | `cargo run [cargo args] -- dev`, restarted on changes | Start the development server. The admin UI reloads by itself. |
-| `openshop build [args]` | `openshop build-ui`, then `cargo build --release [args]` | Build the app for production. |
-| `openshop build-ui` | `trunk build --release` on the crate of the bundle | Build the admin UI bundle of an app whose admin pages have a view, into `dist/`. |
+| `openshop dev [cargo args]` | `cargo run [cargo args] -- dev`, restarted on changes | Start the development server. A page of the admin reloads by itself. |
+| `openshop build [args]` | `cargo build --release [args]` | Build the app for production. |
 | `openshop start [args]` | `cargo run --release -- start [args]` | Start the production web process. |
 | `openshop worker [args]` | `cargo run --release -- worker [args]` | Start the worker process. |
 | `openshop migrate [args]` | `cargo run -- migrate [args]` | Apply, generate, check, or inspect migrations. |
@@ -27,8 +26,8 @@ this page). When `cargo` fails, `openshop` prints the error and exits with
 status `1`.
 
 `openshop`, `openshop help`, `--help` and `-h` print the usage text and exit
-with status `0`, and so do `--help` and `-h` after `init`, `init-ui` or
-`build-ui`, which then do nothing else. A command forwarded to cargo passes
+with status `0`, and so do `--help` and `-h` after `init` or `init-ui`, which
+then do nothing else. A command forwarded to cargo passes
 them on with its arguments: `openshop run --help` is `cargo run -- run --help`,
 which the application binary answers with the usage of `run` (see
 [Command behavior](#command-behavior)); `openshop test --help` and
@@ -41,8 +40,8 @@ the dependencies the repository tested:
 cargo install --locked --git https://github.com/0xtlt/openshop-rust openshop-cli
 ```
 
-The CLI is a convenience. Every command except `init`, `init-ui`,
-`build-ui`, and the file watcher of `dev` can be run with `cargo run -- <command>` or, in
+The CLI is a convenience. Every command except `init`, `init-ui`, and the
+file watcher of `dev` can be run with `cargo run -- <command>` or, in
 production, by executing the compiled binary directly (`./my-app start`).
 
 ## Scaffold a project
@@ -86,15 +85,11 @@ tables of its models. It does not update an existing app. See the
 At most one of the four `--openshop-*` arguments; a second one fails with
 ``[openshop] Name one source for `openshop` ``. The commit the CLI was built from
 is the one `cargo install --git` took; for a CLI built from a local checkout,
-make sure it is pushed, or pass `--openshop-path`. The `Dockerfile` of a project
-with admin views installs the CLI of the `rev`, `tag` or `branch` of the
-manifest, so it follows any of them.
+make sure it is pushed, or pass `--openshop-path`.
 
 A non-empty target fails with
 `[openshop] Target directory is not empty: <path>`, before any question about
-the template. The `custom` and `public` templates have admin pages with a
-view, compiled to WebAssembly: install the toolchain once with
-`rustup target add wasm32-unknown-unknown` and `cargo install trunk`.
+the template.
 
 If `init` fails after it started writing, it removes the files it wrote and the
 directories it made, nothing else: a directory it shares with another `init`
@@ -109,41 +104,20 @@ openshop init-ui
 ```
 
 `init-ui` gives an app a first [custom admin page](custom-admin-pages.md) with
-a view, and what views are compiled with. Run it from the project root:
+a view, and `maud`, which views are written with. Run it from the project root:
 without a `Cargo.toml` in the current directory it fails with
 ``[openshop] No Cargo.toml here. Run `openshop init-ui` from the root of an OpenShop project.``
 
 The command writes `src/admin/hello.rs`, an example `/hello` page with a
-loader and its view, declares it in `src/admin/mod.rs`, and adds `dist/`,
-where the bundle is built, to `.gitignore`. When the page already exists it
-fails with `[openshop] src/admin/hello.rs already exists.`
+loader, an action and its view, and declares it in `src/admin/mod.rs`. When the
+page already exists it fails with
+`[openshop] src/admin/hello.rs already exists.`
 
-In `Cargo.toml`, it adds the `ui` feature to the `openshop` dependency and
-adds `leptos`. When `openshop` is not declared on one line of
-`[dependencies]`, the manifest is left as it is and the lines to add are
-printed.
+In `Cargo.toml`, it adds `maud` after `openshop`. When `[dependencies]` has
+no `openshop`, the manifest is left as it is and the line to add is printed.
 
-It then prints what to write in `src/main.rs`: `mod admin;`, the page in the
-`admin_pages` of `app!`, and the `admin_ui` setting.
-
-### Build the admin UI bundle
-
-```bash
-openshop build-ui
-```
-
-`build-ui` reads `src/` for the admin pages that have a `#[view]`. Without
-one, it prints
-`[openshop] No admin page has a view: the admin UI is the one built into openshop.`
-and builds nothing. Otherwise it writes the crate of the bundle under the
-`target` directory of the project, in `openshop-ui/<package>/`, and builds it
-with [trunk](https://trunkrs.dev) into `dist/`, optimized for size. The crate
-is made of the modules that declare the pages; see
-[What the bundle is made of](custom-admin-pages.md#what-the-bundle-is-made-of).
-
-A page with a view declared in `src/main.rs` or `src/lib.rs` is refused: the
-bundle is made of a module, such as `src/admin/`. `openshop build` runs the
-same build before `cargo build --release`.
+It then prints what to write in `src/main.rs`: `mod admin;` and the page in
+the `admin_pages` of `app!`.
 
 ## Command behavior
 
@@ -186,12 +160,11 @@ Details:
   (but not its `--help`). Variables the configuration requires must be set for
   all of them.
 - `dev` and `start` listen on `0.0.0.0` at `PORT` (default `3000`).
-- In `dev`, a page of the admin UI reloads by itself when the app has been
-  started again, or when the bundle it is served from disk has been built
-  again. The shell is served with a script that listens to
-  `GET /__openshop/reload`, a `text/event-stream` that names the version being
-  served, and reloads the page when it is no longer the one it was served.
-  `start` serves neither the script nor the route.
+- In `dev`, a page of the admin reloads by itself when the app has been
+  started again. A page is served with a script that listens to
+  `GET /__openshop/reload`, a `text/event-stream` that names the server being
+  served from, and reloads the page when it is no longer the one it was served
+  by. `start` serves neither the script nor the route.
 - `--concurrency=N` must be written with `=`. When the flag is absent, the
   worker uses `worker.concurrency` from the configuration, then the default of
   `5`. A value that is not a positive integer stops the command with
@@ -308,18 +281,11 @@ not start a second `dev` process alongside it.
   every process of it is gone;
 - changes that arrive during a restart are coalesced into one more restart;
 - arguments after `dev` are passed to `cargo run`, for example
-  `openshop dev -p my-app` in a workspace;
-- when an admin page has a view, it also writes the crate of the admin UI
-  bundle, as `build-ui` does, runs `trunk watch` on it to rebuild the bundle
-  when a page changes, or a crate on disk the project is compiled with, and,
-  unless `OPENSHOP_UI_DIR` is already set, starts the app with
-  `OPENSHOP_UI_DIR` pointing at `dist`. A view added or removed while `dev`
-  runs is taken into account at the next change. If `trunk` cannot be started,
-  a warning is printed and the bundle is not rebuilt.
+  `openshop dev -p my-app` in a workspace.
 
-The page open in the browser follows: it reloads once the app is back, and
-again if the bundle is ready after it. A change that does not compile leaves
-the page as it is, and the error in the terminal.
+The page open in the browser follows: it reloads once the app is back. A
+change that does not compile leaves the page as it is, and the error in the
+terminal.
 
 ### Stopping the app
 
