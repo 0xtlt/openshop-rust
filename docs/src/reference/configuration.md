@@ -114,7 +114,7 @@ can fail with `?`: the error is the one `APP.config()` and `APP.run()` return.
 | `retry_policy` | `RetryPolicy` | See [Retry defaults](#retry-defaults) |
 | `shopify_retry` | `openshop::shopify::RetryPolicy`: how the Shopify client retries what Shopify did not run; see [Shopify client retries](#shopify-client-retries) | Four retries, from one second apart, doubling, up to thirty seconds |
 | `builtin_pages` | [`AdminPagesConfig`](#admin-pages), or `AdminPagesConfig::none()` for an admin made of the pages of the application | Every built-in page of the admin `visible` |
-| `admin_ui` | `UiSource` | The admin UI bundle built into the framework; see [Custom admin pages](custom-admin-pages.md#serve-the-bundle) |
+| `admin_ui` | `UiSource` | `UiSource::Server`, the admin the server renders; `UiSource::None` serves no admin (API only). See [Custom admin pages](custom-admin-pages.md#how-pages-are-served) |
 | `max_request_body_bytes` | `usize` | `2 * 1024 * 1024` (2 MB); larger request bodies are answered with `413` |
 | `request_timeout` | `Duration` | `60 s`; a request whose response has not begun by then is answered with `503` (`Request timed out`). The time to read the body counts; a response already streaming does not |
 | `max_concurrent_requests` | `usize` | `1024`; a request that comes while that many are being served is answered with `503` and `Retry-After: 1`, and `/health` is always answered |
@@ -185,7 +185,7 @@ fn main() -> Result<()> {
 | `.builtin_pages(config)` | `AdminPagesConfig` | Every built-in page of the admin `visible` |
 | `.builtin_page(id, mode)` | `AdminPageId` and `AdminPageMode` | — |
 | `.model(table)` | `Table` | No app tables pushed in development |
-| `.admin_ui(ui)` | `UiSource` | The admin UI bundle built into the framework; see [Custom admin pages](custom-admin-pages.md#serve-the-bundle) |
+| `.admin_ui(ui)` | `UiSource` | `UiSource::Server`, the admin the server renders; see the setting of the same name |
 | `.max_request_body_bytes(bytes)` | `usize` | `2 * 1024 * 1024` (2 MB); larger request bodies are answered with `413` |
 | `.request_timeout(timeout)` | `Duration` | `60 s`; see the setting of the same name |
 | `.max_concurrent_requests(requests)` | `usize` | `1024`; see the setting of the same name |

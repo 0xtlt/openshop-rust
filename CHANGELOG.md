@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- The admin is rendered by the server by default: `UiSource::Server` is the
+  default of `admin_ui`, of `ServerOptions` and of the test harness, and
+  `OPENSHOP_UI=server` is no longer needed. A test or a server that served no
+  UI by default names `UiSource::None`, which keeps CORS on `/api`.
 - Every page of the framework is rendered by the server with
   `admin_ui: UiSource::Server`: the home, the providers, the flows and their
   runs, the page of a run with its logs, the Shopify Functions and their

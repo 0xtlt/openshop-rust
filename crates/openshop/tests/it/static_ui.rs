@@ -1056,7 +1056,7 @@ async fn reserved_paths_are_never_served_the_shell() {
     ctx.shutdown().await.unwrap();
 }
 
-#[openshop::test(context_with(static_config(), ServerOptions::default()))]
+#[openshop::test(context_with(static_config(), ServerOptions { ui: UiSource::None, dev: false }))]
 async fn server_without_ui_returns_404_for_pages_and_assets(ctx: &TestContext) {
     for path in [
         "/".to_string(),

@@ -563,7 +563,7 @@ async fn serve(config: OpenShopConfig, shutdown: impl Future<Output = ()>) -> Re
     let db = openshop::db::connect_to(&std::env::var("DATABASE_URL")?).await?;
     let app = OpenShop::new(config, db, RuntimeEnv::from_env())?;
 
-    let server = listen(&app, 3000, ServerOptions { ui: UiSource::Embedded, dev: false }).await?;
+    let server = listen(&app, 3000, ServerOptions { ui: UiSource::Server, dev: false }).await?;
     let worker = Worker::new(app.clone(), WorkerConfig::new());
     worker.start().await;
     let mut scheduler = Scheduler::start(&app)?;
@@ -580,8 +580,8 @@ async fn serve(config: OpenShopConfig, shutdown: impl Future<Output = ()>) -> Re
 | --- | --- |
 | `openshop::server::router(&app, options)` | Builds the `axum::Router` without listening. |
 | `openshop::server::listen(&app, port, options)` | Binds `0.0.0.0:<port>` (`0` picks a free port) and returns a handle with `addr` and `shutdown()`. Keep the handle for as long as the server should run: dropping it stops accepting connections and lets requests in flight finish. `shutdown()` also waits for those requests, up to five seconds. After that it returns an error, and the requests still in flight keep running until they finish or the process exits. |
-| `ServerOptions { ui, dev }` | `ui` is the admin UI to serve: `UiSource::Embedded`, `UiSource::Dir(path)`, `UiSource::Assets(lookup)`, or `UiSource::None` (see [Serve the bundle](custom-admin-pages.md#serve-the-bundle)). It is served behind the signed-launch check, unless `dev` is set: then the shell reloads the page when the server is started again or its bundle rebuilt (see [Development process](cli.md#development-process)), and CORS is enabled on `/api`. |
-| `ServerOptions::default()` | API only: no UI is served, and CORS is enabled on `/api`. |
+| `ServerOptions { ui, dev }` | `ui` is the admin to serve: `UiSource::Server`, the pages the server renders (see [How pages are served](custom-admin-pages.md#how-pages-are-served)), or `UiSource::None`, API only, with CORS enabled on `/api`. With `dev`, a page of the admin reloads when the server is started again (see [Development process](cli.md#development-process)), and CORS is enabled on `/api`. |
+| `ServerOptions::default()` | `UiSource::Server`, not `dev`. |
 | `openshop::server::serve(listener, router)` | Serves a router built with `router` on an existing `tokio::net::TcpListener`. Returns the same handle as `listen`: keep it for as long as the server should run. |
 | `openshop::cli::shutdown_signal()` | Resolves when the process receives `SIGINT` or `SIGTERM`: the `shutdown` of the example above, for a process that stops as `dev` and `start` do. |
 | `Worker::new(app, overrides)` | Worker with `start()`, `stop()`, `is_running()`, `active_count()`, and `worker_id()`. `overrides` is a `WorkerConfig`: what it sets replaces the `worker` setting of the application. |

@@ -95,11 +95,10 @@ pub(crate) async fn forget_plan_on_welcome(app: &OpenShop, shopify_app: &str, qu
     }
 }
 
-/// Where the admin UI assets come from.
+/// The admin the server serves: the one it renders itself, by default.
 #[derive(Debug, Clone, Default)]
 pub enum UiSource {
     /// API only: no UI is served.
-    #[default]
     None,
     /// The UI bundle compiled into the framework.
     Embedded,
@@ -110,7 +109,8 @@ pub enum UiSource {
     /// and returning its bytes.
     Assets(fn(&str) -> Option<Cow<'static, [u8]>>),
     /// The admin rendered by the server, page by page: no bundle, no
-    /// WebAssembly. Experimental: see `server::pages`.
+    /// WebAssembly. The default.
+    #[default]
     Server,
 }
 

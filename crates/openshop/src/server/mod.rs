@@ -68,7 +68,8 @@ const ROBOTS_TXT: &str = "User-agent: *\nDisallow: /\n";
 
 #[derive(Debug, Clone, Default)]
 pub struct ServerOptions {
-    /// Admin UI to serve. Without one the server is API-only and enables CORS on `/api`.
+    /// Admin UI to serve: the one the server renders, by default. With
+    /// `UiSource::None` the server is API-only and enables CORS on `/api`.
     pub ui: UiSource,
     /// Development mode: the UI shell is served without the signed-query gate,
     /// and reloads when the server is started again or its bundle rebuilt.
