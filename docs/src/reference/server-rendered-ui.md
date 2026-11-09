@@ -11,16 +11,18 @@
 | --- | --- | --- |
 | What the browser downloads for the app, `openshop dev` | 3.2 MB compressed (a 45.5 MB debug `.wasm`) | 3 KB (the page, 1 KB, and `openshop.js`, 2 KB) |
 | Same, release build | 451 KB compressed (a 1.2 MB `.wasm`) | 3 KB |
-| Launch to rendered page, `openshop dev` (cold cache) | 4.4 to 6.8 s | 70 ms |
-| Same, release bundle | 285 to 321 ms | 70 ms (debug server) |
-| An edit of a page to the page updated in `openshop dev` | 13.1 s (cargo, then trunk, the frame blank meanwhile) | 3.6 s (cargo) |
+| Launch to rendered page, `openshop dev`, cold browser cache | 1.5 s for the first load of a build, 0.5 s after | 65 to 74 ms |
+| Same, release bundle | 285 to 321 ms | 65 to 74 ms (debug server) |
+| Navigation to another page | 82 ms | 50 ms |
+| An edit of a page to the page updated in `openshop dev` | 5.3 s (cargo and trunk) | 2.7 s (cargo) |
 | Toolchain | `wasm32-unknown-unknown`, trunk, wasm-bindgen | cargo |
 
 Measured in lsf's admin (`lsf serve --polaris offline`) with Playwright 1.64.1
 and Chromium, on the same app twice: the `minimal` template, the home page of
 shop-test, the `/reviews` page of the `custom` template and the `/hello` page
 of `openshop init-ui`. Polaris and App Bridge (268 KB, the same for both) are
-not counted. The numbers are in the pull request that adds this page.
+not counted. The Leptos numbers of `openshop dev` include the compression
+cache of #57; before it, a launch took 4.4 to 6.8 s and an edit 13.1 s.
 
 ## The model
 
@@ -157,7 +159,7 @@ Without a valid token, Shopify's own pattern for server-rendered embedded apps
 
 The launch URL keeps its parameters: a reload of the frame sends an expired
 token, which bounces. The bounce costs one round trip and App Bridge's start:
-43 ms in lsf for a page loaded without any token.
+41 ms in lsf for a page loaded without any token.
 
 ## `openshop.js`
 
@@ -404,8 +406,8 @@ About 10 days in all, then the applications.
 ## Open questions
 
 1. **Navigation by the script.** Links and the menu are fetched and swapped,
-   which avoids a bounce per click (47 ms instead of a full load and a
-   bounce). The alternative is full loads only, a smaller script, and a bounce
+   which avoids a bounce per click (50 ms, where a full load costs the
+   page, the bounce, and App Bridge started twice). The alternative is full loads only, a smaller script, and a bounce
    for every page. Keep it?
 2. **Form errors.** The view needs the field errors and the submitted values
    of an action that failed. A second kind of parameter
