@@ -107,7 +107,9 @@ from the one of a worker, so replicas whose clocks differ agree on when a lease
 ends. The extension has a time limit of a quarter of the lease (at least 250 ms,
 at most 10 s), which covers the wait for a free connection of the pool and the
 statement itself. A failed extension is logged (`Heartbeat of run … failed`: the
-first time and every tenth in a row) and tried again at the next heartbeat. The
+first time and every tenth in a row) and tried again at the next heartbeat. A
+worker sends one every quarter of the lease (every 15 seconds at most), so one
+that fails leaves the next ones time to extend the lease. The
 worker counts the lease from the moment it sent the last request that extended
 it, or the claim that took the run, less a tenth of the lease. A claim that
 answered so late that this time has passed does not start the run. When that time has passed, the lease has
