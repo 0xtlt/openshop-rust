@@ -24,6 +24,8 @@ use crate::server::shopify_apps::ShopifyApps;
 use crate::server::static_ui::UiSource;
 use crate::shopify::client::ShopifyClient;
 use crate::shopify::endpoints::{Endpoints, ShopifyEndpoints};
+use crate::shopify::partner::{PartnerApi, PartnerApiClient};
+use crate::billing::{BillingSource, PlanCache};
 use crate::server::webhooks::WebhookDeliveries;
 use crate::shopify::client_credentials::ClientCredentials;
 use crate::types::{
@@ -38,6 +40,10 @@ pub struct OpenShopConfig {
     /// Where the application reaches Shopify, field by field: a field that is
     /// `None` is read from its environment variable, then is Shopify's.
     pub shopify_endpoints: ShopifyEndpoints,
+    /// The Partner API billing reads the plans from, field by field: a field
+    /// that is `None` is read from its environment variable. Neither a
+    /// Partner ID nor a token: the plans are read from the Admin API.
+    pub partner_api: PartnerApi,
     pub providers: IndexMap<String, Provider>,
     pub flows: IndexMap<String, Flow>,
     pub functions: IndexMap<String, Function>,
@@ -170,6 +176,29 @@ impl OpenShopBuilder {
     /// [`shopify`](Self::shopify).
     pub fn shopify_endpoints(mut self, endpoints: ShopifyEndpoints) -> Self {
         self.config.shopify_endpoints = endpoints.or(std::mem::take(&mut self.config.shopify_endpoints));
+        self
+    }
+
+    /// The Partner API of the organization that owns the app: with it,
+    /// [`billing`](crate::billing) reads the plans of the shops from the
+    /// Partner API's `activeSubscription`, as Shopify App Pricing asks,
+    /// instead of the Admin API. Merges with earlier calls field by field, as
+    /// [`shopify_endpoints`](Self::shopify_endpoints) does; a field no call
+    /// sets is read from `SHOPIFY_PARTNER_ID` or `SHOPIFY_PARTNER_API_TOKEN`
+    /// when the application starts. The application refuses to start with a
+    /// Partner ID and no token, or a token and no Partner ID.
+    ///
+    /// ```
+    /// use openshop::PartnerApi;
+    ///
+    /// let config = openshop::OpenShopConfig::builder()
+    ///     .partner_api(PartnerApi::new().partner_id("1234567"))
+    ///     .build()
+    ///     .unwrap();
+    /// assert_eq!(config.partner_api.partner_id.as_deref(), Some("1234567"));
+    /// ```
+    pub fn partner_api(mut self, partner_api: PartnerApi) -> Self {
+        self.config.partner_api = partner_api.or(std::mem::take(&mut self.config.partner_api));
         self
     }
 
@@ -485,6 +514,10 @@ struct Inner {
     transport: Arc<dyn Transport>,
     /// Where Shopify is reached: the configuration's, else the environment's.
     endpoints: Endpoints,
+    /// The Partner API billing reads the plans from, when it is set.
+    partner_api: Option<PartnerApiClient>,
+    /// The plans read from the Partner API, per shop.
+    plans: PlanCache,
     client_credentials: ClientCredentials,
     custom_pages: Vec<CustomAdminPage>,
     mcp_registry: McpRegistry,
@@ -520,6 +553,16 @@ impl OpenShop {
         if let Some(line) = endpoints.startup_line() {
             tracing::info!("{line}");
         }
+        let partner_api = PartnerApiClient::resolve(
+            &config.partner_api,
+            &env.partner_api,
+            endpoints.partner_origin(),
+            transport.clone(),
+            config.shopify_retry.clone().unwrap_or_default(),
+        )?;
+        if let Some(partner_api) = &partner_api {
+            tracing::info!("{}", partner_api.startup_line());
+        }
         let crypto = Crypto::new(env.encryption_key.clone(), env.allows_plaintext_secrets());
         crypto.check_configured()?;
         let client_credentials = ClientCredentials::new(config.client_credentials_shop.as_deref())?;
@@ -534,6 +577,8 @@ impl OpenShop {
                 apps,
                 transport,
                 endpoints,
+                partner_api,
+                plans: PlanCache::default(),
                 client_credentials,
                 custom_pages,
                 mcp_registry,
@@ -576,6 +621,27 @@ impl OpenShop {
     /// The same, checked.
     pub(crate) fn endpoints(&self) -> &Endpoints {
         &self.inner.endpoints
+    }
+
+    /// The Partner API of the application, when a Partner ID and a token
+    /// are set: what billing reads the plans from, and what sends any other
+    /// query of the Partner API.
+    pub fn partner_api(&self) -> Option<&PartnerApiClient> {
+        self.inner.partner_api.as_ref()
+    }
+
+    /// Where billing reads the plans of the shops: the Partner API when it
+    /// is set, the Admin API otherwise.
+    pub fn billing_source(&self) -> BillingSource {
+        match self.inner.partner_api {
+            Some(_) => BillingSource::PartnerApi,
+            None => BillingSource::AdminApi,
+        }
+    }
+
+    /// The plans read from the Partner API, per shop.
+    pub(crate) fn plans(&self) -> &PlanCache {
+        &self.inner.plans
     }
 
     /// The client credentials grant, and the shop of the

@@ -92,8 +92,13 @@ impl ShopifyClient {
         self
     }
 
+    /// The application this client belongs to.
+    pub(crate) fn app(&self) -> &OpenShop {
+        &self.app
+    }
+
     /// The shop, checked.
-    fn domain(&self) -> Result<String> {
+    pub(crate) fn domain(&self) -> Result<String> {
         strict_shop_domain(&self.shop).ok_or_else(|| {
             anyhow!(
                 "[openshop] Invalid shop domain for app \"{}\": expected <name>.myshopify.com",

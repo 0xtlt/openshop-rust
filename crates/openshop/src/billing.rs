@@ -1,18 +1,33 @@
 //! Billing with Shopify's managed pricing: the plans live on Shopify's side,
 //! where the merchant picks one on the plan selection page Shopify hosts for
-//! the app. The application reads what the shop is subscribed to, sends the
-//! merchant to that page, and hears of the changes.
+//! the app. The application reads what the shop is subscribed to and sends
+//! the merchant to that page.
 //!
-//! - [`ShopifyClient::active_subscriptions`] reads
-//!   `currentAppInstallation.activeSubscriptions` of the shop, and
-//!   [`ActiveSubscriptions::plan`] says whether a plan, any or one of some
-//!   names, is active;
+//! Where the plan is read is the [`BillingSource`] of the application, which
+//! its configuration sets, never a guess:
+//!
+//! - without a [Partner API](crate::PartnerApi), the Admin API:
+//!   `currentAppInstallation.activeSubscriptions`, for an app whose
+//!   subscriptions the Billing API made (manual pricing), or enrolled in
+//!   Shopify App Pricing before April 2026;
+//! - with one, the Partner API: `activeSubscription(appId:, shopId:)`, which
+//!   Shopify App Pricing asks the apps enrolled since April 2026, and every
+//!   app after April 28, 2026, to read. A subscription of the Billing API
+//!   that was not migrated is not there.
+//!
+//! What this module gives:
+//!
+//! - [`ShopifyClient::active_plans`] reads the plans of the shop from the
+//!   source of the application, and [`ActivePlans::plan`] says whether one,
+//!   any or one of some names, is active. [`ShopifyClient::active_subscriptions`]
+//!   reads the Admin API whatever the source;
 //! - [`require_plan`] guards a loader or an action of an admin page, and
 //!   [`any_plan`] is the same as an `authorize` rule: without the plan, the
 //!   page receives `402` with the code [`PLAN_REQUIRED`] and the pricing page;
 //! - [`pricing_url`] and [`pricing_link`] are that page, for a link of the
 //!   server and for App Bridge;
-//! - [`AppSubscriptionsUpdate`] is the payload of `app_subscriptions/update`.
+//! - [`AppSubscriptionsUpdate`] is the payload of `app_subscriptions/update`,
+//!   which Shopify App Pricing no longer sends after April 28, 2026.
 //!
 //! ```
 //! use openshop::billing::{self, AppSubscriptionsUpdate};
@@ -25,8 +40,8 @@
 //!     /// For the shops on the Pro or the Plus plan; the others are sent to the pricing page.
 //!     #[loader]
 //!     async fn report(ctx: AdminContext) -> Result<Value> {
-//!         let subscription = billing::require_plan(&ctx, &["Pro", "Plus"]).await?;
-//!         Ok(json!({ "plan": subscription.name }))
+//!         let plan = billing::require_plan(&ctx, &["pro", "plus"]).await?;
+//!         Ok(json!({ "plan": plan.name }))
 //!     }
 //!
 //!     /// For any plan.
@@ -47,20 +62,35 @@
 //! OpenShop declares no plan: their names, prices and trials are the ones of
 //! the Partner Dashboard.
 
+mod cache;
+mod partner;
+
+use std::time::Instant;
+
 use chrono::{DateTime, Utc};
 use serde::de::{self, Deserializer};
 use serde::{Deserialize, Serialize, Serializer};
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use crate::admin::{AdminContext, AdminPublicError};
 use crate::shopify::ShopifyClient;
 use crate::types::ShopScope;
 
+pub(crate) use cache::PlanCache;
+pub use cache::MIN_REFRESH;
+#[cfg(feature = "testing")]
+pub(crate) use partner::{partner_ids_data, partner_subscription_data};
+pub use partner::{
+    AppPricingDiscount, AppPricingItem, AppPricingPrice, AppPricingSubscription, AppPricingUsage, BillingCycle,
+    FlatRatePrice, PARTNER_IDS_OPERATION, PARTNER_SUBSCRIPTION_OPERATION, PendingUpdate, PriceTier, TieredPrice,
+};
+
 /// The `code` of the error [`require_plan`] answers when no plan fits.
 pub const PLAN_REQUIRED: &str = "PLAN_REQUIRED";
 
 /// The name of the GraphQL operation [`ShopifyClient::active_subscriptions`]
-/// sends, and so [`require_plan`] and [`any_plan`]: what a test answers
+/// sends, and so [`require_plan`] and [`any_plan`] when the plans are read
+/// from the Admin API: what a test answers
 /// (`ctx.shopify.active_subscriptions([…])` of the `testing` feature does it).
 pub const ACTIVE_SUBSCRIPTIONS_OPERATION: &str = "OpenShopActiveSubscriptions";
 
@@ -286,6 +316,146 @@ impl IntoIterator for ActiveSubscriptions {
     }
 }
 
+/// Where an application reads the plans of the shops:
+/// [`OpenShop::billing_source`](crate::OpenShop::billing_source). The Partner
+/// API when it is set ([`PartnerApi`](crate::PartnerApi)), the Admin API
+/// otherwise.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+pub enum BillingSource {
+    /// `currentAppInstallation.activeSubscriptions` of the Admin API: the
+    /// subscriptions of the Billing API, and of Shopify App Pricing for the
+    /// apps enrolled before April 2026. Asked at each check.
+    AdminApi,
+    /// `activeSubscription` of the Partner API: the subscriptions of Shopify
+    /// App Pricing. Kept per shop for the `plan_ttl` of the Partner API.
+    PartnerApi,
+}
+
+/// A plan a shop has, read from the [`BillingSource`] of the application.
+/// Serialized as `{ "name", "handle", "source", "subscription" }`.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Plan {
+    /// The name of the plan: the `name` of the subscription on the Admin
+    /// API; the `description` of the item of the plan on the Partner API,
+    /// else its handle.
+    pub name: String,
+    /// The handle of the plan: the `planHandle` of the recurring line on the
+    /// Admin API, the `handle` of the item of the plan on the Partner API.
+    pub handle: Option<String>,
+    /// The subscription, as its source gives it.
+    #[serde(flatten)]
+    pub subscription: PlanSubscription,
+}
+
+/// The subscription of a [`Plan`], as its source gives it.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(tag = "source", content = "subscription", rename_all = "camelCase")]
+pub enum PlanSubscription {
+    /// An active subscription of `currentAppInstallation.activeSubscriptions`.
+    AdminApi(AppSubscription),
+    /// The `activeSubscription` of the Partner API.
+    PartnerApi(AppPricingSubscription),
+}
+
+impl Plan {
+    /// Whether it is the plan named `name`: by its handle or by its name.
+    pub fn is_named(&self, name: &str) -> bool {
+        self.handle.as_deref() == Some(name) || self.name == name
+    }
+
+    /// Where it was read.
+    pub fn source(&self) -> BillingSource {
+        match self.subscription {
+            PlanSubscription::AdminApi(_) => BillingSource::AdminApi,
+            PlanSubscription::PartnerApi(_) => BillingSource::PartnerApi,
+        }
+    }
+}
+
+impl From<AppSubscription> for Plan {
+    fn from(subscription: AppSubscription) -> Self {
+        Self {
+            name: subscription.name.clone(),
+            handle: subscription.plan_handle().map(str::to_string),
+            subscription: PlanSubscription::AdminApi(subscription),
+        }
+    }
+}
+
+impl From<AppPricingSubscription> for Plan {
+    fn from(subscription: AppPricingSubscription) -> Self {
+        let item = subscription.plan_item();
+        let handle = item.and_then(|item| item.handle.clone());
+        let name = item
+            .and_then(|item| item.description.clone())
+            .or_else(|| handle.clone())
+            .unwrap_or_default();
+        Self {
+            name,
+            handle,
+            subscription: PlanSubscription::PartnerApi(subscription),
+        }
+    }
+}
+
+/// The plans a shop has now, read from the [`BillingSource`] of the
+/// application: the active subscriptions of the Admin API, or the one of the
+/// Partner API.
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct ActivePlans(pub Vec<Plan>);
+
+impl ActivePlans {
+    /// The plan among `plans`, each the handle of a plan or its name, that
+    /// the shop has; any plan when `plans` is empty. `None` when it has none
+    /// of them.
+    pub fn plan(&self, plans: &[&str]) -> Option<&Plan> {
+        self.0
+            .iter()
+            .find(|plan| plans.is_empty() || plans.iter().any(|name| plan.is_named(name)))
+    }
+
+    /// Whether the shop has one of `plans`, or any plan when `plans` is empty.
+    pub fn has_plan(&self, plans: &[&str]) -> bool {
+        self.plan(plans).is_some()
+    }
+
+    pub fn into_vec(self) -> Vec<Plan> {
+        self.0
+    }
+
+    /// The active ones of `subscriptions`.
+    fn of_admin_api(subscriptions: ActiveSubscriptions) -> Self {
+        Self(
+            subscriptions
+                .into_iter()
+                .filter(AppSubscription::is_active)
+                .map(Plan::from)
+                .collect(),
+        )
+    }
+
+    fn of_partner_api(subscription: Option<AppPricingSubscription>) -> Self {
+        Self(subscription.map(Plan::from).into_iter().collect())
+    }
+}
+
+impl std::ops::Deref for ActivePlans {
+    type Target = [Plan];
+
+    fn deref(&self) -> &[Plan] {
+        &self.0
+    }
+}
+
+impl IntoIterator for ActivePlans {
+    type Item = Plan;
+    type IntoIter = std::vec::IntoIter<Plan>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.into_iter()
+    }
+}
+
 /// What Shopify answers for the line of a subscription, before it is read.
 #[derive(Deserialize)]
 struct LineItemData {
@@ -382,9 +552,12 @@ pub(crate) fn active_subscriptions_data(subscriptions: &[AppSubscription]) -> Va
 
 impl ShopifyClient {
     /// The subscriptions of the shop to the app that are active:
-    /// `currentAppInstallation.activeSubscriptions`, with their status, their
-    /// trial and their lines. One request to the Admin API, which needs no
-    /// access scope; nothing is kept between two calls.
+    /// `currentAppInstallation.activeSubscriptions` of the Admin API, with
+    /// their status, their trial and their lines, whatever the
+    /// [`BillingSource`] of the application. One request, which needs no
+    /// access scope; nothing is kept between two calls. Prefer
+    /// [`active_plans`](Self::active_plans), which reads the source of the
+    /// application.
     ///
     /// ```no_run
     /// # async fn example(ctx: openshop::FlowContext) -> openshop::Result<()> {
@@ -398,6 +571,75 @@ impl ShopifyClient {
     pub async fn active_subscriptions(&self) -> anyhow::Result<ActiveSubscriptions> {
         read_active_subscriptions(self.graphql(ACTIVE_SUBSCRIPTIONS, ()).await?)
     }
+
+    /// The plans the shop has now, read from the [`BillingSource`] of the
+    /// application:
+    ///
+    /// - the Admin API: its active subscriptions, one request at each call;
+    /// - the Partner API: its `activeSubscription`, kept for the `plan_ttl`
+    ///   of the [Partner API](crate::PartnerApi). The first call for a shop
+    ///   also reads the GIDs of the app and of the shop from the Admin API,
+    ///   once per process.
+    ///
+    /// ```no_run
+    /// # async fn example(ctx: openshop::FlowContext) -> openshop::Result<()> {
+    /// if let Some(plan) = ctx.shopify.active_plans().await?.plan(&["pro"]) {
+    ///     ctx.logger.info(format!("On {}", plan.name));
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn active_plans(&self) -> anyhow::Result<ActivePlans> {
+        self.plans_passing(|_| true).await
+    }
+
+    /// [`active_plans`](Self::active_plans), asking the Partner API again
+    /// unless its last answer is younger than [`MIN_REFRESH`]: for the
+    /// welcome link of a plan the server serves itself, or after the
+    /// merchant was sent to the plans. The Admin API is asked at each call
+    /// anyway.
+    pub async fn refresh_plans(&self) -> anyhow::Result<ActivePlans> {
+        self.plans_passing(|_| false).await
+    }
+
+    /// The plans of the shop, from the source of the application. A kept
+    /// answer of the Partner API that `passes` is used until it is
+    /// `plan_ttl` old; one that does not, until it is [`MIN_REFRESH`] old.
+    pub(crate) async fn plans_passing(&self, passes: impl Fn(&ActivePlans) -> bool) -> anyhow::Result<ActivePlans> {
+        let Some(partner) = self.app().partner_api() else {
+            return Ok(ActivePlans::of_admin_api(self.active_subscriptions().await?));
+        };
+        let shop = self.domain()?;
+        let entry = self.app().plans().entry(&self.shopify_app, &shop);
+        let mut entry = entry.lock().await;
+        let asked_at = Instant::now();
+        if let Some(answer) = &entry.answer {
+            let plans = ActivePlans::of_partner_api(answer.subscription.clone());
+            if answer.serves(asked_at, partner.plan_ttl(), passes(&plans)) {
+                return Ok(plans);
+            }
+        }
+        let ids = match &entry.ids {
+            Some(ids) => ids.clone(),
+            None => {
+                let ids = partner::read_partner_ids(self.graphql(partner::PARTNER_IDS, ()).await?)?;
+                entry.ids = Some(ids.clone());
+                ids
+            }
+        };
+        let data = partner
+            .graphql(
+                partner::PARTNER_SUBSCRIPTION,
+                json!({ "appId": ids.app, "shopId": ids.shop }),
+            )
+            .await?;
+        let subscription = partner::read_partner_subscription(data)?;
+        entry.answer = (!partner.plan_ttl().is_zero()).then(|| cache::Answer {
+            asked_at,
+            subscription: subscription.clone(),
+        });
+        Ok(ActivePlans::of_partner_api(subscription))
+    }
 }
 
 /// The plan selection page Shopify hosts for the app, for the shop of
@@ -406,29 +648,33 @@ impl ShopifyClient {
 /// with an `admin_origin`,
 /// `{admin_origin}/admin/charges/{app_handle}/pricing_plans?shop={shop}`. For
 /// a link the server writes, or a redirect of the top window.
-pub fn pricing_url(scope: &impl ShopScope) -> String {
-    scope
+///
+/// Fails when the `shopify.app.toml` of the app has no `handle`: Shopify
+/// does not take the client ID in this URL, and the error says what to add.
+pub fn pricing_url(scope: &impl ShopScope) -> anyhow::Result<String> {
+    Ok(scope
         .app()
         .shopify_endpoints()
-        .pricing_plans_url(scope.shop(), scope.app_handle())
+        .pricing_plans_url(scope.shop(), scope.app_handle()?))
 }
 
 /// The same page as an App Bridge link of the admin,
 /// `shopify:admin/charges/{app_handle}/pricing_plans`: what a view of an
 /// embedded page opens with `target: "_top"`. The admin it is opened in names
-/// the shop.
-pub fn pricing_link(scope: &impl ShopScope) -> String {
-    format!("shopify:admin/charges/{}/pricing_plans", scope.app_handle())
+/// the shop. Fails as [`pricing_url`] does without a `handle`.
+pub fn pricing_link(scope: &impl ShopScope) -> anyhow::Result<String> {
+    Ok(format!("shopify:admin/charges/{}/pricing_plans", scope.app_handle()?))
 }
 
 /// The error [`require_plan`] answers: `402`, the code [`PLAN_REQUIRED`],
 /// and the pricing page in its details, `pricingUrl`
-/// ([`pricing_url`]) and `pricingLink` ([`pricing_link`]).
-pub fn plan_required(scope: &impl ShopScope, plans: &[&str]) -> AdminPublicError {
-    AdminPublicError::new(PLAN_REQUIRED, plan_required_message(plans))
+/// ([`pricing_url`]) and `pricingLink` ([`pricing_link`]). Fails as they do
+/// without a `handle`.
+pub fn plan_required(scope: &impl ShopScope, plans: &[&str]) -> anyhow::Result<AdminPublicError> {
+    Ok(AdminPublicError::new(PLAN_REQUIRED, plan_required_message(plans))
         .status(402)
-        .detail("pricingUrl", pricing_url(scope))
-        .detail("pricingLink", pricing_link(scope))
+        .detail("pricingUrl", pricing_url(scope)?)
+        .detail("pricingLink", pricing_link(scope)?))
 }
 
 /// What the merchant is told when no plan fits.
@@ -440,20 +686,26 @@ fn plan_required_message(plans: &[&str]) -> String {
     }
 }
 
-/// Guards a loader or an action of an admin page: the active subscription to
-/// one of `plans` (plan names of the Partner Dashboard, or handles of plans),
-/// or to any plan when `plans` is empty. Without one, the error the page
-/// receives is `402 PLAN_REQUIRED` with the pricing page in its `details`
-/// ([`plan_required`]), for the view to send the merchant there.
+/// Guards a loader or an action of an admin page: the plan among `plans`
+/// (handles of plans, or their names) the shop has, or any plan when `plans`
+/// is empty, read from the [`BillingSource`] of the application. Without
+/// one, the error the page receives is `402 PLAN_REQUIRED` with the pricing
+/// page in its `details` ([`plan_required`]), for the view to send the
+/// merchant there.
+///
+/// On the Partner API, a kept answer without the plan is asked again first,
+/// unless it is younger than [`MIN_REFRESH`]: a merchant who just chose the
+/// plan is not sent back to the plans.
 ///
 /// A failure to ask Shopify is an error of the server (`500`), not a missing
 /// plan: a paying merchant is not sent to the pricing page because Shopify
-/// did not answer.
-pub async fn require_plan(ctx: &AdminContext, plans: &[&str]) -> anyhow::Result<AppSubscription> {
-    let subscriptions = ctx.shopify.active_subscriptions().await?;
-    match subscriptions.plan(plans) {
-        Some(subscription) => Ok(subscription.clone()),
-        None => Err(plan_required(ctx, plans).into()),
+/// did not answer. So is a `shopify.app.toml` without a `handle`, which the
+/// pricing page needs.
+pub async fn require_plan(ctx: &AdminContext, plans: &[&str]) -> anyhow::Result<Plan> {
+    let active = ctx.shopify.plans_passing(|active| active.has_plan(plans)).await?;
+    match active.plan(plans) {
+        Some(plan) => Ok(plan.clone()),
+        None => Err(plan_required(ctx, plans)?.into()),
     }
 }
 

@@ -204,6 +204,7 @@ pub(crate) async fn record_uninstall(app: &OpenShop, shopify_app: &str, webhook:
         .execute(app.db())
         .await?;
     app.client_credentials().forget(shopify_app, &shop);
+    app.plans().forget(shopify_app, &shop).await;
     Ok(true)
 }
 

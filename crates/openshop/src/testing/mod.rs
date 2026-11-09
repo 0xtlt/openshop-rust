@@ -14,8 +14,8 @@ mod webhook;
 
 pub use admin::{AdminTestOptions, admin_context};
 pub use context::{
-    IntoTestContext, ProxyClient, ProxyRequestBuilder, ProxyResponse, StartedTestContext, TEST_API_KEY, TestContext,
-    TestOptions,
+    IntoTestContext, ProxyClient, ProxyRequestBuilder, ProxyResponse, StartedTestContext, TEST_API_KEY,
+    TEST_PARTNER_API_TOKEN, TEST_PARTNER_ID, TestContext, TestOptions,
 };
 #[doc(hidden)]
 pub use context::in_crate;
@@ -23,7 +23,7 @@ pub use db::{TestDb, test_database_url};
 #[cfg(test)]
 pub(crate) use db::connect;
 pub use fake::{FakeCall, FakeMethod, FakeProviders, TypedCall, TypedFake};
-pub use shopify::{FakeShopify, GraphqlCall, subscription};
+pub use shopify::{FakeShopify, GraphqlCall, TEST_APP_GID, TEST_SHOP_GID, app_pricing_subscription, subscription};
 pub use transport::{FORM_CONTENT_TYPE, MockTransport, OutboundRequest, OutboundResponse};
 pub use webhook::WebhookRequestBuilder;
 

@@ -78,6 +78,18 @@ async fn is_installed_for_launch(
     is_installed_shop(app, &shopify_app.handle, shop, grant.as_ref()).await
 }
 
+/// A verified launch of the app with `plan_handle` (or `charge_id`) in its
+/// query is the welcome link of a plan the merchant just chose: the plan
+/// kept for the shop is forgotten, so that the next check reads the new one.
+async fn forget_plan_on_welcome(app: &OpenShop, shopify_app: &str, query: &SignedQuery) {
+    if query.get("plan_handle").is_none() && query.get("charge_id").is_none() {
+        return;
+    }
+    if let Some(shop) = query.get("shop").and_then(normalize_shop_domain) {
+        app.plans().forget(shopify_app, &shop).await;
+    }
+}
+
 /// Where the admin UI assets come from.
 #[derive(Debug, Clone, Default)]
 pub enum UiSource {
@@ -465,10 +477,11 @@ pub(crate) async fn serve_ui(
         if !allowed {
             return open_from_shopify_admin(StatusCode::FORBIDDEN, endpoints);
         }
-        let shopify_app = app
-            .apps()
-            .by_signed_query(request.uri().query().unwrap_or_default())
-            .ok()
+        let signed = app.apps().by_signed_query(request.uri().query().unwrap_or_default()).ok();
+        if let Some((shopify_app, query)) = &signed {
+            forget_plan_on_welcome(&app, &shopify_app.handle, query).await;
+        }
+        let shopify_app = signed
             .map(|(shopify_app, _)| shopify_app)
             .or_else(|| app.apps().all().first());
         (
@@ -483,7 +496,7 @@ pub(crate) async fn serve_ui(
             return unauthorized_ui(endpoints);
         };
         match is_installed_for_launch(&app, shopify_app, &shop, &signed).await {
-            Ok(true) => {}
+            Ok(true) => forget_plan_on_welcome(&app, &shopify_app.handle, &signed).await,
             Ok(false) => {
                 // Always name the app, `default` included: with several apps,
                 // `/auth` cannot tell which one to install otherwise.

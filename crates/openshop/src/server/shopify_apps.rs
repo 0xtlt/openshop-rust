@@ -30,8 +30,10 @@ pub struct ResolvedShopifyApp {
     pub handle: String,
     /// The handle of the app on Shopify, which the URLs of the Shopify admin
     /// name it by (`/charges/{app_handle}/pricing_plans`): the `handle` of its
-    /// `shopify.app*.toml`, else its API key, else [`handle`](Self::handle).
-    pub app_handle: String,
+    /// `shopify.app*.toml`. `None` without one: the client ID does not take
+    /// its place, Shopify refuses it there. [`app_handle()`](Self::app_handle)
+    /// says what to do.
+    pub app_handle: Option<String>,
     /// The name of the app, which the admin shows: the `name` of the
     /// `shopify.app*.toml` its `app_handle` is read from, else its
     /// [`handle`](Self::handle) when it is one of `shopify.apps`, else
@@ -63,10 +65,7 @@ impl ResolvedShopifyApp {
         scopes: String,
     ) -> Self {
         let oauth = ShopifyApp::new(&api_key, signing_secret(&api_secret)).with_user_agent(USER_AGENT);
-        let app_handle = toml
-            .and_then(|toml| read_top_level_value(toml, "handle"))
-            .or_else(|| (!api_key.trim().is_empty()).then(|| api_key.clone()))
-            .unwrap_or_else(|| handle.to_string());
+        let app_handle = toml.and_then(|toml| read_top_level_value(toml, "handle"));
         let name = toml
             .and_then(|toml| read_top_level_value(toml, "name"))
             .or_else(|| (handle != DEFAULT_SHOPIFY_APP_HANDLE).then(|| handle.to_string()))
@@ -81,6 +80,29 @@ impl ResolvedShopifyApp {
             scopes,
             oauth,
         }
+    }
+}
+
+impl ResolvedShopifyApp {
+    /// The handle of the app on Shopify, which the pages of the Shopify admin
+    /// name it by, such as the plan selection page. Fails when its
+    /// `shopify.app*.toml` has no `handle`, saying to add it: Shopify does not
+    /// take the client ID there.
+    pub fn app_handle(&self) -> Result<&str> {
+        self.app_handle.as_deref().ok_or_else(|| {
+            let file = if self.api_key.trim().is_empty() {
+                "shopify.app.toml".to_string()
+            } else {
+                format!("the shopify.app*.toml whose client_id is \"{}\"", self.api_key)
+            };
+            anyhow!(
+                "[openshop] The Shopify app \"{}\" has no handle: add `handle = \"<your-app-handle>\"` at the \
+                 top of {file}, next to client_id (`shopify app config link` writes it). The pages of the Shopify \
+                 admin, such as the plan selection page, name the app by its handle, and Shopify does not take \
+                 the client ID there.",
+                self.handle
+            )
+        })
     }
 }
 
@@ -550,13 +572,19 @@ scopes = "read_products,read_orders"
             ..Default::default()
         };
         let app_handle = |api_key: Option<&str>| {
-            ShopifyApps::resolve(None, &env(api_key)).unwrap().all()[0]
-                .app_handle
-                .clone()
+            let apps = ShopifyApps::resolve(None, &env(api_key)).unwrap();
+            let app = &apps.all()[0];
+            app.app_handle().map(str::to_string).unwrap_or_else(|error| error.to_string())
         };
-        // No file: the API key, else the name OpenShop gives the app.
-        assert_eq!(app_handle(Some("prod-key")), "prod-key");
-        assert_eq!(app_handle(None), "default");
+        // No file: no handle, and the error says where to write it.
+        assert_eq!(
+            app_handle(Some("prod-key")),
+            "[openshop] The Shopify app \"default\" has no handle: add `handle = \"<your-app-handle>\"` at the \
+             top of the shopify.app*.toml whose client_id is \"prod-key\", next to client_id (`shopify app config \
+             link` writes it). The pages of the Shopify admin, such as the plan selection page, name the app by \
+             its handle, and Shopify does not take the client ID there."
+        );
+        assert!(app_handle(None).contains("at the top of shopify.app.toml, next to client_id"));
 
         std::fs::write(
             dir.join("shopify.app.toml"),
@@ -572,14 +600,14 @@ scopes = "read_products,read_orders"
         assert_eq!(app_handle(Some("prod-key")), "hide-paypal");
         assert_eq!(app_handle(None), "hide-paypal");
         // The file of the app is the one of its client id.
-        assert_eq!(app_handle(Some("dev-key")), "dev-key");
+        assert!(app_handle(Some("dev-key")).contains("has no handle"));
         std::fs::write(
             dir.join("shopify.app.dev.toml"),
             "client_id = 'dev-key'\nhandle = 'hide-paypal-dev' # linked\n",
         )
         .unwrap();
         assert_eq!(app_handle(Some("dev-key")), "hide-paypal-dev");
-        assert_eq!(app_handle(Some("other-key")), "other-key");
+        assert!(app_handle(Some("other-key")).contains("whose client_id is \"other-key\""));
 
         // An app of `shopify.apps`: the handle of its own file, else as above.
         let config = ShopifyConfig {
@@ -602,9 +630,17 @@ scopes = "read_products,read_orders"
         };
         let apps = ShopifyApps::resolve(Some(&config), &env(None)).unwrap();
         let handle_of = |name: &str| apps.by_handle(Some(name)).unwrap().app_handle.clone();
-        assert_eq!(handle_of("main"), "hide-paypal-dev");
-        assert_eq!(handle_of("keys"), "hide-paypal");
-        assert_eq!(handle_of("other"), "other");
+        assert_eq!(handle_of("main").as_deref(), Some("hide-paypal-dev"));
+        assert_eq!(handle_of("keys").as_deref(), Some("hide-paypal"));
+        assert_eq!(handle_of("other"), None);
+        assert!(
+            apps.by_handle(Some("other"))
+                .unwrap()
+                .app_handle()
+                .unwrap_err()
+                .to_string()
+                .starts_with("[openshop] The Shopify app \"other\" has no handle")
+        );
         std::fs::remove_dir_all(dir).ok();
     }
 

@@ -127,6 +127,7 @@ fn validate_field(field: &Field, path: &str) -> Result<()> {
 pub fn validate_openshop_config(config: &OpenShopConfig) -> Result<()> {
     validate_shopify_config(config.shopify.as_ref())?;
     config.shopify_endpoints.check()?;
+    config.partner_api.check()?;
     assert_positive_duration(config.request_timeout, "request_timeout")?;
     assert_positive_integer(
         config.max_concurrent_requests.map(|requests| requests as u64),
