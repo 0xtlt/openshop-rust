@@ -62,6 +62,50 @@ fn expires_at_from_body(body: &JsonMap) -> Result<Option<DateTime<Utc>>, &'stati
     Ok(Some(Utc::now() + Duration::days(DEFAULT_EXPIRATION_DAYS)))
 }
 
+/// [`expires_at_from_body`], its refusal naming the field it is about.
+fn expiration(body: &JsonMap) -> Result<Option<DateTime<Utc>>, TokenRefusal> {
+    expires_at_from_body(body).map_err(|message| TokenRefusal::Invalid {
+        field: if body.contains_key("expiresAt") { "expiresAt" } else { "expiresInDays" },
+        message: message.to_string(),
+    })
+}
+
+/// Why a token is not created or changed: what the API answers, and what the
+/// page of the admin says.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum TokenRefusal {
+    /// No token of that id for the session's shop and app.
+    NotFound,
+    /// The token is revoked: it cannot be `action`ed (`update`, `rotate`).
+    Revoked(&'static str),
+    /// A field of the request is refused (`name`, `permissions`,
+    /// `expiresInDays` or `expiresAt`), with what is wrong with it.
+    Invalid { field: &'static str, message: String },
+}
+
+impl TokenRefusal {
+    pub(crate) fn status(&self) -> StatusCode {
+        match self {
+            Self::NotFound => StatusCode::NOT_FOUND,
+            Self::Revoked(_) => StatusCode::CONFLICT,
+            Self::Invalid { .. } => StatusCode::BAD_REQUEST,
+        }
+    }
+
+    /// What the API says: `Token not found`, `Cannot rotate a revoked token`, `name is required`.
+    pub(crate) fn message(&self) -> String {
+        match self {
+            Self::NotFound => "Token not found".to_string(),
+            Self::Revoked(action) => format!("Cannot {action} a revoked token"),
+            Self::Invalid { message, .. } => message.clone(),
+        }
+    }
+
+    fn response(&self) -> Response {
+        json_error(self.status(), self.message())
+    }
+}
+
 fn public_token(
     row: &McpToken,
     permissions: &[String],
@@ -115,6 +159,63 @@ async fn permissions_for_tokens(
     Ok(by_token)
 }
 
+/// The `limit` latest audits of each token, newest first.
+async fn recent_audits(
+    app: &OpenShop,
+    session: &ShopSession,
+    token_ids: &[String],
+    limit: i64,
+) -> Result<HashMap<String, Vec<McpAuditLog>>, sqlx::Error> {
+    if token_ids.is_empty() || limit <= 0 {
+        return Ok(HashMap::new());
+    }
+    let audits: Vec<McpAuditLog> = sqlx::query_as(
+        "SELECT * FROM ( \
+           SELECT *, row_number() OVER (PARTITION BY token_id ORDER BY created_at DESC) AS recency \
+           FROM mcp_audit_logs WHERE app_handle = $1 AND shop = $2 AND token_id = ANY($3) \
+         ) recent WHERE recency <= $4 ORDER BY created_at DESC",
+    )
+    .bind(&session.shopify_app)
+    .bind(&session.shop)
+    .bind(token_ids)
+    .bind(limit)
+    .fetch_all(app.db())
+    .await?;
+
+    let mut by_token: HashMap<String, Vec<McpAuditLog>> = HashMap::new();
+    for audit in audits {
+        if let Some(token_id) = audit.token_id.clone() {
+            by_token.entry(token_id).or_default().push(audit);
+        }
+    }
+    Ok(by_token)
+}
+
+/// The tokens of the session's shop and app, newest first, as `GET
+/// /api/mcp/tokens` lists them: each with its permissions, those no longer
+/// declared (`stalePermissions`), and its `audits` latest audits
+/// (`recentAudits`, none for `0`).
+pub(crate) async fn token_items(app: &OpenShop, session: &ShopSession, audits: i64) -> Result<Vec<Value>, sqlx::Error> {
+    let rows: Vec<McpToken> =
+        sqlx::query_as("SELECT * FROM mcp_tokens WHERE app_handle = $1 AND shop = $2 ORDER BY created_at DESC")
+            .bind(&session.shopify_app)
+            .bind(&session.shop)
+            .fetch_all(app.db())
+            .await?;
+    let token_ids: Vec<String> = rows.iter().map(|row| row.token_id.clone()).collect();
+    let permissions = permissions_for_tokens(app, session, &token_ids).await?;
+    let recent = recent_audits(app, session, &token_ids, audits).await?;
+
+    Ok(rows
+        .iter()
+        .map(|row| {
+            let granted = permissions.get(&row.token_id).map(Vec::as_slice).unwrap_or_default();
+            let audits = recent.get(&row.token_id).map(Vec::as_slice).unwrap_or_default();
+            public_token(row, granted, app.mcp_registry(), audits)
+        })
+        .collect())
+}
+
 /// The token row when it belongs to the session's shop and app.
 async fn find_token(app: &OpenShop, session: &ShopSession, id: &str) -> Result<Option<McpToken>, sqlx::Error> {
     let Ok(id) = Uuid::parse_str(id) else {
@@ -128,10 +229,6 @@ async fn find_token(app: &OpenShop, session: &ShopSession, id: &str) -> Result<O
         .await
 }
 
-fn token_not_found() -> Response {
-    json_error(StatusCode::NOT_FOUND, "Token not found")
-}
-
 fn is_revoked(token: &McpToken) -> bool {
     token.status == "revoked" || token.revoked_at.is_some()
 }
@@ -140,12 +237,8 @@ fn is_revoked(token: &McpToken) -> bool {
 /// token: a revocation that lands after the token was read is not undone.
 const NOT_REVOKED: &str = "status <> 'revoked' AND revoked_at IS NULL";
 
-fn revoked_conflict(action: &str) -> Response {
-    json_error(StatusCode::CONFLICT, format!("Cannot {action} a revoked token"))
-}
-
 /// Distinct string permissions from the body; the error names the first unknown one.
-fn selected_permissions(body: &JsonMap, registry: &McpRegistry) -> Result<Vec<String>, String> {
+fn selected_permissions(body: &JsonMap, registry: &McpRegistry) -> Result<Vec<String>, TokenRefusal> {
     let mut permissions: Vec<String> = Vec::new();
     for permission in body
         .get("permissions")
@@ -162,7 +255,10 @@ fn selected_permissions(body: &JsonMap, registry: &McpRegistry) -> Result<Vec<St
         .iter()
         .find(|permission| !registry.permissions.contains_key(*permission))
     {
-        Some(unknown) => Err(format!("Unknown permission \"{unknown}\"")),
+        Some(unknown) => Err(TokenRefusal::Invalid {
+            field: "permissions",
+            message: format!("Unknown permission \"{unknown}\""),
+        }),
         None => Ok(permissions),
     }
 }
@@ -257,42 +353,32 @@ async fn capabilities(State(app): State<OpenShop>) -> Response {
 }
 
 async fn list_tokens(State(app): State<OpenShop>, Extension(session): Extension<ShopSession>) -> ApiResult {
-    let rows: Vec<McpToken> =
-        sqlx::query_as("SELECT * FROM mcp_tokens WHERE app_handle = $1 AND shop = $2 ORDER BY created_at DESC")
-            .bind(&session.shopify_app)
-            .bind(&session.shop)
-            .fetch_all(app.db())
-            .await?;
-    let token_ids: Vec<String> = rows.iter().map(|row| row.token_id.clone()).collect();
-    let permissions = permissions_for_tokens(&app, &session, &token_ids).await?;
-
-    let tokens: Vec<Value> = rows
-        .iter()
-        .map(|row| {
-            let granted = permissions.get(&row.token_id).map(Vec::as_slice).unwrap_or_default();
-            public_token(row, granted, app.mcp_registry(), &[])
-        })
-        .collect();
+    let tokens = token_items(&app, &session, 0).await?;
     Ok(json_response(StatusCode::OK, Value::Array(tokens)))
 }
 
-async fn create_token(
-    State(app): State<OpenShop>,
-    Extension(session): Extension<ShopSession>,
-    body: Bytes,
-) -> ApiResult {
+/// Creates a token from `body`, as `POST /api/mcp/tokens` takes it: `name`,
+/// `permissions`, and `expiresAt` or `expiresInDays` (90 days without
+/// either). The secret, shown once, and the token as the API lists it.
+pub(crate) async fn create_token_for(
+    app: &OpenShop,
+    session: &ShopSession,
+    body: &JsonMap,
+) -> anyhow::Result<Result<(String, Value), TokenRefusal>> {
     let registry = app.mcp_registry();
-    let body = json_object_body(&body);
-    let Some(name) = string_value(&body, "name") else {
-        return Ok(json_error(StatusCode::BAD_REQUEST, "name is required"));
+    let Some(name) = string_value(body, "name") else {
+        return Ok(Err(TokenRefusal::Invalid {
+            field: "name",
+            message: "name is required".to_string(),
+        }));
     };
-    let permissions = match selected_permissions(&body, registry) {
+    let permissions = match selected_permissions(body, registry) {
         Ok(permissions) => permissions,
-        Err(error) => return Ok(json_error(StatusCode::BAD_REQUEST, error)),
+        Err(refused) => return Ok(Err(refused)),
     };
-    let expires_at = match expires_at_from_body(&body) {
+    let expires_at = match expiration(body) {
         Ok(expires_at) => expires_at,
-        Err(error) => return Ok(json_error(StatusCode::BAD_REQUEST, error)),
+        Err(refused) => return Ok(Err(refused)),
     };
     let generated = generate_token(None).await?;
 
@@ -310,13 +396,21 @@ async fn create_token(
     .bind(expires_at)
     .fetch_one(&mut *tx)
     .await?;
-    insert_grants(&mut tx, &session, &generated.token_id, &permissions).await?;
+    insert_grants(&mut tx, session, &generated.token_id, &permissions).await?;
     tx.commit().await?;
 
-    Ok(json_response(
-        StatusCode::CREATED,
-        json!({ "token": generated.token, "item": public_token(&row, &permissions, registry, &[]) }),
-    ))
+    Ok(Ok((generated.token, public_token(&row, &permissions, registry, &[]))))
+}
+
+async fn create_token(
+    State(app): State<OpenShop>,
+    Extension(session): Extension<ShopSession>,
+    body: Bytes,
+) -> ApiResult {
+    Ok(match create_token_for(&app, &session, &json_object_body(&body)).await? {
+        Ok((token, item)) => json_response(StatusCode::CREATED, json!({ "token": token, "item": item })),
+        Err(refused) => refused.response(),
+    })
 }
 
 async fn get_token(
@@ -325,7 +419,7 @@ async fn get_token(
     Path(id): Path<String>,
 ) -> ApiResult {
     let Some(row) = find_token(&app, &session, &id).await? else {
-        return Ok(token_not_found());
+        return Ok(TokenRefusal::NotFound.response());
     };
     let permissions = permissions_for_tokens(&app, &session, std::slice::from_ref(&row.token_id)).await?;
     let audits: Vec<McpAuditLog> = sqlx::query_as(
@@ -345,30 +439,32 @@ async fn get_token(
     ))
 }
 
-async fn update_token(
-    State(app): State<OpenShop>,
-    Extension(session): Extension<ShopSession>,
-    Path(id): Path<String>,
-    body: Bytes,
-) -> ApiResult {
-    let body = json_object_body(&body);
-    let Some(existing) = find_token(&app, &session, &id).await? else {
-        return Ok(token_not_found());
+/// Changes the token `id` as `PATCH /api/mcp/tokens/{id}` does with `body`:
+/// its `name`, its `status` (`active` or `disabled`), its expiration
+/// (`expiresAt` or `expiresInDays`), each when it is given.
+pub(crate) async fn update_token_for(
+    app: &OpenShop,
+    session: &ShopSession,
+    id: &str,
+    body: &JsonMap,
+) -> Result<Result<(), TokenRefusal>, sqlx::Error> {
+    let Some(existing) = find_token(app, session, id).await? else {
+        return Ok(Err(TokenRefusal::NotFound));
     };
     if is_revoked(&existing) {
-        return Ok(revoked_conflict("update"));
+        return Ok(Err(TokenRefusal::Revoked("update")));
     }
 
-    let name = string_value(&body, "name");
+    let name = string_value(body, "name");
     let status = body
         .get("status")
         .and_then(Value::as_str)
         .filter(|status| ["active", "disabled"].contains(status));
     let updates_expiration = body.contains_key("expiresAt") || body.contains_key("expiresInDays");
     let expires_at = if updates_expiration {
-        match expires_at_from_body(&body) {
+        match expiration(body) {
             Ok(expires_at) => expires_at,
-            Err(error) => return Ok(json_error(StatusCode::BAD_REQUEST, error)),
+            Err(refused) => return Ok(Err(refused)),
         }
     } else {
         existing.expires_at
@@ -386,27 +482,40 @@ async fn update_token(
     .execute(app.db())
     .await?;
     if updated.rows_affected() == 0 {
-        return Ok(revoked_conflict("update"));
+        return Ok(Err(TokenRefusal::Revoked("update")));
     }
-    Ok(json_response(StatusCode::OK, json!({ "ok": true })))
+    Ok(Ok(()))
 }
 
-async fn set_permissions(
+async fn update_token(
     State(app): State<OpenShop>,
     Extension(session): Extension<ShopSession>,
     Path(id): Path<String>,
     body: Bytes,
 ) -> ApiResult {
-    let body = json_object_body(&body);
-    let permissions = match selected_permissions(&body, app.mcp_registry()) {
+    Ok(match update_token_for(&app, &session, &id, &json_object_body(&body)).await? {
+        Ok(()) => json_response(StatusCode::OK, json!({ "ok": true })),
+        Err(refused) => refused.response(),
+    })
+}
+
+/// Grants the token `id` the `permissions` of `body` in place of the ones
+/// it had, as `PUT /api/mcp/tokens/{id}/permissions` does.
+pub(crate) async fn set_permissions_for(
+    app: &OpenShop,
+    session: &ShopSession,
+    id: &str,
+    body: &JsonMap,
+) -> Result<Result<(), TokenRefusal>, sqlx::Error> {
+    let permissions = match selected_permissions(body, app.mcp_registry()) {
         Ok(permissions) => permissions,
-        Err(error) => return Ok(json_error(StatusCode::BAD_REQUEST, error)),
+        Err(refused) => return Ok(Err(refused)),
     };
-    let Some(row) = find_token(&app, &session, &id).await? else {
-        return Ok(token_not_found());
+    let Some(row) = find_token(app, session, id).await? else {
+        return Ok(Err(TokenRefusal::NotFound));
     };
     if is_revoked(&row) {
-        return Ok(revoked_conflict("update"));
+        return Ok(Err(TokenRefusal::Revoked("update")));
     }
 
     // The row is locked first: a revocation waits for the grants, or the
@@ -420,7 +529,7 @@ async fn set_permissions(
     .await?;
     if updated.rows_affected() == 0 {
         tx.rollback().await?;
-        return Ok(revoked_conflict("update"));
+        return Ok(Err(TokenRefusal::Revoked("update")));
     }
     sqlx::query("DELETE FROM mcp_permission_grants WHERE app_handle = $1 AND shop = $2 AND token_id = $3")
         .bind(&session.shopify_app)
@@ -428,22 +537,35 @@ async fn set_permissions(
         .bind(&row.token_id)
         .execute(&mut *tx)
         .await?;
-    insert_grants(&mut tx, &session, &row.token_id, &permissions).await?;
+    insert_grants(&mut tx, session, &row.token_id, &permissions).await?;
     tx.commit().await?;
-
-    Ok(json_response(StatusCode::OK, json!({ "ok": true })))
+    Ok(Ok(()))
 }
 
-async fn rotate_token(
+async fn set_permissions(
     State(app): State<OpenShop>,
     Extension(session): Extension<ShopSession>,
     Path(id): Path<String>,
+    body: Bytes,
 ) -> ApiResult {
-    let Some(existing) = find_token(&app, &session, &id).await? else {
-        return Ok(token_not_found());
+    Ok(match set_permissions_for(&app, &session, &id, &json_object_body(&body)).await? {
+        Ok(()) => json_response(StatusCode::OK, json!({ "ok": true })),
+        Err(refused) => refused.response(),
+    })
+}
+
+/// Gives the token `id` a new secret, which is returned, shown once: the
+/// old one stops working, and a disabled token is active again.
+pub(crate) async fn rotate_token_for(
+    app: &OpenShop,
+    session: &ShopSession,
+    id: &str,
+) -> anyhow::Result<Result<String, TokenRefusal>> {
+    let Some(existing) = find_token(app, session, id).await? else {
+        return Ok(Err(TokenRefusal::NotFound));
     };
     if is_revoked(&existing) {
-        return Ok(revoked_conflict("rotate"));
+        return Ok(Err(TokenRefusal::Revoked("rotate")));
     }
     let generated = generate_token(Some(existing.token_id)).await?;
 
@@ -462,15 +584,39 @@ async fn rotate_token(
     .execute(app.db())
     .await?;
     if updated.rows_affected() == 0 {
-        return Ok(match find_token(&app, &session, &id).await? {
-            Some(_) => revoked_conflict("rotate"),
-            None => token_not_found(),
-        });
+        return Ok(Err(match find_token(app, session, id).await? {
+            Some(_) => TokenRefusal::Revoked("rotate"),
+            None => TokenRefusal::NotFound,
+        }));
     }
-    Ok(json_response(
-        StatusCode::OK,
-        json!({ "ok": true, "token": generated.token }),
-    ))
+    Ok(Ok(generated.token))
+}
+
+async fn rotate_token(
+    State(app): State<OpenShop>,
+    Extension(session): Extension<ShopSession>,
+    Path(id): Path<String>,
+) -> ApiResult {
+    Ok(match rotate_token_for(&app, &session, &id).await? {
+        Ok(token) => json_response(StatusCode::OK, json!({ "ok": true, "token": token })),
+        Err(refused) => refused.response(),
+    })
+}
+
+/// Revokes the token `id` for good.
+pub(crate) async fn revoke_token_for(
+    app: &OpenShop,
+    session: &ShopSession,
+    id: &str,
+) -> Result<Result<(), TokenRefusal>, sqlx::Error> {
+    let Some(existing) = find_token(app, session, id).await? else {
+        return Ok(Err(TokenRefusal::NotFound));
+    };
+    sqlx::query("UPDATE mcp_tokens SET status = 'revoked', revoked_at = now(), updated_at = now() WHERE id = $1")
+        .bind(existing.id)
+        .execute(app.db())
+        .await?;
+    Ok(Ok(()))
 }
 
 async fn revoke_token(
@@ -478,15 +624,12 @@ async fn revoke_token(
     Extension(session): Extension<ShopSession>,
     Path(id): Path<String>,
 ) -> ApiResult {
-    let Some(existing) = find_token(&app, &session, &id).await? else {
-        return Ok(token_not_found());
-    };
-    sqlx::query("UPDATE mcp_tokens SET status = 'revoked', revoked_at = now(), updated_at = now() WHERE id = $1")
-        .bind(existing.id)
-        .execute(app.db())
-        .await?;
-    Ok(json_response(StatusCode::OK, json!({ "ok": true })))
+    Ok(match revoke_token_for(&app, &session, &id).await? {
+        Ok(()) => json_response(StatusCode::OK, json!({ "ok": true })),
+        Err(refused) => refused.response(),
+    })
 }
+
 
 pub fn routes() -> Router<OpenShop> {
     Router::new()
