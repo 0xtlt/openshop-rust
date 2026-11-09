@@ -55,6 +55,7 @@ futures.workspace = true
 hex.workspace = true
 hmac.workspace = true
 indexmap.workspace = true
+maud.workspace = true
 mime_guess.workspace = true
 rand.workspace = true
 regex.workspace = true
@@ -80,6 +81,8 @@ uuid.workspace = true
 openshop = { path = ".", features = ["testing", "ui"] }
 # The views of `tests/it/admin_views.rs`.
 leptos = "0.8"
+# The server-rendered views of `tests/it/server_views.rs`: `html!` names `maud`.
+maud.workspace = true
 # The transport that keeps events, for `tests/sentry.rs`.
 sentry = { workspace = true, features = ["test"] }
 tokio = { workspace = true, features = ["io-util", "test-util"] }

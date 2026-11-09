@@ -19,6 +19,7 @@ mod linger;
 pub mod log_query;
 pub mod mcp;
 pub mod ops;
+mod pages;
 pub mod provider_config;
 pub mod proxy;
 mod reload;
@@ -183,7 +184,9 @@ pub(crate) fn create_router(app: &OpenShop, options: ServerOptions, log: bool) -
         let options = ui_options.clone();
         let reload = ui_reload.clone();
         async move {
-            if options.ui.is_enabled() {
+            if matches!(options.ui, UiSource::Server) {
+                pages::serve(state.0, options, reload, request).await
+            } else if options.ui.is_enabled() {
                 static_ui::serve_ui(state, options, reload, request).await
             } else {
                 not_found()
@@ -204,6 +207,14 @@ pub(crate) fn create_router(app: &OpenShop, options: ServerOptions, log: bool) -
         .merge(auth::create_auth_routes())
         .merge(webhooks::create_webhook_routes())
         .merge(api);
+
+    // The admin rendered by the server: its script, and the bounce page
+    // where App Bridge gets a session token for a page loaded without one.
+    if matches!(options.ui, UiSource::Server) {
+        router = router
+            .route(pages::SCRIPT_PATH, get(pages::script))
+            .route(pages::BOUNCE_PATH, get(pages::bounce_page));
+    }
 
     if let Some(served) = reload {
         router = router.route(

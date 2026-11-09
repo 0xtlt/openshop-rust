@@ -23,6 +23,12 @@ use openshop_shared::{
 };
 
 pub use crate::types::{CustomAdminPageAccess, CustomAdminPagesResponse, ResolvedAdminPages};
+
+mod view;
+pub(crate) use view::{fields_to_json, parse_fields, with_outcome};
+#[doc(hidden)]
+pub use view::output;
+pub use view::{ACTION_FIELD, AdminView, Outcome, PageRequest};
 pub use openshop_shared::AdminFunctionKind;
 
 /// The Shopify staff member behind the session token.
@@ -122,7 +128,7 @@ impl AdminFunction {
             let handler = handler.clone();
             async move {
                 let input: T = serde_json::from_value(input)?;
-                Ok(serde_json::to_value(handler(context, input).await?)?)
+                output(handler(context, input).await?)
             }
         })
         .input(InputSchema::of::<T>())
@@ -169,6 +175,9 @@ pub struct AdminPage {
     /// Gate for the page and every page nested under it.
     pub page_access: Option<AdminAuthorize>,
     pub functions: IndexMap<String, AdminFunction>,
+    /// The view the server renders the page with, when it has one: see
+    /// [`AdminPage::view`].
+    pub view: Option<AdminView>,
 }
 
 impl AdminPage {
@@ -178,7 +187,21 @@ impl AdminPage {
             nav: None,
             page_access: None,
             functions: IndexMap::new(),
+            view: None,
         }
+    }
+
+    /// Renders the page on the server: `view` runs the loaders it needs with
+    /// the [`PageRequest`] and returns the HTML of the page, its `<s-page>`.
+    /// The access rules of the page run first. What `#[view] fn(…) -> Markup`
+    /// declares.
+    pub fn view<F, Fut>(mut self, view: F) -> Self
+    where
+        F: Fn(PageRequest) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<maud::Markup>> + Send + 'static,
+    {
+        self.view = Some(Arc::new(move |request| Box::pin(view(request))));
+        self
     }
 
     /// Gives the page an entry in the menu of the admin. A page with a

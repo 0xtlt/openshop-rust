@@ -125,6 +125,9 @@ pub use serde_json::{self, Value, json};
 not_wasm! {
     pub use chrono;
     pub use indexmap::IndexMap;
+    /// What a server-rendered `#[view]` returns, `maud::Markup`, written with
+    /// `maud::html!` (the application depends on `maud`, which `html!` names).
+    pub use maud::{self, Markup};
     pub use sqlx::{self, PgPool};
     pub use tokio_util::sync::CancellationToken;
     /// The `tracing` crate the framework logs with, whose subscriber
@@ -144,7 +147,7 @@ not_wasm! {
 // and the server are made of stays in their modules, and the definitions a
 // block is built from by hand are in `builder`.
 not_wasm! {
-    pub use admin::{AdminActor, AdminContext, AdminPublicError};
+    pub use admin::{AdminActor, AdminContext, AdminPublicError, Outcome};
     pub use app::{OpenShop, OpenShopConfig};
     pub use db::{FlowRun, Installation, LogRow, Model, Record, StepResult};
     pub use declare::{App, InvalidInput};
@@ -196,7 +199,7 @@ pub mod prelude {
     pub use crate::{Context, Result, Value, admin_page, anyhow, app, bail, json};
     not_wasm! {
         pub use crate::{
-            AdminContext, App, Cron, ErrorContext, FlowContext, FunctionConfig, InvalidInput, Liquid, McpConfig,
+            AdminContext, App, Cron, Markup, Outcome, ErrorContext, FlowContext, FunctionConfig, InvalidInput, Liquid, McpConfig,
             McpContext, McpPermission, McpRiskLevel, Model, PartnerApi, ProviderConfig, ProxyContext, PublicError, QueuedRun,
             RetryPolicy, RouteAuthContext, RouteAuthOutcome, RouteContext, RunOutcome, ShopScope, ShopifyEndpoints,
             ShopifyLaunch, Uuid,

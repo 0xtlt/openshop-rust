@@ -46,24 +46,35 @@ pub(crate) async fn shop_middleware(State(app): State<OpenShop>, mut request: Re
     else {
         return json_error(StatusCode::UNAUTHORIZED, "Unauthorized: missing session token");
     };
+    match session_of(&app, &session_token, request.uri().path()).await {
+        Ok(session) => {
+            request.extensions_mut().insert(session);
+            next.run(request).await
+        }
+        Err(reason) => json_error(StatusCode::UNAUTHORIZED, reason),
+    }
+}
 
-    let Some(audience) = read_jwt_audience(&session_token) else {
-        return json_error(StatusCode::UNAUTHORIZED, "Unauthorized: missing token audience");
+/// The session of a staff member a session token vouches for, the shop
+/// installed first when it had no token (best effort). The reason it is
+/// refused otherwise, for the `401` that says so; why a token fails (which
+/// claim, which app) is logged, not given to whoever sent it.
+pub(crate) async fn session_of(app: &OpenShop, session_token: &str, path: &str) -> Result<ShopSession, &'static str> {
+    let Some(audience) = read_jwt_audience(session_token) else {
+        return Err("Unauthorized: missing token audience");
     };
     let verified = app.apps().by_api_key(&audience).and_then(|shopify_app| {
-        let verified = shopify_app.oauth.verify_session_token(&session_token)?;
+        let verified = shopify_app.oauth.verify_session_token(session_token)?;
         Ok((shopify_app.clone(), verified))
     });
     let (shopify_app, verified) = match verified {
         Ok(verified) => verified,
         Err(error) => {
-            // Why a token fails (which claim, which app) is for the logs, not for
-            // whoever sent it.
             logger::warn_with(
                 "[openshop] Session token refused",
-                json!({ "reason": error.to_string(), "path": request.uri().path() }),
+                json!({ "reason": error.to_string(), "path": path }),
             );
-            return json_error(StatusCode::UNAUTHORIZED, "Unauthorized: invalid session token");
+            return Err("Unauthorized: invalid session token");
         }
     };
 
@@ -71,10 +82,7 @@ pub(crate) async fn shop_middleware(State(app): State<OpenShop>, mut request: Re
     // for a customer or an anonymous buyer. The Admin API is for staff sessions only.
     let staff = verified.user_id().unwrap_or_default().to_string();
     if !is_staff_subject(&staff) {
-        return json_error(
-            StatusCode::UNAUTHORIZED,
-            "Unauthorized: session token was not issued to a staff user",
-        );
+        return Err("Unauthorized: session token was not issued to a staff user");
     }
 
     let shop = verified.shop().to_string();
@@ -82,17 +90,16 @@ pub(crate) async fn shop_middleware(State(app): State<OpenShop>, mut request: Re
         request.shop(&shop, &shopify_app.handle);
     });
     // Installation is best-effort: a failed token exchange must not block the request.
-    let _ = ensure_installation(&app, &shopify_app, &shop, &verified).await;
+    let _ = ensure_installation(app, &shopify_app, &shop, &verified).await;
 
-    request.extensions_mut().insert(ShopSession {
+    Ok(ShopSession {
         shop,
         shopify_app: shopify_app.handle,
         actor: AdminActor {
             id: staff,
             session_id: verified.session_id().unwrap_or_default().to_string(),
         },
-    });
-    next.run(request).await
+    })
 }
 
 /// Gives the shop an offline access token when it has none yet, by the

@@ -67,6 +67,45 @@ fn input_type<'a>(function: &'a ImplItemFn, marker: &str) -> syn::Result<Option<
     })
 }
 
+/// Whether a `#[view]` returns `Markup`: the server renders it.
+fn returns_markup(function: &ImplItemFn) -> bool {
+    match &function.sig.output {
+        ReturnType::Type(_, returned) => matches!(
+            &**returned,
+            Type::Path(returned) if returned.path.segments.last().is_some_and(|segment| segment.ident == "Markup")
+        ),
+        ReturnType::Default => false,
+    }
+}
+
+/// The parameters of a server-rendered `#[view]`, `fn(list: List, …) -> Markup`:
+/// each one is a loader of the page, by the name of its function.
+fn server_view_parameters(function: &ImplItemFn) -> syn::Result<Vec<Ident>> {
+    let signature = &function.sig;
+    let refusal = |span: Span| {
+        syn::Error::new(
+            span,
+            "expected `fn(loader: Output, …) -> Markup` for a server-rendered `#[view]`: each parameter is named after a loader of the page",
+        )
+    };
+    if signature.asyncness.is_some() || signature.receiver().is_some() || !signature.generics.params.is_empty() {
+        return Err(refusal(signature.ident.span()));
+    }
+    signature
+        .inputs
+        .iter()
+        .map(|input| match input {
+            FnArg::Typed(typed) => match &*typed.pat {
+                syn::Pat::Ident(pattern) if pattern.by_ref.is_none() && pattern.subpat.is_none() => {
+                    Ok(pattern.ident.clone())
+                }
+                other => Err(refusal(other.span())),
+            },
+            FnArg::Receiver(receiver) => Err(refusal(receiver.span())),
+        })
+        .collect()
+}
+
 /// Refuses a `#[view]` that is not `fn() -> impl IntoView` or
 /// `fn(params: RouteParams) -> impl IntoView`.
 fn check_view(function: &ImplItemFn) -> syn::Result<()> {
@@ -79,7 +118,7 @@ fn check_view(function: &ImplItemFn) -> syn::Result<()> {
     {
         return Err(syn::Error::new(
             signature.ident.span(),
-            "expected `fn() -> impl IntoView` or `fn(params: RouteParams) -> impl IntoView` for `#[view]`",
+            "expected `fn() -> impl IntoView` or `fn(params: RouteParams) -> impl IntoView` for `#[view]`, or `fn(loader: Output, …) -> Markup` for a view the server renders",
         ));
     }
     Ok(())
@@ -116,6 +155,8 @@ struct Reference {
     output: Option<Type>,
     /// Where the function says what it returns.
     returned: Span,
+    /// Its own access rule.
+    authorize: Option<Expr>,
 }
 
 pub fn admin_page(arguments: Arguments, mut item: ItemImpl) -> syn::Result<TokenStream> {
@@ -155,6 +196,8 @@ pub fn admin_page(arguments: Arguments, mut item: ItemImpl) -> syn::Result<Token
 
     let mut access: Option<Ident> = None;
     let mut view: Option<Ident> = None;
+    // The loaders a view the server renders reads, when the view is one.
+    let mut server_view: Option<Vec<Ident>> = None;
     let mut functions = Vec::new();
     let mut references: Vec<Reference> = Vec::new();
     let mut names: Vec<String> = Vec::new();
@@ -178,7 +221,13 @@ pub fn admin_page(arguments: Arguments, mut item: ItemImpl) -> syn::Result<Token
             if view.is_some() {
                 return Err(syn::Error::new(ident.span(), "an admin page has one `#[view]`"));
             }
-            check_view(function)?;
+            if returns_markup(function) {
+                // Rendered by the server: not compiled into the admin UI bundle.
+                server_view = Some(server_view_parameters(function)?);
+                function.attrs.insert(0, on_server);
+            } else {
+                check_view(function)?;
+            }
             view = Some(ident);
             continue;
         }
@@ -225,9 +274,10 @@ pub fn admin_page(arguments: Arguments, mut item: ItemImpl) -> syn::Result<Token
         names.push(name.value());
 
         // Without an input the function answers whatever it is sent.
+        // An `Outcome` it returns is kept for the form that called it.
         let untyped = quote! {
             |ctx: ::openshop::AdminContext, _input: ::openshop::Value| async move {
-                ::openshop::Result::<::openshop::Value>::Ok(::openshop::serde_json::to_value(Self::#ident(ctx).await?)?)
+                ::openshop::admin::output(Self::#ident(ctx).await?)
             }
         };
         let definition = match (marker.as_str(), input.is_some()) {
@@ -238,6 +288,7 @@ pub fn admin_page(arguments: Arguments, mut item: ItemImpl) -> syn::Result<Token
                 quote!(::openshop::builder::AdminFunction::action(::openshop::builder::InputSchema::any(), #untyped))
             }
         };
+        let own_rule = authorize.cloned();
         let authorize = authorize.map(|authorize| quote!(.authorize(#authorize)));
         functions.push(quote!(.function(#name, #definition #authorize)));
         references.push(Reference {
@@ -247,10 +298,48 @@ pub fn admin_page(arguments: Arguments, mut item: ItemImpl) -> syn::Result<Token
             input,
             output,
             returned,
+            authorize: own_rule,
         });
     }
 
     let access = access.map(|access| quote!(.access(Self::#access)));
+    // A view the server renders: the loaders it names, each after the
+    // access rule of its own, then the view, a function of what they return.
+    let server_render = match (&view, &server_view) {
+        (Some(view), Some(parameters)) => {
+            let mut loads = Vec::new();
+            for parameter in parameters {
+                let Some(loader) = references
+                    .iter()
+                    .find(|reference| reference.function == *parameter && reference.kind == "loader")
+                else {
+                    return Err(syn::Error::new(
+                        parameter.span(),
+                        format!(
+                            "`{parameter}` is not a loader of the page: each parameter of a server-rendered `#[view]` is named after a loader, and receives what it returns"
+                        ),
+                    ));
+                };
+                let function = &loader.function;
+                if let Some(authorize) = &loader.authorize {
+                    loads.push(quote!(request.authorize(#authorize).await?;));
+                }
+                let load = if loader.input.is_some() {
+                    quote!(load_with)
+                } else {
+                    quote!(load)
+                };
+                loads.push(quote!(let #parameter = request.#load(Self::#function).await?;));
+            }
+            quote! {
+                .view(|request: ::openshop::admin::PageRequest| async move {
+                    #(#loads)*
+                    ::openshop::Result::<::openshop::Markup>::Ok(Self::#view(#(#parameters),*))
+                })
+            }
+        }
+        _ => TokenStream::new(),
+    };
     // The entry of the page in the menu of the admin.
     let nav = nav.map(|label| quote!(.nav(#label)));
 
@@ -265,7 +354,39 @@ pub fn admin_page(arguments: Arguments, mut item: ItemImpl) -> syn::Result<Token
             "`PATH` is the path of the page, which `#[admin_page]` declares: give this item another name",
         ));
     }
-    if view.is_some() {
+    if view.is_some() && server_view.is_some() {
+        // The forms of the view name their action with its constant:
+        // `input type="hidden" name="_action" value=(Self::SAVE_REVIEW);`.
+        for Reference {
+            function, kind, name, ..
+        } in &references
+        {
+            let constant = constant_ident(function);
+            if constant == "PATH" {
+                return Err(syn::Error::new(
+                    function.span(),
+                    "`PATH` is the path of the page: give the function another name",
+                ));
+            }
+            if let Some(taken) = own.iter().find(|ident| ***ident == constant && ***ident != *function) {
+                return Err(syn::Error::new(
+                    taken.span(),
+                    format!(
+                        "the view of the page names `{function}` with the constant `{constant}`: give this item another name"
+                    ),
+                ));
+            }
+            let doc = format!(
+                "The name of the {kind} `{}`, what a form of the view sends in `_action`.",
+                name.value()
+            );
+            constants.push(quote! {
+                #[doc = #doc]
+                #[allow(dead_code)]
+                pub const #constant: &'static str = #name;
+            });
+        }
+    } else if view.is_some() {
         for reference in &references {
             let Reference {
                 function,
@@ -274,6 +395,7 @@ pub fn admin_page(arguments: Arguments, mut item: ItemImpl) -> syn::Result<Token
                 input,
                 output,
                 returned,
+                ..
             } = reference;
             let constant = constant_ident(function);
             if constant == "PATH" {
@@ -313,6 +435,13 @@ pub fn admin_page(arguments: Arguments, mut item: ItemImpl) -> syn::Result<Token
     // error about what the view is given points at too.
     let openshop = quote!(::openshop);
     let page_view = match &view {
+        // A view the server renders: the names of the functions, for its forms.
+        Some(_) if server_view.is_some() => quote! {
+            #[cfg(not(target_arch = "wasm32"))]
+            impl #self_type {
+                #(#constants)*
+            }
+        },
         // Refused with one message when the application has not enabled the feature `ui`.
         Some(view) => quote_spanned! {view.span()=>
             #openshop::__view! {
@@ -332,7 +461,7 @@ pub fn admin_page(arguments: Arguments, mut item: ItemImpl) -> syn::Result<Token
     let declared = declared(
         &self_type,
         "AdminPage",
-        quote!(app.admin_page(::openshop::builder::AdminPage::new(Self::PATH) #nav #access #(#functions)*)),
+        quote!(app.admin_page(::openshop::builder::AdminPage::new(Self::PATH) #nav #access #(#functions)* #server_render)),
     );
 
     Ok(quote! {
@@ -398,7 +527,7 @@ mod tests {
             "impl :: openshop :: declare :: Declared for ReviewsPage { type Kind = :: openshop :: declare :: kind :: AdminPage ;",
             "app . admin_page (:: openshop :: builder :: AdminPage :: new (Self :: PATH) . access (Self :: staff)",
             ". function (\"listReviews\" , :: openshop :: builder :: AdminFunction :: loader (",
-            ":: openshop :: serde_json :: to_value (Self :: list_reviews (ctx) . await ?) ?",
+            ":: openshop :: admin :: output (Self :: list_reviews (ctx) . await ?)",
             ". function (\"find\" , :: openshop :: builder :: AdminFunction :: typed_loader (Self :: find_review))",
             ". function (\"saveReview\" , :: openshop :: builder :: AdminFunction :: typed_action (Self :: save_review) . authorize (Self :: staff))",
             ". function (\"refresh\" , :: openshop :: builder :: AdminFunction :: action (:: openshop :: builder :: InputSchema :: any () ,",
@@ -460,18 +589,82 @@ mod tests {
     }
 
     #[test]
+    fn a_view_that_returns_markup_is_rendered_by_the_server() {
+        let generated = admin_page(
+            parse_quote!("/"),
+            parse_quote! {
+                impl HomePage {
+                    #[loader]
+                    async fn home(ctx: AdminContext) -> Result<Home> { todo!() }
+
+                    #[loader(authorize = Self::staff)]
+                    async fn filter(ctx: AdminContext, input: Filter) -> Result<Vec<Row>> { todo!() }
+
+                    #[action(authorize = openshop::billing::any_plan)]
+                    async fn set_hidden(ctx: AdminContext, input: SetHidden) -> Result<Outcome> { todo!() }
+
+                    #[view]
+                    fn view(home: Home, filter: Vec<Row>) -> Markup { todo!() }
+                }
+            },
+        )
+        .unwrap()
+        .to_string();
+
+        for expected in [
+            // The view is the server's, as the functions it calls.
+            "# [cfg (not (target_arch = \"wasm32\"))] fn view (home : Home , filter : Vec < Row >) -> Markup",
+            // Each parameter is a loader, run with its own rule, its input read from the query.
+            ". view (| request : :: openshop :: admin :: PageRequest | async move { let home = request . load (Self :: home) . await ? ; request . authorize (Self :: staff) . await ? ; let filter = request . load_with (Self :: filter) . await ? ; :: openshop :: Result :: < :: openshop :: Markup > :: Ok (Self :: view (home , filter)) })",
+            // The forms name an action by its constant.
+            "pub const SET_HIDDEN : & 'static str = \"setHidden\" ;",
+        ] {
+            assert!(generated.contains(expected), "missing `{expected}` in:\n{generated}");
+        }
+        // Nothing of it is for the admin UI bundle.
+        assert!(!generated.contains("__view"), "{generated}");
+        assert!(!generated.contains("PageView"), "{generated}");
+    }
+
+    #[test]
+    fn a_server_view_reads_loaders_only() {
+        assert_eq!(
+            refusal(parse_quote! { impl P {
+                #[loader] async fn list(ctx: AdminContext) -> Result<String> { todo!() }
+                #[view] fn view(lists: String) -> Markup { todo!() }
+            } }),
+            "`lists` is not a loader of the page: each parameter of a server-rendered `#[view]` is named after a loader, and receives what it returns"
+        );
+        assert_eq!(
+            refusal(parse_quote! { impl P {
+                #[action] async fn save(ctx: AdminContext) -> Result<String> { todo!() }
+                #[view] fn view(save: String) -> Markup { todo!() }
+            } }),
+            "`save` is not a loader of the page: each parameter of a server-rendered `#[view]` is named after a loader, and receives what it returns"
+        );
+        assert_eq!(
+            refusal(parse_quote! { impl P { #[view] async fn view() -> Markup { todo!() } } }),
+            "expected `fn(loader: Output, …) -> Markup` for a server-rendered `#[view]`: each parameter is named after a loader of the page"
+        );
+        assert_eq!(
+            refusal(parse_quote! { impl P { #[view] fn view((a, b): (u8, u8)) -> maud::Markup { todo!() } } }),
+            "expected `fn(loader: Output, …) -> Markup` for a server-rendered `#[view]`: each parameter is named after a loader of the page"
+        );
+    }
+
+    #[test]
     fn refuses_views_a_page_cannot_show() {
         assert_eq!(
             refusal(parse_quote! { impl P { #[view] async fn view() -> impl IntoView { } } }),
-            "expected `fn() -> impl IntoView` or `fn(params: RouteParams) -> impl IntoView` for `#[view]`"
+            "expected `fn() -> impl IntoView` or `fn(params: RouteParams) -> impl IntoView` for `#[view]`, or `fn(loader: Output, …) -> Markup` for a view the server renders"
         );
         assert_eq!(
             refusal(parse_quote! { impl P { #[view] fn view(params: RouteParams, other: u8) -> impl IntoView { } } }),
-            "expected `fn() -> impl IntoView` or `fn(params: RouteParams) -> impl IntoView` for `#[view]`"
+            "expected `fn() -> impl IntoView` or `fn(params: RouteParams) -> impl IntoView` for `#[view]`, or `fn(loader: Output, …) -> Markup` for a view the server renders"
         );
         assert_eq!(
             refusal(parse_quote! { impl P { #[view] fn view() { } } }),
-            "expected `fn() -> impl IntoView` or `fn(params: RouteParams) -> impl IntoView` for `#[view]`"
+            "expected `fn() -> impl IntoView` or `fn(params: RouteParams) -> impl IntoView` for `#[view]`, or `fn(loader: Output, …) -> Markup` for a view the server renders"
         );
         assert_eq!(
             refusal(parse_quote! { impl P {

@@ -37,6 +37,7 @@ mod proxy_routes;
 mod records;
 mod security;
 mod server_limits;
+mod server_pages;
 mod server_routes;
 mod shopify_endpoints;
 mod static_ui;

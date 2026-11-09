@@ -9,9 +9,13 @@ use crate::engine::Scheduler;
 use crate::runtime::RuntimeEnv;
 use crate::server::{ServerOptions, UiSource, listen};
 
-/// The admin UI to serve: `OPENSHOP_UI_DIR`, then the bundle set on the
-/// configuration, then the one built into the framework.
+/// The admin UI to serve: the admin rendered by the server with
+/// `OPENSHOP_UI=server` (experimental), else `OPENSHOP_UI_DIR`, then the
+/// bundle set on the configuration, then the one built into the framework.
 pub(crate) fn ui_source(config: &OpenShopConfig) -> UiSource {
+    if std::env::var("OPENSHOP_UI").is_ok_and(|ui| ui == "server") {
+        return UiSource::Server;
+    }
     match std::env::var_os("OPENSHOP_UI_DIR").filter(|directory| !directory.is_empty()) {
         Some(directory) => UiSource::Dir(directory.into()),
         None => config.admin_ui.clone().unwrap_or(UiSource::Embedded),
