@@ -3,14 +3,17 @@ use std::str::FromStr;
 use std::time::{Duration, Instant};
 
 use crate::common::{LogCapture, create_config, noop_flow};
-use openshop::billing::{self, ACTIVE_SUBSCRIPTIONS_OPERATION, AppSubscription, SubscriptionStatus};
+use openshop::billing::{
+    self, ACTIVE_SUBSCRIPTIONS_OPERATION, AppSubscription, BillingSource, PARTNER_IDS_OPERATION,
+    PARTNER_SUBSCRIPTION_OPERATION, PlanSubscription, SubscriptionStatus,
+};
 use openshop::builder::Flow;
 use openshop::shopify::RetryPolicy;
 use openshop::testing::{
-    AdminTestOptions, MockTransport, TEST_API_KEY, TestContext, TestDb, TestOptions, admin_context, in_crate,
-    subscription,
+    AdminTestOptions, MockTransport, TEST_API_KEY, TEST_APP_GID, TEST_PARTNER_API_TOKEN, TEST_SHOP_GID, TestContext,
+    TestDb, TestOptions, admin_context, app_pricing_subscription, in_crate, subscription,
 };
-use openshop::{FlowContext, OpenShopConfig, RunOutcome, ShopScope, json};
+use openshop::{FlowContext, OpenShopConfig, PartnerApi, RunOutcome, ShopScope, json};
 use sqlx::postgres::PgConnectOptions;
 use sqlx::{Connection, PgConnection};
 
@@ -224,14 +227,30 @@ async fn token_request(ctx: &TestContext) -> u16 {
 
 #[tokio::test]
 async fn a_plan_is_given_to_the_billing_of_a_test_by_name() {
-    let ctx = installed(OpenShopConfig::builder().build().unwrap()).await;
+    // The handle the pricing page of the error names the app by.
+    let dir = project(TEST_API_KEY);
+    let options = TestOptions {
+        cwd: Some(dir.clone()),
+        ..TestOptions::installed()
+    };
+    let ctx = TestContext::with_options(OpenShopConfig::builder().build().unwrap(), options)
+        .await
+        .unwrap();
+    assert_eq!(ctx.app.billing_source(), BillingSource::AdminApi);
     let page = || admin_context(&ctx.app, AdminTestOptions::default());
 
     ctx.shopify.active_subscriptions([subscription("Monthly")]);
     let plan = billing::require_plan(&page().await.unwrap(), &["Monthly"])
         .await
         .unwrap();
-    assert_eq!((plan.name.as_str(), plan.is_active()), ("Monthly", true));
+    assert_eq!(
+        (plan.name.as_str(), plan.source()),
+        ("Monthly", BillingSource::AdminApi)
+    );
+    let PlanSubscription::AdminApi(read) = &plan.subscription else {
+        panic!("a subscription of the Admin API");
+    };
+    assert!(read.is_active());
 
     ctx.shopify.active_subscriptions([AppSubscription {
         status: SubscriptionStatus::Frozen,
@@ -243,6 +262,79 @@ async fn a_plan_is_given_to_the_billing_of_a_test_by_name() {
         .expect("a public error");
     assert_eq!((error.code.as_str(), error.status), (billing::PLAN_REQUIRED, 402));
     ctx.shutdown().await.unwrap();
+    std::fs::remove_dir_all(dir).ok();
+}
+
+#[tokio::test]
+async fn a_plan_of_the_partner_api_is_given_to_the_billing_of_a_test() {
+    let dir = project(TEST_API_KEY);
+    let options = TestOptions {
+        cwd: Some(dir.clone()),
+        // A Partner ID, and no token: the test gives its own.
+        partner_api: PartnerApi::new().partner_id("7438846"),
+        ..TestOptions::installed()
+    };
+    let ctx = TestContext::with_options(OpenShopConfig::builder().build().unwrap(), options)
+        .await
+        .unwrap();
+    assert_eq!(ctx.app.billing_source(), BillingSource::PartnerApi);
+    let page = || admin_context(&ctx.app, AdminTestOptions::default());
+
+    ctx.shopify.active_subscription(app_pricing_subscription("pro"));
+    let plan = billing::require_plan(&page().await.unwrap(), &["pro"]).await.unwrap();
+    assert_eq!(
+        (plan.name.as_str(), plan.handle.as_deref(), plan.source()),
+        ("pro", Some("pro"), BillingSource::PartnerApi)
+    );
+    // The GIDs from the Admin API, then the plan from the Partner API, with its token.
+    assert_eq!(
+        ctx.shopify.operations(),
+        [PARTNER_IDS_OPERATION, PARTNER_SUBSCRIPTION_OPERATION]
+    );
+    let ids = &ctx.shopify.calls_to(PARTNER_IDS_OPERATION)[0];
+    assert!(
+        ids.url.starts_with("https://test.myshopify.com/admin/api/"),
+        "{}",
+        ids.url
+    );
+    let call = &ctx.shopify.calls_to(PARTNER_SUBSCRIPTION_OPERATION)[0];
+    assert_eq!(
+        call.url,
+        "https://partners.shopify.com/7438846/api/2026-10/graphql.json"
+    );
+    assert_eq!(
+        call.variables,
+        json!({ "appId": TEST_APP_GID, "shopId": TEST_SHOP_GID })
+    );
+    let request = ctx
+        .transport
+        .requests()
+        .into_iter()
+        .find(|request| request.url == call.url)
+        .unwrap();
+    assert_eq!(request.header("x-shopify-access-token"), Some(TEST_PARTNER_API_TOKEN));
+    assert!(!format!("{request:?}").contains(TEST_PARTNER_API_TOKEN));
+
+    // The plan is kept: the shop is not asked again for a check it passes,
+    // nor, within ten seconds, for one it does not.
+    ctx.shopify.active_subscription(None);
+    assert!(billing::require_plan(&page().await.unwrap(), &[]).await.is_ok());
+    let error = billing::require_plan(&page().await.unwrap(), &["plus"])
+        .await
+        .unwrap_err();
+    let error = error
+        .downcast_ref::<openshop::AdminPublicError>()
+        .expect("a public error");
+    assert_eq!((error.code.as_str(), error.status), (billing::PLAN_REQUIRED, 402));
+    assert_eq!(ctx.shopify.calls_to(PARTNER_SUBSCRIPTION_OPERATION).len(), 1);
+
+    // `refresh_plans` asks again at once, as the welcome link of a plan a
+    // route serves needs; the Admin API is not asked for the GIDs again.
+    assert_eq!(page().await.unwrap().shopify.refresh_plans().await.unwrap().len(), 0);
+    assert_eq!(ctx.shopify.calls_to(PARTNER_SUBSCRIPTION_OPERATION).len(), 2);
+    assert_eq!(ctx.shopify.calls_to(PARTNER_IDS_OPERATION).len(), 1);
+    ctx.shutdown().await.unwrap();
+    std::fs::remove_dir_all(dir).ok();
 }
 
 // ─── The retries of the Shopify client ───────────────────────────────
@@ -336,9 +428,9 @@ async fn the_contexts_of_a_test_are_the_app_of_its_shopify_app_toml() {
         let ctx = installed(config()).await;
         // The app the file describes: its client id, its handle, its name, its scopes.
         assert_eq!(ctx.api_key, "0123456789abcdef0123456789abcdef");
-        assert_eq!(ctx.app_handle(), "hide-paypal");
+        assert_eq!(ctx.app_handle().unwrap(), "hide-paypal");
         assert_eq!(
-            billing::pricing_link(&ctx),
+            billing::pricing_link(&ctx).unwrap(),
             "shopify:admin/charges/hide-paypal/pricing_plans"
         );
         let app = ctx.app.apps().by_handle(Some("default")).unwrap();
@@ -360,7 +452,9 @@ async fn the_contexts_of_a_test_are_the_app_of_its_shopify_app_toml() {
         )
         .await
         .unwrap();
-        assert_eq!((ctx.api_key.as_str(), ctx.app_handle()), ("another-key", "another-key"));
+        // No file of that key: no handle, and no client ID in its place.
+        assert_eq!(ctx.api_key, "another-key");
+        assert!(ctx.app_handle().unwrap_err().to_string().contains("has no handle"));
         assert_eq!(ctx.app.env().cwd, elsewhere);
         ctx.shutdown().await.unwrap();
     })
@@ -377,12 +471,16 @@ async fn the_contexts_of_a_test_are_the_app_of_its_shopify_app_toml() {
     )
     .await
     .unwrap();
-    assert_eq!((ctx.api_key.as_str(), ctx.app_handle()), (TEST_API_KEY, "hide-paypal"));
+    assert_eq!(
+        (ctx.api_key.as_str(), ctx.app_handle().unwrap()),
+        (TEST_API_KEY, "hide-paypal")
+    );
     ctx.shutdown().await.unwrap();
 
     // Outside `#[openshop::test]` and without a `cwd`, no file is read.
     let ctx = installed(config()).await;
-    assert_eq!((ctx.api_key.as_str(), ctx.app_handle()), (TEST_API_KEY, TEST_API_KEY));
+    assert_eq!(ctx.api_key, TEST_API_KEY);
+    assert!(ctx.app_handle().is_err());
     ctx.shutdown().await.unwrap();
     std::fs::remove_dir_all(dir).ok();
     std::fs::remove_dir_all(local).ok();

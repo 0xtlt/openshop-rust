@@ -25,7 +25,7 @@ use crate::runtime::RuntimeEnv;
 use super::proxy_signature;
 use crate::server::shopify_apps::{DEFAULT_SHOPIFY_APP_HANDLE, client_id_in_place_of};
 use crate::server::{ServerHandle, ServerOptions, create_router, serve};
-use crate::shopify::ShopifyEndpoints;
+use crate::shopify::{PartnerApi, ShopifyEndpoints};
 use crate::types::ShopScope;
 
 #[derive(Debug, Clone)]
@@ -174,6 +174,12 @@ impl ProxyClient {
 /// The API key of the options of a test that sets none, [`TestOptions::api_key`].
 pub const TEST_API_KEY: &str = "test-app";
 
+/// The Partner ID of a test whose Partner API has a token and no Partner ID.
+pub const TEST_PARTNER_ID: &str = "1234567";
+
+/// The token of a test whose Partner API has a Partner ID and no token.
+pub const TEST_PARTNER_API_TOKEN: &str = "prtapi_test";
+
 tokio::task_local! {
     /// The directory of the manifest of the crate whose test runs, which
     /// `#[openshop::test]` sets.
@@ -239,6 +245,14 @@ pub struct TestOptions {
     /// the mock transport. The environment variables of the endpoints are not
     /// read in a test.
     pub shopify_endpoints: ShopifyEndpoints,
+    /// The Partner API of the application, field by field over the one its
+    /// configuration sets: with a Partner ID or a token, billing reads the
+    /// plans from the Partner API, which the mock transport answers
+    /// (`ctx.shopify.active_subscription(…)`). The one that is missing is
+    /// [`TEST_PARTNER_ID`] or [`TEST_PARTNER_API_TOKEN`], so that a
+    /// configuration that names its Partner ID and reads its token from the
+    /// environment runs in a test. The environment variables are not read.
+    pub partner_api: PartnerApi,
 }
 
 impl Default for TestOptions {
@@ -258,6 +272,7 @@ impl Default for TestOptions {
             server: ServerOptions::default(),
             transport: None,
             shopify_endpoints: ShopifyEndpoints::new(),
+            partner_api: PartnerApi::new(),
         }
     }
 }
@@ -345,6 +360,17 @@ impl ShopScope for TestContext {
     }
 }
 
+/// `partner_api` with the Partner ID or the token of a test in place of the
+/// one that is missing, when the other is set.
+fn with_test_credentials(partner_api: PartnerApi) -> PartnerApi {
+    if partner_api.partner_id.is_none() && partner_api.token.is_none() {
+        return partner_api;
+    }
+    partner_api.or(PartnerApi::new()
+        .partner_id(TEST_PARTNER_ID)
+        .token(TEST_PARTNER_API_TOKEN))
+}
+
 /// The API key a test runs with: the one of the options, or with
 /// [`TEST_API_KEY`] the `client_id` of the `shopify.app.toml` of `cwd` when
 /// no `shopify.app*.toml` there is the one of `test-app`, so that the file
@@ -383,6 +409,7 @@ impl TestContext {
             config.client_credentials_shop = options.client_credentials_shop.clone();
         }
         config.shopify_endpoints = options.shopify_endpoints.clone().or(config.shopify_endpoints);
+        config.partner_api = with_test_credentials(options.partner_api.clone().or(config.partner_api));
         config.shopify_retry = Some(match &options.shopify_retry {
             Some(policy) => policy.clone(),
             None => without_waits(&config.shopify_retry.clone().unwrap_or_default()),
@@ -406,6 +433,7 @@ impl TestContext {
             development: options.development,
             cwd,
             shopify_endpoints: ShopifyEndpoints::new(),
+            partner_api: PartnerApi::new(),
         };
         let app = OpenShop::with_transport(config, db.clone(), env, transport.clone())?;
 

@@ -1,16 +1,29 @@
-//! `openshop::billing`: the active subscriptions of a shop, the guard of an
-//! admin page that needs a plan, and the pricing page of the app.
+//! `openshop::billing`: the plans of a shop, from the Admin API or the
+//! Partner API, the guard of an admin page that needs a plan, and the pricing
+//! page of the app.
 
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
-use crate::common::{TEST_SHOP, json_body};
-use openshop::billing::{self, SubscriptionStatus};
+use crate::common::{TEST_SECRET, TEST_SHOP, json_body};
+use openshop::billing::{
+    self, BillingSource, PARTNER_IDS_OPERATION, PARTNER_SUBSCRIPTION_OPERATION, SubscriptionStatus,
+};
 use openshop::builder::{AdminFunction, AdminPage, InputSchema, Route};
 use openshop::response;
-use openshop::testing::{MockTransport, TestContext, TestOptions};
-use openshop::{AdminContext, OpenShopConfig, ShopScope, ShopifyEndpoints, Value, json};
+use openshop::server::{ServerOptions, UiSource};
+use openshop::testing::{
+    MockTransport, TEST_APP_GID, TEST_SHOP_GID, TestContext, TestOptions, app_pricing_subscription, sign_query,
+    to_query_string,
+};
+use openshop::{AdminContext, OpenShopConfig, PartnerApi, ShopScope, ShopifyEndpoints, Value, json};
 use openshop_shared::build_admin_function_rpc_url;
 use reqwest::{Method, Response};
+
+/// The Partner ID and the token of the tests of the Partner API, in lsf's shape.
+const PARTNER_ID: &str = "7438846";
+const PARTNER_TOKEN: &str = "prtapi_lsf_d532acaed0aa7474ed8e231cde1d1c84";
 
 /// What Shopify answers to `activeSubscriptions` for a shop with `plans`,
 /// each `(name, status)`.
@@ -47,8 +60,8 @@ fn subscriptions(plans: &[(&str, &str)]) -> Value {
 fn config() -> OpenShopConfig {
     let page = AdminPage::new("/reports")
         .loader("report", |ctx: AdminContext, _input: Value| async move {
-            let subscription = billing::require_plan(&ctx, &["Pro", "Plus"]).await?;
-            Ok(json!({ "plan": subscription.name, "handle": subscription.plan_handle() }))
+            let plan = billing::require_plan(&ctx, &["Pro", "Plus", "pro", "plus"]).await?;
+            Ok(json!({ "plan": plan.name, "handle": plan.handle }))
         })
         .function(
             "export",
@@ -72,18 +85,54 @@ fn config() -> OpenShopConfig {
         .unwrap()
 }
 
-async fn context(
-    transport: std::sync::Arc<MockTransport>,
-    endpoints: ShopifyEndpoints,
-    cwd: Option<PathBuf>,
-) -> TestContext {
-    let options = TestOptions {
+/// A project whose `shopify.app.toml` is the one of the test app, with
+/// `handle` when there is one.
+fn project(handle: Option<&str>) -> PathBuf {
+    let cwd = std::env::temp_dir().join(format!("openshop-billing-{}", openshop::Uuid::new_v4()));
+    std::fs::create_dir_all(&cwd).unwrap();
+    let handle = handle
+        .map(|handle| format!("handle = \"{handle}\"\n"))
+        .unwrap_or_default();
+    std::fs::write(
+        cwd.join("shopify.app.toml"),
+        format!("client_id = \"test-app\"\nname = \"Hide PayPal\"\n{handle}"),
+    )
+    .unwrap();
+    cwd
+}
+
+fn options(transport: Arc<MockTransport>, endpoints: ShopifyEndpoints, cwd: Option<PathBuf>) -> TestOptions {
+    TestOptions {
         shop: TEST_SHOP.to_string(),
+        secret: TEST_SECRET.to_string(),
         access_token: Some("test-access-token".to_string()),
         transport: Some(transport),
         shopify_endpoints: endpoints,
         cwd,
         ..Default::default()
+    }
+}
+
+async fn context(transport: Arc<MockTransport>, endpoints: ShopifyEndpoints, cwd: Option<PathBuf>) -> TestContext {
+    TestContext::with_options(config(), options(transport, endpoints, cwd))
+        .await
+        .unwrap()
+}
+
+/// A context whose plans are read from the Partner API, at lsf's origin,
+/// with the admin UI served for the launches of the app.
+async fn partner_context(transport: Arc<MockTransport>, cwd: PathBuf) -> TestContext {
+    let options = TestOptions {
+        partner_api: PartnerApi::new().partner_id(PARTNER_ID).token(PARTNER_TOKEN),
+        server: ServerOptions {
+            ui: UiSource::Embedded,
+            dev: false,
+        },
+        ..options(
+            transport,
+            ShopifyEndpoints::new().partner_origin("http://localhost:9393"),
+            Some(cwd),
+        )
     };
     TestContext::with_options(config(), options).await.unwrap()
 }
@@ -97,23 +146,43 @@ async fn call(ctx: &TestContext, kind: &str, name: &str) -> Response {
         .unwrap()
 }
 
+/// The status and the body of a call.
+async fn answer(ctx: &TestContext, kind: &str, name: &str) -> (u16, Value) {
+    let response = call(ctx, kind, name).await;
+    (response.status().as_u16(), json_body(response).await)
+}
+
+/// The launch of the app from the admin of the shop, signed, with `extra`
+/// in its query: the welcome link of a plan has `plan_handle`.
+async fn launch(ctx: &TestContext, extra: &[(&str, &str)]) -> Response {
+    let mut params = vec![("host", "YWRtaW4uc2hvcGlmeS5jb20vc3RvcmUvdGVzdA"), ("shop", TEST_SHOP)];
+    params.extend_from_slice(extra);
+    let query = sign_query(&params, TEST_SECRET);
+    ctx.http
+        .get(ctx.url_for(&format!("/welcome?{}", to_query_string(&query))))
+        .send()
+        .await
+        .unwrap()
+}
+
 #[tokio::test]
 async fn a_page_that_needs_a_plan_answers_402_with_the_pricing_page() {
+    let cwd = project(Some("my-app"));
     let transport = MockTransport::new();
     transport.respond_json(subscriptions(&[("Basic", "ACTIVE"), ("Pro", "CANCELLED")]));
-    let ctx = context(transport.clone(), ShopifyEndpoints::new(), None).await;
+    let ctx = context(transport.clone(), ShopifyEndpoints::new(), Some(cwd.clone())).await;
+    assert_eq!(ctx.app.billing_source(), BillingSource::AdminApi);
 
     let response = call(&ctx, "loader", "report").await;
     assert_eq!(response.status(), 402);
     let body = json_body(response).await;
     assert_eq!(body["code"], "PLAN_REQUIRED");
-    assert_eq!(body["error"], "This feature needs the Pro or Plus plan");
-    // Without a `shopify.app.toml`, the app is named by its API key.
+    assert_eq!(body["error"], "This feature needs the Pro, Plus, pro or plus plan");
     assert_eq!(
         body["details"],
         json!({
-            "pricingUrl": "https://admin.shopify.com/store/test-integration/charges/test-app/pricing_plans",
-            "pricingLink": "shopify:admin/charges/test-app/pricing_plans",
+            "pricingUrl": "https://admin.shopify.com/store/test-integration/charges/my-app/pricing_plans",
+            "pricingLink": "shopify:admin/charges/my-app/pricing_plans",
         })
     );
     // One request to the Admin API of the shop, with its token.
@@ -138,11 +207,51 @@ async fn a_page_that_needs_a_plan_answers_402_with_the_pricing_page() {
     let body = json_body(response).await;
     assert_eq!(body["error"], "Choose a plan to use this feature");
 
+    // The Admin API is asked at each check: nothing is kept.
     transport.respond_json(subscriptions(&[("Plus", "ACTIVE")]));
     let response = call(&ctx, "loader", "report").await;
     assert_eq!(response.status(), 200);
     assert_eq!(json_body(response).await, json!({ "plan": "Plus", "handle": "plus" }));
     ctx.shutdown().await.unwrap();
+    std::fs::remove_dir_all(cwd).ok();
+}
+
+#[tokio::test]
+async fn without_a_handle_the_pricing_page_is_an_error_that_says_to_add_it() {
+    let cwd = project(None);
+    let transport = MockTransport::new();
+    transport.respond_json(subscriptions(&[]));
+    let ctx = context(transport.clone(), ShopifyEndpoints::new(), Some(cwd.clone())).await;
+
+    // The client ID does not take the place of the handle.
+    let error = billing::pricing_url(&ctx).unwrap_err().to_string();
+    assert!(
+        error.starts_with(
+            "[openshop] The Shopify app \"default\" has no handle: add `handle = \"<your-app-handle>\"` at the top \
+             of the shopify.app*.toml whose client_id is \"test-app\""
+        ),
+        "{error}"
+    );
+    assert!(billing::pricing_link(&ctx).is_err() && ctx.app_handle().is_err());
+    assert!(billing::plan_required(&ctx, &[]).is_err());
+    // A page without the plan is an error of the server, not a 402 without its pricing page.
+    let (status, body) = answer(&ctx, "loader", "report").await;
+    assert_eq!((status, body["code"].as_str()), (500, Some("INTERNAL_ERROR")));
+    // A route too.
+    let links = ctx
+        .http
+        .get(format!("{}/routes/plans?shop={TEST_SHOP}", ctx.url))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(links.status(), 500);
+    // The other pages of the admin need no handle.
+    assert_eq!(
+        ctx.admin_url("settings/payments"),
+        "https://admin.shopify.com/store/test-integration/settings/payments"
+    );
+    ctx.shutdown().await.unwrap();
+    std::fs::remove_dir_all(cwd).ok();
 }
 
 #[tokio::test]
@@ -164,13 +273,7 @@ async fn a_failure_of_shopify_is_not_a_missing_plan() {
 
 #[tokio::test]
 async fn the_pricing_page_is_at_the_admin_origin_and_names_the_app_by_its_handle() {
-    let cwd = std::env::temp_dir().join(format!("openshop-billing-{}", openshop::Uuid::new_v4()));
-    std::fs::create_dir_all(&cwd).unwrap();
-    std::fs::write(
-        cwd.join("shopify.app.toml"),
-        "client_id = \"test-app\"\nname = \"Hide PayPal\"\nhandle = \"hide-paypal\"\n",
-    )
-    .unwrap();
+    let cwd = project(Some("hide-paypal"));
     let transport = MockTransport::new();
     transport.respond_json(subscriptions(&[]));
     let endpoints = ShopifyEndpoints::new().admin_origin("http://localhost:9393");
@@ -196,9 +299,9 @@ async fn the_pricing_page_is_at_the_admin_origin_and_names_the_app_by_its_handle
 
     // What a context gives for its shop, `shopify_app` unchanged.
     assert_eq!(ctx.shopify_app(), "default");
-    assert_eq!(ctx.app_handle(), "hide-paypal");
+    assert_eq!(ctx.app_handle().unwrap(), "hide-paypal");
     assert_eq!(
-        billing::pricing_url(&ctx),
+        billing::pricing_url(&ctx).unwrap(),
         "http://localhost:9393/admin/charges/hide-paypal/pricing_plans?shop=test-integration.myshopify.com"
     );
     assert_eq!(
@@ -224,14 +327,158 @@ async fn the_pricing_page_is_at_the_admin_origin_and_names_the_app_by_its_handle
 
     // Read from a flow, a webhook or a route the same way.
     transport.respond_json(subscriptions(&[("Pro", "ACTIVE")]));
-    let subscriptions = ctx
-        .app
-        .shopify_client(TEST_SHOP, "default")
-        .active_subscriptions()
-        .await
-        .unwrap();
+    let client = ctx.app.shopify_client(TEST_SHOP, "default");
+    let subscriptions = client.active_subscriptions().await.unwrap();
     assert!(subscriptions.has_plan(&["pro"]));
     assert_eq!(subscriptions[0].status, SubscriptionStatus::Active);
+    let plans = client.active_plans().await.unwrap();
+    assert_eq!(
+        (plans[0].name.as_str(), plans[0].source()),
+        ("Pro", BillingSource::AdminApi)
+    );
+    ctx.shutdown().await.unwrap();
+    std::fs::remove_dir_all(cwd).ok();
+}
+
+#[tokio::test]
+async fn with_the_partner_api_the_plan_is_read_there_and_kept() {
+    let cwd = project(Some("hide-paypal"));
+    let transport = MockTransport::new();
+    let ctx = partner_context(transport.clone(), cwd.clone()).await;
+    assert_eq!(ctx.app.billing_source(), BillingSource::PartnerApi);
+    let partner = ctx.app.partner_api().unwrap();
+    assert_eq!(partner.url(), "http://localhost:9393/7438846/api/2026-10/graphql.json");
+    assert!(!format!("{partner:?}").contains(PARTNER_TOKEN));
+
+    ctx.shopify.active_subscription(app_pricing_subscription("pro"));
+    assert_eq!(
+        answer(&ctx, "loader", "report").await,
+        (200, json!({ "plan": "pro", "handle": "pro" }))
+    );
+    // The GIDs from the Admin API of the shop, then the plan from the Partner
+    // API, at its origin and with its token.
+    assert_eq!(
+        ctx.shopify.operations(),
+        [PARTNER_IDS_OPERATION, PARTNER_SUBSCRIPTION_OPERATION]
+    );
+    let partner_call = &ctx.shopify.calls_to(PARTNER_SUBSCRIPTION_OPERATION)[0];
+    assert_eq!(
+        partner_call.url,
+        "http://localhost:9393/7438846/api/2026-10/graphql.json"
+    );
+    assert_eq!(
+        partner_call.variables,
+        json!({ "appId": TEST_APP_GID, "shopId": TEST_SHOP_GID })
+    );
+    let request = transport.last_request().unwrap();
+    assert_eq!(request.header("X-Shopify-Access-Token"), Some(PARTNER_TOKEN));
+    // Nothing went to `currentAppInstallation.activeSubscriptions`.
+    assert!(transport.requests().iter().all(|request| {
+        !request.body["query"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("activeSubscriptions")
+    }));
+
+    // The answer is kept: the plan ends on Shopify's side, and the shop
+    // keeps it until the answer is five minutes old.
+    ctx.shopify.active_subscription(None);
+    assert_eq!(answer(&ctx, "action", "export").await.0, 200);
+    assert_eq!(answer(&ctx, "loader", "report").await.0, 200);
+    assert_eq!(ctx.shopify.calls_to(PARTNER_SUBSCRIPTION_OPERATION).len(), 1);
+
+    // The welcome link of a plan, a signed launch with `plan_handle`, makes
+    // the next check ask again.
+    let shell = launch(&ctx, &[("plan_handle", "free")]).await;
+    assert_eq!(shell.status(), 200);
+    let (status, body) = answer(&ctx, "loader", "report").await;
+    assert_eq!((status, body["code"].as_str()), (402, Some("PLAN_REQUIRED")));
+    assert_eq!(
+        body["details"]["pricingUrl"],
+        "https://admin.shopify.com/store/test-integration/charges/hide-paypal/pricing_plans"
+    );
+    assert_eq!(ctx.shopify.calls_to(PARTNER_SUBSCRIPTION_OPERATION).len(), 2);
+    // A launch without it does not; nor does a check that fails within ten
+    // seconds of the answer.
+    ctx.shopify.active_subscription(app_pricing_subscription("plus"));
+    assert_eq!(launch(&ctx, &[]).await.status(), 200);
+    assert_eq!(answer(&ctx, "loader", "report").await.0, 402);
+    assert_eq!(ctx.shopify.calls_to(PARTNER_SUBSCRIPTION_OPERATION).len(), 2);
+    // The GIDs were asked once.
+    assert_eq!(ctx.shopify.calls_to(PARTNER_IDS_OPERATION).len(), 1);
+
+    // An uninstall forgets the plan too.
+    let uninstalled = ctx
+        .webhook("app/uninstalled", json!({ "myshopify_domain": TEST_SHOP }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(uninstalled.status(), 200);
+    let plans = ctx
+        .app
+        .shopify_client(TEST_SHOP, "default")
+        .active_plans()
+        .await
+        .unwrap();
+    assert_eq!(
+        plans.plan(&["plus"]).map(|plan| plan.source()),
+        Some(BillingSource::PartnerApi)
+    );
+    assert_eq!(ctx.shopify.calls_to(PARTNER_SUBSCRIPTION_OPERATION).len(), 3);
+    ctx.shutdown().await.unwrap();
+    std::fs::remove_dir_all(cwd).ok();
+}
+
+#[tokio::test]
+async fn a_shop_the_partner_api_does_not_know_is_an_error_and_a_429_is_sent_again() {
+    let cwd = project(Some("hide-paypal"));
+    let transport = MockTransport::new();
+    let ctx = partner_context(transport.clone(), cwd.clone()).await;
+    ctx.shopify
+        .on_with(PARTNER_SUBSCRIPTION_OPERATION, |_| anyhow::bail!("Shop not found"))
+        .on(
+            PARTNER_IDS_OPERATION,
+            json!({ "shop": { "id": "gid://shopify/Shop/9" }, "currentAppInstallation": { "app": { "id": TEST_APP_GID } } }),
+        );
+    // Not a missing plan: an error of the server.
+    let (status, body) = answer(&ctx, "loader", "report").await;
+    assert_eq!((status, body["code"].as_str()), (500, Some("INTERNAL_ERROR")));
+    let error = ctx
+        .app
+        .shopify_client(TEST_SHOP, "default")
+        .active_plans()
+        .await
+        .unwrap_err()
+        .to_string();
+    assert_eq!(error, "[openshop] The Partner API answered with errors: Shop not found");
+    // The GIDs of the test's own answer.
+    assert_eq!(
+        ctx.shopify.calls_to(PARTNER_SUBSCRIPTION_OPERATION)[0].variables["shopId"],
+        "gid://shopify/Shop/9"
+    );
+
+    // Four requests a second: a `429` is sent again, as `shopify_retry` says.
+    ctx.shopify.reset();
+    ctx.shopify.on(
+        PARTNER_IDS_OPERATION,
+        json!({ "shop": { "id": TEST_SHOP_GID }, "currentAppInstallation": { "app": { "id": TEST_APP_GID } } }),
+    );
+    let sent = Arc::new(AtomicUsize::new(0));
+    let counter = sent.clone();
+    transport.respond_with(move |_| {
+        Ok(match counter.fetch_add(1, Ordering::SeqCst) {
+            0 => MockTransport::json(429, json!({ "errors": [{ "message": "Too many requests" }] })),
+            _ => MockTransport::json(200, json!({ "data": { "activeSubscription": null } })),
+        })
+    });
+    let plans = ctx
+        .app
+        .shopify_client(TEST_SHOP, "default")
+        .refresh_plans()
+        .await
+        .unwrap();
+    assert!(plans.is_empty());
+    assert_eq!(sent.load(Ordering::SeqCst), 2);
     ctx.shutdown().await.unwrap();
     std::fs::remove_dir_all(cwd).ok();
 }

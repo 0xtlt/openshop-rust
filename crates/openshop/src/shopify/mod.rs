@@ -1,12 +1,14 @@
-//! Shopify Admin API access, through `shopify_api`.
+//! Shopify Admin API access, through `shopify_api`, and the Partner API.
 
 pub mod client;
 pub(crate) mod client_credentials;
 pub mod endpoints;
+pub mod partner;
 pub(crate) mod token_exchange;
 
 pub use client::ShopifyClient;
 pub use endpoints::ShopifyEndpoints;
+pub use partner::{PartnerApi, PartnerApiClient};
 pub use shopify_api::{ApiVersion, IntoVariable, Operation, Page};
 /// How the Shopify client retries what Shopify did not run: the
 /// [`shopify_retry`](crate::builder::OpenShopBuilder::shopify_retry) setting.

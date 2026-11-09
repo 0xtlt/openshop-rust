@@ -273,6 +273,8 @@ you.
 | `shopify_client(shop, shopify_app)` | `ShopifyClient` of the shop. The access token is read at the first request. |
 | `mcp_registry()` | Core and application MCP permissions, tools, and resources |
 | `shopify_endpoints()` | `&ShopifyEndpoints`: the [Shopify endpoints](../guides/custom-shopify-endpoints.md) in use, each field from the configuration, else from its environment variable, written in full. `None` is Shopify's. |
+| `billing_source()` | `BillingSource`: where billing reads the plans, `PartnerApi` when a Partner ID and a token are set, `AdminApi` otherwise. See [Billing](billing.md#where-the-plan-is-read). |
+| `partner_api()` | `Option<&PartnerApiClient>`: the Partner API, when it is set. `graphql(query, variables)` runs any query of it; `url()`, `partner_id()` and `plan_ttl()` say how it is set. |
 
 In a handler, use `ctx.shopify` and `ctx.connectors`: every context that
 belongs to a shop has them. `connectors` and `shopify_client` are for code
@@ -299,8 +301,8 @@ pub async fn orders_create(ctx: WebhookContext) -> Result<()> {
 `ctx` is any context that belongs to a shop: the context of a flow, of a
 webhook, of an app proxy, of an admin function, of an MCP tool or resource, or
 what `ctx.for_shop(…)` returns in a server route. These implement the
-`ShopScope` trait, which also gives `ctx.app_handle()`, the handle of the app
-on Shopify, and `ctx.admin_url(path)`, a page of the admin of the shop (see
+`ShopScope` trait, which also gives `ctx.app_handle()?`, the handle of the app
+on Shopify (an error without a `handle` in `shopify.app.toml`), and `ctx.admin_url(path)`, a page of the admin of the shop (see
 [Billing](billing.md#the-pricing-page-and-the-pages-of-the-admin)); a
 `RouteContext` gives them for a shop it names, `ctx.app_handle(shop)` and
 `ctx.admin_url(shop, path)`, with no installation needed. The second argument is the input type of the flow, which
@@ -397,7 +399,9 @@ async fn product_title(ctx: &WebhookContext, id: &str) -> Result<Option<String>>
 | `client.graphql(query, variables)` | `variables`: anything that serializes to an object, or `()` for none. Returns Shopify's `data` object as a `Value`. |
 | `client.execute(graphql!(…))` | An operation checked against Shopify's schema at compile time, with typed variables and a typed result. See [Typed GraphQL](graphql.md). |
 | `client.api().await?` | The `shopify_api::Shopify` client of the shop: `paginate`, bulk operations, webhook subscriptions, `execute_response`. |
-| `client.active_subscriptions().await?` | The active subscriptions of the shop to the app, `currentAppInstallation.activeSubscriptions`. See [Billing](billing.md). |
+| `client.active_plans().await?` | The plans of the shop, read from the Partner API when it is set, else from the Admin API. See [Billing](billing.md#the-plans-of-a-shop). |
+| `client.refresh_plans().await?` | The same, asking the Partner API again unless its answer is younger than ten seconds. |
+| `client.active_subscriptions().await?` | The active subscriptions of the shop to the app, `currentAppInstallation.activeSubscriptions` of the Admin API, whatever the source. See [Billing](billing.md). |
 | `client.shop`, `client.shopify_app` | Public fields. |
 
 `graphql()`:

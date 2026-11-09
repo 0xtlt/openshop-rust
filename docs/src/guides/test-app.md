@@ -114,7 +114,9 @@ worker. Shopify requests never leave the process: `ctx.shopify` answers the
 GraphQL operations, and one it does not answer fails with an error that names
 it: ``The test does not answer the Admin API operation `GetRecentOrders` ``.
 `ctx.shopify.active_subscriptions([subscription("Pro")])` answers what the
-[billing](../reference/billing.md) helpers ask; see
+[billing](../reference/billing.md) helpers ask of the Admin API, and
+`ctx.shopify.active_subscription(app_pricing_subscription("pro"))` what they
+ask of the Partner API; see
 [Answer the Admin API](../reference/testing.md#answer-the-admin-api) for the
 rest, and for the operations OpenShop sends of its own.
 

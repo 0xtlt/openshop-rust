@@ -1,7 +1,8 @@
 # Custom Shopify endpoints: simulators, proxies, custom APIs
 
 By default, an OpenShop app talks to Shopify. The Admin API and OAuth of each
-shop are at `https://{shop}`, and the admin UI loads App Bridge and Polaris
+shop are at `https://{shop}`, the Partner API at
+`https://partners.shopify.com`, and the admin UI loads App Bridge and Polaris
 from Shopify's CDN. `ShopifyEndpoints` moves any of them somewhere else:
 
 - a simulator of Shopify, on your machine or in CI, such as
@@ -10,7 +11,7 @@ from Shopify's CDN. `ShopifyEndpoints` moves any of them somewhere else:
 - an API of your own that answers as Shopify's does;
 - your own copy of the App Bridge or Polaris script.
 
-Each endpoint is independent: set one, two or all three. When none is set,
+Each endpoint is independent: set one, several or all four. When none is set,
 nothing changes.
 
 ## The endpoints
@@ -20,14 +21,16 @@ nothing changes.
 | `admin_origin` | `https://{shop}` | The GraphQL Admin API, the token exchange, the code exchange, the client credentials grant and the refresh of every shop. Also the install link that `/auth` sends the browser to, and the redirect at the end of `/auth/callback`, which goes to `{admin_origin}/admin/apps/{client_id}?shop={shop}`, and the pages of the admin the app links to (`ctx.admin_url(path)`, `billing::pricing_url(&ctx)`), `{admin_origin}/admin/{path}?shop={shop}` in place of `https://admin.shopify.com/store/{store}/{path}`. The admin UI may also be framed by this origin (`frame-ancestors`), since a simulator serves its admin there |
 | `app_bridge` | `https://cdn.shopify.com/shopifycloud/app-bridge.js` | The App Bridge script of the admin UI. The tag keeps its `data-api-key`, and the page keeps its `shopify-api-key` meta |
 | `polaris` | `https://cdn.shopify.com/shopifycloud/polaris.js` | The Polaris script of the admin UI, and of the page that tells a visitor where the app opens from. That page's policy allows the script's origin in `script-src`, `style-src`, `font-src` and `connect-src`, where a copy of Polaris loads its styles, font and icons from |
+| `partner_origin` | `https://partners.shopify.com` | The [Partner API](https://shopify.dev/docs/api/partner), where billing reads the plans of the shops when a Partner ID and a token are set ([Billing](../reference/billing.md#the-partner-api)). The path stays Shopify's: `{partner_origin}/{partner_id}/api/2026-10/graphql.json` |
 
 The shop is still the shop. Session tokens are still checked against
 `https://{shop}`, and installations are still stored under the shop's domain.
 One origin can serve every shop, so each request sent to `admin_origin` names
 its shop in `X-Forwarded-Host`, and the install link in its `shop` parameter.
 
-`admin_origin` is `https://host[:port]`, or `http://` to `localhost`,
-`127.0.0.1` or `[::1]`, with no path, query string, fragment or user. A
+`admin_origin` and `partner_origin` are `https://host[:port]`, or `http://` to
+`localhost`, `127.0.0.1` or `[::1]`, with no path, query string, fragment or
+user. A
 trailing `/` is dropped. A script is an absolute `https://` URL, or `http://`
 to the same three hosts, with no user or fragment. Any other value stops the
 application at startup, so that an access token never travels in clear text
@@ -86,6 +89,7 @@ field by field:
    | `SHOPIFY_ADMIN_ORIGIN` | `admin_origin` |
    | `SHOPIFY_APP_BRIDGE_URL` | `app_bridge` |
    | `SHOPIFY_POLARIS_URL` | `polaris` |
+   | `SHOPIFY_PARTNER_ORIGIN` | `partner_origin` |
 
 A field nobody sets is Shopify's. `.shopify_endpoints(…)` merges with the
 calls before it: a field it sets replaces the earlier one, a field it leaves
@@ -98,7 +102,7 @@ When an endpoint is not Shopify's, the process logs one line at startup, with
 where each one comes from:
 
 ```text
-[openshop] Shopify endpoints replaced: Admin API and OAuth at http://localhost:9393 (shopify_endpoints.admin_origin); App Bridge from http://localhost:9393/__lsf/admin/app-bridge.js (shopify_endpoints.app_bridge); Polaris from http://localhost:9393/__lsf/cdn/shopifycloud/polaris.js (SHOPIFY_POLARIS_URL)
+[openshop] Shopify endpoints replaced: Admin API and OAuth at http://localhost:9393 (shopify_endpoints.admin_origin); App Bridge from http://localhost:9393/__lsf/admin/app-bridge.js (shopify_endpoints.app_bridge); Polaris from http://localhost:9393/__lsf/cdn/shopifycloud/polaris.js (SHOPIFY_POLARIS_URL); Partner API at http://localhost:9393 (SHOPIFY_PARTNER_ORIGIN)
 ```
 
 `dev`, `start` and `worker` all use the endpoints. Give every process the same
@@ -129,7 +133,7 @@ whose `uri` is a path (`/webhooks`) goes to `--app-url`.
 
 ### 2. Point the app at lsf
 
-The three endpoints of lsf, at its port:
+The four endpoints of lsf, at its port:
 
 ```rust,ignore
 fn lsf(port: u16) -> ShopifyEndpoints {
@@ -137,6 +141,7 @@ fn lsf(port: u16) -> ShopifyEndpoints {
         .admin_origin(format!("http://localhost:{port}"))
         .app_bridge(format!("http://localhost:{port}/__lsf/admin/app-bridge.js"))
         .polaris(format!("http://localhost:{port}/__lsf/cdn/shopifycloud/polaris.js"))
+        .partner_origin(format!("http://localhost:{port}"))
 }
 
 fn main() -> Result<()> {
@@ -155,7 +160,12 @@ Then `cargo run -- dev --lsf=9393`, or `openshop dev` with the endpoints in
 SHOPIFY_ADMIN_ORIGIN=http://localhost:9393
 SHOPIFY_APP_BRIDGE_URL=http://localhost:9393/__lsf/admin/app-bridge.js
 SHOPIFY_POLARIS_URL=http://localhost:9393/__lsf/cdn/shopifycloud/polaris.js
+SHOPIFY_PARTNER_ORIGIN=http://localhost:9393
 ```
+
+`partner_origin` matters only with a Partner ID and a token (see
+[The Partner API](#the-partner-api-and-pricing) below); without them, billing
+reads the Admin API and nothing goes to the Partner API.
 
 lsf's App Bridge only talks to lsf's admin, and Shopify's only to Shopify's: in
 lsf's admin, Shopify's would never resolve `shopify.idToken()`, and the admin
@@ -169,7 +179,8 @@ icons and fonts, and the admin UI renders without the internet.
 ### 3. Open the app in lsf's admin
 
 Open `http://localhost:9393/admin/apps/<handle>`, where `<handle>` is the
-`handle` of `shopify.app.toml` or its `client_id`. lsf's admin signs the launch
+`handle` of `shopify.app.toml`, or its `client_id` when it has none (the
+pricing page of OpenShop needs the `handle`). lsf's admin signs the launch
 the way Shopify's admin does, and its App Bridge gives the admin UI session
 tokens. The first request of the admin UI exchanges a session token for an
 access token at lsf. After that, flows, crons and webhook handlers use the Admin
@@ -203,14 +214,29 @@ answered.
 shop: lsf revokes its tokens and delivers `app/uninstalled`, which OpenShop
 records ([Uninstallation](../reference/webhooks.md#uninstallation)).
 
-### Pages of the admin and pricing
+### The Partner API and pricing
 
 The pages of Shopify's admin are at the admin origin too, with the shop in the
 query: `ctx.admin_url("settings/payments")` is
 `http://localhost:9393/admin/settings/payments?shop=…`, and
-`billing::pricing_url(&ctx)` lsf's plan selection page,
+`billing::pricing_url(&ctx)?` lsf's plan selection page,
 `http://localhost:9393/admin/charges/<handle>/pricing_plans?shop=…`, where the
-plans lsf is given stand for the ones of the Partner Dashboard. See
+plans lsf is given (`--pricing-plans pricing.toml`) stand for the ones of the
+Partner Dashboard.
+
+lsf serves the Partner API at Shopify's path, on its own origin, with a
+Partner ID and a token of its own. It prints them at start (its `partner:`
+line), and `GET http://localhost:9393/__lsf/admin/partner` gives them as JSON
+(`partnerId`, `token`, `url`). Give them to the app with `partner_origin`:
+
+```bash
+SHOPIFY_PARTNER_ORIGIN=http://localhost:9393
+SHOPIFY_PARTNER_ID=7438846                 # partnerId: the same for a client id at every run
+SHOPIFY_PARTNER_API_TOKEN=prtapi_lsf_…     # token
+```
+
+Billing then reads the plans chosen in lsf's admin from `activeSubscription`,
+as it would from Shopify's. See
 [Charge with managed pricing](charge-with-managed-pricing.md).
 
 ## Tests

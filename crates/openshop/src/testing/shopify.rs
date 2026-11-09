@@ -1,4 +1,5 @@
-//! The Admin API of a test, answered by the name of each GraphQL operation.
+//! The Admin API and the Partner API of a test, answered by the name of each
+//! GraphQL operation.
 
 use std::sync::{Arc, Mutex};
 
@@ -6,10 +7,20 @@ use anyhow::Result;
 use serde_json::{Value, json};
 
 use super::transport::{OutboundRequest, OutboundResponse};
-use crate::billing::{ACTIVE_SUBSCRIPTIONS_OPERATION, AppSubscription, SubscriptionStatus};
+use crate::billing::{
+    ACTIVE_SUBSCRIPTIONS_OPERATION, AppPricingItem, AppPricingPrice, AppPricingSubscription, AppSubscription,
+    FlatRatePrice, PARTNER_IDS_OPERATION, PARTNER_SUBSCRIPTION_OPERATION, SubscriptionStatus,
+};
 use crate::locked;
 
-/// A GraphQL request the application sent to the Admin API.
+/// The app GID a test's Admin API answers with when the test gives a shop
+/// its plan of the Partner API ([`FakeShopify::active_subscription`]).
+pub const TEST_APP_GID: &str = "gid://shopify/App/1";
+
+/// The shop GID that goes with [`TEST_APP_GID`].
+pub const TEST_SHOP_GID: &str = "gid://shopify/Shop/1";
+
+/// A GraphQL request the application sent to the Admin API or the Partner API.
 #[derive(Debug, Clone, PartialEq)]
 pub struct GraphqlCall {
     /// The name of the operation: its `operationName`, else the name its
@@ -20,7 +31,8 @@ pub struct GraphqlCall {
     pub query: String,
     /// Its variables: an object, empty when it has none.
     pub variables: Value,
-    /// The address it was sent to, `…/admin/api/{version}/graphql.json`.
+    /// The address it was sent to, `…/admin/api/{version}/graphql.json`, or
+    /// `…/{partner_id}/api/{version}/graphql.json` for the Partner API.
     pub url: String,
 }
 
@@ -78,8 +90,10 @@ struct State {
     unanswered: Vec<String>,
 }
 
-/// The Admin API of a test: answers each GraphQL operation the application
-/// sends by its name, and records them. `ctx.shopify` of a
+/// The Admin API and the Partner API of a test: answers each GraphQL
+/// operation the application sends by its name, and records them. Both APIs
+/// share the names: an operation of the Partner API is told by its
+/// [`url`](GraphqlCall::url). `ctx.shopify` of a
 /// [`TestContext`](super::TestContext), or [`MockTransport::shopify`](super::MockTransport::shopify).
 ///
 /// ```
@@ -175,6 +189,34 @@ impl FakeShopify {
         )
     }
 
+    /// Answers `OpenShopPartnerSubscription`, the `activeSubscription` the
+    /// [`billing`](crate::billing) helpers read from the Partner API, with
+    /// `subscription`, `None` for a shop without a plan. See
+    /// [`app_pricing_subscription`].
+    ///
+    /// Also answers `OpenShopPartnerIds`, the GIDs of the app and the shop the
+    /// Admin API gives first, with [`TEST_APP_GID`] and [`TEST_SHOP_GID`],
+    /// unless the test answers it itself. The plan of a shop is kept for the
+    /// `plan_ttl` of the Partner API: set `plan_ttl(Duration::ZERO)` in
+    /// [`TestOptions::partner_api`](super::TestOptions::partner_api) for a
+    /// test that changes it.
+    pub fn active_subscription(&self, subscription: impl Into<Option<AppPricingSubscription>>) -> &Self {
+        let answered = locked(&self.state)
+            .answers
+            .iter()
+            .any(|answer| answer.operation == PARTNER_IDS_OPERATION);
+        if !answered {
+            self.on(
+                PARTNER_IDS_OPERATION,
+                crate::billing::partner_ids_data(TEST_APP_GID, TEST_SHOP_GID),
+            );
+        }
+        self.on(
+            PARTNER_SUBSCRIPTION_OPERATION,
+            crate::billing::partner_subscription_data(subscription.into().as_ref()),
+        )
+    }
+
     /// Every GraphQL request sent so far, answered or not, oldest first.
     pub fn calls(&self) -> Vec<GraphqlCall> {
         locked(&self.state).calls.clone()
@@ -259,8 +301,9 @@ impl FakeShopify {
         } else {
             answered.join(", ")
         };
+        let api = if call.url.contains("/admin/api/") { "Admin API" } else { "Partner API" };
         errors_response(&format!(
-            "[openshop] The test does not answer the Admin API operation `{name}`: answer it with \
+            "[openshop] The test does not answer the {api} operation `{name}`: answer it with \
              `ctx.shopify.on(\"{name}\", data)`. Answered: {answered}."
         ))
     }
@@ -318,6 +361,33 @@ pub fn subscription(name: &str) -> AppSubscription {
         created_at: chrono::Utc::now(),
         current_period_end: None,
         line_items: Vec::new(),
+    }
+}
+
+/// A subscription of Shopify App Pricing to the plan `handle`, as the
+/// Partner API's `activeSubscription` gives one: every 30 days, out of its
+/// trial, one item with the handle and a flat rate of `10.00` USD, its
+/// description the handle too. Its fields are public: change what the test
+/// needs, `AppPricingSubscription { trial_ends_at: Some(…), ..app_pricing_subscription("pro") }`.
+pub fn app_pricing_subscription(handle: &str) -> AppPricingSubscription {
+    AppPricingSubscription {
+        billing_period: "EVERY_30_DAYS".to_string(),
+        cancel_at_end_of_cycle: false,
+        trial_ends_at: None,
+        current_billing_cycle: None,
+        items: vec![AppPricingItem {
+            handle: Some(handle.to_string()),
+            description: Some(handle.to_string()),
+            price: AppPricingPrice::FlatRate(FlatRatePrice {
+                active: true,
+                amount: "10.00".to_string(),
+                currency: "USD".to_string(),
+            }),
+            discount: None,
+            usage: None,
+        }],
+        pending_update: None,
+        legacy_subscription_id: None,
     }
 }
 

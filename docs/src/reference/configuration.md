@@ -311,16 +311,46 @@ independent, and `None` is Shopify's:
 | `admin_origin` | `.admin_origin(origin)` | `https://{shop}`, for the Admin API, the token requests, the install link and the redirect after OAuth (`{origin}/admin/apps/{client_id}?shop={shop}`). The admin UI may also be framed by this origin. |
 | `app_bridge` | `.app_bridge(url)` | `https://cdn.shopify.com/shopifycloud/app-bridge.js` in the admin UI |
 | `polaris` | `.polaris(url)` | `https://cdn.shopify.com/shopifycloud/polaris.js` in the admin UI and the page that says where the app opens from |
+| `partner_origin` | `.partner_origin(origin)` | `https://partners.shopify.com`, for the Partner API that billing reads the plans from when a [Partner API](#partner-api) is set |
 
 `ShopifyEndpoints::new()` is Shopify for every field. Each field comes from a
 call at startup (`APP.main_with`), else from the `shopify_endpoints` of `app!`,
-else from `SHOPIFY_ADMIN_ORIGIN`, `SHOPIFY_APP_BRIDGE_URL` or
-`SHOPIFY_POLARIS_URL`, else is Shopify's. `shopify_endpoints` is its own
+else from `SHOPIFY_ADMIN_ORIGIN`, `SHOPIFY_APP_BRIDGE_URL`,
+`SHOPIFY_POLARIS_URL` or `SHOPIFY_PARTNER_ORIGIN`, else is Shopify's. `shopify_endpoints` is its own
 setting: it does not turn on multi-app mode, and every app of a multi-app setup
 uses the same endpoints. `build()` and startup refuse an origin that is not
 `https://host[:port]` or `http://` to `localhost`, `127.0.0.1` or `[::1]`, and
 a script URL that is not absolute `https://` or `http://` to the same hosts.
 See [Custom Shopify endpoints](../guides/custom-shopify-endpoints.md).
+
+### Partner API
+
+`PartnerApi` gives the credentials of the Partner API of the organization
+that owns the app. With them, `openshop::billing` reads the plans of the shops
+from the Partner API's `activeSubscription`, as Shopify App Pricing asks;
+without them, from the Admin API. See
+[Billing](billing.md#where-the-plan-is-read).
+
+| Field | Builder method | Environment variable | Meaning |
+| --- | --- | --- | --- |
+| `partner_id` | `.partner_id(id)` | `SHOPIFY_PARTNER_ID` | The number in the URL of the Partner Dashboard |
+| `token` | `.token(token)` | `SHOPIFY_PARTNER_API_TOKEN` | The access token of a Partner API client of the organization, with the "Manage apps" permission. A secret: never logged, never in an error |
+| `plan_ttl` | `.plan_ttl(duration)` | None | How long the plan of a shop is kept: five minutes by default, `Duration::ZERO` for none. See [The cache](billing.md#the-cache) |
+
+```rust,ignore
+static APP: App = app! {
+    admin_pages: [ReportsPage],
+    partner_api: PartnerApi::new().partner_id("1234567"),
+};
+```
+
+Each field comes from a call at startup
+(`APP.main_with(|app| app.partner_api(…))`), else from the `partner_api` of
+`app!`, else from its environment variable. Set both the Partner ID and the
+token, or neither: startup refuses one without the other, and a Partner ID that
+is not a number. `app.billing_source()` says where the plans are read, and
+`app.partner_api()` returns the client. The requests go to the
+`partner_origin` of the Shopify endpoints.
 
 ## Split the registration
 

@@ -1,6 +1,6 @@
-//! Where an application reaches Shopify: the Admin API and OAuth, and the
-//! scripts its admin UI loads. Shopify's by default; a simulator, a proxy or
-//! an API of one's own when set.
+//! Where an application reaches Shopify: the Admin API and OAuth, the
+//! Partner API, and the scripts its admin UI loads. Shopify's by default; a
+//! simulator, a proxy or an API of one's own when set.
 
 use anyhow::{Result, anyhow};
 use shopify_api::AdminOrigin;
@@ -11,6 +11,11 @@ pub const ADMIN_ORIGIN_VAR: &str = "SHOPIFY_ADMIN_ORIGIN";
 pub const APP_BRIDGE_VAR: &str = "SHOPIFY_APP_BRIDGE_URL";
 /// The variable that sets [`ShopifyEndpoints::polaris`] when the code does not.
 pub const POLARIS_VAR: &str = "SHOPIFY_POLARIS_URL";
+/// The variable that sets [`ShopifyEndpoints::partner_origin`] when the code does not.
+pub const PARTNER_ORIGIN_VAR: &str = "SHOPIFY_PARTNER_ORIGIN";
+
+/// Shopify's Partner API: where its requests go when `partner_origin` is not set.
+pub const SHOPIFY_PARTNER_ORIGIN: &str = "https://partners.shopify.com";
 
 /// Shopify's App Bridge: what the admin UI loads when `app_bridge` is not set.
 pub const SHOPIFY_APP_BRIDGE: &str = "https://cdn.shopify.com/shopifycloud/app-bridge.js";
@@ -34,14 +39,18 @@ pub const SHOPIFY_POLARIS: &str = "https://cdn.shopify.com/shopifycloud/polaris.
 ///   `data-api-key`, and the page its `shopify-api-key` meta.
 /// - [`polaris`](Self::polaris): the Polaris script the admin UI and the pages
 ///   the server renders load, in place of [`SHOPIFY_POLARIS`].
+/// - [`partner_origin`](Self::partner_origin): where the requests to the
+///   Partner API go, in place of [`SHOPIFY_PARTNER_ORIGIN`]: billing reads the
+///   plans of the shops there when the [Partner API](crate::PartnerApi) is set.
+///   The path stays Shopify's, `/{partner_id}/api/{version}/graphql.json`.
 ///
 /// An application sets them in [`app!`](crate::app!) (`shopify_endpoints:
 /// …`), or at startup on the builder ([`App::main_with`](crate::App::main_with)).
 /// A field the code does not set is read from its variable,
-/// `SHOPIFY_ADMIN_ORIGIN`, `SHOPIFY_APP_BRIDGE_URL` or `SHOPIFY_POLARIS_URL`,
-/// then is Shopify's.
+/// `SHOPIFY_ADMIN_ORIGIN`, `SHOPIFY_APP_BRIDGE_URL`, `SHOPIFY_POLARIS_URL` or
+/// `SHOPIFY_PARTNER_ORIGIN`, then is Shopify's.
 ///
-/// The admin origin is `https://host[:port]`, or `http://` to `localhost`,
+/// An origin (the admin's, the Partner API's) is `https://host[:port]`, or `http://` to `localhost`,
 /// `127.0.0.1` or `[::1]`, with no path, query string, fragment or user. A
 /// script is an absolute `https://` URL, or `http://` to the same hosts, with
 /// no user or fragment. Anything else stops the application at startup, so
@@ -54,7 +63,8 @@ pub const SHOPIFY_POLARIS: &str = "https://cdn.shopify.com/shopifycloud/polaris.
 /// let simulator = ShopifyEndpoints::new()
 ///     .admin_origin("http://localhost:9393")
 ///     .app_bridge("http://localhost:9393/__lsf/admin/app-bridge.js")
-///     .polaris("http://localhost:9393/__lsf/cdn/shopifycloud/polaris.js");
+///     .polaris("http://localhost:9393/__lsf/cdn/shopifycloud/polaris.js")
+///     .partner_origin("http://localhost:9393");
 /// assert!(!simulator.is_shopify());
 /// assert!(ShopifyEndpoints::new().is_shopify());
 /// ```
@@ -66,6 +76,8 @@ pub struct ShopifyEndpoints {
     pub app_bridge: Option<String>,
     /// The URL of the Polaris script, in place of [`SHOPIFY_POLARIS`].
     pub polaris: Option<String>,
+    /// Where the Partner API requests go, in place of [`SHOPIFY_PARTNER_ORIGIN`].
+    pub partner_origin: Option<String>,
 }
 
 impl ShopifyEndpoints {
@@ -93,12 +105,20 @@ impl ShopifyEndpoints {
         self
     }
 
+    /// Sends the Partner API requests to `origin`, such as
+    /// `http://localhost:9393`, in place of `https://partners.shopify.com`.
+    pub fn partner_origin(mut self, origin: impl Into<String>) -> Self {
+        self.partner_origin = Some(origin.into());
+        self
+    }
+
     /// Each field of `self`, or of `fallback` where `self` sets none.
     pub fn or(self, fallback: Self) -> Self {
         Self {
             admin_origin: self.admin_origin.or(fallback.admin_origin),
             app_bridge: self.app_bridge.or(fallback.app_bridge),
             polaris: self.polaris.or(fallback.polaris),
+            partner_origin: self.partner_origin.or(fallback.partner_origin),
         }
     }
 
@@ -108,14 +128,15 @@ impl ShopifyEndpoints {
     }
 
     /// The fields the environment sets: `SHOPIFY_ADMIN_ORIGIN`,
-    /// `SHOPIFY_APP_BRIDGE_URL` and `SHOPIFY_POLARIS_URL`. An empty value is
-    /// not set.
+    /// `SHOPIFY_APP_BRIDGE_URL`, `SHOPIFY_POLARIS_URL` and
+    /// `SHOPIFY_PARTNER_ORIGIN`. An empty value is not set.
     pub fn from_env() -> Self {
         let var = |name: &str| std::env::var(name).ok().filter(|value| !value.is_empty());
         Self {
             admin_origin: var(ADMIN_ORIGIN_VAR),
             app_bridge: var(APP_BRIDGE_VAR),
             polaris: var(POLARIS_VAR),
+            partner_origin: var(PARTNER_ORIGIN_VAR),
         }
     }
 
@@ -294,6 +315,8 @@ pub(crate) struct Endpoints {
     pub(crate) admin_origin: Option<AdminOrigin>,
     pub(crate) app_bridge: Option<ScriptUrl>,
     pub(crate) polaris: Option<ScriptUrl>,
+    /// `scheme://host[:port]`, without a trailing `/`.
+    pub(crate) partner_origin: Option<String>,
     /// The same, as [`OpenShop::shopify_endpoints`](crate::OpenShop::shopify_endpoints) shows them.
     pub(crate) shown: ShopifyEndpoints,
     /// What the startup line says of the ones that are not Shopify's.
@@ -341,7 +364,32 @@ impl Endpoints {
                 .push(format!("Polaris from {} ({})", url.as_str(), source.name()));
             endpoints.polaris = Some(url);
         }
+        if let Some((value, source)) = Source::pick(
+            &code.partner_origin,
+            &env.partner_origin,
+            "partner_origin",
+            PARTNER_ORIGIN_VAR,
+        ) {
+            // The rules of the admin origin: an origin, `https://`, or `http://` to this machine.
+            let origin = AdminOrigin::new(value).map_err(|error| match error {
+                shopify_api::Error::Config(reason) => {
+                    source.invalid(reason.replacen("invalid admin origin", "invalid Partner API origin", 1))
+                }
+                other => source.invalid(other),
+            })?;
+            let origin = origin.as_str().to_string();
+            endpoints.shown.partner_origin = Some(origin.clone());
+            endpoints
+                .replaced
+                .push(format!("Partner API at {origin} ({})", source.name()));
+            endpoints.partner_origin = Some(origin);
+        }
         Ok(endpoints)
+    }
+
+    /// Where the Partner API is: the `partner_origin`, else Shopify's.
+    pub(crate) fn partner_origin(&self) -> &str {
+        self.partner_origin.as_deref().unwrap_or(SHOPIFY_PARTNER_ORIGIN)
     }
 
     /// The line the application logs at startup when an endpoint is not
@@ -363,6 +411,7 @@ mod tests {
             admin_origin: admin_origin.map(Into::into),
             app_bridge: app_bridge.map(Into::into),
             polaris: polaris.map(Into::into),
+            partner_origin: None,
         }
     }
 
@@ -371,7 +420,46 @@ mod tests {
         let endpoints = Endpoints::resolve(&ShopifyEndpoints::new(), &ShopifyEndpoints::new()).unwrap();
         assert!(endpoints.admin_origin.is_none() && endpoints.app_bridge.is_none() && endpoints.polaris.is_none());
         assert!(endpoints.shown.is_shopify());
+        assert_eq!(endpoints.partner_origin(), "https://partners.shopify.com");
         assert_eq!(endpoints.startup_line(), None);
+    }
+
+    #[test]
+    fn the_partner_api_is_an_origin_of_the_code_else_of_the_environment() {
+        let env = ShopifyEndpoints::new().partner_origin("https://partners-proxy.example.com");
+        let endpoints = Endpoints::resolve(&ShopifyEndpoints::new(), &env).unwrap();
+        assert_eq!(endpoints.partner_origin(), "https://partners-proxy.example.com");
+        assert_eq!(
+            endpoints.startup_line().unwrap(),
+            "[openshop] Shopify endpoints replaced: Partner API at https://partners-proxy.example.com \
+             (SHOPIFY_PARTNER_ORIGIN)"
+        );
+
+        let code = ShopifyEndpoints::new().partner_origin("HTTP://LOCALHOST:9393/");
+        let endpoints = Endpoints::resolve(&code, &env).unwrap();
+        // Written as an origin: lower case, no trailing `/`.
+        assert_eq!(endpoints.partner_origin(), "http://localhost:9393");
+        assert_eq!(endpoints.shown, ShopifyEndpoints::new().partner_origin("http://localhost:9393"));
+        assert!(endpoints.startup_line().unwrap().contains("(shopify_endpoints.partner_origin)"));
+
+        let error = |code: ShopifyEndpoints, env: ShopifyEndpoints| {
+            Endpoints::resolve(&code, &env).unwrap_err().to_string()
+        };
+        assert_eq!(
+            error(ShopifyEndpoints::new().partner_origin("http://partners.example.com"), ShopifyEndpoints::new()),
+            "[openshop] Invalid config: shopify_endpoints.partner_origin is not valid: invalid Partner API \
+             origin, expected `https://host[:port]` (or `http://` to localhost): `http://` is taken for \
+             `localhost`, `127.0.0.1` or `[::1]` only: use `https://`"
+        );
+        let from_env = error(
+            ShopifyEndpoints::new(),
+            ShopifyEndpoints::new().partner_origin("https://user:prtapi_secret@partners.shopify.com/1234567"),
+        );
+        assert!(
+            from_env.starts_with("[openshop] SHOPIFY_PARTNER_ORIGIN is not valid: invalid Partner API origin"),
+            "{from_env}"
+        );
+        assert!(!from_env.contains("prtapi_secret"), "{from_env}");
     }
 
     #[test]

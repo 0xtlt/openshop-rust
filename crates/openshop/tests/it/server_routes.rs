@@ -90,10 +90,13 @@ fn admin_links_route() -> Route {
     Route::public().get(|ctx| async move {
         let input = shop_input(&parse_query(ctx.request.uri.query()));
         let links = (|| -> Result<Value> {
+            let admin_url = ctx.admin_url(input.clone(), "settings/payments")?;
+            // A link that needs the handle of the app, or the error that says to add it.
+            let or_error = |link: Result<String>| link.unwrap_or_else(|error| error.to_string());
             Ok(json!({
-                "appHandle": ctx.app_handle(input.clone())?,
-                "adminUrl": ctx.admin_url(input.clone(), "settings/payments")?,
-                "pricingUrl": ctx.pricing_url(input.clone())?,
+                "appHandle": or_error(ctx.app_handle(input.clone()).map(str::to_string)),
+                "adminUrl": admin_url,
+                "pricingUrl": or_error(ctx.pricing_url(input.clone())),
             }))
         })();
         Ok(match links {
@@ -618,21 +621,29 @@ async fn links_to_the_admin_of_a_shop_need_no_installation(ctx: &TestContext) {
     // `for_shop` refuses a shop that has not installed the app; its links are there.
     let refused = json_body(get(ctx, &format!("/shop-context?{shop}")).send().await.unwrap()).await;
     assert_eq!(refused["error"], "[openshop] Shop is not actively installed");
+    // No `shopify.app.toml`: no handle, and not the API key in its place.
+    let no_handle = "[openshop] The Shopify app \"clientB\" has no handle: add `handle = \"<your-app-handle>\"` \
+                     at the top of the shopify.app*.toml whose client_id is \"client-b-key\", next to client_id \
+                     (`shopify app config link` writes it). The pages of the Shopify admin, such as the plan \
+                     selection page, name the app by its handle, and Shopify does not take the client ID there.";
     assert_eq!(
         links(shop).await,
         (
             200,
             json!({
-                // No `shopify.app.toml`: the API key of the app.
-                "appHandle": "client-b-key",
+                "appHandle": no_handle,
                 "adminUrl": "https://admin.shopify.com/store/links-demo/settings/payments",
-                "pricingUrl": "https://admin.shopify.com/store/links-demo/charges/client-b-key/pricing_plans",
+                "pricingUrl": no_handle,
             })
         )
     );
-    assert_eq!(
-        links("shop=links-demo.myshopify.com&app=clientA").await.1["appHandle"],
-        "client-a-key"
+    let client_a = links("shop=links-demo.myshopify.com&app=clientA").await.1;
+    assert!(
+        client_a["appHandle"]
+            .as_str()
+            .unwrap()
+            .contains("\"clientA\" has no handle"),
+        "{client_a}"
     );
 
     // The shop and the app are checked as `for_shop` checks them.

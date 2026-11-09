@@ -2,6 +2,70 @@
 
 ## Unreleased
 
+- `openshop::billing` reads the plan from the Partner API when it is set, as
+  Shopify App Pricing asks: "Replace GraphQL Admin API checks, such as
+  billing.check() and currentAppInstallation, with Partner API queries." An app
+  enrolled since April 2026, and every app after April 28, 2026, gets no
+  `charge_id` and no `app_subscriptions/update`, and a subscription created in
+  Shopify App Pricing has no Admin API subscription (`legacySubscriptionId` is
+  null): with the Admin API, a paying merchant got `402`.
+  - `PartnerApi` (`partner_id`, `token`, `plan_ttl`), set at startup with
+    `.partner_api(…)`, in `app!` with `partner_api: …`, or by
+    `SHOPIFY_PARTNER_ID` and `SHOPIFY_PARTNER_API_TOKEN`, field by field in
+    that order. Both or neither: one without the other stops the app at
+    startup, naming the setting or the variable. The token is never logged
+    and never in an error; `Debug` hides it. With both, a startup line says
+    where the plans are read.
+  - The source is explicit: `app.billing_source()` is `BillingSource::PartnerApi`
+    with the Partner API, `AdminApi` without it, for apps on manual pricing,
+    whose Billing API subscriptions `activeSubscription` does not cover.
+  - `ctx.shopify.active_plans()` reads the plans of the shop from that source
+    (`ActivePlans` of `Plan`: `name`, `handle`, `subscription`, an
+    `AppSubscription` or an `AppPricingSubscription`), and
+    `ctx.shopify.refresh_plans()` reads them again from the Partner API at
+    once, for a welcome link a route serves. `active_subscriptions()`
+    still reads the Admin API whatever the source.
+  - The Partner API takes four requests a second per client: the GIDs of the
+    app and of the shop are read once per process from the Admin API
+    (`OpenShopPartnerIds`), and the answer of `activeSubscription`
+    (`OpenShopPartnerSubscription`) is kept per shop for `plan_ttl`, five
+    minutes by default. A check it fails asks again unless the answer is
+    younger than ten seconds (`billing::MIN_REFRESH`); a verified launch with
+    `plan_handle` or `charge_id` (the welcome link of a plan) and
+    `app/uninstalled` forget it; concurrent checks of a shop send one
+    request. A plan that ends outside the app is seen within `plan_ttl`. A
+    `429`, a `5xx` or a network failure is retried as `shopify_retry` says.
+  - `app.partner_api()` returns the `PartnerApiClient`, whose `graphql(query,
+    variables)` runs any other query of the Partner API, such as `events`.
+  - `ShopifyEndpoints` gains `partner_origin` (`SHOPIFY_PARTNER_ORIGIN`), in
+    place of `https://partners.shopify.com`, with the rules of `admin_origin`
+    and a part in the startup line: lsf serves the Partner API there.
+  - Tests: `TestOptions::partner_api`, whose missing Partner ID or token is
+    `TEST_PARTNER_ID` or `TEST_PARTNER_API_TOKEN`;
+    `ctx.shopify.active_subscription(app_pricing_subscription("pro"))` answers
+    the Partner API (and the GIDs, `TEST_APP_GID` and `TEST_SHOP_GID`). An
+    operation of the Partner API nothing answers is named as one.
+- The handle of the app no longer falls back to its client ID, which Shopify
+  refuses in `admin.shopify.com/store/{store}/charges/{handle}/pricing_plans`.
+  Without a `handle` in `shopify.app.toml`, `ShopScope::app_handle()`,
+  `billing::pricing_url`, `pricing_link`, `plan_required`, the `402` of
+  `require_plan`, and `RouteContext::app_handle` and `pricing_url` fail with
+  an error that says to add it. The redirect after OAuth still opens the app at
+  `/admin/apps/{client_id}`.
+- Breaking, for code written against the billing, the endpoints and the
+  handle of the unreleased entries below:
+  - `billing::require_plan` returns a `Plan`, not an `AppSubscription`:
+    `plan.name` is unchanged; read `plan.handle`, or `plan.subscription`, for
+    the rest.
+  - `ShopScope::app_handle()` returns `Result<&str>`;
+    `billing::pricing_url` and `pricing_link` return `Result<String>`;
+    `billing::plan_required` returns `Result<AdminPublicError>`.
+  - `ResolvedShopifyApp::app_handle` is an `Option<String>`, and
+    `app_handle()` gives it or the error.
+  - `ShopifyEndpoints`, `OpenShopConfig`, `RuntimeEnv` and `TestOptions`
+    have a new public field (`partner_origin`, `partner_api`): a struct
+    literal of them needs it, or `..Default::default()`.
+
 - A test calls a loader or an action of an admin page by the path of the
   page and the name of the function, as the view of the page does:
   `ctx.call_loader::<T>(path, name, input)` and

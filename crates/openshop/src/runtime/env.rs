@@ -3,7 +3,7 @@
 
 use std::path::PathBuf;
 
-use crate::shopify::ShopifyEndpoints;
+use crate::shopify::{PartnerApi, ShopifyEndpoints};
 
 /// Database used when `DATABASE_URL` is not set.
 pub const DEFAULT_DATABASE_URL: &str = "postgresql://openshop:openshop@localhost:5432/openshop";
@@ -29,10 +29,14 @@ pub struct RuntimeEnv {
     pub development: bool,
     /// Project root used to resolve Shopify TOML files and migrations.
     pub cwd: PathBuf,
-    /// `SHOPIFY_ADMIN_ORIGIN`, `SHOPIFY_APP_BRIDGE_URL` and
-    /// `SHOPIFY_POLARIS_URL`: the endpoints of Shopify the configuration does
-    /// not set, field by field. See [`ShopifyEndpoints`].
+    /// `SHOPIFY_ADMIN_ORIGIN`, `SHOPIFY_APP_BRIDGE_URL`,
+    /// `SHOPIFY_POLARIS_URL` and `SHOPIFY_PARTNER_ORIGIN`: the endpoints of
+    /// Shopify the configuration does not set, field by field. See
+    /// [`ShopifyEndpoints`].
     pub shopify_endpoints: ShopifyEndpoints,
+    /// `SHOPIFY_PARTNER_ID` and `SHOPIFY_PARTNER_API_TOKEN`: the Partner API
+    /// the configuration does not set, field by field. See [`PartnerApi`].
+    pub partner_api: PartnerApi,
 }
 
 impl std::fmt::Debug for RuntimeEnv {
@@ -48,6 +52,7 @@ impl std::fmt::Debug for RuntimeEnv {
             .field("development", &self.development)
             .field("cwd", &self.cwd)
             .field("shopify_endpoints", &self.shopify_endpoints)
+            .field("partner_api", &self.partner_api)
             .finish()
     }
 }
@@ -82,6 +87,7 @@ impl RuntimeEnv {
             development,
             cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             shopify_endpoints: ShopifyEndpoints::from_env(),
+            partner_api: PartnerApi::from_env(),
         }
     }
 

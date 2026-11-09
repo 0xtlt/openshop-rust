@@ -159,7 +159,7 @@ not_wasm! {
     pub use server::UiSource;
     pub use server::http::PublicError;
     pub use server::connectors::Connectors;
-    pub use shopify::{ShopifyClient, ShopifyEndpoints};
+    pub use shopify::{PartnerApi, PartnerApiClient, ShopifyClient, ShopifyEndpoints};
     pub use template::Liquid;
     pub use types::{
         AdminMenuItem, AdminPageId, AdminPageMode, AdminPagesConfig, Concurrency, Cron, CronShops, ErrorContext,
@@ -197,8 +197,8 @@ pub mod prelude {
     not_wasm! {
         pub use crate::{
             AdminContext, App, Cron, ErrorContext, FlowContext, FunctionConfig, InvalidInput, Liquid, McpConfig,
-            McpContext, McpPermission, McpRiskLevel, Model, ProviderConfig, ProxyContext, PublicError, QueuedRun, RetryPolicy,
-            RouteAuthContext, RouteAuthOutcome, RouteContext, RunOutcome, ShopScope, ShopifyEndpoints, Uuid,
+            McpContext, McpPermission, McpRiskLevel, Model, PartnerApi, ProviderConfig, ProxyContext, PublicError, QueuedRun,
+            RetryPolicy, RouteAuthContext, RouteAuthOutcome, RouteContext, RunOutcome, ShopScope, ShopifyEndpoints, Uuid,
             WebhookContext, WorkerConfig, flow, graphql, liquid, mcp_resource, mcp_tool, provider, proxy, response,
             route, tracing, validators, webhook,
         };

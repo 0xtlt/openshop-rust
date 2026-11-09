@@ -526,14 +526,13 @@ pub trait ShopScope {
 
     /// The handle of the app on Shopify, which the URLs of the Shopify admin
     /// name it by (`charges/{app_handle}/pricing_plans`): the `handle` of its
-    /// `shopify.app*.toml` (the one whose `client_id` is its API key), else its
-    /// API key. Not [`shopify_app`](Self::shopify_app), the name OpenShop
-    /// gives it.
-    fn app_handle(&self) -> &str {
-        self.app()
-            .apps()
-            .by_handle(Some(self.shopify_app()))
-            .map_or(self.shopify_app(), |app| app.app_handle.as_str())
+    /// `shopify.app*.toml` (the one whose `client_id` is its API key). Not
+    /// [`shopify_app`](Self::shopify_app), the name OpenShop gives it.
+    ///
+    /// Fails when the file has no `handle`, with an error that says to add
+    /// it: Shopify does not take the client ID in those URLs.
+    fn app_handle(&self) -> Result<&str> {
+        self.app().apps().by_handle(Some(self.shopify_app()))?.app_handle()
     }
 
     /// A page of the Shopify admin of the shop, `path` being what follows the
@@ -1399,7 +1398,7 @@ impl RouteAuthContext {
 
 fn route_app_handle(app: &OpenShop, shop: RouteShopInput) -> Result<&str> {
     let (_, shopify_app) = crate::server::connectors::resolve_route_shop(app, shop)?;
-    Ok(&shopify_app.app_handle)
+    shopify_app.app_handle()
 }
 
 fn route_admin_url(app: &OpenShop, shop: RouteShopInput, path: &str) -> Result<String> {
@@ -1409,7 +1408,7 @@ fn route_admin_url(app: &OpenShop, shop: RouteShopInput, path: &str) -> Result<S
 
 fn route_pricing_url(app: &OpenShop, shop: RouteShopInput) -> Result<String> {
     let (shop, shopify_app) = crate::server::connectors::resolve_route_shop(app, shop)?;
-    Ok(app.shopify_endpoints().pricing_plans_url(&shop, &shopify_app.app_handle))
+    Ok(app.shopify_endpoints().pricing_plans_url(&shop, shopify_app.app_handle()?))
 }
 
 /// What the handler of a route receives. `A` is what the authentication
@@ -1440,8 +1439,9 @@ impl<A> RouteContext<A> {
     /// [`RouteShopInput`] that names the app, and is checked the same way,
     /// except that the shop does not have to have the app installed: this
     /// reads the configuration only. Fails when the shop is not a
-    /// `*.myshopify.com` domain, or when the app is unknown, or not named
-    /// while several are configured.
+    /// `*.myshopify.com` domain, when the app is unknown, or not named while
+    /// several are configured, and when its `shopify.app*.toml` has no
+    /// `handle`.
     pub fn app_handle(&self, shop: impl Into<RouteShopInput>) -> Result<&str> {
         route_app_handle(&self.app, shop.into())
     }
