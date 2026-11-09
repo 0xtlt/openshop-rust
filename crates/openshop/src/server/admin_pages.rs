@@ -26,7 +26,7 @@ use openshop_shared::{custom_admin_route_params, match_custom_admin_path};
 
 /// The most specific page matching a path. Pages are sorted with static
 /// segments first, so `/reviews/new` wins over `/reviews/:id`.
-fn find_matching_page<'a>(pages: &'a [CustomAdminPage], pathname: &str) -> Option<&'a CustomAdminPage> {
+pub(crate) fn find_matching_page<'a>(pages: &'a [CustomAdminPage], pathname: &str) -> Option<&'a CustomAdminPage> {
     pages
         .iter()
         .find(|page| match_custom_admin_path(&page.route_pattern, pathname))
@@ -169,22 +169,6 @@ async fn page_access(
 
 fn public_error(code: &str, message: &str, status: u16) -> anyhow::Error {
     AdminPublicError::new(code, message).status(status).into()
-}
-
-/// The loader or the action `name` of the page at `page_path`, with the
-/// values of the dynamic segments of the path: what a test calls there.
-/// `None` when no page matches the path, or the page has no function of that
-/// kind by that name.
-pub(crate) fn find_function<'a>(
-    pages: &'a [CustomAdminPage],
-    page_path: &str,
-    kind: AdminFunctionKind,
-    name: &str,
-) -> Option<(&'a CustomAdminPage, IndexMap<String, String>, &'a AdminFunction)> {
-    let page = find_matching_page(pages, page_path)?;
-    let params = custom_admin_route_params(&page.route_pattern, page_path)?;
-    let function = page.page.functions.get(name).filter(|function| function.kind == kind)?;
-    Some((page, params, function))
 }
 
 /// Runs `function` of `page`, as a form of the page and a test call it: the access rules of

@@ -17,8 +17,11 @@ description = "Format the workspace"
 run = "cargo fmt --all"
 
 [tasks.lint]
-description = "Clippy on the whole workspace, warnings are errors"
-run = "cargo clippy --workspace --all-targets --locked -- -D warnings"
+description = "Clippy on the whole workspace, then on `openshop` as an application builds it (without `testing`), warnings are errors"
+run = [
+  "cargo clippy --workspace --all-targets --locked -- -D warnings",
+  "cargo clippy -p openshop --locked -- -D warnings",
+]
 
 [tasks.test]
 description = "Run the test suite (needs PostgreSQL: `mise run db:up`, or set DATABASE_URL)"

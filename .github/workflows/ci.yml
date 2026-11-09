@@ -61,6 +61,10 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      # The workspace builds `openshop` with `testing`, which its tests and the
+      # templates turn on; an application builds it without: what only the
+      # tests use warns there, on every build of the application.
+      - run: cargo clippy -p openshop --locked -- -D warnings
       # Each test owns a schema and a small pool: cap parallelism to stay under
       # the default max_connections of the service container.
       - run: cargo test --workspace --locked -- --test-threads=4

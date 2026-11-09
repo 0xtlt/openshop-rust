@@ -7,13 +7,14 @@ use serde::de::DeserializeOwned;
 use uuid::Uuid;
 
 use super::TestContext;
-use crate::admin::{AdminActor, AdminContext, AdminFunctionKind, AdminPublicError, CustomAdminPage};
+use crate::admin::{AdminActor, AdminContext, AdminFunction, AdminFunctionKind, AdminPublicError, CustomAdminPage};
 use crate::app::OpenShop;
 use crate::runtime::context_logger::ContextLogger;
-use crate::server::admin_pages::{call_function, create_context, find_function};
+use crate::server::admin_pages::{call_function, create_context, find_matching_page};
 use crate::server::shop::ShopSession;
 use crate::server::shopify_apps::DEFAULT_SHOPIFY_APP_HANDLE;
 use crate::shopify::client_credentials::Grant;
+use openshop_shared::custom_admin_route_params;
 
 #[derive(Debug, Clone)]
 pub struct AdminTestOptions {
@@ -175,6 +176,22 @@ impl TestContext {
             ),
         }
     }
+}
+
+/// The loader or the action `name` of the page at `page_path`, with the
+/// values of the dynamic segments of the path: what a test calls there.
+/// `None` when no page matches the path, or the page has no function of that
+/// kind by that name.
+fn find_function<'a>(
+    pages: &'a [CustomAdminPage],
+    page_path: &str,
+    kind: AdminFunctionKind,
+    name: &str,
+) -> Option<(&'a CustomAdminPage, IndexMap<String, String>, &'a AdminFunction)> {
+    let page = find_matching_page(pages, page_path)?;
+    let params = custom_admin_route_params(&page.route_pattern, page_path)?;
+    let function = page.page.functions.get(name).filter(|function| function.kind == kind)?;
+    Some((page, params, function))
 }
 
 /// Why `path` and `name` name no function of `kind`: the pages there are,

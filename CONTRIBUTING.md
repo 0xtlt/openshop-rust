@@ -34,6 +34,8 @@ macros are binaries of their own.
 ```bash
 cargo fmt --all --check
 cargo clippy --workspace --all-targets --locked -- -D warnings
+# `openshop` as an application builds it: without `testing`.
+cargo clippy -p openshop --locked -- -D warnings
 cargo test --workspace --locked
 ```
 
