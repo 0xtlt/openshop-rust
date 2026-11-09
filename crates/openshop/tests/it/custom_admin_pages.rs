@@ -1287,7 +1287,26 @@ fn reviews_app_with_functions() -> OpenShopConfig {
         .unwrap()
 }
 
-#[openshop::test(context(reviews_app_with_functions()))]
+/// [`context`], in a project whose `shopify.app.toml` gives the app its
+/// handle, which the pricing page of a `402` names it by.
+async fn context_with_handle(config: OpenShopConfig) -> TestContext {
+    let cwd = std::env::temp_dir().join("openshop-custom-pages-handle");
+    std::fs::create_dir_all(&cwd).unwrap();
+    std::fs::write(
+        cwd.join("shopify.app.toml"),
+        "client_id = \"test-app\"\nhandle = \"reviews\"\n",
+    )
+    .unwrap();
+    let options = TestOptions {
+        shop: TEST_SHOP.to_string(),
+        access_token: Some("test-access-token".to_string()),
+        cwd: Some(cwd),
+        ..Default::default()
+    };
+    TestContext::with_options(config, options).await.expect("test context")
+}
+
+#[openshop::test(context_with_handle(reviews_app_with_functions()))]
 async fn a_test_calls_the_functions_of_a_page_by_its_path_as_the_view_does(ctx: &TestContext) {
     // The loader of `/reviews/:id` at `/reviews/42`, as the reviewer: the
     // rule of `/reviews`, which the page is nested under, lets them in.
@@ -1332,7 +1351,10 @@ async fn a_test_calls_the_functions_of_a_page_by_its_path_as_the_view_does(ctx: 
     ctx.shopify.active_subscriptions([]);
     let error = save(json!({ "title": "Great", "rating": 5 })).await.unwrap_err();
     assert_eq!((error.code.as_str(), error.status), (billing::PLAN_REQUIRED, 402));
-    assert!(error.details.unwrap().contains_key("pricingUrl"));
+    assert_eq!(
+        error.details.unwrap()["pricingLink"],
+        "shopify:admin/charges/reviews/pricing_plans"
+    );
 
     // Any other error is the `500` of the page, with its message for the test.
     let error = ctx.call_loader::<Value>("/", "home", ()).await.unwrap_err();
