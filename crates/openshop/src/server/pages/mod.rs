@@ -26,7 +26,7 @@ mod providers;
 mod shell;
 mod ui;
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use axum::body::to_bytes;
@@ -176,7 +176,7 @@ pub(crate) async fn serve(app: OpenShop, options: ServerOptions, reload: Option<
         let body = to_bytes(request.into_body(), MAX_FORM_BYTES).await.unwrap_or_default();
         submit(&call, &body).await
     } else {
-        render(&call, StatusCode::OK, None, &FormState::default()).await
+        render(&call, StatusCode::OK, None, &FormState::default(), None).await
     };
     finish(response, &app, options.dev)
 }
@@ -264,18 +264,25 @@ pub(crate) async fn bounce_page(State(app): State<OpenShop>, request: Request) -
 
 /// The page, rendered for the session. `notice` is a failure to show above
 /// it, for a plain post the action refused; `form`, the form the page
-/// refused, which its view shows again.
-async fn render(call: &PageCall<'_>, status: StatusCode, notice: Option<&str>, form: &FormState) -> Response {
+/// refused, which its view shows again; `revealed`, what an action of a page
+/// of the framework gave it to show once.
+async fn render(
+    call: &PageCall<'_>,
+    status: StatusCode,
+    notice: Option<&str>,
+    form: &FormState,
+    revealed: Option<Value>,
+) -> Response {
     let app = call.app;
     let content = match target(app, &call.pathname) {
         None => Err(StatusCode::NOT_FOUND),
         Some(Target::Custom(page)) => render_custom(call, page, form).await,
-        Some(Target::Home) => render_builtin(call, None, form).await,
+        Some(Target::Home) => render_builtin(call, None, form, revealed).await,
         Some(Target::Builtin(page)) => {
             if resolved_admin_pages(app.config()).get(page) == AdminPageMode::Disabled {
                 Err(StatusCode::NOT_FOUND)
             } else {
-                render_builtin(call, Some(page), form).await
+                render_builtin(call, Some(page), form, revealed).await
             }
         }
     };
@@ -328,10 +335,26 @@ pub(super) struct BuiltinPage<'a> {
     pub(super) query: &'a str,
     /// The form the page refused, which it shows again; empty otherwise.
     pub(super) form: &'a FormState,
+    /// What an action gives the page to show once (a secret made for the
+    /// merchant): set by `submit` with [`BuiltinPage::reveal`], read by
+    /// `render` with [`BuiltinPage::revealed`].
+    revealed: Mutex<Option<Value>>,
 }
 
 #[allow(dead_code)]
 impl BuiltinPage<'_> {
+    /// Called by `submit`: the page is rendered again with `value`, which
+    /// `render` reads with [`BuiltinPage::revealed`], in place of a redirect
+    /// (a plain post too, which would lose it). A secret shown once.
+    pub(super) fn reveal(&self, value: Value) {
+        *crate::locked(&self.revealed) = Some(value);
+    }
+
+    /// What the action that ran gave the page to show once, if one did.
+    pub(super) fn revealed(&self) -> Option<Value> {
+        crate::locked(&self.revealed).clone()
+    }
+
     /// A parameter of the query string, `?flow=syncOrders`: the first one of that name.
     pub(super) fn param(&self, name: &str) -> Option<String> {
         parse_fields(self.query.as_bytes())
@@ -355,13 +378,19 @@ fn is_run_path(pathname: &str) -> bool {
 }
 
 /// A page of the framework: the home of the admin (`None`) or one of the pages it lists.
-async fn render_builtin(call: &PageCall<'_>, id: Option<AdminPageId>, form: &FormState) -> Result<Shown, StatusCode> {
+async fn render_builtin(
+    call: &PageCall<'_>,
+    id: Option<AdminPageId>,
+    form: &FormState,
+    revealed: Option<Value>,
+) -> Result<Shown, StatusCode> {
     let page = BuiltinPage {
         app: call.app,
         session: &call.session,
         pathname: &call.pathname,
         query: &call.query,
         form,
+        revealed: Mutex::new(revealed),
     };
     let rendered = catch_panic("admin page", async {
         match id {
@@ -381,13 +410,14 @@ async fn render_builtin(call: &PageCall<'_>, id: Option<AdminPageId>, form: &For
     }
 }
 
-/// A form of a page of the framework: the action it names.
+/// A form of a page of the framework: the action it names, and what it gave
+/// the page to show once.
 async fn submit_builtin(
     call: &PageCall<'_>,
     id: Option<AdminPageId>,
     action: &str,
     fields: &[(String, String)],
-) -> anyhow::Result<Outcome> {
+) -> (anyhow::Result<Outcome>, Option<Value>) {
     let form = FormState::default();
     let page = BuiltinPage {
         app: call.app,
@@ -395,8 +425,9 @@ async fn submit_builtin(
         pathname: &call.pathname,
         query: &call.query,
         form: &form,
+        revealed: Mutex::new(None),
     };
-    catch_panic("admin page action", async {
+    let outcome = catch_panic("admin page action", async {
         match id {
             None => home::submit(&page, action, fields).await,
             Some(AdminPageId::Crons) => crons::submit(&page, action, fields).await,
@@ -407,7 +438,8 @@ async fn submit_builtin(
             Some(AdminPageId::Mcp) => mcp::submit(&page, action, fields).await,
         }
     })
-    .await
+    .await;
+    (outcome, page.revealed.into_inner().unwrap_or_else(std::sync::PoisonError::into_inner))
 }
 
 /// The answer of a page to an action it does not have.
@@ -445,15 +477,15 @@ async fn submit(call: &PageCall<'_>, body: &[u8]) -> Response {
         .map(|(_, value)| value.clone())
         .unwrap_or_default();
     let target = target(call.app, &call.pathname);
-    let outcome = match &target {
-        Some(Target::Custom(page)) => run_action(call, page, &action, &fields).await,
+    let (outcome, revealed) = match &target {
+        Some(Target::Custom(page)) => (run_action(call, page, &action, &fields).await, None),
         Some(Target::Home) => submit_builtin(call, None, &action, &fields).await,
         Some(Target::Builtin(page))
             if resolved_admin_pages(call.app.config()).get(*page) != AdminPageMode::Disabled =>
         {
             submit_builtin(call, Some(*page), &action, &fields).await
         }
-        _ => Err(no_action()),
+        _ => (Err(no_action()), None),
     };
     // The view shows a refused form itself: every page of the framework, and a
     // view of the application that reads its `form`.
@@ -474,7 +506,7 @@ async fn submit(call: &PageCall<'_>, body: &[u8]) -> Response {
             let message = outcome.toast.clone().unwrap_or_else(|| first_error(&form.errors));
             refuse(call, reads_form, &form, StatusCode::UNPROCESSABLE_ENTITY, &message, outcome.toast.as_deref()).await
         }
-        Ok(outcome) => answer(call, outcome).await,
+        Ok(outcome) => answer(call, outcome, revealed).await,
         Err(error) => {
             let (status, message, errors) = match error.downcast_ref::<AdminPublicError>() {
                 Some(public) => (
@@ -519,7 +551,7 @@ async fn fail(call: &PageCall<'_>, status: StatusCode, message: &str) -> Respons
     if call.fetch {
         (status, [(TOAST_ERROR_HEADER, encode(message))]).into_response()
     } else {
-        render(call, status, Some(message), &FormState::default()).await
+        render(call, status, Some(message), &FormState::default(), None).await
     }
 }
 
@@ -537,7 +569,7 @@ async fn refuse(
     if !reads_form {
         return fail(call, status, message).await;
     }
-    let mut response = render(call, status, None, form).await;
+    let mut response = render(call, status, None, form, None).await;
     if let Some(toast) = toast.filter(|_| call.fetch)
         && let Ok(value) = HeaderValue::from_str(&encode(toast))
     {
@@ -547,8 +579,20 @@ async fn refuse(
 }
 
 /// What a form gets after its action: the page again, or the page the
-/// action sent it to, with its toast.
-async fn answer(call: &PageCall<'_>, outcome: Outcome) -> Response {
+/// action sent it to, with its toast. A page given something to show once is
+/// rendered again with it, never redirected.
+async fn answer(call: &PageCall<'_>, outcome: Outcome, revealed: Option<Value>) -> Response {
+    if revealed.is_some() {
+        let mut response = render(call, StatusCode::OK, None, &FormState::default(), revealed).await;
+        if call.fetch
+            && let Some(toast) = &outcome.toast
+            && let Ok(value) = HeaderValue::from_str(&encode(toast))
+        {
+            let name = if outcome.error { TOAST_ERROR_HEADER } else { TOAST_HEADER };
+            response.headers_mut().insert(name, value);
+        }
+        return response;
+    }
     let next = outcome
         .redirect
         .as_deref()
@@ -564,7 +608,7 @@ async fn answer(call: &PageCall<'_>, outcome: Outcome) -> Response {
             }
             response
         }
-        None => render(call, StatusCode::OK, None, &FormState::default()).await,
+        None => render(call, StatusCode::OK, None, &FormState::default(), None).await,
     };
     if let Some(toast) = &outcome.toast {
         let name = if outcome.error { TOAST_ERROR_HEADER } else { TOAST_HEADER };
