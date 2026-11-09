@@ -1,28 +1,32 @@
 # Server-rendered admin (design)
 
-> **Status: proof of concept, behind `UiSource::Server`.** This page is the
-> design of the migration from the WebAssembly admin UI (`crates/openshop-ui`,
-> Leptos built with trunk) to pages the server renders. Nothing else changes
-> until it is accepted: the Leptos UI stays the default.
+> **Status: implemented.** The admin of the framework and of the
+> applications is rendered by the server; the Leptos UI (`crates/openshop-ui`,
+> built with trunk), its bundle and the `ui` feature are removed. This page is
+> the record of the design and of the migration. How to write a page is in
+> [Custom admin pages](custom-admin-pages.md); how to move an application is in
+> [Migrate to the server-rendered admin](../guides/migrate-to-server-rendered-ui.md).
 
 ## Why
 
-| | Leptos UI (today) | Server-rendered |
+| | Leptos UI (before) | Server-rendered |
 | --- | --- | --- |
-| What the browser downloads for the app, `openshop dev` | 3.2 MB compressed (a 45.5 MB debug `.wasm`) | 3 KB (the page, 1 KB, and `openshop.js`, 2 KB) |
-| Same, release build | 451 KB compressed (a 1.2 MB `.wasm`) | 3 KB |
-| Launch to rendered page, `openshop dev`, cold browser cache | 1.5 s for the first load of a build, 0.5 s after | 65 to 74 ms |
-| Same, release bundle | 285 to 321 ms | 65 to 74 ms (debug server) |
-| Navigation to another page | 82 ms | 50 ms |
-| An edit of a page to the page updated in `openshop dev` | 5.3 s (cargo and trunk) | 2.7 s (cargo) |
+| What the browser downloads for the app, `openshop dev` | 3.2 MB compressed (a 45.5 MB debug `.wasm`) | 5 to 7 KB: the page, 0.8 to 3.1 KB, and `openshop.js`, 4.1 KB, cached for a year |
+| Same, release build | 451 KB compressed (a 1.2 MB `.wasm`) | the same 5 to 7 KB |
+| Launch to rendered page, `openshop dev`, cold browser cache | 1.5 s for the first load of a build, 0.5 s after | 87 to 115 ms, lsf's admin included |
+| Same, release bundle | 285 to 321 ms | the same, from a debug server |
+| Navigation to another page | 82 ms | 54 to 57 ms (163 ms for the first) |
+| An edit of a page to the page updated in `openshop dev` | 5.3 s (cargo and trunk) | 2.7 to 2.8 s (cargo) |
+| Time the server takes for a page | — | 3 to 11 ms |
 | Toolchain | `wasm32-unknown-unknown`, trunk, wasm-bindgen | cargo |
+| Committed bundle | `ui-dist/`, 1.2 MB | none |
+| Crates in `Cargo.lock` | 480, and 1906 lines of a second lockfile | 397 |
 
-Measured in lsf's admin (`lsf serve --polaris offline`) with Playwright 1.64.1
-and Chromium, on the same app twice: the `minimal` template, the home page of
-shop-test, the `/reviews` page of the `custom` template and the `/hello` page
-of `openshop init-ui`. Polaris and App Bridge (268 KB, the same for both) are
-not counted. The Leptos numbers of `openshop dev` include the compression
-cache of #57; before it, a launch took 4.4 to 6.8 s and an edit 13.1 s.
+Measured in lsf's admin (`lsf app dev --polaris offline`) with Playwright
+1.64.1 and Chromium, on projects made from the `minimal`, `custom` and `public`
+templates. The Leptos numbers are those of the proof of concept, on the same
+machine, with the compression cache of #57. Polaris and App Bridge (268 KB, the
+same for both) are not counted.
 
 ## The model
 
@@ -48,7 +52,7 @@ takes what the loaders return and gives back `maud::Markup`. No signal, no
 
 ```rust,ignore
 #[view]
-fn view(home: Home) -> Markup {
+fn view(home: Home, form: FormState) -> Markup {
     html! { s-page { … } }
 }
 ```
@@ -63,8 +67,12 @@ fn view(home: Home) -> Markup {
   that schema (`400 INVALID_INPUT` otherwise).
 - The access rule of the page and of its parents runs first; a loader's own
   `authorize` rule runs before it. A refusal renders "This page is disabled."
+- A parameter named `form` receives the form the page refused, its values and
+  the error of each field (see below). A view without it keeps the page as it
+  was when a form is refused, with an error toast.
 - Markup is written with `maud::html!`. The application depends on `maud`
-  (`html!` names the crate), as it depends on `leptos` today.
+  (`html!` names the crate); `openshop init-ui` adds it. There is no wrapper
+  macro.
 - The view, like the loaders and the actions, is compiled with the server only.
 
 ### What the macro does
@@ -88,8 +96,9 @@ impl HomePage {
 }
 ```
 
-`AdminPage::view(…)` is the same thing by hand. `openshop dev` and `openshop
-build` build no bundle for a view that returns `Markup`.
+`AdminPage::view(…)` is the same thing by hand, and `AdminPage::view_with_form(…)`
+for a view that reads the form. A `#[view]` that returns anything else is
+refused at compile time.
 
 ## Actions and the form protocol
 
@@ -122,11 +131,31 @@ page does next:
 | `Outcome::error("…")` | the same, with `X-OpenShop-Toast-Error` | `303` to the page |
 | `Outcome::redirect("/reviews/42")` (`.with_toast(…)`) | `204`, `X-OpenShop-Location: /reviews/42` (and the toast) | `303` to `/reviews/42` |
 | any other value | `200`, the page rendered again | `303` to the page |
+| `Outcome::invalid([("title", "…")])` | `422`, the page rendered with the form (see below) | the same |
 | `Err(AdminPublicError)` | its status, `X-OpenShop-Toast-Error: <message>`, no body: the page stays | the page rendered with the message in a critical banner, with its status |
 | any other error | `500`, `X-OpenShop-Toast-Error: Internal server error`, reported to Sentry | the same page, `500` |
 
-Header values are percent-encoded. Each action writes the log line of an RPC
-call, with `"form": true`.
+Header values are percent-encoded. Each action writes one log line, with
+`"form": true`, and its failure is reported to Sentry as `admin <route>
+<action>`, with the `request_id` tag.
+
+### Form errors
+
+A form refused field by field is rendered again in place (`422`, or the
+status of the error), with what was sent and the error of each field, in the
+`form: FormState` of a view that declares it: when the input schema refuses
+the form (each property it can tell: `Required`, `Must be at least 3
+characters`, `Must be a whole number`), when the action answers
+`Outcome::invalid(…)`, and when it fails with an `AdminPublicError` that has
+`field_errors`. The view shows them with `error=[form.error("title")]` on a
+Polaris field and `value=(form.value_or("title", saved))`; `form.of(ACTION)`
+keeps the errors on the form that was sent. A modal whose form was refused is
+rendered with `data-openshop-open`, which opens it again.
+
+The toast of a plain post, without the script, is lost: there is no session
+cookie the admin's frame keeps reliably, and nothing runs inside Shopify
+admin without JavaScript, App Bridge first. A refused form is not lost: it is
+the page, rendered with its errors.
 
 ## Authentication of document requests
 
@@ -150,7 +179,9 @@ Without a valid token, Shopify's own pattern for server-rendered embedded apps
   expired `id_token`. That page is App Bridge alone: App Bridge sees
   `shopify-reload` and loads that URL again with a fresh `id_token`. The app
   whose key the page carries is the `aud` of the expired token, else the first
-  one;
+  one: with several Shopify apps on one server, a page loaded without any
+  token, such as a pasted link, bounces with the key of the first app. That is
+  known, and left as it is;
 - a request of the script gets `401` with
   `X-Shopify-Retry-Invalid-Session-Request: 1`, and App Bridge's `fetch` asks
   again with a fresh token;
@@ -159,265 +190,122 @@ Without a valid token, Shopify's own pattern for server-rendered embedded apps
 
 The launch URL keeps its parameters: a reload of the frame sends an expired
 token, which bounces. The bounce costs one round trip and App Bridge's start:
-41 ms in lsf for a page loaded without any token.
+84 ms in lsf for a page loaded without any token. A page is framed by the
+admin of the shop of its session only: `frame-ancestors https://<shop>
+https://admin.shopify.com` (any shop and `localhost` in development).
 
 ## `openshop.js`
 
-126 lines, 106 of code, 2.3 KB gzipped, served at
-`/__openshop/openshop.js?v=<hash>` with `immutable`. Its whole job:
+231 lines, 4.1 KB with Brotli, served at `/__openshop/openshop.js?v=<hash>`
+with `immutable`. Its whole job:
 
 1. **Forms.** `submit` of a same-origin form is sent with `fetch` (App
    Bridge's, which adds the token), `X-OpenShop-Fetch: 1`, the body as
    `application/x-www-form-urlencoded`. A `GET` form puts its fields in the
    query and is a navigation. The submit `s-button` has `loading` while the
    request runs, and the admin's loading bar is on (`shopify.loading`). A form
-   with `data-openshop-native` is left to the browser.
+   with `data-openshop-native` is left to the browser. Enter in a Polaris
+   field submits its form, as in a native field (the field's input is in a
+   shadow root, which the browser does not submit from). A `GET` form with
+   `data-openshop-autosubmit` is sent when one of its fields changes.
 2. **Answers.** `X-OpenShop-Toast` and `X-OpenShop-Toast-Error` go to
-   `shopify.toast.show`. `X-OpenShop-Location` is fetched next. An HTML body
-   replaces the content of `#openshop-page`, the title, and the `ui-nav-menu`
-   when it changed. Anything else is a generic error toast.
+   `shopify.toast.show`. `X-OpenShop-Location` is fetched next. An HTML body,
+   `ok` or not (a refused form, a page that is not there), replaces the
+   content of `#openshop-page`, the title, and the `ui-nav-menu` when it
+   changed. Anything else is a generic error toast.
 3. **Navigation.** A click on a same-origin `<a>`, a `shopify:navigate` event
    (Polaris's `s-link`, `s-button href`; App Bridge clicks the `<a>` of the
    menu), and back and forward are fetched the same way, then `pushState`. The
    menu of the admin follows the URL.
+4. **What only a browser knows**, when the page asks with an attribute:
+   `<time datetime>` written in the language and the time zone of the browser;
+   `data-openshop-open` on a modal, opened once the page is shown;
+   `data-openshop-refresh="3000"`, the page fetched again after that delay
+   while something runs, unless a field has the focus or was changed, or a
+   modal is open (a running flow, the dashboard); `data-openshop-copy` and
+   `data-openshop-copy-from`, a copy to the clipboard; `data-openshop-download`
+   and `data-openshop-download-from`, a file saved (the export of the logs of
+   a run, the output of a step).
 
 Without it, every form posts and every link loads: the server answers with
 redirects and full pages. Inside Shopify admin a full load costs a bounce, and
-a toast needs the script.
+a toast needs the script. The navigation by the script stays: it saves a
+bounce per click.
 
 ## The framework pages
 
-Built-in pages are server-rendered the same way, in
-`crates/openshop/src/server/pages/<page>.rs`: a function of the session that
-reads what the JSON API reads today (`cron_items`, …) and returns `Markup`,
-and a `submit` for its forms. This proof ports `/crons`: the table, the input
-of a cron in an `s-modal` opened by `commandFor`, and the form of each row,
-which says "Cron enabled" or "Cron disabled" in a toast.
+Every page of the framework is server-rendered, in
+`crates/openshop/src/server/pages/<page>.rs`: a function of the request
+(`BuiltinPage`: the session, the path, the query, the refused form) that reads
+what the JSON API reads (the listing, the save, the check of a provider, the
+runs a list asks for, the logs of a run, the instances of a function, the
+tokens of MCP…, each a function the handler of the API calls too) and returns
+`Markup`, and a `submit` for its forms. The home, the providers, the flows and
+their runs, the page of a run with its steps, its output and its logs, the
+Shopify Functions and their instances, MCP and its tokens, and the crons keep
+every feature of their Leptos page; a list, a filter, a selection, a tab is a
+URL. What runs is followed by fetching the URL again
+(`data-openshop-refresh`): every 3 s for a run in progress, 5 s for the runs of
+a flow while one is active, 10 s for the dashboard. A secret made for the
+merchant, the token of MCP, is given to the page by its action
+(`BuiltinPage::reveal`) and rendered once, never put in a URL. A form posts to
+`/mcp` as a form; MCP clients post JSON there.
 
 The document around every page (`shell.rs`) has App Bridge first (the
-endpoints of `ShopifyEndpoints`, as today), Polaris, `openshop.js` with
-`defer`, the `ui-nav-menu` of the built-in pages that are visible and of the
-pages of the app that let the staff member in, and `#openshop-page`. In
-development the reload script of `openshop dev` is added: the page reloads
-when the server starts again.
+endpoints of `ShopifyEndpoints`), Polaris, `openshop.js` with `defer`, the
+`ui-nav-menu` of the built-in pages that are visible and of the pages of the
+app that let the staff member in, and `#openshop-page`. In development the
+reload script of `openshop dev` is added: the page reloads when the server
+starts again.
 
-## Features, `ui-dist/`, trunk
+## What was removed
 
-| Today | After the migration |
+| Before | After |
 | --- | --- |
 | `crates/openshop-ui` (Leptos, wasm32, its own workspace and lockfile) | removed |
-| `crates/openshop/ui-dist/` (1.2 MB committed), `build-dist.sh`, `sources-hash.sh`, `ui-dist.sha256`, the `ui-dist` CI job | removed |
-| feature `embedded-ui` (embeds `ui-dist/`) | removed; the server-rendered admin needs no feature (`maud` is a small dependency) |
-| feature `ui` (re-exports `openshop-ui` as `openshop::ui`) | removed after one release where it is a no-op that warns |
-| `UiSource::{Embedded, Dir, Assets}` | `UiSource::Server` becomes the default and the only admin; `Dir`/`Assets` go, `None` stays (API only) |
+| `crates/openshop/ui-dist/` (1.2 MB committed), `build-dist.sh`, `sources-hash.sh`, `ui-dist.sha256`, the `ui`, `ui-dist` and `templates-ui` CI jobs | removed |
+| feature `embedded-ui` | removed; the admin needs no feature |
+| feature `ui` and `openshop::ui` | removed at once: nothing was released, so no release with a feature that warns |
+| `UiSource::{Embedded, Dir, Assets}` | removed: `UiSource::Server` is the default and the only admin, `None` stays (API only) |
 | `openshop dev`: trunk watch, `OPENSHOP_UI_DIR`, the bundle crate under `target/openshop-ui/` | `cargo run -- dev` alone; the reload script stays |
 | `openshop build-ui`, `init-ui` writing a Leptos page | `build-ui` removed; `init-ui` writes a `Markup` page and adds `maud` |
-| trunk in `mise.toml`, CI, the `Dockerfile` of the templates (`# if views`) | removed |
-| `/api/pages/custom/_rpc/…`, `use_loader`, `use_action`, `AdminFunctionRef` | removed with the Leptos views; `ctx.call_loader` and `ctx.call_action` stay for tests |
-| `/api/pages`, `/api/pages/custom`, `/api/crons`, … (the JSON the Leptos UI reads) | kept while something else reads them (MCP has its own functions), then removed page by page |
+| trunk and the wasm target in `mise.toml`, CI, the `Dockerfile` of the templates (`# if views`) | removed |
+| `/api/pages/custom/_rpc/…`, `use_loader`, `use_action`, `AdminFunctionRef` | removed; `ctx.call_loader` and `ctx.call_action` stay for tests, with `ctx.page` and `ctx.submit` |
+| `/api/pages`, `/api/pages/custom`, `/api/crons`, … (the JSON the Leptos UI read) | kept: scripts, MCP and the downloads of the pages read them |
+
+Loader outputs keep `Serialize`: `ctx.call_loader` reads them as JSON in
+tests.
 
 ## Migrating an application
 
-`Cargo.toml`: `features = ["ui"]` and `leptos` go, `maud = "0.27"` comes.
-A page changes in three places: the view takes the loader's output, an action
-that toasts returns `Outcome`, and a button that ran an action is a form.
-shop-test's `src/admin/home.rs`, before:
-
-```rust,ignore
-use leptos::prelude::*;
-use leptos::task::spawn_local;
-use openshop::prelude::*;
-use openshop::ui::{AdminActionOptions, shopify, use_action, use_loader};
-use serde::{Deserialize, Serialize};
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub enum Home {
-    NoPlan { pricing_plans: String },
-    Plan { hidden: bool },
-}
-
-#[input]
-pub struct SetHidden {
-    pub hidden: bool,
-}
-
-pub struct HomePage;
-
-#[admin_page("/")]
-impl HomePage {
-    #[loader]
-    async fn home(ctx: AdminContext) -> Result<Home> { /* unchanged */ }
-
-    #[action(authorize = openshop::billing::any_plan)]
-    async fn set_hidden(ctx: AdminContext, input: SetHidden) -> Result<Home> {
-        // … unchanged …
-        Ok(Home::Plan { hidden: input.hidden })
-    }
-
-    #[view]
-    fn view() -> impl IntoView {
-        let home = use_loader(Self::HOME, || ());
-        let set_hidden = use_action(Self::SET_HIDDEN);
-        let toggle = move |hidden: bool| {
-            spawn_local(async move {
-                let options = AdminActionOptions::new().revalidate(Self::HOME);
-                match set_hidden.invoke(SetHidden { hidden }, options).await {
-                    Ok(Some(_)) => {
-                        shopify::toast(if hidden { "Paypal Express hidden" } else { "Paypal Express shown" });
-                    }
-                    Err(error) => {
-                        shopify::toast_error(&error.message);
-                    }
-                    Ok(None) => {}
-                }
-            });
-        };
-
-        view! {
-            <s-page>
-                {move || home.error.get().map(|error| view! { <s-banner tone="critical">{error.message}</s-banner> })}
-                {move || home.loading.get().then(|| view! { <s-spinner accessibilityLabel="Loading" /> })}
-                {move || {
-                    home.data.get().map(|data| match data {
-                        Home::NoPlan { pricing_plans } => view! {
-                            <s-banner tone="warning" heading="You don't have a subscription plan yet.">
-                                <s-button variant="primary" href=pricing_plans target="_top">"Take a plan"</s-button>
-                            </s-banner>
-                        }
-                        .into_any(),
-                        Home::Plan { hidden } => view! {
-                            <s-banner
-                                tone=if hidden { "success" } else { "warning" }
-                                heading=if hidden {
-                                    "Paypal Express is successfully hidden from checkout page"
-                                } else {
-                                    "Paypal Express is not hidden from checkout page"
-                                }
-                            >
-                                <s-button
-                                    variant="primary"
-                                    tone=if hidden { "critical" } else { "auto" }
-                                    loading=move || set_hidden.pending.get()
-                                    on:click=move |_| toggle(!hidden)
-                                >
-                                    {if hidden { "Show Paypal Express" } else { "Hide Paypal Express" }}
-                                </s-button>
-                            </s-banner>
-                        }
-                        .into_any(),
-                    })
-                }}
-            </s-page>
-        }
-    }
-}
-```
-
-After:
-
-```rust,ignore
-use maud::html;
-use openshop::prelude::*;
-use serde::Serialize;
-
-#[derive(Debug, Clone, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub enum Home {
-    NoPlan { pricing_plans: String },
-    Plan { hidden: bool },
-}
-
-#[input]
-pub struct SetHidden {
-    pub hidden: bool,
-}
-
-pub struct HomePage;
-
-#[admin_page("/")]
-impl HomePage {
-    #[loader]
-    async fn home(ctx: AdminContext) -> Result<Home> { /* unchanged */ }
-
-    #[action(authorize = openshop::billing::any_plan)]
-    async fn set_hidden(ctx: AdminContext, input: SetHidden) -> Result<Outcome> {
-        // … unchanged …
-        Ok(Outcome::toast(if input.hidden { "Paypal Express hidden" } else { "Paypal Express shown" }))
-    }
-
-    #[view]
-    fn view(home: Home) -> Markup {
-        html! {
-            s-page {
-                @match home {
-                    Home::NoPlan { pricing_plans } => {
-                        s-banner tone="warning" heading="You don't have a subscription plan yet." {
-                            s-button variant="primary" href=(pricing_plans) target="_top" { "Take a plan" }
-                        }
-                    }
-                    Home::Plan { hidden } => {
-                        s-banner
-                            tone=(if hidden { "success" } else { "warning" })
-                            heading=(if hidden {
-                                "Paypal Express is successfully hidden from checkout page"
-                            } else {
-                                "Paypal Express is not hidden from checkout page"
-                            })
-                        {
-                            form method="post" {
-                                input type="hidden" name="_action" value=(Self::SET_HIDDEN);
-                                input type="hidden" name="hidden" value=(!hidden);
-                                s-button type="submit" variant="primary" tone=(if hidden { "critical" } else { "auto" }) {
-                                    (if hidden { "Show Paypal Express" } else { "Hide Paypal Express" })
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-```
-
-What goes away: the loading and error states (the server renders once it has
-the data; a loader error is the page's error), `revalidate` (the page is
-rendered again after the action), `pending` (the script sets `loading`), and
-`Deserialize` on `Home`. `Serialize` stays while the loaders also answer the
-RPC transport of the Leptos views. The loader and the action do not change.
+`Cargo.toml`: `features = ["ui"]` and `leptos` go, `maud = "0.27"` comes. A
+page changes in three places: the view takes the loader's output, an action
+that toasts returns `Outcome`, and a button that ran an action is a form. See
+[Migrate to the server-rendered admin](../guides/migrate-to-server-rendered-ui.md),
+with shop-test's `home.rs` before and after. About 30 minutes per page.
 
 ## Order of the full migration
 
-Estimates are for one person who knows the code, with the tests of each step.
-
-| Step | What | Estimate |
+| Step | What | State |
 | --- | --- | --- |
-| 1 | This proof, after review: `UiSource::Server`, `#[view] -> Markup`, forms, `Outcome`, the bounce, `openshop.js`, `/crons` | done, plus 0.5 day of review fixes |
-| 2 | Form errors: the view receives the action's field errors and the submitted values (`error=` on `s-text-field`), `422` rendered in place | 1 day |
-| 3 | Framework pages, simplest first: home (0.5 d), providers with their config forms and the check button (0.5 d), flows and the run modal (1 d), functions (1 d), flow run with its logs, polling as a refresh of the URL (1.5 d), MCP (1.5 d) | 6 days |
-| 4 | Switch the default to `UiSource::Server`; the Leptos UI stays reachable with `admin_ui: UiSource::Embedded` for one release | 0.5 day |
-| 5 | Templates (`custom`, `public`), `init-ui`, the guides and the references (`custom-admin-pages.md`, `add-admin-page.md`, `cli.md`, `project-structure.md`), `tests/it/admin_views.rs` | 1 day |
-| 6 | Remove `crates/openshop-ui`, `ui-dist/`, trunk in the CLI, CI, `mise.toml` and the `Dockerfile`, the `ui` and `embedded-ui` features, the RPC transport and `openshop::ui`; drop `Serialize` from loader outputs | 1 day |
+| 1 | The proof: `UiSource::Server`, `#[view] -> Markup`, forms, `Outcome`, the bounce, `openshop.js`, `/crons` | done (#58) |
+| 2 | Form errors: `form: FormState`, `Outcome::invalid`, the `422` of the schema field by field, rendered in place | done |
+| 3 | The framework pages: home, providers, flows, the page of a run, functions, MCP | done |
+| 4 | `UiSource::Server` is the default | done; the Leptos UI did not stay one more release |
+| 5 | Templates (`custom`, `public`), `init-ui`, the guides and the references | done |
+| 6 | Remove `crates/openshop-ui`, `ui-dist/`, trunk, the `ui` and `embedded-ui` features, the RPC transport and `openshop::ui` | done |
 | 7 | Applications: shop-test and the others, about 30 minutes per page | per app |
 
-About 10 days in all, then the applications.
+## Decisions
 
-## Open questions
-
-1. **Navigation by the script.** Links and the menu are fetched and swapped,
-   which avoids a bounce per click (50 ms, where a full load costs the
-   page, the bounce, and App Bridge started twice). The alternative is full loads only, a smaller script, and a bounce
-   for every page. Keep it?
-2. **Form errors.** The view needs the field errors and the submitted values
-   of an action that failed. A second kind of parameter
-   (`form: &FormState`), or an `Outcome` that carries them?
-3. **The toast of a plain post** is lost: a session cookie is not reliable in
-   the admin's iframe. Acceptable, given that nothing runs inside Shopify
-   admin without JavaScript (App Bridge is a script)?
-4. **Several Shopify apps on one server.** A page loaded without any token
-   bounces with the key of the first app. The `aud` of an expired token picks
-   the right one, which covers reloads; a pasted link does not have one.
-5. **`maud` in the application.** `html!` names the `maud` crate, so the
-   application depends on it. A wrapper macro of `openshop` would hide it at
-   the cost of maintaining one.
+1. **Navigation by the script**: kept. Links and the menu are fetched and
+   swapped.
+2. **Form errors**: a `form` parameter of the view, filled when the schema
+   refuses the form and when the action returns field errors
+   (`Outcome::invalid`, or an `AdminPublicError` with `field_errors`); `error=`
+   on the Polaris fields. A view without `form` works as before.
+3. **The toast of a plain post** without the script is lost: accepted.
+4. **Several Shopify apps on one server**: a page loaded without any token
+   bounces with the first app's key. Known, not fixed.
+5. **`maud` in the application**: the application depends on it; `init-ui`
+   adds it. No wrapper macro.
