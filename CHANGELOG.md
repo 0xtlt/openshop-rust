@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+- `openshop --version` (and `-V`) prints the version of the CLI and the first
+  12 characters of the commit it was built from: `openshop 0.0.12-beta.0
+  (1b8a53a4cac9)`. `openshop dev` lists what a project keeps of the Leptos
+  admin (`openshop` with the feature `ui`, `leptos`, `UiSource::Dir`,
+  `openshop::ui`…) before it starts it, and names the migration guide, which
+  now begins with installing the CLI again (`--force`) and checking
+  `openshop --version`.
+- `openshop::testing::toast(&response)` and `toast_error(&response)` read the
+  toasts of the answer to `ctx.submit`, percent-decoded as the admin shows
+  them. `openshop::testing` re-exports `RequestBuilder`, `Response`, `Client`,
+  `Method` and `StatusCode` of `reqwest`, and `reqwest` itself, so that a helper
+  of the tests names what `ctx.page` and `ctx.submit` return without depending
+  on `reqwest`. The documentation of `ctx.page` says what it gives: the whole
+  document, the page in `<main id="openshop-page">`.
+- An application built without the `testing` feature no longer gets the
+  warning `function find_function is never used` from `openshop`. CI checks
+  the library as an application builds it, with `-D warnings`.
+
 - The `custom` template asks for `read_discounts` and `write_discounts`: its
   volume discount Function has instances, which the Functions page of the
   admin lists, creates, updates and deletes, and Shopify refused without them.

@@ -1,4 +1,4 @@
-use openshop::testing::TestContext;
+use openshop::testing::{TestContext, toast, toast_error};
 use openshop::{Outcome, Value, json};
 
 use openshop_template_custom::APP;
@@ -54,7 +54,8 @@ async fn renders_the_reviews_and_saves_one(ctx: &TestContext) {
         .await
         .unwrap();
     assert_eq!(sent.status(), 200);
-    assert_eq!(sent.headers()["x-openshop-toast"], "Saved%20Great");
+    assert_eq!(toast(&sent).as_deref(), Some("Saved Great"));
+    assert_eq!(toast_error(&sent), None);
     let refused = ctx
         .submit(
             ReviewsPage::PATH,

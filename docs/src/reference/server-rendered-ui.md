@@ -270,13 +270,18 @@ starts again.
 | `openshop dev`: trunk watch, `OPENSHOP_UI_DIR`, the bundle crate under `target/openshop-ui/` | `cargo run -- dev` alone; the reload script stays |
 | `openshop build-ui`, `init-ui` writing a Leptos page | `build-ui` removed; `init-ui` writes a `Markup` page and adds `maud` |
 | trunk and the wasm target in `mise.toml`, CI, the `Dockerfile` of the templates (`# if views`) | removed |
-| `/api/pages/custom/_rpc/…`, `use_loader`, `use_action`, `AdminFunctionRef` | removed; `ctx.call_loader` and `ctx.call_action` stay for tests, with `ctx.page` and `ctx.submit` |
+| `/api/pages/custom/_rpc/…`, `use_loader`, `use_action`, `AdminFunctionRef` | removed; `ctx.call_loader` and `ctx.call_action` stay for tests, with `ctx.page` (the whole document) and `ctx.submit`, whose toasts `openshop::testing::toast` and `toast_error` read decoded |
 | `/api/pages`, `/api/pages/custom`, `/api/crons`, … (the JSON the Leptos UI read) | kept: scripts, MCP and the downloads of the pages read them |
 
 Loader outputs keep `Serialize`: `ctx.call_loader` reads them as JSON in
 tests.
 
 ## Migrating an application
+
+The `openshop` CLI is installed again first (`cargo install --locked --path
+crates/openshop-cli --force` from a checkout), and `openshop --version` says
+which one runs: the old one runs trunk. `openshop dev` lists what a project
+keeps of the Leptos admin before it starts it.
 
 `Cargo.toml`: `features = ["ui"]` and `leptos` go, `maud = "0.27"` comes. A
 page changes in three places: the view takes the loader's output, an action

@@ -515,10 +515,13 @@ call a function of a page without HTTP: the access rules, the `authorize`
 rule, the input schema and the errors above, typed output (an action that
 returns an `Outcome` gives back an `Outcome`; `call_loader_as` and
 `call_action_as` for another shop or staff user). `ctx.page(path)` asks for
-the page as the admin does and gives its HTML, and `ctx.submit(path,
-&[("_action", Page::SAVE), …])` sends a form of it: the page rendered again,
-its toast in `x-openshop-toast`, `422` and the errors under the fields when
-the form is refused. `admin_context` and `invoke_admin_function` call a
+the page as the admin does and gives the HTML of the whole document, the page
+in `<main id="openshop-page">`, and `ctx.submit(path, &[("_action",
+Page::SAVE), …])` sends a form of it: the page rendered again, its toast in
+`x-openshop-toast` or `x-openshop-toast-error`, percent-encoded, which
+`openshop::testing::toast(&response)` and `toast_error(&response)` read
+decoded, `422` and the errors under the fields when the form is refused.
+`admin_context` and `invoke_admin_function` call a
 function, or code that takes an `AdminContext`, directly. See
 [Testing](testing.md#test-admin-functions).
 

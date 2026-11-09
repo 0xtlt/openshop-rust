@@ -1,6 +1,6 @@
 mod common;
 
-use openshop::testing::TestContext;
+use openshop::testing::{TestContext, toast};
 use openshop::{FlowRun, Outcome, RunOutcome, Value, json};
 
 use openshop_template_public::APP;
@@ -68,7 +68,7 @@ async fn check_now_queues_a_check_for_the_shop_of_the_session(ctx: &TestContext)
         .await
         .unwrap();
     assert_eq!(checked.status(), 200);
-    assert_eq!(checked.headers()["x-openshop-toast"], "Stock%20check%20started");
+    assert_eq!(toast(&checked).as_deref(), Some("Stock check started"));
     // The page again: a check runs, and the page is fetched again until it ends.
     let page = checked.text().await.unwrap();
     assert!(

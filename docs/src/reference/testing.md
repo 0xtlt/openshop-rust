@@ -209,14 +209,14 @@ fn another_shop() -> TestOptions {
 | `fakes` | `FakeProviders` used by `run_flow`. |
 | `shopify` | The `FakeShopify` that answers the GraphQL operations the application sends, by name. See [Answer the Admin API](#answer-the-admin-api). |
 | `transport` | The `MockTransport` behind every Shopify HTTP call. |
-| `http` | A `reqwest::Client` that does not follow redirects, for unauthenticated requests. |
+| `http` | A `Client` (`reqwest`'s) that does not follow redirects, for unauthenticated requests. |
 | `run_flow(flow, input)` / `run_flow_for(flow, input, shop)` | Executes a flow immediately with the fakes. |
 | `dispatch_flow(flow, input)` / `dispatch_flow_for(flow, input, shop)` | Queues a run and returns its `Uuid`. |
 | `proxy()` / `proxy_for(shop, secret)` | App proxy client that signs requests. |
 | `call_loader(path, name, input)` / `call_loader_as(path, name, input, shop, sub)` | Calls a loader of the admin page at `path` as its view does, for staff user `1` of the shop of the test or `sub` of `shop`. See [Test admin functions](#test-admin-functions). |
 | `call_action(path, name, input)` / `call_action_as(path, name, input, shop, sub)` | The same for an action. |
-| `page(path)` | A request for the admin page at `path` as the admin asks for it: its HTML. See [Test a page](#test-a-page). |
-| `submit(path, fields)` | A form of the admin page at `path`, sent as the admin sends it. |
+| `page(path)` | A request for the admin page at `path` as the admin asks for it: the HTML of the whole document. See [Test a page](#test-a-page). |
+| `submit(path, fields)` | A form of the admin page at `path`, sent as the admin sends it. `toast(&response)` and `toast_error(&response)` read its toasts, decoded. |
 | `webhook(topic, payload)` | A delivery of a webhook to `/webhooks`, signed with the secret of the test and with the headers Shopify sends. See [Deliver a webhook](#deliver-a-webhook). |
 | `get`, `post`, `put`, `patch`, `delete`, `request(method, path)` | Request builders authenticated with a session token for the default shop. |
 | `request_as(method, path, shop, sub)` | Request authenticated as staff user `sub` of `shop`. |
@@ -612,9 +612,23 @@ async fn lists_runs(ctx: &TestContext) {
 }
 ```
 
-The builders are `reqwest::RequestBuilder` values: finish them with
+The builders are `reqwest` request builders: finish them with
 `.json(&body)`, `.send()`, and the usual `reqwest` response methods. For custom
 claims, `ctx.session_token_for(shop, sub)` returns the raw JWT.
+
+`openshop::testing` re-exports the types of `reqwest` a test names, so that a
+helper of the tests needs no `reqwest` dependency: `RequestBuilder` (what
+`get`, `request_as`, `page` and `submit` return), `Response` (what `send()`
+gives), `Client` (`ctx.http`), `Method` and `StatusCode`, and the crate itself,
+`openshop::testing::reqwest`, for the rest.
+
+```rust,ignore
+use openshop::testing::{RequestBuilder, Response};
+
+async fn sent(request: RequestBuilder) -> Response {
+    request.send().await.expect("the application answers")
+}
+```
 
 ## Deliver a webhook
 
@@ -811,14 +825,18 @@ there are.
 ### Test a page
 
 `ctx.page(path)` asks for an admin page as the admin does, with a session
-token of staff user `1`: the answer is the HTML of the page, rendered by its
-view. `ctx.submit(path, fields)` sends a form of it, `fields` with the name of
-the action in `_action`, as the admin's script sends it:
+token of staff user `1`: the answer is the HTML of the whole document the
+server renders, the `<ui-nav-menu>` of the admin and the page, rendered by its
+view, in `<main id="openshop-page">`. `ctx.submit(path, fields)` sends a form
+of it, `fields` with the name of the action in `_action`, as the admin's
+script sends it. `toast(&response)` and `toast_error(&response)` read the
+toasts of the answer, decoded: the headers are percent-encoded
+(`Saved%20Great`). Read them before the body, which `text()` consumes.
 
 ```rust,ignore
 use my_app::APP;
 use my_app::admin::settings::SettingsPage;
-use openshop::testing::TestContext;
+use openshop::testing::{TestContext, toast};
 
 #[openshop::test(APP)]
 async fn saves_the_threshold(ctx: &TestContext) {
@@ -831,7 +849,7 @@ async fn saves_the_threshold(ctx: &TestContext) {
         .await
         .unwrap();
     assert_eq!(saved.status(), 200);
-    assert_eq!(saved.headers()["x-openshop-toast"], "Saved");
+    assert_eq!(toast(&saved).as_deref(), Some("Threshold saved"));
 
     let refused = ctx
         .submit(SettingsPage::PATH, &[("_action", SettingsPage::SAVE_SETTINGS), ("threshold", "0")])
@@ -845,10 +863,10 @@ async fn saves_the_threshold(ctx: &TestContext) {
 
 | Answer | When |
 | --- | --- |
-| `200`, the page | The action ran; its toast in `x-openshop-toast` (an error toast in `x-openshop-toast-error`), percent-encoded. |
-| `204`, `x-openshop-location` | The action answered `Outcome::redirect(…)`. |
+| `200`, the page | The action ran. `toast(&response)` is its toast, `Outcome::toast(…)`; `toast_error(&response)` its error toast, `Outcome::error(…)`. |
+| `204`, `x-openshop-location` | The action answered `Outcome::redirect(…)`; `toast` and `toast_error` read its toast. |
 | `422`, the page | The form was refused field by field, and the view reads `form`: the values sent and the error of each field. |
-| Its status, `x-openshop-toast-error` | The action failed with an `AdminPublicError`, or the form was refused and the view does not read `form`. |
+| Its status, no body | The action failed with an `AdminPublicError` (`toast_error` is its message; `Internal server error` for any other error), or the form was refused and the view does not read `form` (`toast_error` is the first error, `threshold: Must be at least 1`). |
 | `404`, "This page is disabled." | The page's access rule said no, or no page is at `path`. |
 
 ### Without a context

@@ -82,8 +82,15 @@ when you upgrade so that `openshop init` and `openshop dev` come from the same
 release:
 
 ```bash
-cargo install --locked --git https://github.com/0xtlt/openshop-rust openshop-cli
+cargo install --locked --force --git https://github.com/0xtlt/openshop-rust openshop-cli
+# or, from a checkout of the repository:
+cargo install --locked --force --path crates/openshop-cli
 ```
+
+`--force` replaces the CLI installed: without it, cargo keeps it when the
+version number has not changed. Then `openshop --version` prints the version
+and the commit of the CLI that runs; one that answers
+`Unknown command: --version` is older than this check.
 
 For migration steps, see [Manage migrations](manage-migrations.md). For the
 package compatibility policy, see [Versioning](../reference/versioning.md).

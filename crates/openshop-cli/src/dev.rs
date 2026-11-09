@@ -12,7 +12,7 @@ use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use tokio::process::{Child, Command};
 use tokio::sync::{Mutex, mpsc, watch};
 
-use crate::metadata;
+use crate::{legacy, metadata};
 
 /// Directories watched recursively, including ones created after startup.
 const WATCHED_DIRECTORIES: [&str; 2] = ["src", "migrations"];
@@ -495,6 +495,11 @@ async fn terminate_signal() {
 pub async fn start_dev(cargo_args: &[String]) -> Result<()> {
     let cwd = std::env::current_dir()?.canonicalize()?;
     println!("[openshop] Starting dev server...");
+    // cargo, or the admin, fails next: what to do comes first.
+    let leftovers = legacy::leftovers(&cwd);
+    if !leftovers.is_empty() {
+        eprintln!("{}", legacy::warning(&leftovers));
+    }
 
     let process = Arc::new(DevProcess {
         cwd: cwd.clone(),
