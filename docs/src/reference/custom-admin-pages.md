@@ -484,9 +484,11 @@ Assets whose file name carries a content hash are served with
 `no-cache`, and the shell with `no-store`. Every asset has a strong `ETag`, a
 hash of its bytes (weak, and with `Vary: accept-encoding`, when the response may
 be compressed; a `304` carries the same), and a request whose
-`If-None-Match` names it is answered `304`. Assets and shell carry
-`X-Content-Type-Options: nosniff`. An asset compiled into the binary is sent
-from the binary without being copied, and hashed once.
+`If-None-Match` names it is answered `304`. An asset is compressed once per
+encoding (Brotli or gzip) and kept in memory, up to 64 MB of compressed assets,
+the least recently requested dropped first: the next request sends it at once.
+Assets and shell carry `X-Content-Type-Options: nosniff`. An asset compiled into
+the binary is sent from the binary without being copied, and hashed once.
 
 ## Authorization and errors
 

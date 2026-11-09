@@ -16,7 +16,8 @@ use std::sync::{Arc, LazyLock, Mutex, PoisonError};
 use axum::body::Bytes;
 use axum::extract::{Request, State};
 use axum::http::header::{
-    CACHE_CONTROL, CONTENT_SECURITY_POLICY, CONTENT_TYPE, ETAG, IF_NONE_MATCH, REFERER, VARY, X_CONTENT_TYPE_OPTIONS,
+    CACHE_CONTROL, CONTENT_ENCODING, CONTENT_SECURITY_POLICY, CONTENT_TYPE, ETAG, IF_NONE_MATCH, REFERER, VARY,
+    X_CONTENT_TYPE_OPTIONS,
 };
 use axum::http::{HeaderMap, HeaderValue, Method, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -419,28 +420,48 @@ fn is_not_modified(headers: &HeaderMap, etag: &HeaderValue) -> bool {
     sent.trim() == "*" || sent.split(',').any(|tag| strong(tag) == current)
 }
 
-fn asset_response(path: &str, data: Cow<'static, [u8]>, request_headers: &HeaderMap) -> Response {
+async fn asset_response(path: &str, data: Cow<'static, [u8]>, request_headers: &HeaderMap) -> Response {
     let mime = mime_guess::from_path(path).first_or_octet_stream();
-    let (body, mut etag) = shared(data);
-    // What the compression layer will do to a `200`, decided here so that a
-    // `304` describes the same representation: a body it compresses has a weak
-    // ETag, and every body it may compress varies with `Accept-Encoding`.
+    let (body, etag) = shared(data);
+    // The representation a `200` sends, decided first so that a `304`
+    // describes the same one: a compressed body has a weak ETag, and every body
+    // that may be compressed varies with `Accept-Encoding`.
     let compressible = compression::is_compressible(body.len());
-    if compressible && compression::accepts_compression(request_headers) {
-        etag = compression::weak_etag(&etag);
-    }
+    let encoding = compressible
+        .then(|| compression::preferred_encoding(request_headers))
+        .flatten();
     let mut headers = HeaderMap::new();
     headers.insert(CACHE_CONTROL, HeaderValue::from_static(cache_control(path)));
     headers.insert(X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff"));
-    headers.insert(ETAG, etag.clone());
+    let sent_etag = match encoding {
+        Some(_) => compression::weak_etag(&etag),
+        None => etag.clone(),
+    };
+    headers.insert(ETAG, sent_etag.clone());
     if compressible {
         headers.insert(VARY, HeaderValue::from_static("accept-encoding"));
     }
-    if is_not_modified(request_headers, &etag) {
-        return (StatusCode::NOT_MODIFIED, headers).into_response();
-    }
-    let content_type = HeaderValue::from_str(mime.as_ref()).unwrap_or(HeaderValue::from_static("application/octet-stream"));
-    ([(CONTENT_TYPE, content_type)], headers, body).into_response()
+    let mut response = if is_not_modified(request_headers, &sent_etag) {
+        (StatusCode::NOT_MODIFIED, headers).into_response()
+    } else {
+        // Compressed once per ETag and encoding, then kept: an asset never
+        // changes under its ETag.
+        let body = match encoding {
+            Some(encoding) => match compression::encode_asset(&etag, encoding, body.clone()).await {
+                Some(encoded) => {
+                    headers.insert(CONTENT_ENCODING, encoding.header_value());
+                    encoded
+                }
+                None => body,
+            },
+            None => body,
+        };
+        let content_type =
+            HeaderValue::from_str(mime.as_ref()).unwrap_or(HeaderValue::from_static("application/octet-stream"));
+        ([(CONTENT_TYPE, content_type)], headers, body).into_response()
+    };
+    response.extensions_mut().insert(compression::Negotiated);
+    response
 }
 
 pub(crate) async fn serve_ui(
@@ -459,7 +480,7 @@ pub(crate) async fn serve_ui(
             return not_found();
         };
         return match options.ui.read(&path).await {
-            Some(data) => asset_response(&path, data, request.headers()),
+            Some(data) => asset_response(&path, data, request.headers()).await,
             None => not_found(),
         };
     }
@@ -774,6 +795,25 @@ mod tests {
              connect-src https://cdn.shopify.com/shopifycloud/ http://localhost:9393; \
              form-action 'none'; base-uri 'none'"
         );
+    }
+
+    #[tokio::test]
+    async fn a_large_asset_asked_for_twice_is_compressed_once() {
+        let data: Vec<u8> = (0..200_000u32).flat_map(|value| (value % 1000).to_le_bytes()).collect();
+        let accepted = HeaderMap::from_iter([(
+            axum::http::header::ACCEPT_ENCODING,
+            HeaderValue::from_static("gzip, br"),
+        )]);
+        let mut bodies = Vec::new();
+        for _ in 0..2 {
+            let response = asset_response("app-0123456789abcdef_bg.wasm", Cow::Owned(data.clone()), &accepted).await;
+            assert_eq!(response.headers()[CONTENT_ENCODING], "br");
+            assert!(response.headers()[ETAG].as_bytes().starts_with(b"W/\""));
+            bodies.push(axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap());
+        }
+        // The same bytes, not equal ones: the second answer reuses the first compression.
+        assert_eq!(bodies[0].as_ptr(), bodies[1].as_ptr());
+        assert!(bodies[0].len() < data.len() / 10);
     }
 
     #[tokio::test]

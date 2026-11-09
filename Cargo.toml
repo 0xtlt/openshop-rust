@@ -31,11 +31,13 @@ aes-gcm = "0.11"
 anyhow = "1"
 axum = { version = "0.8", default-features = false, features = ["http1", "json", "query", "tokio"] }
 base64 = "0.23"
+brotli = "9"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde", "std"] }
 chrono-tz = { version = "0.10", default-features = false }
 croner = "4"
 # Without its editor and password prompts.
 dialoguer = { version = "0.12", default-features = false }
+flate2 = "1"
 futures = { version = "0.3", default-features = false, features = ["std", "alloc"] }
 hex = "0.4"
 hmac = "0.13"
