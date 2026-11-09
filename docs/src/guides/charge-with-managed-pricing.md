@@ -3,16 +3,17 @@
 With Shopify's managed pricing (Shopify App Pricing), the plans of an app are
 declared in the Partner Dashboard, and Shopify hosts the page where a merchant
 picks one and approves its charge. This guide makes an admin page that needs a
-plan: a shop without one is sent to that page, and the app hears when a
-subscription changes. The [billing reference](../reference/billing.md) has
-every type and function.
+plan: a shop without one is sent to that page, and the app reads the plan from
+the Partner API, as Shopify App Pricing asks. The
+[billing reference](../reference/billing.md) has every type and function.
 
 ## 1. Declare the plans in Shopify
 
 In the Partner Dashboard, open the listing of the app, then **Pricing
 content**, **Settings**, and choose **Shopify App Pricing** as the pricing
-method. Add the plans, such as `Pro` and `Plus`. OpenShop declares none: the
-names you use in the code are the names, or the handles, of these plans.
+method. Add the plans, and give each a handle, such as `pro` and `plus`.
+OpenShop declares none: the names you use in the code are the handles, or the
+names, of these plans.
 
 Give the app its handle in `shopify.app.toml`. Shopify CLI writes it when it
 links the app (`shopify app config link`):
@@ -25,10 +26,62 @@ handle = "hide-paypal"
 
 The handle names the app in the URL of its plan selection page,
 `https://admin.shopify.com/store/{store}/charges/hide-paypal/pricing_plans`.
-`ctx.app_handle()` reads it; without it, the page is named by the API key of
-the app, which Shopify may not take.
+`ctx.app_handle()?` reads it. Without it, the pricing page is an error that
+says to add it: Shopify does not take the client ID in that URL.
 
-## 2. Guard the page
+## 2. Connect the Partner API
+
+Shopify App Pricing keeps the plan of each shop in the Partner API. For the
+apps enrolled since April 2026, and for every app after April 28, 2026,
+Shopify's
+[migration guide](https://shopify.dev/docs/apps/launch/billing/shopify-app-pricing/migrating-to-shopify-app-pricing)
+says to "replace GraphQL Admin API checks, such as billing.check() and
+currentAppInstallation, with Partner API queries". Their subscriptions may not
+be in the Admin API at all.
+
+1. In the Dev Dashboard, open **Organization settings**, **Users**, then
+   **Security**. In **Partner API clients**, click **Add Partner API client**,
+   give it the **Manage apps** permission, and copy its access token: Shopify
+   shows it once.
+2. Note the Partner ID: the number in the URL of the Partner Dashboard,
+   `https://partners.shopify.com/1234567/…`, not the organization ID in the
+   URL of the Dev Dashboard.
+3. Give both to the app, in `.env` or the secrets of your host:
+
+   ```bash
+   SHOPIFY_PARTNER_ID=1234567
+   SHOPIFY_PARTNER_API_TOKEN=prtapi_…
+   ```
+
+   Or name the Partner ID in the code, and keep only the token in the
+   environment:
+
+   ```rust,ignore
+   static APP: App = app! {
+       admin_pages: [ReportsPage],
+       partner_api: PartnerApi::new().partner_id("1234567"),
+   };
+   ```
+
+The application then logs where it reads the plans, without the token:
+
+```text
+[openshop] Billing reads the plans from the Partner API: https://partners.shopify.com/1234567/api/2026-10/graphql.json (SHOPIFY_PARTNER_ID, token from SHOPIFY_PARTNER_API_TOKEN), each plan kept 300s per shop
+```
+
+Without a Partner ID and a token, billing reads the Admin API
+(`currentAppInstallation.activeSubscriptions`), as an app on manual pricing,
+whose charges the Billing API creates, needs: `activeSubscription` does not
+cover the Billing API. A Partner ID without a token, or the reverse, stops the
+app at startup. See [Where the plan is read](../reference/billing.md#where-the-plan-is-read).
+
+The Partner API takes four requests a second per Partner API client, for the
+whole organization. OpenShop keeps the plan of each shop for five minutes, and
+asks again sooner when a check fails or the merchant comes back from the plan
+selection page: see [The cache](../reference/billing.md#the-cache) for the
+trade-off, and `PartnerApi::plan_ttl` to change it.
+
+## 3. Guard the page
 
 Call `billing::require_plan` in a loader or an action, with the plans it needs,
 or use `billing::any_plan` as the `authorize` rule of one that needs any plan:
@@ -44,9 +97,9 @@ pub struct ReportsPage;
 impl ReportsPage {
     #[loader]
     async fn report(ctx: AdminContext) -> Result<Value> {
-        let subscription = billing::require_plan(&ctx, &["Pro", "Plus"]).await?;
-        ctx.logger.info(format!("Report for a {} shop", subscription.name));
-        Ok(json!({ "plan": subscription.name }))
+        let plan = billing::require_plan(&ctx, &["pro", "plus"]).await?;
+        ctx.logger.info(format!("Report for a {} shop", plan.name));
+        Ok(json!({ "plan": plan.handle }))
     }
 
     #[action(authorize = billing::any_plan)]
@@ -56,12 +109,13 @@ impl ReportsPage {
 }
 ```
 
-A shop with neither plan gets `402` with the code `PLAN_REQUIRED`, and the
-plan selection page in the `details` of the error: `pricingUrl`, the page
+Name the plans by their handles: the Admin API and the Partner API both give
+them. A shop with neither plan gets `402` with the code `PLAN_REQUIRED`, and
+the plan selection page in the `details` of the error: `pricingUrl`, the page
 itself, and `pricingLink`, its App Bridge link
 (`shopify:admin/charges/hide-paypal/pricing_plans`).
 
-## 3. Send the merchant to the plans
+## 4. Send the merchant to the plans
 
 In the view of the page, open `pricingLink` in the top window of the admin when
 the loader answers `PLAN_REQUIRED`:
@@ -90,75 +144,108 @@ fn view() -> impl IntoView {
 }
 ```
 
-On the server, outside a view, `billing::pricing_url(&ctx)` is the same page,
+On the server, outside a view, `billing::pricing_url(&ctx)?` is the same page,
 for a redirect or an email, and `ctx.admin_url("settings/payments")` any other
-page of the admin of the shop. A server route, such as the welcome link of the
-plans, gives them for the shop it names, installed or not:
-`ctx.pricing_url(&shop)?` and `ctx.admin_url(&shop, &format!("apps/{}",
-ctx.app_handle(&shop)?))?` (see [Server routes](../reference/server-routes.md#links-to-the-shopify-admin)).
+page of the admin of the shop. A server route gives them for the shop it names,
+installed or not: `ctx.pricing_url(&shop)?` and `ctx.admin_url(&shop,
+&format!("apps/{}", ctx.app_handle(&shop)?))?` (see
+[Server routes](../reference/server-routes.md#links-to-the-shopify-admin)).
 
-## 4. Hear of the changes
+## 5. The welcome link and the changes
 
-Subscribe to `app_subscriptions/update` in `shopify.app.toml`, and handle it
-with its typed payload:
+After the merchant approves a plan, Shopify sends them to the welcome link of
+the plan, with `plan_handle` in its query. Shopify App Pricing sends no webhook
+for a change of plan after April 28, 2026: the welcome link and the Partner API
+are how the app hears of it.
 
-```toml
-[[webhooks.subscriptions]]
-topics = ["app_subscriptions/update"]
-uri = "/webhooks"
-```
+- A welcome link that is a path of the embedded app opens in the admin, which
+  signs its launch. OpenShop forgets the plan it kept for the shop when a
+  verified launch has `plan_handle` (or `charge_id`), so the next check reads
+  the new plan.
+- A welcome link served by a server route of the app calls
+  `ctx.for_shop(&shop).await?.shopify.refresh_plans().await?` to read it again.
+- A plan that ends outside the app, a cancellation or a frozen shop, is seen
+  within five minutes, when the kept plan expires.
+
+A flow, a webhook or a route reads what the shop has now with
+`ctx.shopify.active_plans().await?`.
+
+An app enrolled in Shopify App Pricing before April 2026, and an app of the
+Billing API, still get `app_subscriptions/update` until then. Its typed payload
+is `AppSubscriptionsUpdate`: see
+[The `app_subscriptions/update` webhook](../reference/billing.md#the-app_subscriptionsupdate-webhook).
+
+## 6. Test it
+
+A test gives the shop its plan by handle, without writing what Shopify
+answers, and calls the loader of the page as its view does. A test reads no
+environment variable: give it the Partner API in `TestOptions::partner_api`.
+The Partner ID or the token it lacks is the test's own (`1234567`,
+`prtapi_test`), and the requests go to the mock transport:
 
 ```rust,ignore
-use openshop::billing::{AppSubscriptionsUpdate, SubscriptionStatus};
-use openshop::prelude::*;
+use std::time::Duration;
 
-#[webhook("app_subscriptions/update")]
-pub async fn subscription_updated(ctx: WebhookContext, update: AppSubscriptionsUpdate) -> Result<()> {
-    let subscription = update.app_subscription;
-    ctx.logger.info(format!("{} is {}", subscription.name, subscription.status));
-    Ok(())
-}
-```
-
-List it in the `webhooks` of `app!`. A flow, a webhook or a route reads what
-the shop has now with `ctx.shopify.active_subscriptions().await?`.
-
-## 5. Test it
-
-A test gives the shop its plans by name, without writing what Shopify answers,
-and calls the loader of the page as its view does:
-
-```rust,ignore
 use my_app::APP;
 use my_app::pages::reports::ReportsPage;
 use openshop::billing::PLAN_REQUIRED;
 use openshop::prelude::*;
-use openshop::testing::{TestContext, subscription};
+use openshop::testing::{TestContext, TestOptions, app_pricing_subscription};
 
-#[openshop::test(APP)]
+async fn context() -> TestContext {
+    let options = TestOptions {
+        // The Partner API, asked at each check: the test changes the plan.
+        partner_api: PartnerApi::new().partner_id("1234567").plan_ttl(Duration::ZERO),
+        ..TestOptions::installed()
+    };
+    TestContext::with_options(APP.config().unwrap(), options).await.unwrap()
+}
+
+#[openshop::test(context())]
 async fn a_shop_without_a_plan_is_sent_to_the_plans(ctx: &TestContext) {
-    ctx.shopify.active_subscriptions([]);
+    ctx.shopify.active_subscription(None);
     let error = ctx.call_loader::<Value>(ReportsPage::PATH, "report", ()).await.unwrap_err();
     assert_eq!((error.code.as_str(), error.status), (PLAN_REQUIRED, 402));
     // The `handle` of the `shopify.app.toml` of the project.
     assert_eq!(error.details.unwrap()["pricingLink"], "shopify:admin/charges/my-app/pricing_plans");
 
-    ctx.shopify.active_subscriptions([subscription("Pro")]);
+    ctx.shopify.active_subscription(app_pricing_subscription("pro"));
     let report: Value = ctx.call_loader(ReportsPage::PATH, "report", ()).await.unwrap();
-    assert_eq!(report["plan"], "Pro");
+    assert_eq!(report["plan"], "pro");
 }
 ```
 
-See [Answer the Admin API](../reference/testing.md#answer-the-admin-api) and
+An app that reads the Admin API answers with
+`ctx.shopify.active_subscriptions([subscription("Pro")])` instead. See
+[Answer the Admin API](../reference/testing.md#answer-the-admin-api) and
 [Test admin functions](../reference/testing.md#test-admin-functions).
 
-## 6. Try it locally
+## 7. Try it locally
 
-[local-storefront](https://github.com/0xtlt/local-storefront) serves the plan
-selection page in its admin, at
-`{admin_origin}/admin/charges/{handle}/pricing_plans?shop={shop}`. With
-`SHOPIFY_ADMIN_ORIGIN` set (see
-[Use custom Shopify endpoints](custom-shopify-endpoints.md)), `pricingUrl` and
-`ctx.admin_url(…)` point there; the App Bridge link opens in the admin it is
-clicked in. Development stores get test subscriptions (`subscription.test`),
-which `require_plan` counts as plans.
+[local-storefront](https://github.com/0xtlt/local-storefront) (lsf) serves the
+plan selection page in its admin, at
+`{admin_origin}/admin/charges/{handle}/pricing_plans?shop={shop}`, and the
+Partner API at Shopify's path on its own origin. Start it with the plans in a
+file (lsf's `docs/admin.md`, "Managed pricing"):
+
+```bash
+lsf app dev --app . --app-url http://localhost:3000 --port 9393 --pricing-plans pricing.toml
+```
+
+It prints the Partner API it serves, its Partner ID and its token, and
+`GET http://localhost:9393/__lsf/admin/partner` gives the same as JSON. Point
+the app at it (see
+[Use custom Shopify endpoints](custom-shopify-endpoints.md)):
+
+```bash
+SHOPIFY_ADMIN_ORIGIN=http://localhost:9393
+SHOPIFY_PARTNER_ORIGIN=http://localhost:9393
+SHOPIFY_PARTNER_ID=…          # partnerId of /__lsf/admin/partner
+SHOPIFY_PARTNER_API_TOKEN=…   # token of /__lsf/admin/partner, prtapi_lsf_…
+```
+
+`pricingUrl` and `ctx.admin_url(…)` point to lsf's admin, the App Bridge link
+opens in the admin it is clicked in, and the plans chosen there are what
+`activeSubscription` answers. `POST /__lsf/admin/pricing-plans/{handle}/select`
+and `POST /__lsf/admin/pricing-plans/cancel` choose and end a plan without the
+page.

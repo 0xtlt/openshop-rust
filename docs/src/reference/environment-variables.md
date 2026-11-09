@@ -27,6 +27,9 @@ afterwards has no effect on a running process.
 | `SHOPIFY_ADMIN_ORIGIN` | No | Unset: `https://{shop}` | Where the Admin API, OAuth and the token requests of every shop go, when the code sets no `admin_origin` [endpoint](../guides/custom-shopify-endpoints.md): a simulator, a proxy or an API of your own, such as `http://localhost:9393` |
 | `SHOPIFY_APP_BRIDGE_URL` | No | Unset: Shopify's CDN | The App Bridge script of the admin UI, when the code sets no `app_bridge` [endpoint](../guides/custom-shopify-endpoints.md) |
 | `SHOPIFY_POLARIS_URL` | No | Unset: Shopify's CDN | The Polaris script of the admin UI and of the page that says where the app opens from, when the code sets no `polaris` [endpoint](../guides/custom-shopify-endpoints.md) |
+| `SHOPIFY_PARTNER_ORIGIN` | No | Unset: `https://partners.shopify.com` | Where the Partner API requests go, when the code sets no `partner_origin` [endpoint](../guides/custom-shopify-endpoints.md) |
+| `SHOPIFY_PARTNER_ID` | With `SHOPIFY_PARTNER_API_TOKEN` | Unset | The number in the URL of the Partner Dashboard, when the code sets no `partner_api.partner_id`. With a token, billing reads the plans from the Partner API ([Billing](billing.md#the-partner-api)) |
+| `SHOPIFY_PARTNER_API_TOKEN` | With `SHOPIFY_PARTNER_ID` | Unset | The access token of a Partner API client of the organization, when the code sets no `partner_api.token`. A secret: never logged |
 | `PGPOOL_MAX` | No | `10` | Maximum PostgreSQL pool connections per process |
 | `PGPOOL_IDLE_TIMEOUT_MS` | No | `30000` | Idle PostgreSQL connection timeout |
 | `PGPOOL_CONNECTION_TIMEOUT_MS` | No | `5000` | PostgreSQL connection acquisition timeout |
@@ -37,16 +40,23 @@ Notes:
 
 - An empty value counts as unset for `SHOPIFY_API_KEY`, `SHOPIFY_API_SECRET`,
   `HOST`, `SHOPIFY_APP_URL`, `ENCRYPTION_KEY`, `OPENSHOP_UI_DIR`,
-  `SHOPIFY_ADMIN_ORIGIN`, `SHOPIFY_APP_BRIDGE_URL`, and `SHOPIFY_POLARIS_URL`.
-- `SHOPIFY_ADMIN_ORIGIN`, `SHOPIFY_APP_BRIDGE_URL` and `SHOPIFY_POLARIS_URL`
-  are read by `dev`, `start` and `worker`, each for the one field of the
-  `shopify_endpoints` the code does not set: a field set in `app!` or at
-  startup wins over its variable. The origin must be `https://host[:port]`, or
+  `SHOPIFY_ADMIN_ORIGIN`, `SHOPIFY_APP_BRIDGE_URL`, `SHOPIFY_POLARIS_URL`,
+  `SHOPIFY_PARTNER_ORIGIN`, `SHOPIFY_PARTNER_ID`, and
+  `SHOPIFY_PARTNER_API_TOKEN`.
+- `SHOPIFY_ADMIN_ORIGIN`, `SHOPIFY_APP_BRIDGE_URL`, `SHOPIFY_POLARIS_URL` and
+  `SHOPIFY_PARTNER_ORIGIN` are read by `dev`, `start` and `worker`, each for
+  the one field of the `shopify_endpoints` the code does not set: a field set
+  in `app!` or at startup wins over its variable. An origin must be `https://host[:port]`, or
   `http://` to `localhost`, `127.0.0.1` or `[::1]`, with no path; a script
   URL is absolute, `https://`, or `http://` to the same hosts. Any other value
   stops the command at startup. When one of the endpoints is not Shopify's,
   the command logs a line at startup that names it. See
   [Custom Shopify endpoints](../guides/custom-shopify-endpoints.md).
+- `SHOPIFY_PARTNER_ID` and `SHOPIFY_PARTNER_API_TOKEN` are read the same way,
+  for the fields of `partner_api` the code does not set. Set both or neither:
+  one without the other stops the command at startup. With both, the command
+  logs where billing reads the plans, without the token. See
+  [Billing](billing.md#the-partner-api).
 - The templates of `openshop init` also read `OPS_PASSWORD`, `SENTRY_DSN` and
   `SHOPIFY_CLIENT_CREDENTIALS_SHOP` in `src/main.rs` or `src/lib.rs`, and pass
   them to the `ops_password`, `sentry` and `client_credentials_shop` settings

@@ -38,7 +38,7 @@ context down when the function returns.
 
 The contexts a `#[openshop::test]` starts read the Shopify TOML files of the
 crate of the test, in its `CARGO_MANIFEST_DIR`: the `handle` and the `name` of
-`shopify.app.toml`, and its scopes. So `billing::pricing_url(ctx)` and the
+`shopify.app.toml`, and its scopes. So `billing::pricing_url(ctx)?` and the
 links of a route name the app as Shopify does. When the file has a
 `client_id`, the test is that app: its `client_id` is the API key of the
 context (`ctx.api_key`), unless the options give one, or a
@@ -179,6 +179,7 @@ in a test that ends with `ctx.shutdown().await`.
 | `server` | `ServerOptions::default()` | API only: no admin UI is served. |
 | `transport` | A new `MockTransport` | Transport shared with other contexts or prepared in advance. |
 | `shopify_endpoints` | `ShopifyEndpoints::new()` | The [Shopify endpoints](../guides/custom-shopify-endpoints.md) of the application, field by field over the ones its configuration sets: the Admin API and OAuth at another origin, another App Bridge or Polaris in the admin UI. The requests still go to the mock transport. `SHOPIFY_ADMIN_ORIGIN` and the other variables of the endpoints are not read in a test. |
+| `partner_api` | `PartnerApi::new()` | The [Partner API](billing.md#the-partner-api) of the application, field by field over the one its configuration sets. With a Partner ID or a token, billing reads the plans from the Partner API, which `ctx.shopify` answers; the one that is missing is `TEST_PARTNER_ID` (`1234567`) or `TEST_PARTNER_API_TOKEN` (`prtapi_test`). `SHOPIFY_PARTNER_ID` and `SHOPIFY_PARTNER_API_TOKEN` are not read in a test. `plan_ttl(Duration::ZERO)` keeps no plan, for a test that changes it. |
 
 `TestOptions` implements `Default`; set the fields you need with struct update
 syntax. `TestOptions::installed()` is the default options with an
@@ -356,7 +357,8 @@ async fn hides_paypal_for_a_paying_shop(ctx: &TestContext) {
 | `on_variables(operation, variables, data)` | The same, for a request whose variables contain `variables`: each key given, with the same value, an object compared key by key. Chosen before an answer without variables. |
 | `on_with(operation, answer)` | Answers with what `answer` makes of the `GraphqlCall`: `Ok(data)` is `{ "data": data }`, an `Err` a GraphQL error with its message. For a shop whose state the mutations change: the closure keeps it, in an `Arc<Mutex<…>>`. |
 | `respond(operation, response)` | Answers with an `OutboundResponse` as it is: `MockTransport::json(503, json!({}))` for a Shopify that fails, `json!({ "errors": … })` for a refusal. |
-| `active_subscriptions(subscriptions)` | Answers `OpenShopActiveSubscriptions`, what `ctx.shopify.active_subscriptions()`, `billing::require_plan` and `billing::any_plan` ask, with these `AppSubscription`s. `[]` is a shop without a plan. |
+| `active_subscriptions(subscriptions)` | Answers `OpenShopActiveSubscriptions`, what `ctx.shopify.active_subscriptions()` asks, and `billing::require_plan`, `billing::any_plan` and `active_plans()` when they read the Admin API, with these `AppSubscription`s. `[]` is a shop without a plan. |
+| `active_subscription(subscription)` | Answers `OpenShopPartnerSubscription`, the `activeSubscription` of the Partner API that the billing helpers read when the Partner API is set, with this `AppPricingSubscription`; `None` is a shop without a plan. Also answers `OpenShopPartnerIds` with `TEST_APP_GID` and `TEST_SHOP_GID`, unless the test answers it. |
 | `calls()`, `calls_to(operation)` | The requests, oldest first, as `GraphqlCall`s: `operation` (`None` for an anonymous one), `query`, `variables` (`{}` without), `url`. |
 | `operations()` | The names of the operations sent, in order; `(anonymous)` for one without a name. |
 | `unanswered()` | The operations nothing answered, once each. |
@@ -374,6 +376,11 @@ a GraphQL error, which fails the call that sent it:
 [openshop] The test does not answer the Admin API operation `CurrentCustomization`: answer it with `ctx.shopify.on("CurrentCustomization", data)`. Answered: OpenShopActiveSubscriptions.
 ```
 
+`ctx.shopify` answers the Partner API too, by the same names: a call to it
+has the address of the Partner API in its `url`,
+`https://partners.shopify.com/{partner_id}/api/2026-10/graphql.json`, and an
+operation it does not answer is a "Partner API operation" in the error.
+
 `openshop::testing::subscription(name)` is an active test subscription to the
 plan `name`, as `activeSubscriptions` lists one
 (`gid://shopify/AppSubscription/1`, no trial, created now, no line). Its
@@ -390,6 +397,26 @@ ctx.shopify.active_subscriptions([AppSubscription {
 }]);
 ```
 
+`openshop::testing::app_pricing_subscription(handle)` is the same for the
+Partner API: a subscription to the plan `handle`, every 30 days, out of its
+trial, with one item of that handle and description and a flat rate of
+`10.00` USD. Its fields are public too:
+
+```rust,ignore
+use openshop::billing::AppPricingSubscription;
+use openshop::testing::app_pricing_subscription;
+
+// A shop in the trial of the Pro plan.
+ctx.shopify.active_subscription(AppPricingSubscription {
+    trial_ends_at: Some(chrono::Utc::now() + chrono::Duration::days(7)),
+    ..app_pricing_subscription("pro")
+});
+```
+
+The plan of a shop read from the Partner API is kept for the `plan_ttl` of the
+Partner API, as in production: a test that changes it sets
+`plan_ttl(Duration::ZERO)` in [`TestOptions::partner_api`](#testoptions).
+
 A `5xx`, a network failure or a throttled answer is retried as in
 production, with the [retry policy](#testoptions) of the test, which does not
 wait: `ctx.shopify.respond("Orders", MockTransport::json(503, json!({})))`
@@ -403,7 +430,9 @@ these of its own, and a test that reaches them answers them by these names:
 
 | Operation | Sent by | Answer |
 | --- | --- | --- |
-| `OpenShopActiveSubscriptions` (`billing::ACTIVE_SUBSCRIPTIONS_OPERATION`) | `ShopifyClient::active_subscriptions()`, `billing::require_plan`, `billing::any_plan` | `ctx.shopify.active_subscriptions([…])` |
+| `OpenShopActiveSubscriptions` (`billing::ACTIVE_SUBSCRIPTIONS_OPERATION`) | `ShopifyClient::active_subscriptions()`; `active_plans()`, `billing::require_plan` and `billing::any_plan` on the Admin API | `ctx.shopify.active_subscriptions([…])` |
+| `OpenShopPartnerIds` (`billing::PARTNER_IDS_OPERATION`), to the Admin API | The first plan read of a shop from the Partner API, for the GIDs of the app and of the shop | `ctx.shopify.active_subscription(…)` answers it, or `on(…)` with `shop { id }` and `currentAppInstallation { app { id } }` |
+| `OpenShopPartnerSubscription` (`billing::PARTNER_SUBSCRIPTION_OPERATION`), to the Partner API | `active_plans()`, `refresh_plans()`, `billing::require_plan` and `billing::any_plan` on the Partner API | `ctx.shopify.active_subscription(…)` |
 | `ListShopifyFunctions`, `ListCartTransformInstances` | The built-in Functions page, listing the instances of a cart transform | `on(…)`, with the `shopifyFunctions` and `cartTransforms` connections |
 | `ListDiscountInstances` | The same page, for a discount Function | `on(…)`, with `discountNodes` |
 | `ListInstances` | The same page, for the other Functions | `on(…)`, with the connection of the type: `paymentCustomizations`, `deliveryCustomizations`, `validations` or `fulfillmentConstraintRules` |

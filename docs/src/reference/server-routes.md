@@ -262,9 +262,9 @@ link in an email. These read the configuration only, and take the shop as
 
 | Method | Returns |
 | --- | --- |
-| `ctx.app_handle(shop)` | `Result<&str>`: the handle of the app on Shopify, which the URLs of the admin name it by (see [Billing](billing.md#the-handle-of-the-app)). |
+| `ctx.app_handle(shop)` | `Result<&str>`: the handle of the app on Shopify, which the URLs of the admin name it by (see [Billing](billing.md#the-handle-of-the-app)). An error when `shopify.app.toml` has no `handle`. |
 | `ctx.admin_url(shop, path)` | `Result<String>`: a page of the admin of the shop, `https://admin.shopify.com/store/{store}/{path}`, at the `admin_origin` of the [Shopify endpoints](../guides/custom-shopify-endpoints.md) when there is one. |
-| `ctx.pricing_url(shop)` | `Result<String>`: the plan selection page of the app for the shop, as `billing::pricing_url` gives it. |
+| `ctx.pricing_url(shop)` | `Result<String>`: the plan selection page of the app for the shop, as `billing::pricing_url` gives it. An error without a `handle`, as `app_handle`. |
 
 ```rust,ignore
 use openshop::prelude::*;
@@ -274,6 +274,11 @@ use openshop::response::{IntoResponse, Response, StatusCode, header};
 #[route(GET, "/welcome")]
 pub async fn welcome(ctx: RouteContext) -> Result<Response> {
     let shop = ctx.request.query().get("shop").cloned().unwrap_or_default();
+    // The plan just chosen: read it again, for a shop that has the app. A
+    // failure is the next check's to report: the merchant goes back anyway.
+    if let Ok(tenant) = ctx.for_shop(&shop).await {
+        let _ = tenant.shopify.refresh_plans().await;
+    }
     let app = format!("apps/{}", ctx.app_handle(&shop)?);
     let location = ctx.admin_url(&shop, &app)?;
     Ok((StatusCode::FOUND, [(header::LOCATION, location)]).into_response())
@@ -283,7 +288,12 @@ pub async fn welcome(ctx: RouteContext) -> Result<Response> {
 An authentication function has them too. They fail as `for_shop` does when the
 shop is not a `*.myshopify.com` domain, or the app handle is unknown or missing
 while several apps are configured; whether the shop installed the app is not
-asked. A route that wants a context of the shop, with `app_handle()` and
+asked. `app_handle` and `pricing_url` also fail when the `shopify.app.toml` of
+the app has no `handle`.
+
+The query of a welcome link is not signed when it reaches a server route:
+anyone can call it. `refresh_plans()` asks the Partner API at most once every
+ten seconds per shop, whatever calls it. A route that wants a context of the shop, with `app_handle()` and
 `admin_url(path)` of its own, calls `for_shop`.
 
 ## Queue durable work
