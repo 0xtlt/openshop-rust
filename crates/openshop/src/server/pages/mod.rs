@@ -140,8 +140,7 @@ pub(crate) async fn serve(app: OpenShop, options: ServerOptions, reload: Option<
             // App Bridge asks again with a fresh token.
             return (StatusCode::UNAUTHORIZED, [(RETRY_HEADER, "1")]).into_response();
         }
-        let embedded = options.dev
-            || query.contains_key("shop")
+        let embedded = query.contains_key("shop")
             || query.contains_key("embedded")
             || header(&headers, "sec-fetch-dest") == Some("iframe");
         return if embedded && request.method() != Method::POST {
@@ -191,6 +190,12 @@ fn finish(mut response: Response, app: &OpenShop, dev: bool) -> Response {
     response
 }
 
+/// A path of this server: `/reviews/42`, not `//host` nor `/\\host`, which
+/// browsers read as another host.
+fn is_local_path(path: &str) -> bool {
+    path.starts_with('/') && !path.starts_with("//") && !path.contains('\\')
+}
+
 fn redirect(location: &str) -> Response {
     (StatusCode::FOUND, [(LOCATION, location)]).into_response()
 }
@@ -234,7 +239,7 @@ fn bounce(app: &OpenShop, pathname: &str, query: &str, token: Option<&str>) -> R
 pub(crate) async fn bounce_page(State(app): State<OpenShop>, request: Request) -> Response {
     let query = parse_query(request.uri().query());
     let reload = query.get("shopify-reload").map(String::as_str).unwrap_or_default();
-    if !reload.starts_with('/') || reload.starts_with("//") {
+    if !is_local_path(reload) {
         return not_found();
     }
     let shopify_app = app.apps().by_handle(query.get("app").map(String::as_str)).ok().or_else(|| app.apps().all().first());
@@ -355,7 +360,7 @@ async fn answer(call: &PageCall<'_>, outcome: Outcome) -> Response {
     let next = outcome
         .redirect
         .as_deref()
-        .filter(|path| path.starts_with('/') && !path.starts_with("//"));
+        .filter(|path| is_local_path(path));
     if !call.fetch {
         return see_other(next.unwrap_or(&page_url(&call.pathname, &call.query)));
     }

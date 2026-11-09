@@ -297,13 +297,14 @@ async fn a_page_loaded_without_a_token_bounces() {
         bounce.body
     );
     // Only to a page of the app.
-    let elsewhere = send(request(
-        &ctx,
-        Method::GET,
-        "/auth/session-token?shopify-reload=%2F%2Fevil.example",
-    ))
-    .await;
-    assert_eq!(elsewhere.status, StatusCode::NOT_FOUND);
+    for elsewhere in ["%2F%2Fevil.example", "%2F%5Cevil.example", "https%3A%2F%2Fevil.example"] {
+        let path = format!("/auth/session-token?shopify-reload={elsewhere}");
+        assert_eq!(
+            send(request(&ctx, Method::GET, &path)).await.status,
+            StatusCode::NOT_FOUND,
+            "{path}"
+        );
+    }
 
     // Outside Shopify admin: where the app opens from.
     let outside = send(request(&ctx, Method::GET, "/")).await;
