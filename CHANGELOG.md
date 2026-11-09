@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+- An asset of the admin UI is compressed once per encoding and kept in
+  memory; each request compressed it again. Under `openshop dev`, a debug
+  build of the UI has a `.wasm` of 40 MB or more: each load compressed it for
+  5 s on a fast machine (19 s seen in Chrome), and the frame of the app stayed
+  blank meanwhile. The first load of a new asset compresses it at Brotli
+  quality 1 or gzip level 3, fast enough in a debug build of the app: 1.3 s
+  for a 43 MB `.wasm`, then 0.4 s for each load after it. Up to 64 MB of
+  compressed assets are kept, the least recently requested dropped first, and
+  the requests that arrive while an asset is compressed wait for that
+  compression. A compressed asset now has a `Content-Length`. The other
+  responses are compressed while they are sent, as before, at Brotli quality 4
+  or gzip level 6.
+- An asset requested with `Accept-Encoding: br;q=0, gzip;q=0`, or with
+  `identity` preferred, is sent uncompressed with its strong `ETag`; it had
+  the weak one of a compressed asset.
+
 - A signed welcome link that a route serves costs one Partner API request,
   not two. The route read the plan with `refresh_plans()`, then sent the
   launch to the app's home, which forgot that answer because the query has

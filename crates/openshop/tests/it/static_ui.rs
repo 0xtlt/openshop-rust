@@ -375,6 +375,82 @@ async fn a_compressed_asset_has_a_weak_etag() {
     ctx.shutdown().await.unwrap();
 }
 
+/// A body sent with this `Content-Encoding`, decoded.
+fn decode(encoding: &str, body: &[u8]) -> Vec<u8> {
+    use std::io::Read;
+    let mut decoded = Vec::new();
+    match encoding {
+        "br" => brotli::Decompressor::new(body, 4096).read_to_end(&mut decoded),
+        "gzip" => flate2::read::GzDecoder::new(body).read_to_end(&mut decoded),
+        other => panic!("not an encoding of the server: {other}"),
+    }
+    .unwrap();
+    decoded
+}
+
+#[tokio::test]
+async fn a_large_asset_decodes_to_itself_in_each_encoding() {
+    let ui = UiDir::new();
+    let source: String = (0..100_000)
+        .map(|line| format!("export const value{line} = {};\n", line * 7919 % 10_007))
+        .collect();
+    ui.write("assets/big-1a2b3c4d5e.js", &source);
+    let ctx = ui_context(&ui).await;
+
+    let plain = request(&ctx, Method::GET, "/assets/big-1a2b3c4d5e.js")
+        .send()
+        .await
+        .unwrap();
+    assert!(plain.headers().get("content-encoding").is_none());
+    let etag = plain.headers()["etag"].to_str().unwrap().to_string();
+    assert_eq!(plain.bytes().await.unwrap(), source.as_bytes());
+
+    for (accepted, encoding) in [
+        ("gzip, deflate, br, zstd", "br"),
+        ("gzip", "gzip"),
+        ("gzip;q=0.5, br;q=0.1", "gzip"),
+        ("br;q=0, gzip", "gzip"),
+    ] {
+        let mut bodies = Vec::new();
+        for _ in 0..2 {
+            let reply = request(&ctx, Method::GET, "/assets/big-1a2b3c4d5e.js")
+                .header("accept-encoding", accepted)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(reply.status(), StatusCode::OK, "{accepted}");
+            assert_eq!(reply.headers()["content-encoding"], encoding, "{accepted}");
+            assert_eq!(reply.headers()["etag"], format!("W/{etag}").as_str(), "{accepted}");
+            assert_eq!(reply.headers()["vary"], "accept-encoding", "{accepted}");
+            let length: usize = reply.headers()["content-length"].to_str().unwrap().parse().unwrap();
+            let body = reply.bytes().await.unwrap();
+            assert_eq!(body.len(), length, "{accepted}");
+            bodies.push(body);
+        }
+        assert_eq!(bodies[0], bodies[1], "{accepted}");
+        assert!(
+            bodies[0].len() < source.len() / 4,
+            "{accepted}: {} bytes",
+            bodies[0].len()
+        );
+        assert_eq!(decode(encoding, &bodies[0]), source.as_bytes(), "{accepted}");
+    }
+
+    // Identity preferred, or no encoding of the server accepted: sent as it is.
+    for accepted in ["identity, gzip;q=0.5", "deflate, zstd", "br;q=0, gzip;q=0"] {
+        let reply = request(&ctx, Method::GET, "/assets/big-1a2b3c4d5e.js")
+            .header("accept-encoding", accepted)
+            .send()
+            .await
+            .unwrap();
+        assert!(reply.headers().get("content-encoding").is_none(), "{accepted}");
+        assert_eq!(reply.headers()["etag"], etag.as_str(), "{accepted}");
+        assert_eq!(reply.headers()["vary"], "accept-encoding", "{accepted}");
+        assert_eq!(reply.bytes().await.unwrap(), source.as_bytes(), "{accepted}");
+    }
+    ctx.shutdown().await.unwrap();
+}
+
 #[tokio::test]
 async fn an_asset_compiled_into_the_application_is_served_with_an_etag() {
     let ui = UiSource::Assets(|path| match path {
