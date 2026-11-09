@@ -110,7 +110,7 @@ app and shop:
 | --- | --- |
 | A check passes with the kept answer | It is used until it is `plan_ttl` old. |
 | A check does not pass (no plan, or not the one asked) | The Partner API is asked again, unless the answer is younger than ten seconds (`billing::MIN_REFRESH`). A merchant who just chose a plan gets it at once; a merchant without one costs at most one request every ten seconds. |
-| A verified launch of the app with `plan_handle` (or `charge_id`) | The answer is forgotten: it is the welcome link of a plan, which the admin opens signed. |
+| A verified launch of the app with `plan_handle` (or `charge_id`) | The answer is forgotten: it is the welcome link of a plan, which the admin opens signed. Not an answer younger than ten seconds that has the plan of `plan_handle`: the [route of the welcome link](#the-welcome-link-of-a-route) just read it, after the plan was chosen. A "no plan" answer of the same age is forgotten: it is the check that sent the merchant to the plans. |
 | `app/uninstalled` | The answer is forgotten. |
 | `ctx.shopify.refresh_plans()` | The Partner API is asked again, whatever the age of the answer: for the welcome link of a plan that a server route serves, when Shopify signed it (see [The welcome link of a route](#the-welcome-link-of-a-route)). Not for every request: the Partner API takes four requests a second for the whole organization. |
 | Concurrent checks of a shop | One request; the others wait for it. |
@@ -254,6 +254,31 @@ rule fails is hidden, and the merchant is not told why.
 On the Partner API, a kept answer without the plan is asked again first,
 unless it is younger than ten seconds (see [The cache](#the-cache)).
 
+### A page with its own "no plan" state
+
+`ctx.shopify.plan_among(&plans)` is the check of `require_plan` without the
+error: `Result<Option<Plan>>`, the plan among `plans` the shop has, or `None`.
+It reads the plan with the same rule: a kept answer without the plan is asked
+again once it is ten seconds old. A loader that shows a "no plan" state,
+instead of answering `402`, calls it:
+
+```rust,ignore
+#[loader]
+async fn report(ctx: AdminContext) -> Result<Value> {
+    Ok(match ctx.shopify.plan_among(&["pro", "plus"]).await? {
+        Some(plan) => json!({ "plan": plan.handle }),
+        None => json!({ "plan": null, "pricingLink": billing::pricing_link(&ctx)? }),
+    })
+}
+```
+
+It works in any context with a `ctx.shopify`: a flow, a webhook, the shop of a
+route. A failure to ask Shopify is an error, not `None`. `active_plans()` reads
+the plans too, but keeps any answer for `plan_ttl`: a "no plan" it kept is
+not asked again sooner.
+
+### The response of `require_plan`
+
 The response of a call without the plan:
 
 ```json
@@ -294,14 +319,17 @@ route serves it, the route reads the plan with `refresh_plans()`:
 
 ```rust,ignore
 use openshop::prelude::*;
-use openshop::response::{IntoResponse, Response, StatusCode, header};
+use openshop::response::{self, IntoResponse, Response, StatusCode, header};
 
 /// The welcome link of a plan, which the admin opens in the app's frame.
 #[route(GET, "/welcome")]
 pub async fn welcome(ctx: RouteContext) -> Result<Response> {
     let Some(launch) = ctx.shopify_launch() else {
         // Not signed by Shopify: the app's page in the admin, and no Partner API call.
-        let shop = ctx.request.query().get("shop").cloned().unwrap_or_default();
+        let Some(shop) = ctx.request.query_shop() else {
+            let error = json!({ "error": "Missing or invalid shop" });
+            return Ok(response::json_with_status(StatusCode::BAD_REQUEST, error));
+        };
         let location = ctx.admin_url(&shop, &format!("apps/{}", ctx.app_handle(&shop)?))?;
         return Ok((StatusCode::FOUND, [(header::LOCATION, location)]).into_response());
     };
@@ -336,11 +364,15 @@ pub async fn welcome(ctx: RouteContext) -> Result<Response> {
 - **Into the app, in the frame.** The admin runs the route in the app's
   frame, and Shopify's admin cannot be framed (`X-Frame-Options: DENY`). So a
   signed launch goes to the app's home, `/?{launch.query}`, which verifies the
-  same query again within its 90 seconds. That home forgets the kept plan, as
-  any launch with `plan_handle` does, so its first check asks the Partner API
-  once more: two requests per plan change, both signed. A call without the
-  signature is not from the admin's frame: it goes to the app's page in the
-  admin.
+  same query again within its 90 seconds. The home keeps the plan the route
+  just read, since it has the plan of `plan_handle` and is younger than ten
+  seconds (see [The cache](#the-cache)): one Partner API request per plan
+  change. A call without the signature is not from the admin's frame: it goes
+  to the app's page in the admin.
+- **A bad shop is `400`.** Without the signature, the route reads `shop` from
+  the query with `ctx.request.query_shop()`, which is `None` when it is
+  missing or not a `*.myshopify.com` domain. `admin_url` would fail on it, and
+  `?` would make that a `500`.
 
 ## The pricing page and the pages of the admin
 

@@ -1358,6 +1358,18 @@ impl RouteRequest {
         crate::server::http::parse_query(self.uri.query())
     }
 
+    /// The `shop` of the query, as [`RouteContext::for_shop`] reads a shop:
+    /// trimmed, lowercased, `demo.myshopify.com` from a URL too. `None` when
+    /// there is none, or when it is not a `*.myshopify.com` domain: answer
+    /// `400` then, before building a link with it. Not verified: anyone can
+    /// write it. [`RouteContext::shopify_launch`] gives the shop Shopify
+    /// signed.
+    pub fn query_shop(&self) -> Option<String> {
+        self.query()
+            .get("shop")
+            .and_then(|shop| crate::server::shop_domain::normalize_shop_domain(shop))
+    }
+
     pub fn json<T: DeserializeOwned>(&self) -> Result<T> {
         Ok(serde_json::from_slice(&self.body)?)
     }
@@ -1416,7 +1428,8 @@ impl ShopifyLaunch {
 
     /// Whether it is the welcome link of a plan: `plan_handle` or
     /// `charge_id` is in the query. The admin UI forgets the plan it kept
-    /// for the shop on such a launch.
+    /// for the shop on such a launch, unless that answer has the plan of
+    /// `plan_handle` and is younger than ten seconds.
     pub fn is_plan_welcome(&self) -> bool {
         self.plan_handle().is_some() || self.charge_id().is_some()
     }
@@ -1590,12 +1603,16 @@ impl<A> RouteContext<A> {
     ///
     /// ```
     /// use openshop::prelude::*;
-    /// use openshop::response::{IntoResponse, Response, StatusCode, header};
+    /// use openshop::response::{self, IntoResponse, Response, StatusCode, header};
     ///
     /// /// A link to the app in the admin of `?shop=`, for an email.
     /// #[route(GET, "/open")]
     /// async fn open(ctx: RouteContext) -> Result<Response> {
-    ///     let shop = ctx.request.query().get("shop").cloned().unwrap_or_default();
+    ///     // A missing or bad shop is the caller's error, not one of the server.
+    ///     let Some(shop) = ctx.request.query_shop() else {
+    ///         let error = json!({ "error": "Missing or invalid shop" });
+    ///         return Ok(response::json_with_status(StatusCode::BAD_REQUEST, error));
+    ///     };
     ///     let app = format!("apps/{}", ctx.app_handle(&shop)?);
     ///     let location = ctx.admin_url(&shop, &app)?;
     ///     Ok((StatusCode::FOUND, [(header::LOCATION, location)]).into_response())

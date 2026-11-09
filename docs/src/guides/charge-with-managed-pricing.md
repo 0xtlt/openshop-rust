@@ -144,6 +144,34 @@ fn view() -> impl IntoView {
 }
 ```
 
+A page can show its own "no plan" state instead of an error. Its loader reads
+the plan with `ctx.shopify.plan_among(&[…])`, which is the check of
+`require_plan` without the `402`: `Some(plan)`, or `None` without one of the
+plans. It asks the Partner API again as `require_plan` does, so a merchant
+back from the plan selection page sees the new plan at once:
+
+```rust,ignore
+#[loader]
+async fn report(ctx: AdminContext) -> Result<Value> {
+    Ok(match ctx.shopify.plan_among(&["pro", "plus"]).await? {
+        Some(plan) => json!({ "plan": plan.handle }),
+        None => json!({ "plan": null, "pricingLink": billing::pricing_link(&ctx)? }),
+    })
+}
+```
+
+The view shows the banner when `plan` is `null`, with the link of the loader:
+
+```rust,ignore
+let plans = move || {
+    report
+        .data
+        .get()
+        .filter(|report| report["plan"].is_null())
+        .and_then(|report| report["pricingLink"].as_str().map(str::to_string))
+};
+```
+
 On the server, outside a view, `billing::pricing_url(&ctx)?` is the same page,
 for a redirect or an email, and `ctx.admin_url("settings/payments")` any other
 page of the admin of the shop. A server route gives them for the shop it names,
@@ -179,19 +207,25 @@ merchant was sent to the plans, more than ten seconds earlier.
 
 Read it as a best effort. Do not use `?` on `for_shop` or `refresh_plans()`
 there: when the Partner API fails, a merchant who just paid would land on a
-`500`. The route logs the failure and sends the merchant into the app.
+`500`. The route logs the failure and sends the merchant into the app. A call
+without the signature names its shop in the query: `ctx.request.query_shop()`
+checks it, and the route answers `400` when it is missing or not a shop
+domain.
 
 ```rust,ignore
 // src/routes/welcome.rs
 use openshop::prelude::*;
-use openshop::response::{IntoResponse, Response, StatusCode, header};
+use openshop::response::{self, IntoResponse, Response, StatusCode, header};
 
 /// The welcome link of a plan, which the admin opens in the app's frame.
 #[route(GET, "/welcome")]
 pub async fn welcome(ctx: RouteContext) -> Result<Response> {
     let Some(launch) = ctx.shopify_launch() else {
         // Not signed by Shopify: the app's page in the admin, and no Partner API call.
-        let shop = ctx.request.query().get("shop").cloned().unwrap_or_default();
+        let Some(shop) = ctx.request.query_shop() else {
+            let error = json!({ "error": "Missing or invalid shop" });
+            return Ok(response::json_with_status(StatusCode::BAD_REQUEST, error));
+        };
         let location = ctx.admin_url(&shop, &format!("apps/{}", ctx.app_handle(&shop)?))?;
         return Ok((StatusCode::FOUND, [(header::LOCATION, location)]).into_response());
     };
@@ -211,7 +245,8 @@ pub async fn welcome(ctx: RouteContext) -> Result<Response> {
 
 A signed launch stays in the admin's frame: the route sends it to the app's
 home with the signed query, which the home verifies again. Shopify's admin
-cannot be opened in a frame. `ctx.logger` writes the warning with the route
+cannot be opened in a frame. The home keeps the plan the route just read: one
+Partner API request per plan change. `ctx.logger` writes the warning with the route
 (see [Server routes](../reference/server-routes.md#logging)).
 
 A flow, a webhook or a route reads what the shop has now with

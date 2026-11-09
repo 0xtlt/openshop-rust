@@ -62,7 +62,10 @@ fn welcome_route() -> Route {
     Route::public().get(|ctx| async move {
         let Some(launch) = ctx.shopify_launch() else {
             // Not signed by Shopify: the app's page in the admin, and no Partner API call.
-            let shop = ctx.request.query().get("shop").cloned().unwrap_or_default();
+            let Some(shop) = ctx.request.query_shop() else {
+                let error = json!({ "error": "Missing or invalid shop" });
+                return Ok(response::json_with_status(StatusCode::BAD_REQUEST, error));
+            };
             let location = ctx.admin_url(&shop, &format!("apps/{}", ctx.app_handle(&shop)?))?;
             return Ok((StatusCode::FOUND, [(header::LOCATION, location)]).into_response());
         };
@@ -79,13 +82,20 @@ fn welcome_route() -> Route {
     })
 }
 
-/// `/reports`: a loader for the Pro and Plus plans, an action for any plan.
+/// `/reports`: a loader for the Pro and Plus plans, a loader that shows a
+/// "no plan" state instead, and an action for any plan.
 /// `/routes/plans`: the links a route gives for the shop of `?shop=`.
 fn config() -> OpenShopConfig {
     let page = AdminPage::new("/reports")
         .loader("report", |ctx: AdminContext, _input: Value| async move {
             let plan = billing::require_plan(&ctx, &["Pro", "Plus", "pro", "plus"]).await?;
             Ok(json!({ "plan": plan.name, "handle": plan.handle }))
+        })
+        .loader("status", |ctx: AdminContext, _input: Value| async move {
+            Ok(match ctx.shopify.plan_among(&["pro", "plus"]).await? {
+                Some(plan) => json!({ "plan": plan.handle }),
+                None => json!({ "plan": null, "pricingLink": billing::pricing_link(&ctx)? }),
+            })
         })
         .function(
             "export",
@@ -660,6 +670,158 @@ async fn a_welcome_route_reads_the_plan_again_only_for_a_launch_shopify_signed()
         )
     );
     assert_eq!(warning.context, Some(json!({ "route": "GET /welcome" })));
+    ctx.shutdown().await.unwrap();
+    std::fs::remove_dir_all(cwd).ok();
+}
+
+/// The app's home at `/?{query}`, where the welcome route sends a signed launch.
+async fn home(ctx: &TestContext, query: &str) -> u16 {
+    ctx.http
+        .get(ctx.url_for(&format!("/?{query}")))
+        .send()
+        .await
+        .unwrap()
+        .status()
+        .as_u16()
+}
+
+#[tokio::test]
+async fn a_signed_welcome_through_the_route_then_the_home_asks_the_partner_api_once() {
+    let cwd = project(Some("hide-paypal"));
+    let ctx = partner_context(MockTransport::new(), cwd.clone()).await;
+    let partner_calls = || ctx.shopify.calls_to(PARTNER_SUBSCRIPTION_OPERATION).len();
+    // The check that sent the merchant to the plans.
+    ctx.shopify.active_subscription(None);
+    assert_eq!(answer(&ctx, "loader", "report").await.0, 402);
+    assert_eq!(partner_calls(), 1);
+    ctx.shopify.active_subscription(app_pricing_subscription("pro"));
+
+    // The route reads the plan, the home keeps it, and the page has it.
+    let signed = to_query_string(&sign_query(
+        &[
+            ("host", "YWRtaW4uc2hvcGlmeS5jb20vc3RvcmUvdGVzdA"),
+            ("plan_handle", "pro"),
+            ("shop", TEST_SHOP),
+        ],
+        TEST_SECRET,
+    ));
+    assert_eq!(welcome(&ctx, &signed).await, (302, format!("/?{signed}")));
+    assert_eq!(home(&ctx, &signed).await, 200);
+    assert_eq!(
+        answer(&ctx, "loader", "report").await,
+        (200, json!({ "plan": "pro", "handle": "pro" }))
+    );
+    assert_eq!(partner_calls(), 2, "one request for the welcome");
+    ctx.shutdown().await.unwrap();
+    std::fs::remove_dir_all(cwd).ok();
+}
+
+#[tokio::test]
+async fn a_welcome_launch_forgets_a_no_plan_answer_however_young() {
+    let cwd = project(Some("hide-paypal"));
+    let ctx = partner_context(MockTransport::new(), cwd.clone()).await;
+    let partner_calls = || ctx.shopify.calls_to(PARTNER_SUBSCRIPTION_OPERATION).len();
+    ctx.shopify.active_subscription(None);
+    assert_eq!(answer(&ctx, "loader", "report").await.0, 402);
+    // The merchant approves within ten seconds, and the welcome link is a
+    // page of the app: the "no plan" answer is forgotten, young as it is.
+    ctx.shopify.active_subscription(app_pricing_subscription("pro"));
+    assert_eq!(launch(&ctx, &[("plan_handle", "pro")]).await.status(), 200);
+    assert_eq!(answer(&ctx, "loader", "report").await.0, 200);
+    assert_eq!(partner_calls(), 2);
+    ctx.shutdown().await.unwrap();
+    std::fs::remove_dir_all(cwd).ok();
+}
+
+#[tokio::test]
+async fn plan_among_is_the_check_of_require_plan_without_the_402() {
+    let cwd = project(Some("hide-paypal"));
+    let ctx = partner_context(MockTransport::new(), cwd.clone()).await;
+    let partner_calls = || ctx.shopify.calls_to(PARTNER_SUBSCRIPTION_OPERATION).len();
+    ctx.shopify.active_subscription(None);
+    let no_plan = (
+        200,
+        json!({ "plan": null, "pricingLink": "shopify:admin/charges/hide-paypal/pricing_plans" }),
+    );
+    assert_eq!(answer(&ctx, "loader", "status").await, no_plan);
+    assert_eq!(partner_calls(), 1);
+
+    // A "no plan" answer younger than ten seconds is kept, as for `require_plan`.
+    ctx.shopify.active_subscription(app_pricing_subscription("pro"));
+    assert_eq!(answer(&ctx, "loader", "status").await, no_plan);
+    assert_eq!(answer(&ctx, "loader", "report").await.0, 402);
+    assert_eq!(partner_calls(), 1);
+
+    // The welcome of the plan: read again, then kept while it has the plan.
+    assert_eq!(launch(&ctx, &[("plan_handle", "pro")]).await.status(), 200);
+    assert_eq!(answer(&ctx, "loader", "status").await, (200, json!({ "plan": "pro" })));
+    let client = ctx.app.shopify_client(TEST_SHOP, "default");
+    assert_eq!(
+        client
+            .plan_among(&["plus", "pro"])
+            .await
+            .unwrap()
+            .and_then(|plan| plan.handle),
+        Some("pro".to_string())
+    );
+    assert!(client.plan_among(&["plus"]).await.unwrap().is_none());
+    assert_eq!(
+        client.plan_among(&[]).await.unwrap().map(|plan| plan.source()),
+        Some(BillingSource::PartnerApi)
+    );
+    // `plus` is not in the kept answer, which is younger than ten seconds: not asked.
+    assert_eq!(partner_calls(), 2);
+
+    // A failure of Shopify is an error, not `None`.
+    ctx.shopify
+        .on_with(PARTNER_SUBSCRIPTION_OPERATION, |_| anyhow::bail!("Throttled"));
+    assert!(client.refresh_plans().await.is_err());
+    let (status, body) = answer(&ctx, "loader", "status").await;
+    assert_eq!((status, body["code"].as_str()), (500, Some("INTERNAL_ERROR")));
+    ctx.shutdown().await.unwrap();
+    std::fs::remove_dir_all(cwd).ok();
+}
+
+#[tokio::test]
+async fn plan_among_reads_the_admin_api_without_the_partner_api() {
+    let transport = MockTransport::new();
+    transport.respond_json(subscriptions(&[("Pro", "ACTIVE")]));
+    let ctx = context(transport.clone(), ShopifyEndpoints::new(), None).await;
+    let client = ctx.app.shopify_client(TEST_SHOP, "default");
+    let plan = client.plan_among(&["pro"]).await.unwrap().unwrap();
+    assert_eq!((plan.name.as_str(), plan.source()), ("Pro", BillingSource::AdminApi));
+    transport.respond_json(subscriptions(&[]));
+    assert!(client.plan_among(&[]).await.unwrap().is_none());
+    ctx.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn an_unsigned_welcome_without_a_shop_domain_is_a_400() {
+    let cwd = project(Some("hide-paypal"));
+    let ctx = partner_context(MockTransport::new(), cwd.clone()).await;
+    for query in ["", "plan_handle=pro", "shop=", "shop=evil.example.com", "shop=%20"] {
+        let response = ctx
+            .http
+            .get(format!("{}/routes/welcome?{query}", ctx.url))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 400, "{query}");
+        assert_eq!(
+            json_body(response).await,
+            json!({ "error": "Missing or invalid shop" }),
+            "{query}"
+        );
+    }
+    // A shop written as a URL is read as `for_shop` reads it.
+    assert_eq!(
+        welcome(&ctx, "shop=https%3A%2F%2FTest-Integration.myshopify.com%2Fadmin").await,
+        (
+            302,
+            "https://admin.shopify.com/store/test-integration/apps/hide-paypal".to_string()
+        )
+    );
+    assert!(ctx.shopify.calls_to(PARTNER_SUBSCRIPTION_OPERATION).is_empty());
     ctx.shutdown().await.unwrap();
     std::fs::remove_dir_all(cwd).ok();
 }

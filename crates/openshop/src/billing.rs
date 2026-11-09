@@ -24,7 +24,9 @@
 //!   the source is the Partner API;
 //! - [`require_plan`] guards a loader or an action of an admin page, and
 //!   [`any_plan`] is the same as an `authorize` rule: without the plan, the
-//!   page receives `402` with the code [`PLAN_REQUIRED`] and the pricing page;
+//!   page receives `402` with the code [`PLAN_REQUIRED`] and the pricing page.
+//!   [`ShopifyClient::plan_among`] is the same check without the error, for
+//!   a page that shows its own "no plan" state;
 //! - [`pricing_url`] and [`pricing_link`] are that page, for a link of the
 //!   server and for App Bridge;
 //! - [`AppSubscriptionsUpdate`] is the payload of `app_subscriptions/update`,
@@ -618,6 +620,45 @@ impl ShopifyClient {
         self.plans_passing(|_| true).await
     }
 
+    /// The plan among `plans` (handles of plans, or their names) the shop
+    /// has, or any plan when `plans` is empty; `None` when it has none of
+    /// them. It is what [`require_plan`] checks, for a page that shows its
+    /// own "no plan" state instead of answering `402`, or for a flow, a
+    /// webhook or a route.
+    ///
+    /// It reads the [`BillingSource`] of the application with the rule of
+    /// [`require_plan`]. On the Partner API, a kept answer that has one of
+    /// `plans` is used until it is `plan_ttl` old. A kept answer without one
+    /// is asked again, unless it is younger than [`MIN_REFRESH`]: a merchant
+    /// who just chose the plan gets it, and a merchant without one costs at
+    /// most a request every ten seconds. [`active_plans`](Self::active_plans)
+    /// keeps any answer for `plan_ttl`.
+    ///
+    /// A failure to ask Shopify is an error, not `None`.
+    ///
+    /// ```
+    /// use openshop::billing;
+    /// use openshop::prelude::*;
+    ///
+    /// pub struct ReportsPage;
+    ///
+    /// #[admin_page("/reports", nav = "Reports")]
+    /// impl ReportsPage {
+    ///     /// The report, or what the page shows a shop without the plan.
+    ///     #[loader]
+    ///     async fn report(ctx: AdminContext) -> Result<Value> {
+    ///         Ok(match ctx.shopify.plan_among(&["pro", "plus"]).await? {
+    ///             Some(plan) => json!({ "plan": plan.handle }),
+    ///             None => json!({ "plan": null, "pricingLink": billing::pricing_link(&ctx)? }),
+    ///         })
+    ///     }
+    /// }
+    /// ```
+    pub async fn plan_among(&self, plans: &[&str]) -> anyhow::Result<Option<Plan>> {
+        let active = self.plans_passing(|active| active.has_plan(plans)).await?;
+        Ok(active.plan(plans).cloned())
+    }
+
     /// [`active_plans`](Self::active_plans), asking the Partner API again
     /// whatever the age of its last answer: for the welcome link of a plan
     /// the server serves itself, which can come seconds after the check that
@@ -635,14 +676,17 @@ impl ShopifyClient {
     ///
     /// ```
     /// use openshop::prelude::*;
-    /// use openshop::response::{IntoResponse, Response, StatusCode, header};
+    /// use openshop::response::{self, IntoResponse, Response, StatusCode, header};
     ///
     /// /// The welcome link of a plan, which the admin opens in the app's frame.
     /// #[route(GET, "/welcome")]
     /// async fn welcome(ctx: RouteContext) -> Result<Response> {
     ///     let Some(launch) = ctx.shopify_launch() else {
     ///         // Not signed by Shopify: the app's page in the admin, and no Partner API call.
-    ///         let shop = ctx.request.query().get("shop").cloned().unwrap_or_default();
+    ///         let Some(shop) = ctx.request.query_shop() else {
+    ///             let error = json!({ "error": "Missing or invalid shop" });
+    ///             return Ok(response::json_with_status(StatusCode::BAD_REQUEST, error));
+    ///         };
     ///         let location = ctx.admin_url(&shop, &format!("apps/{}", ctx.app_handle(&shop)?))?;
     ///         return Ok((StatusCode::FOUND, [(header::LOCATION, location)]).into_response());
     ///     };
@@ -768,18 +812,19 @@ fn plan_required_message(plans: &[&str]) -> String {
 /// page in its `details` ([`plan_required`]), for the view to send the
 /// merchant there.
 ///
-/// On the Partner API, a kept answer without the plan is asked again first,
-/// unless it is younger than [`MIN_REFRESH`]: a merchant who just chose the
-/// plan is not sent back to the plans.
+/// The plan is read by [`ShopifyClient::plan_among`]: on the Partner API, a
+/// kept answer without the plan is asked again first, unless it is younger
+/// than [`MIN_REFRESH`]. A merchant who just chose the plan is not sent back
+/// to the plans. A page that shows its own "no plan" state calls
+/// `plan_among` itself, and gets `None` instead of this error.
 ///
 /// A failure to ask Shopify is an error of the server (`500`), not a missing
 /// plan: a paying merchant is not sent to the pricing page because Shopify
 /// did not answer. So is a `shopify.app.toml` without a `handle`, which the
 /// pricing page needs.
 pub async fn require_plan(ctx: &AdminContext, plans: &[&str]) -> anyhow::Result<Plan> {
-    let active = ctx.shopify.plans_passing(|active| active.has_plan(plans)).await?;
-    match active.plan(plans) {
-        Some(plan) => Ok(plan.clone()),
+    match ctx.shopify.plan_among(plans).await? {
+        Some(plan) => Ok(plan),
         None => Err(plan_required(ctx, plans)?.into()),
     }
 }
