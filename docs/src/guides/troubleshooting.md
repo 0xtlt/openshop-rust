@@ -85,9 +85,10 @@ worker that does not know a flow fails its runs with
 `Flow "<name>" not registered`. If a run is scheduled in the future, inspect
 `availableAt`.
 
-If the worker repeatedly loses work, compare the `lease_duration` of the
-`worker` setting with the 15-second interval at which a worker renews its
-leases: keep the lease well above it. Also look for blocking code that stalls the process for longer than
+If the worker repeatedly loses work, check the `lease_duration` of the
+`worker` setting. A worker renews its leases four times per lease (every 15
+seconds at most), and each renewal has a quarter of the lease to answer: a
+lease of a few seconds leaves little room on a busy database. Also look for blocking code that stalls the process for longer than
 the lease, because the renewal only happens while the worker can run its tasks.
 A renewal that fails is logged as `Heartbeat of run … failed`; a pool kept busy by
 the flows themselves delays it, so size the pool above the concurrency of the

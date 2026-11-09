@@ -1807,12 +1807,15 @@ async fn a_release_that_waits_does_not_hold_back_the_shutdown_nor_the_other_rele
     let (stuck, free) = (dispatch(&test, "slow-flow").await, dispatch(&test, "slow-flow").await);
     delay_release(&test, stuck).await;
 
-    let worker = worker_with(
-        &test.app,
-        WorkerConfig::new()
-            .concurrency(2)
-            .lease_duration(Duration::from_millis(500)),
-    );
+    // The worker waits one lease for its runs before it hands them back, so the
+    // heartbeats must keep both leases alive until then, under load too. The
+    // execution gives its lease up at 90% of it from the last extension. Each
+    // heartbeat may take a quarter of the lease, at least 250 ms, and the first
+    // ones often open a new connection. With a 500 ms lease, one late heartbeat
+    // left no time for another: the flow was dropped, and its run was no longer
+    // held when the worker released its runs. A 2 s lease leaves time for three.
+    let lease = Duration::from_secs(2);
+    let worker = worker_with(&test.app, WorkerConfig::new().concurrency(2).lease_duration(lease));
     worker.start().await;
     for _ in 0..2 {
         tokio::time::timeout(TIMEOUT, started.notified())
@@ -1820,11 +1823,17 @@ async fn a_release_that_waits_does_not_hold_back_the_shutdown_nor_the_other_rele
             .expect("runs claimed");
     }
     // Keeps the leases alive while the worker waits for its runs, as a healthy one does.
+    // The stop waits one lease, then the stuck release gives up after 2 s: far
+    // less than the 30 s the release is held.
     let stopping = Instant::now();
-    tokio::time::timeout(Duration::from_secs(8), worker.stop())
+    tokio::time::timeout(lease + Duration::from_secs(7), worker.stop())
         .await
         .expect("the shutdown waits for the release of a run");
-    assert!(stopping.elapsed() < Duration::from_secs(6), "{:?}", stopping.elapsed());
+    assert!(
+        stopping.elapsed() < lease + Duration::from_secs(5),
+        "{:?}",
+        stopping.elapsed()
+    );
 
     // Every execution is gone, whether or not its run could be released.
     assert_eq!(worker.active_count(), 0);
