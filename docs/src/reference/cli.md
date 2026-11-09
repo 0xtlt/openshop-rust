@@ -20,6 +20,7 @@ An OpenShop app has two command lines:
 | `openshop run <flow> [args]` | `cargo run -- run <flow> [args]` | [Run a flow once](#run-a-flow-or-a-cron-by-hand), for a shop or every shop, and wait for it. |
 | `openshop cron run <name>` | `cargo run -- cron run <name>` | [Run the flow of a cron once](#run-a-flow-or-a-cron-by-hand), for the shops of the cron. |
 | `openshop test [args]` | `cargo test [args]` | Run the app's tests. |
+| `openshop --version`, `-V` | — | Print the version of the CLI, and the commit it was built from. |
 
 An unknown command fails with status `2` and the usage text (see the end of
 this page). When `cargo` fails, `openshop` prints the error and exits with
@@ -39,6 +40,24 @@ the dependencies the repository tested:
 ```bash
 cargo install --locked --git https://github.com/0xtlt/openshop-rust openshop-cli
 ```
+
+From a checkout of the repository, `cargo install --locked --path
+crates/openshop-cli --force`. `--force` replaces a CLI already installed:
+without it, cargo keeps the one there when the version number has not
+changed. Then check which one runs:
+
+```bash
+openshop --version
+```
+
+```text
+openshop 0.0.12-beta.0 (1b8a53a4cac9)
+```
+
+The version of the CLI, then the first 12 characters of the commit it was
+built from, which `openshop init` pins projects to; a CLI built without git
+prints the version alone. A CLI from before `--version` answers
+`Unknown command: --version`.
 
 The CLI is a convenience. Every command except `init`, `init-ui`, and the
 file watcher of `dev` can be run with `cargo run -- <command>` or, in
@@ -286,6 +305,25 @@ not start a second `dev` process alongside it.
 The page open in the browser follows: it reloads once the app is back. A
 change that does not compile leaves the page as it is, and the error in the
 terminal.
+
+A project still on the Leptos admin, which the framework no longer has, is
+said first, with what is left of it, then started as it is:
+
+```text
+[openshop] This project is still on the Leptos admin, which this version of OpenShop no longer has:
+[openshop]   Cargo.toml: `openshop` with the feature `ui`, in [dependencies]
+[openshop]   Cargo.toml: the dependency `leptos`, in [dependencies]
+[openshop]   src/admin/home.rs:1: leptos::
+[openshop]   src/main.rs:12: UiSource::Dir
+[openshop] The admin is now rendered by the server, without trunk or a bundle. Move the project with the
+[openshop] guide "Migrate to the server-rendered admin" (docs/src/guides/migrate-to-server-rendered-ui.md
+[openshop] of the OpenShop repository), or keep the release it depends on and the CLI of that release.
+```
+
+It looks at `[dependencies]` and `[workspace.dependencies]` of `Cargo.toml`,
+and at the first line of each file of `src/` that names `UiSource::Dir`,
+`UiSource::Assets`, `UiSource::Embedded`, `openshop::ui` or `leptos::`. See
+[Migrate to the server-rendered admin](../guides/migrate-to-server-rendered-ui.md).
 
 ### Stopping the app
 

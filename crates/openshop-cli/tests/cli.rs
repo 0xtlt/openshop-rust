@@ -88,3 +88,22 @@ fn build_ui_is_no_longer_a_command() {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+#[test]
+fn version_prints_the_version_and_the_commit_the_cli_was_built_from() {
+    let mut printed = Vec::new();
+    for flag in ["--version", "-V"] {
+        let output = openshop(&[flag]);
+        assert_eq!(output.status.code(), Some(0), "{flag}");
+        assert!(output.stderr.is_empty(), "{flag}");
+        printed.push(String::from_utf8(output.stdout).unwrap());
+    }
+    assert_eq!(printed[0], printed[1]);
+    let version = printed[0].trim_end();
+    let expected = format!("openshop {}", env!("CARGO_PKG_VERSION"));
+    // Built from a checkout, as the tests are: the first 12 characters of its commit.
+    match option_env!("OPENSHOP_GIT_COMMIT") {
+        Some(commit) => assert_eq!(version, format!("{expected} ({})", &commit[..12])),
+        None => assert_eq!(version, expected),
+    }
+}

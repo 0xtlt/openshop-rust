@@ -3,6 +3,7 @@
 
 mod dev;
 mod init;
+mod legacy;
 mod metadata;
 
 use std::process::ExitCode;
@@ -33,6 +34,7 @@ const USAGE: &str = "
                                 database of the app, and wait for it
     cron run <name>             Run the flow of a cron once, for the shops of the cron
     test [args]                 Run tests
+    --version, -V               Print the version of this CLI, and the commit it was built from
 
   Usage:
     openshop init
@@ -62,6 +64,17 @@ async fn cargo(args: &[&str], passthrough: &[String]) -> Result<()> {
     Ok(())
 }
 
+/// `openshop 0.0.12 (1b8a53a4cac9)`: the version of the CLI, and the commit
+/// of the repository it was built from, when it was built from a checkout
+/// (`cargo install --git`, `cargo install --path`).
+fn version() -> String {
+    let version = env!("CARGO_PKG_VERSION");
+    match option_env!("OPENSHOP_GIT_COMMIT") {
+        Some(commit) => format!("openshop {version} ({})", &commit[..12]),
+        None => format!("openshop {version}"),
+    }
+}
+
 /// Whether the arguments of a command ask for its usage.
 fn asks_for_help(args: &[String]) -> bool {
     args.iter().any(|arg| arg == "--help" || arg == "-h")
@@ -87,6 +100,10 @@ async fn run(args: &[String]) -> Result<()> {
         Some("test") => cargo(&["test"], rest).await,
         Some(command @ ("migrate" | "run" | "cron")) => cargo(&["run", "--", command], rest).await,
         Some(command @ ("start" | "worker")) => cargo(&["run", "--release", "--", command], rest).await,
+        Some("--version" | "-V") => {
+            println!("{}", version());
+            Ok(())
+        }
         None | Some("help" | "--help" | "-h") => {
             println!("{USAGE}");
             Ok(())
