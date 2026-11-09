@@ -81,12 +81,16 @@ async fn is_installed_for_launch(
 /// A verified launch of the app with `plan_handle` (or `charge_id`) in its
 /// query is the welcome link of a plan the merchant just chose: the plan
 /// kept for the shop is forgotten, so that the next check reads the new one.
+/// Not an answer that has that plan and is younger than ten seconds: the
+/// route of the welcome link read it, then sent the launch here.
 async fn forget_plan_on_welcome(app: &OpenShop, shopify_app: &str, query: &SignedQuery) {
     if query.get("plan_handle").is_none() && query.get("charge_id").is_none() {
         return;
     }
     if let Some(shop) = query.get("shop").and_then(normalize_shop_domain) {
-        app.plans().forget(shopify_app, &shop).await;
+        app.plans()
+            .forget_on_welcome(shopify_app, &shop, query.get("plan_handle"))
+            .await;
     }
 }
 

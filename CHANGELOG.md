@@ -2,6 +2,29 @@
 
 ## Unreleased
 
+- A signed welcome link that a route serves costs one Partner API request,
+  not two. The route read the plan with `refresh_plans()`, then sent the
+  launch to the app's home, which forgot that answer because the query has
+  `plan_handle`, and its first check asked again. A verified launch with
+  `plan_handle` now keeps an answer younger than ten seconds that has that
+  plan. A "no plan" answer of the same age is still forgotten: it is the check
+  that sent the merchant to the plans, and a merchant who approves within ten
+  seconds still gets the plan at once. `charge_id` alone, `refresh_plans()`
+  and an uninstall forget the answer as before.
+- `ctx.shopify.plan_among(&["pro", "plus"])` returns `Result<Option<Plan>>`:
+  the plan among these the shop has, or `None`. It is the check of
+  `billing::require_plan` without the `402`, with the same rule: a kept "no
+  plan" answer is asked again once it is ten seconds old. A loader that shows
+  its own "no plan" state no longer has to call `require_plan` and look for
+  `PLAN_REQUIRED` in its error. `require_plan` uses it. The guide shows it
+  where a page renders the "no plan" state.
+- `RouteRequest::query_shop()` returns the `shop` of the query, normalized as
+  `for_shop` reads it, or `None` when it is missing or not a
+  `*.myshopify.com` domain. The welcome route and the link of an email, in the
+  guide, the billing and server routes references and the rustdoc, answer
+  `400` then. They took the shop with `unwrap_or_default()`, so an empty or
+  bad `shop` made `admin_url` fail with a `500`.
+
 - `ctx.shopify.active_subscriptions()` warns when the plans are read from the
   Partner API. It reads the Admin API (`currentAppInstallation`), where a
   subscription of Shopify App Pricing may not be: a paying merchant looked

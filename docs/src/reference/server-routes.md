@@ -81,6 +81,7 @@ depends on the attribute:
 | `request.body` | `Bytes` | The complete request body. |
 | `request.header(name)` | `Option<&str>` | A header value, when it is valid text. |
 | `request.query()` | `IndexMap<String, String>` | Query parameters; the first value wins for a repeated key. |
+| `request.query_shop()` | `Option<String>` | The `shop` parameter, normalized as `for_shop` does (`demo.myshopify.com`); `None` when it is missing or not a `*.myshopify.com` domain. Not verified: see [A launch Shopify signed](#a-launch-shopify-signed). |
 | `request.json::<T>()` | `Result<T>` | The body deserialized from JSON. |
 | `request.text()` | `String` | The body as text. |
 | `params` | `IndexMap<String, String>` | Dynamic route parameters. |
@@ -270,16 +271,24 @@ shop as `for_shop` does:
 
 ```rust,ignore
 use openshop::prelude::*;
-use openshop::response::{IntoResponse, Response, StatusCode, header};
+use openshop::response::{self, IntoResponse, Response, StatusCode, header};
 
 /// A link to the app in the admin of `?shop=`, for an email.
 #[route(GET, "/open")]
 pub async fn open(ctx: RouteContext) -> Result<Response> {
-    let shop = ctx.request.query().get("shop").cloned().unwrap_or_default();
+    let Some(shop) = ctx.request.query_shop() else {
+        let error = json!({ "error": "Missing or invalid shop" });
+        return Ok(response::json_with_status(StatusCode::BAD_REQUEST, error));
+    };
     let location = ctx.admin_url(&shop, &format!("apps/{}", ctx.app_handle(&shop)?))?;
     Ok((StatusCode::FOUND, [(header::LOCATION, location)]).into_response())
 }
 ```
+
+`ctx.request.query_shop()` is the `shop` of the query, read as `for_shop`
+reads a shop, or `None` when it is missing or not a `*.myshopify.com` domain.
+Answer `400` then: `admin_url` and `app_handle` would fail on it, and `?` makes
+that a `500`.
 
 An authentication function has them too. They fail as `for_shop` does when the
 shop is not a `*.myshopify.com` domain, or the app handle is unknown or missing
@@ -328,14 +337,17 @@ signed, and as a best effort:
 
 ```rust,ignore
 use openshop::prelude::*;
-use openshop::response::{IntoResponse, Response, StatusCode, header};
+use openshop::response::{self, IntoResponse, Response, StatusCode, header};
 
 /// The welcome link of a plan, which the admin opens in the app's frame.
 #[route(GET, "/welcome")]
 pub async fn welcome(ctx: RouteContext) -> Result<Response> {
     let Some(launch) = ctx.shopify_launch() else {
         // Not signed by Shopify: the app's page in the admin, and no Partner API call.
-        let shop = ctx.request.query().get("shop").cloned().unwrap_or_default();
+        let Some(shop) = ctx.request.query_shop() else {
+            let error = json!({ "error": "Missing or invalid shop" });
+            return Ok(response::json_with_status(StatusCode::BAD_REQUEST, error));
+        };
         let location = ctx.admin_url(&shop, &format!("apps/{}", ctx.app_handle(&shop)?))?;
         return Ok((StatusCode::FOUND, [(header::LOCATION, location)]).into_response());
     };
