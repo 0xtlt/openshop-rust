@@ -22,7 +22,8 @@
   - `ctx.shopify.active_plans()` reads the plans of the shop from that source
     (`ActivePlans` of `Plan`: `name`, `handle`, `subscription`, an
     `AppSubscription` or an `AppPricingSubscription`), and
-    `ctx.shopify.refresh_plans()` reads them again. `active_subscriptions()`
+    `ctx.shopify.refresh_plans()` reads them again from the Partner API at
+    once, for a welcome link a route serves. `active_subscriptions()`
     still reads the Admin API whatever the source.
   - The Partner API takes four requests a second per client: the GIDs of the
     app and of the shop are read once per process from the Admin API

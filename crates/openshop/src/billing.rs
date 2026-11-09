@@ -594,12 +594,16 @@ impl ShopifyClient {
     }
 
     /// [`active_plans`](Self::active_plans), asking the Partner API again
-    /// unless its last answer is younger than [`MIN_REFRESH`]: for the
-    /// welcome link of a plan the server serves itself, or after the
-    /// merchant was sent to the plans. The Admin API is asked at each call
-    /// anyway.
+    /// whatever the age of its last answer: for the welcome link of a plan
+    /// the server serves itself, which can come seconds after the check that
+    /// sent the merchant to the plans. Call it there, not at each request:
+    /// the Partner API takes four requests a second for the whole
+    /// organization. The Admin API is asked at each call anyway.
     pub async fn refresh_plans(&self) -> anyhow::Result<ActivePlans> {
-        self.plans_passing(|_| false).await
+        if self.app().partner_api().is_some() {
+            self.app().plans().forget(&self.shopify_app, &self.domain()?).await;
+        }
+        self.active_plans().await
     }
 
     /// The plans of the shop, from the source of the application. A kept

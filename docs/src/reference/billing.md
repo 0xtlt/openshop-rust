@@ -112,7 +112,7 @@ app and shop:
 | A check does not pass (no plan, or not the one asked) | The Partner API is asked again, unless the answer is younger than ten seconds (`billing::MIN_REFRESH`). A merchant who just chose a plan gets it at once; a merchant without one costs at most one request every ten seconds. |
 | A verified launch of the app with `plan_handle` (or `charge_id`) | The answer is forgotten: it is the welcome link of a plan, which the admin opens signed. |
 | `app/uninstalled` | The answer is forgotten. |
-| `ctx.shopify.refresh_plans()` | The Partner API is asked again, unless the answer is younger than ten seconds. |
+| `ctx.shopify.refresh_plans()` | The Partner API is asked again, whatever the age of the answer: for the welcome link of a plan that a server route serves. Not for every request: the Partner API takes four requests a second for the whole organization. |
 | Concurrent checks of a shop | One request; the others wait for it. |
 
 The trade-off: a plan that ends outside the app (a cancellation by Shopify, a

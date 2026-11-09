@@ -328,9 +328,10 @@ async fn a_plan_of_the_partner_api_is_given_to_the_billing_of_a_test() {
     assert_eq!((error.code.as_str(), error.status), (billing::PLAN_REQUIRED, 402));
     assert_eq!(ctx.shopify.calls_to(PARTNER_SUBSCRIPTION_OPERATION).len(), 1);
 
-    // `refresh_plans` asks again only after ten seconds too; the Admin API
-    // is not asked for the GIDs again.
-    assert_eq!(page().await.unwrap().shopify.refresh_plans().await.unwrap().len(), 1);
+    // `refresh_plans` asks again at once, as the welcome link of a plan a
+    // route serves needs; the Admin API is not asked for the GIDs again.
+    assert_eq!(page().await.unwrap().shopify.refresh_plans().await.unwrap().len(), 0);
+    assert_eq!(ctx.shopify.calls_to(PARTNER_SUBSCRIPTION_OPERATION).len(), 2);
     assert_eq!(ctx.shopify.calls_to(PARTNER_IDS_OPERATION).len(), 1);
     ctx.shutdown().await.unwrap();
     std::fs::remove_dir_all(dir).ok();
