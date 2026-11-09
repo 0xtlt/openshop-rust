@@ -1,16 +1,15 @@
 //! The steps of a run: a row each, numbered, with its status, its duration,
 //! its error, and its output in a modal that shows the beginning of it, copies
-//! all of it and downloads it as a JSON file.
+//! all of it and downloads it as a JSON file. The page has each output once:
+//! the buttons name the element that holds it.
 
 use std::collections::HashMap;
 
-use base64::Engine;
-use base64::engine::general_purpose::STANDARD;
 use maud::{Markup, html};
 use serde_json::Value;
 
 use super::super::ui;
-use super::{status_tone, to_fixed_1};
+use super::super::ui::{status_tone, to_fixed_1};
 use crate::db::schema::StepResult;
 
 /// What the modal of an output shows of it: the rest is copied and downloaded.
@@ -145,25 +144,26 @@ fn format_size(bytes: usize) -> String {
     }
 }
 
-/// The output as a file `openshop.js` downloads: the document itself, in a
-/// `data:` URL, which needs no request to the server.
-fn download_url(full: &str) -> String {
-    format!("data:application/json;base64,{}", STANDARD.encode(full))
-}
-
 fn output_modal(step: &StepResult, output: &Value) -> Markup {
     let id = modal_id(step);
     let full = serde_json::to_string_pretty(output).unwrap_or_default();
+    let shown = preview(&full);
+    // What the buttons copy and download: the `pre` of the modal, or the whole
+    // document beside it when the modal shows only its beginning.
+    let source = if shown == full { format!("{id}-shown") } else { format!("{id}-full") };
     html! {
         s-modal id=(id) heading=(format!("Output — {}", step.step_name)) size="large" {
             s-stack gap="small-200" {
                 s-text color="subdued" { (format_size(full.len())) }
-                pre style=(ui::PRE) { (preview(&full)) }
+                pre id=(format!("{id}-shown")) style=(ui::PRE) { (shown) }
+                @if shown != full {
+                    pre id=(source) hidden { (full) }
+                }
             }
-            s-button slot="secondary-actions" data-openshop-copy=(full) { "Copy" }
+            s-button slot="secondary-actions" data-openshop-copy-from=(source) { "Copy" }
             s-button
                 slot="secondary-actions"
-                data-openshop-download=(download_url(&full))
+                data-openshop-download-from=(source)
                 data-openshop-filename=(format!("{}.json", step.step_name))
             { "Download" }
             s-button slot="primary-action" commandFor=(id) command="--hide" { "Close" }
@@ -265,12 +265,23 @@ mod tests {
         assert!(modals.contains("\n…</pre>"), "{modals}");
         assert!(modals.contains("&quot;note&quot;: &quot;&lt;b&gt;&amp;&lt;/b&gt;&quot;"), "{modals}");
         let escaped = html! { (full) }.into_string();
-        assert!(modals.contains(&format!(r#"data-openshop-copy="{escaped}""#)), "{modals}");
-        assert!(modals.contains(&format!(r#"data-openshop-download="{}""#, download_url(&full))), "{modals}");
-        assert!(modals.contains(r#"data-openshop-filename="fetch&lt;all&gt;.json""#), "{modals}");
+        // The whole document once, beside the beginning the modal shows.
+        assert!(modals.contains(&format!(r#"<pre id="{id}-full" hidden>{escaped}</pre>"#)), "{modals}");
+        assert_eq!(modals.matches(&escaped).count(), 1, "{modals}");
+        assert!(modals.contains(&format!(r#"data-openshop-copy-from="{id}-full""#)), "{modals}");
+        assert!(
+            modals.contains(&format!(r#"data-openshop-download-from="{id}-full" data-openshop-filename="fetch&lt;all&gt;.json""#)),
+            "{modals}"
+        );
         assert!(modals.contains(&format_size(full.len())), "{modals}");
-        let encoded = download_url(&full);
-        let decoded = STANDARD.decode(encoded.strip_prefix("data:application/json;base64,").unwrap()).unwrap();
-        assert_eq!(String::from_utf8(decoded).unwrap(), full);
+
+        // A short output is the `pre` the modal shows.
+        let mut short = step(3, "notify", "2026-10-06T12:00:03Z");
+        short.output = Some(json!({ "sent": true }));
+        let steps = [short];
+        let modals = output_modals(&step_rows(&steps)).into_string();
+        let id = format!("output-{}", Uuid::from_u128(3));
+        assert!(!modals.contains("hidden"), "{modals}");
+        assert!(modals.contains(&format!(r#"data-openshop-copy-from="{id}-shown""#)), "{modals}");
     }
 }

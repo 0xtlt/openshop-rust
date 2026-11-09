@@ -69,7 +69,8 @@ fn view(providers: &[ProviderItem<'_>], selected: usize, form: &FormState) -> Ma
         s-page heading="Providers" {
             @if providers.len() > 1 {
                 s-section {
-                    form method="get" {
+                    // Sent when the select changes; "Show" without the script.
+                    form method="get" data-openshop-autosubmit {
                         s-stack direction="inline" gap="base" alignItems="end" {
                             s-select name=(PROVIDER) label="Provider" value=(current.name) {
                                 @for provider in providers {
@@ -240,7 +241,7 @@ mod tests {
             "{html}"
         );
         // One provider: nothing to choose.
-        assert!(!html.contains(r#"<form method="get">"#), "{html}");
+        assert!(!html.contains(r#"<form method="get""#), "{html}");
     }
 
     #[test]
@@ -253,7 +254,7 @@ mod tests {
         erp.last_checked_at = None;
         let providers = [item("warehouse", &first), erp];
         let html = view(&providers, 1, &FormState::default()).into_string();
-        assert!(html.contains(r#"<form method="get">"#), "{html}");
+        assert!(html.contains(r#"<form method="get" data-openshop-autosubmit>"#), "{html}");
         assert!(
             html.contains(r#"<s-select name="provider" label="Provider" value="erp&lt;x&gt;">"#),
             "{html}"

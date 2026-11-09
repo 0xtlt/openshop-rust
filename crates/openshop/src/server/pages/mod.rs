@@ -304,14 +304,24 @@ enum Shown {
 }
 
 /// A failure of a page the merchant may read, `AdminPublicError`, as the page
-/// shows it; any other one is reported and the page is unavailable.
+/// shows it; any other one is reported and the page is unavailable. A plan
+/// the page needs (`billing::require_plan`) links to the plans of the app.
 fn shown_failure(error: &anyhow::Error, failure: &str) -> Result<Shown, StatusCode> {
     match error.downcast_ref::<AdminPublicError>() {
         Some(public) => Ok(Shown::Refused(
             StatusCode::from_u16(public.status).unwrap_or(StatusCode::BAD_REQUEST),
             html! {
                 s-page {
-                    s-banner tone="critical" heading=(public.message) {}
+                    @match public.details.as_ref().and_then(|details| details.get("pricingLink")) {
+                        Some(plans) => {
+                            s-banner tone="warning" heading=(public.message) {
+                                s-button variant="primary" href=(plans) target="_top" { "See the plans" }
+                            }
+                        }
+                        None => {
+                            s-banner tone="critical" heading=(public.message) {}
+                        }
+                    }
                 }
             },
         )),
@@ -324,8 +334,6 @@ fn shown_failure(error: &anyhow::Error, failure: &str) -> Result<Shown, StatusCo
 
 /// A request for a page of the framework: what its `render` and its
 /// `submit` are given.
-// The pages that read the query and the form are ported next.
-#[allow(dead_code)]
 pub(super) struct BuiltinPage<'a> {
     pub(super) app: &'a OpenShop,
     pub(super) session: &'a ShopSession,
@@ -341,7 +349,6 @@ pub(super) struct BuiltinPage<'a> {
     revealed: Mutex<Option<Value>>,
 }
 
-#[allow(dead_code)]
 impl BuiltinPage<'_> {
     /// Called by `submit`: the page is rendered again with `value`, which
     /// `render` reads with [`BuiltinPage::revealed`], in place of a redirect

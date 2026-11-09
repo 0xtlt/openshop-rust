@@ -7,7 +7,7 @@ use maud::{Markup, html};
 use serde_json::Value;
 
 use super::super::ui;
-use super::{CREATE, FORM_PATH, REVOKE, ROTATE, SET_PERMISSIONS, Secret, UPDATE};
+use super::{CREATE, REVOKE, ROTATE, SET_PERMISSIONS, Secret, UPDATE};
 use crate::admin::FormState;
 use crate::server::mcp::registry::RegisteredMcpPermission;
 
@@ -226,14 +226,14 @@ fn token_row(token: &Value) -> Markup {
                 div style="display:flex;gap:6px;flex-wrap:wrap" {
                     s-button variant="secondary" commandFor=(edit_modal_id(id)) command="--show" { "Edit" }
                     @if let Some((label, next)) = toggle {
-                        form method="post" action=(FORM_PATH) {
+                        form method="post" {
                             (hidden("_action", UPDATE))
                             (hidden("id", id))
                             (hidden("status", next))
                             s-button type="submit" variant="secondary" { (label) }
                         }
                     }
-                    form method="post" action=(FORM_PATH) {
+                    form method="post" {
                         (hidden("_action", ROTATE))
                         (hidden("id", id))
                         s-button type="submit" variant="secondary" disabled[revoked] { "Rotate" }
@@ -285,7 +285,7 @@ fn create_modal(groups: &Groups<'_>, form: &FormState) -> Markup {
     let expiration = form.value_or("expiresInDays", DEFAULT_EXPIRATION);
     let checked: Vec<&str> = form.values("permissions").collect();
     html! {
-        form method="post" action=(FORM_PATH) {
+        form method="post" {
             (hidden("_action", CREATE))
             s-modal id=(CREATE_MODAL_ID) heading="Create token" accessibilityLabel="Create MCP token" data-openshop-open[form.is_refused()] {
                 s-stack direction="block" gap="base" {
@@ -346,7 +346,7 @@ fn edit_modal(
         .and_then(Value::as_array)
         .filter(|audits| !audits.is_empty());
     html! {
-        form method="post" action=(FORM_PATH) {
+        form method="post" {
             (hidden("_action", SET_PERMISSIONS))
             (hidden("id", id))
             s-modal
@@ -428,7 +428,7 @@ fn revoke_modal(token: &Value) -> Markup {
     let id = text(token, "id");
     let modal = revoke_modal_id(id);
     html! {
-        form method="post" action=(FORM_PATH) {
+        form method="post" {
             (hidden("_action", REVOKE))
             (hidden("id", id))
             s-modal id=(modal) heading=(format!("Revoke {}?", text(token, "name"))) accessibilityLabel="Revoke MCP token" {
@@ -573,7 +573,7 @@ mod tests {
 
         // Every form posts to this page, at a path that is not the MCP endpoint: create,
         // disable and enable, three rotations, three edit modals, two revocations.
-        assert_eq!(html.matches(r#"<form method="post" action="/mcp/tokens">"#).count(), 11, "{html}");
+        assert_eq!(html.matches(r#"<form method="post">"#).count(), 11, "{html}");
         assert_eq!(html.matches("<form").count(), 11, "{html}");
     }
 

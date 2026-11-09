@@ -7,14 +7,16 @@ use openshop::server::ServerOptions;
 use openshop::testing::{TestContext, TestOptions};
 use openshop::{McpConfig, McpPermission, OpenShopConfig, UiSource, Value, json};
 use reqwest::header::AUTHORIZATION;
+use reqwest::header::CONTENT_TYPE;
 use reqwest::{Method, StatusCode};
 
 use super::{Reply, fetch, form, request, send, urlencoding};
 
 const SHOP: &str = "server-pages-mcp.myshopify.com";
 const APP_URL: &str = "https://mcp-admin.example.com";
-/// Where the forms of the page post: `POST /mcp` is the MCP endpoint.
-const FORMS: &str = "/mcp/tokens";
+/// Where the forms of the page post: the page, `/mcp`, whose `POST` with a
+/// JSON body is the MCP endpoint.
+const FORMS: &str = "/mcp";
 
 async fn context() -> TestContext {
     let mcp = McpConfig::new()
@@ -97,7 +99,8 @@ async fn the_mcp_page_creates_a_token_and_shows_its_secret_once() {
     );
     assert!(body.contains("What the demo says."), "{body}");
     assert!(body.contains(r#"value="shopify_admin_graphql""#), "{body}");
-    assert!(body.contains(r#"<form method="post" action="/mcp/tokens">"#), "{body}");
+    assert!(body.contains(r#"<form method="post">"#), "{body}");
+    assert!(!body.contains("action="), "{body}");
     assert!(secret_in(body).is_none());
 
     // Created: the page again, with the secret, and a toast.
@@ -167,10 +170,15 @@ async fn the_mcp_page_creates_a_token_and_shows_its_secret_once() {
     assert_eq!(initialize(&ctx, plain_secret).await, StatusCode::OK);
     assert_eq!(token_named(&ctx, "CI").await["expiresAt"], Value::Null);
 
-    // `POST /mcp` stays the endpoint of MCP clients.
-    let protocol = send(form(fetch(&ctx, Method::POST, "/mcp"), "_action=createToken&name=Nope")).await;
+    // `POST /mcp` with JSON stays the endpoint of MCP clients: a session token is not theirs.
+    let protocol = send(
+        fetch(&ctx, Method::POST, "/mcp")
+            .header(CONTENT_TYPE, "application/json")
+            .body(r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#),
+    )
+    .await;
     assert_eq!(protocol.status, StatusCode::UNAUTHORIZED, "{}", protocol.body);
-    assert_eq!(tokens(&ctx).await.len(), 2);
+    assert!(!protocol.body.contains("<s-page"), "{}", protocol.body);
 }
 
 #[tokio::test]

@@ -149,6 +149,16 @@ async fn health() -> Response {
     )
 }
 
+/// Whether a request is a form sent by a page of the admin: its body is
+/// `application/x-www-form-urlencoded`.
+fn is_form(request: &Request) -> bool {
+    request
+        .headers()
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.starts_with("application/x-www-form-urlencoded"))
+}
+
 /// Builds the application router.
 pub fn router(app: &OpenShop, options: ServerOptions) -> Result<Router> {
     create_router(app, options, true)
@@ -195,8 +205,20 @@ pub(crate) fn create_router(app: &OpenShop, options: ServerOptions, log: bool) -
     };
 
     // MCP uses OpenShop-issued Bearer tokens, separate from Shopify admin auth.
-    // Only POST is the endpoint: `GET /mcp` is a page of the admin UI.
-    let mcp = post(mcp::handle).fallback(fallback.clone());
+    // Only POST is the endpoint: `GET /mcp` is a page of the admin UI, and a
+    // form of that page posts to it as a form, which an MCP client never sends.
+    let page = fallback.clone();
+    let mcp = post(move |state: State<OpenShop>, request: Request| {
+        let page = page.clone();
+        async move {
+            if is_form(&request) {
+                page(state, request).await
+            } else {
+                mcp::handle(state, request).await
+            }
+        }
+    })
+    .fallback(fallback.clone());
 
     // Auth and webhook routes are public: Shopify signs them with HMAC, not a session token.
     let mut router = Router::new()

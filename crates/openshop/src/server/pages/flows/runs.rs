@@ -7,7 +7,8 @@ use indexmap::IndexMap;
 use maud::{Markup, html};
 
 use super::super::{BuiltinPage, ui};
-use super::format::{run_duration, status_tone, time_ago};
+use super::format::run_duration;
+use super::super::ui::{status_tone, time_ago};
 use super::{DELETE, DELETE_FORM, DELETE_MODAL, FlowsView, IDS, PAGE_SIZE, REFRESH_MS};
 use crate::db::schema::FlowRun;
 use crate::runtime::time::to_iso;

@@ -4,7 +4,8 @@
  *
  * - A form is sent in the background with App Bridge's fetch, which adds the session token. Its
  *   submit `s-button` has `loading` while the request runs. A form with `data-openshop-native` is
- *   left to the browser.
+ *   left to the browser. Enter in a Polaris field submits its form, as in a native field; a
+ *   `GET` form with `data-openshop-autosubmit` is sent when one of its fields changes.
  * - A link of the app (`<a>`, and the `s-link` and `s-button` Polaris announces with
  *   `shopify:navigate`) is fetched the same way, and back and forward too.
  * - What the server answers replaces the content of `#openshop-page`, the title, and the menu
@@ -15,9 +16,11 @@
  * - What only a browser knows: a `<time datetime>` is written in its language and time zone; a
  *   modal with `data-openshop-open` is opened (its form was refused); an element with
  *   `data-openshop-refresh="3000"` has the page fetched again after that many milliseconds (a run
- *   in progress), unless a field of the page has the focus or a modal is open; a button with
- *   `data-openshop-copy` copies that text; one with `data-openshop-download="/api/…"` saves what
- *   that URL answers, under the name of its `data-openshop-filename`.
+ *   in progress), unless a field of the page has the focus or was changed, or a modal is open; a
+ *   button with `data-openshop-copy` copies that text, or with `data-openshop-copy-from="<id>"`
+ *   the text of that element; one with `data-openshop-download="/api/…"` saves what that URL
+ *   answers, or with `data-openshop-download-from="<id>"` the text of that element, under the
+ *   name of its `data-openshop-filename`.
  *
  * Every request carries `X-OpenShop-Fetch: 1`: the server answers it this way. Without this
  * script, a form posts as usual and the server answers with a redirect.
@@ -33,6 +36,9 @@
   let current = null // the request in flight: a newer one replaces it
   let refresh = null // the timer of `data-openshop-refresh`
   const shown = new Set() // the modals open: a refresh would close them
+  let changed = false // a field of the page was changed: a refresh would lose it
+  // The Polaris fields whose Enter submits their form, as a native `<input>` does.
+  const FIELDS = /^s-(text|search|number|email|url|password|money|date|color)-field$/
 
   const app = () => window.shopify
   const attempt = (action) => {
@@ -67,6 +73,7 @@
     document.getElementById(ROOT).replaceChildren(...nodes)
     if (push) history.pushState(null, '', url)
     else if (url !== location.href) history.replaceState(null, '', url)
+    changed = false
     ready()
   }
 
@@ -86,7 +93,7 @@
     const every = Number(root.querySelector('[data-openshop-refresh]')?.getAttribute('data-openshop-refresh'))
     if (every > 0) refresh = setTimeout(function again() {
       const focused = document.activeElement !== document.body && root.contains(document.activeElement)
-      const busy = current || focused || [...shown].some((modal) => modal.isConnected)
+      const busy = current || focused || changed || [...shown].some((modal) => modal.isConnected)
       if (busy) refresh = setTimeout(again, every)
       else visit(location.href, { push: false, quiet: true })
     }, every)
@@ -101,21 +108,28 @@
     }
   }
 
+  function save(blob, name) {
+    const link = Object.assign(document.createElement('a'), { download: name })
+    link.href = URL.createObjectURL(blob)
+    link.click()
+    setTimeout(() => URL.revokeObjectURL(link.href), 0)
+  }
+
   async function download(url, name) {
     loading(true)
     try {
       const response = await fetch(url, { headers: { 'X-OpenShop-Fetch': '1' } })
       if (!response.ok) return toast(decoded(response, 'X-OpenShop-Toast-Error') || GENERIC_ERROR, true)
-      const link = Object.assign(document.createElement('a'), { download: name })
-      link.href = URL.createObjectURL(await response.blob())
-      link.click()
-      setTimeout(() => URL.revokeObjectURL(link.href), 0)
+      save(await response.blob(), name)
     } catch {
       toast(GENERIC_ERROR, true)
     } finally {
       loading(false)
     }
   }
+
+  // The text of the element `id`, for a copy or a download that names it.
+  const textOf = (id) => document.getElementById(id)?.textContent ?? 
 
   async function visit(url, { method = 'GET', body, push = true, button, quiet = false } = {}) {
     current?.abort()
@@ -177,17 +191,37 @@
   })
   document.addEventListener('click', (event) => {
     const target = event.target instanceof Element ? event.target : null
-    const copied = target?.closest('[data-openshop-copy]')
-    if (copied) return copy(copied.getAttribute('data-openshop-copy'))
-    const saved = target?.closest('[data-openshop-download]')
+    const copied = target?.closest('[data-openshop-copy], [data-openshop-copy-from]')
+    if (copied) {
+      const from = copied.getAttribute('data-openshop-copy-from')
+      return copy(from === null ? copied.getAttribute('data-openshop-copy') : textOf(from))
+    }
+    const saved = target?.closest('[data-openshop-download], [data-openshop-download-from]')
     if (saved) {
       const name = saved.getAttribute('data-openshop-filename') || 'download'
-      return download(saved.getAttribute('data-openshop-download'), name)
+      const from = saved.getAttribute('data-openshop-download-from')
+      if (from === null) return download(saved.getAttribute('data-openshop-download'), name)
+      return save(new Blob([textOf(from)], { type: 'application/json' }), name)
     }
     const link = target?.closest('a[href]')
     if (link && !event.defaultPrevented && event.button === 0) follow(event, link)
   })
   addEventListener('popstate', () => visit(location.href, { push: false }))
+  // A change: a `GET` form that asks for it is sent; otherwise a refresh waits.
+  const edited = (event) => {
+    const form = event.target instanceof Element && event.target.closest('form')
+    if (event.type === 'change' && form?.hasAttribute('data-openshop-autosubmit')) return form.requestSubmit()
+    if (document.getElementById(ROOT)?.contains(event.target)) changed = true
+  }
+  document.addEventListener('input', edited, true)
+  document.addEventListener('change', edited, true)
+  document.addEventListener('keydown', (event) => {
+    const field = event.target instanceof Element ? event.target : null
+    const form = field && FIELDS.test(field.localName) && field.closest('form')
+    if (event.key !== 'Enter' || !form || event.isComposing || event.defaultPrevented) return
+    event.preventDefault()
+    form.requestSubmit()
+  })
   // Polaris says when a modal opens and closes; the events do not bubble, a capture sees them.
   document.addEventListener('show', (event) => shown.add(event.target), true)
   document.addEventListener('afterhide', (event) => shown.delete(event.target), true)

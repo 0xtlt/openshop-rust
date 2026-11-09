@@ -1,9 +1,6 @@
 //! What several pages of the framework are made of: a field of a
-//! configuration and the form it is read from, a date, a JSON document in a
-//! modal.
-
-// The pages that use them are ported next.
-#![allow(dead_code)]
+//! configuration and the form it is read from, a date, how long ago it was,
+//! the tone of a status, a JSON document in a modal.
 
 use chrono::{DateTime, Utc};
 use maud::{Markup, html};
@@ -23,6 +20,59 @@ pub(super) fn time(iso: &str) -> Markup {
         .map(|date| date.with_timezone(&Utc).format("%Y-%m-%d %H:%M:%S UTC").to_string())
         .unwrap_or_else(|_| iso.to_string());
     html! { time datetime=(iso) { (shown) } }
+}
+
+/// How long ago `then` was: `just now`, `45m ago`, `4h ago`, `3d ago`.
+pub(super) fn time_ago(now: DateTime<Utc>, then: DateTime<Utc>) -> String {
+    const MINUTE_MS: i64 = 60_000;
+    const HOUR_MS: i64 = 3_600_000;
+    const DAY_MS: i64 = 86_400_000;
+    let ms = (now - then).num_milliseconds();
+    if ms < MINUTE_MS {
+        "just now".to_string()
+    } else if ms < HOUR_MS {
+        format!("{}m ago", ms / MINUTE_MS)
+    } else if ms < DAY_MS {
+        format!("{}h ago", ms / HOUR_MS)
+    } else {
+        format!("{}d ago", ms / DAY_MS)
+    }
+}
+
+/// The tone of the badge of the status of a run or of a step.
+pub(super) fn status_tone(status: &str) -> &'static str {
+    match status {
+        "completed" => "success",
+        "failed" => "critical",
+        "running" => "warning",
+        "pending" | "sleeping" => "info",
+        "canceled" => "neutral",
+        _ => "auto",
+    }
+}
+
+/// JavaScript's `Number.prototype.toFixed(1)`, which the durations of the
+/// admin were written with: `{:.1}`, but an exact tie rounds away from zero.
+pub(super) fn to_fixed_1(value: f64) -> String {
+    let magnitude = value.abs();
+    let quarters = magnitude * 4.0;
+    let tie_rounding_down = quarters.fract() == 0.0 && quarters % 4.0 == 1.0;
+    let rounded = if tie_rounding_down { magnitude + 0.05 } else { magnitude };
+    let sign = if value < 0.0 { "-" } else { "" };
+    format!("{sign}{rounded:.1}")
+}
+
+/// Whether a JSON value has something to show, as JavaScript tells it:
+/// `null`, `false`, `""`, `{}` and `[]` have not.
+pub(super) fn is_truthy(value: Option<&Value>) -> bool {
+    match value {
+        None | Some(Value::Null) => false,
+        Some(Value::Bool(flag)) => *flag,
+        Some(Value::String(text)) => !text.is_empty(),
+        Some(Value::Object(object)) => !object.is_empty(),
+        Some(Value::Array(items)) => !items.is_empty(),
+        Some(Value::Number(_)) => true,
+    }
 }
 
 /// A JSON document in a modal, which a button opens with
@@ -185,6 +235,25 @@ mod tests {
         let error = config_refusal(refused, "config.");
         let errors = error.downcast_ref::<AdminPublicError>().unwrap().field_errors.clone().unwrap();
         assert_eq!(errors["config.endpoint"], "Must be a URL string (was \"not a url\")");
+    }
+
+    #[test]
+    fn says_what_a_run_shows() {
+        let now = DateTime::parse_from_rfc3339("2026-10-06T12:00:00Z").unwrap().with_timezone(&Utc);
+        let ago = |seconds: i64| time_ago(now, now - chrono::Duration::seconds(seconds));
+        assert_eq!(ago(30), "just now");
+        assert_eq!(ago(-300), "just now");
+        assert_eq!(ago(45 * 60), "45m ago");
+        assert_eq!(ago(5 * 3600 - 1), "4h ago");
+        assert_eq!(ago(3 * 86_400), "3d ago");
+        assert_eq!(status_tone("completed"), "success");
+        assert_eq!(status_tone("sleeping"), "info");
+        assert_eq!(status_tone("skipped"), "auto");
+        assert_eq!(to_fixed_1(0.25), "0.3");
+        assert_eq!(to_fixed_1(1.15), "1.1");
+        assert_eq!(to_fixed_1(59.999), "60.0");
+        assert!(!is_truthy(Some(&json!({}))) && !is_truthy(Some(&json!(""))) && !is_truthy(None));
+        assert!(is_truthy(Some(&json!(0))) && is_truthy(Some(&json!({ "a": 1 }))));
     }
 
     #[test]

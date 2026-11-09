@@ -2,8 +2,6 @@
 //! its logs and their filters, read from the URL; retried and deleted by its
 //! forms; fetched again while it is active.
 
-use base64::Engine;
-use base64::engine::general_purpose::STANDARD;
 use chrono::{DateTime, Duration, SubsecRound, Utc};
 use openshop::builder::Flow;
 use openshop::prelude::*;
@@ -150,6 +148,19 @@ fn decoded(reply: &Reply, name: &str) -> Option<String> {
 }
 
 /// The value of the first attribute `name` after `marker` in the page, unescaped.
+/// The text of the element that starts with `start`, unescaped.
+fn html_text(body: &str, start: &str) -> String {
+    let after = body.find(start).unwrap_or_else(|| panic!("no {start}: {body}"));
+    let body = &body[after..];
+    let open = body.find('>').unwrap() + 1;
+    let close = open + body[open..].find("</").unwrap();
+    body[open..close]
+        .replace("&quot;", "\"")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&amp;", "&")
+}
+
 fn attribute(body: &str, marker: &str, name: &str) -> String {
     let after = body.find(marker).unwrap_or_else(|| panic!("no {marker}: {body}"));
     let body = &body[after..];
@@ -209,10 +220,11 @@ async fn the_page_of_a_run_shows_its_steps_their_output_and_its_logs() {
     assert!(body.contains(r#"heading="Output — fetch" size="large">"#), "{body}");
     let output = serde_json::to_string_pretty(&json!({ "orders": ["<#1001>"] })).unwrap();
     let modal = "heading=\"Output — fetch\"";
-    assert_eq!(attribute(body, modal, "data-openshop-copy"), output);
-    let download = attribute(body, modal, "data-openshop-download");
-    let encoded = download.strip_prefix("data:application/json;base64,").expect(&download);
-    assert_eq!(String::from_utf8(STANDARD.decode(encoded).unwrap()).unwrap(), output);
+    // The buttons copy and download the `pre` of the modal, which holds it.
+    let source = attribute(body, modal, "data-openshop-copy-from");
+    assert_eq!(attribute(body, modal, "data-openshop-download-from"), source);
+    let shown = html_text(body, &format!(r#"<pre id="{source}""#));
+    assert_eq!(shown, output);
     assert!(body.contains(r#"data-openshop-filename="fetch.json""#), "{body}");
 
     // The logs, newest first, escaped, with the count of each level and the exports.

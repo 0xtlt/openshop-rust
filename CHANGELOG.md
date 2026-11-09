@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- Every page of the framework is rendered by the server with
+  `admin_ui: UiSource::Server`: the home, the providers, the flows and their
+  runs, the page of a run with its logs, the Shopify Functions and their
+  instances, the MCP tokens, and the crons. Each keeps what its Leptos page
+  had; a list, a filter or a selection is a URL, and what runs is followed by
+  fetching the page again (`data-openshop-refresh`). A page whose loader needs
+  a plan (`billing::require_plan`) shows its message with a link to the plans.
+  A form of the admin posts to `/mcp` as a form; MCP clients post JSON there,
+  as before. `openshop.js` submits a form with Enter in a Polaris field,
+  sends a `GET` form with `data-openshop-autosubmit` when it changes, and
+  copies or downloads the text of an element (`data-openshop-copy-from`,
+  `data-openshop-download-from`).
 - A form of the server-rendered admin that is refused field by field is
   rendered again in place (`422`), with what was sent and the error of each
   field, for a view that declares a `form: FormState` parameter: when the

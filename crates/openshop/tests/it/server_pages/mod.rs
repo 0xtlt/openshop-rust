@@ -161,6 +161,26 @@ impl NewReviewPage {
     }
 }
 
+/// A page of a plan the shop has not taken, as `billing::require_plan` refuses it.
+struct ReportsPage;
+
+#[admin_page("/reports")]
+impl ReportsPage {
+    #[loader]
+    async fn report(_ctx: AdminContext) -> Result<String> {
+        bail!(
+            AdminPublicError::new("PLAN_REQUIRED", "This feature needs the pro plan")
+                .status(402)
+                .detail("pricingLink", "shopify:admin/charges/test-app/pricing_plans")
+        )
+    }
+
+    #[view]
+    fn view(report: String) -> Markup {
+        html! { s-page { (report) } }
+    }
+}
+
 struct PrivatePage;
 
 #[admin_page("/private", nav = "Private")]
@@ -197,7 +217,7 @@ impl SettingsPage {
 }
 
 static APP: App = app! {
-    admin_pages: [HomePage, NewReviewPage, ReviewPage, PrivatePage, SettingsPage],
+    admin_pages: [HomePage, NewReviewPage, ReviewPage, ReportsPage, PrivatePage, SettingsPage],
 };
 
 pub(super) async fn context() -> TestContext {
@@ -321,6 +341,15 @@ async fn a_page_is_rendered_by_the_server() {
     let unknown = send(fetch(&ctx, Method::GET, "/reviews/42")).await;
     assert!(unknown.body.contains("Review 42, tab none"), "{}", unknown.body);
 
+    // A loader that refuses the page: its message, and the plans when it needs one.
+    let reports = send(fetch(&ctx, Method::GET, "/reports")).await;
+    assert_eq!(reports.status, StatusCode::PAYMENT_REQUIRED);
+    assert!(
+        reports.body.contains(r#"<s-banner tone="warning" heading="This feature needs the pro plan"><s-button variant="primary" href="shopify:admin/charges/test-app/pricing_plans" target="_top">See the plans</s-button></s-banner>"#),
+        "{}",
+        reports.body
+    );
+
     // A page whose access rule says no shows nothing of itself.
     let private = send(fetch(&ctx, Method::GET, "/private")).await;
     assert_eq!(private.status, StatusCode::NOT_FOUND);
@@ -328,9 +357,21 @@ async fn a_page_is_rendered_by_the_server() {
     assert!(!private.body.contains("top secret"));
     assert!(!private.body.contains(r#"href="/private""#));
 
-    // A page of the framework that is not rendered by the server yet says so.
-    let flows = send(fetch(&ctx, Method::GET, "/flows")).await;
-    assert!(flows.body.contains("Not rendered by the server yet"), "{}", flows.body);
+    // Every page of the framework is rendered by the server.
+    for (path, heading) in [("/flows", "Flows"), ("/crons", "Crons"), ("/mcp", "MCP")] {
+        let page = send(fetch(&ctx, Method::GET, path)).await;
+        assert_eq!(page.status, StatusCode::OK, "{path}: {}", page.body);
+        assert!(
+            !page.body.contains("Not rendered by the server yet"),
+            "{path}: {}",
+            page.body
+        );
+        assert!(
+            page.body.contains(&format!(r#"<s-page heading="{heading}""#)),
+            "{path}: {}",
+            page.body
+        );
+    }
 }
 
 #[tokio::test]

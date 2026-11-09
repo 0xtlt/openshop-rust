@@ -13,8 +13,8 @@ mod steps;
 use anyhow::Result;
 use chrono::{DateTime, Duration, Utc};
 use maud::{Markup, html};
-use serde_json::Value;
 
+use super::ui::{status_tone, to_fixed_1};
 use super::{BuiltinPage, field, ui};
 use crate::admin::{AdminPublicError, Outcome};
 use crate::db::schema::{FlowRun, StepResult};
@@ -76,27 +76,7 @@ fn is_finished(status: &str) -> bool {
     matches!(status, "failed" | "completed" | "canceled")
 }
 
-/// The tone of the badge of a status of a run or of a step.
-fn status_tone(status: &str) -> &'static str {
-    match status {
-        "completed" => "success",
-        "failed" => "critical",
-        "running" => "warning",
-        "pending" | "sleeping" => "info",
-        "canceled" => "neutral",
-        _ => "auto",
-    }
-}
 
-/// `Number.prototype.toFixed(1)`: `{:.1}`, but a tie rounds away from zero.
-fn to_fixed_1(value: f64) -> String {
-    let magnitude = value.abs();
-    let quarters = magnitude * 4.0;
-    let tie_rounding_down = quarters.fract() == 0.0 && quarters % 4.0 == 1.0;
-    let rounded = if tie_rounding_down { magnitude + 0.05 } else { magnitude };
-    let sign = if value < 0.0 { "-" } else { "" };
-    format!("{sign}{rounded:.1}")
-}
 
 /// How long the run took, `1.3s`; `Running…` while it runs.
 fn duration(run: &FlowRun) -> String {
@@ -111,17 +91,6 @@ fn duration(run: &FlowRun) -> String {
     }
 }
 
-/// JavaScript's truthiness of an input: `{}` and `null` have nothing to show.
-fn has_input(input: Option<&Value>) -> bool {
-    match input {
-        None | Some(Value::Null) => false,
-        Some(Value::Bool(flag)) => *flag,
-        Some(Value::String(text)) => !text.is_empty(),
-        Some(Value::Object(object)) => !object.is_empty(),
-        Some(Value::Array(items)) => !items.is_empty(),
-        Some(Value::Number(_)) => true,
-    }
-}
 
 pub(super) async fn render(page: &BuiltinPage<'_>) -> Result<Markup> {
     let Some(run) = find_run(page.app, page.session, run_id(page)).await? else {
@@ -139,7 +108,7 @@ fn view(run: &FlowRun, steps: &[StepResult], filters: &LogFilters, logs: &Logs, 
     let finished = is_finished(&run.status);
     let rows = step_rows(steps);
     let error = run.error.as_deref().filter(|error| !error.is_empty());
-    let input = run.input.as_ref().filter(|input| has_input(Some(input)));
+    let input = run.input.as_ref().filter(|input| ui::is_truthy(Some(input)));
     let fresh_since = active.then(|| now - Duration::milliseconds(NEW_LINE_MS));
     html! {
         s-page heading=(format!("Run #{id}")) data-openshop-refresh=[active.then_some(REFRESH_MS)] {

@@ -12,6 +12,7 @@ use maud::{Markup, html};
 use serde_json::Value;
 
 use super::BuiltinPage;
+use super::ui::{status_tone, time_ago, to_fixed_1};
 use super::providers::connection_status;
 use crate::admin::{AdminPublicError, Outcome};
 use crate::db::schema::FlowRun;
@@ -30,9 +31,6 @@ const RECENT_SHOWN: usize = 5;
 /// The failed runs the banner names.
 const FAILED_SHOWN: usize = 3;
 
-const MINUTE_MS: i64 = 60_000;
-const HOUR_MS: i64 = 3_600_000;
-const DAY_MS: i64 = 86_400_000;
 
 /// A run as the dashboard shows it.
 struct Run {
@@ -125,30 +123,7 @@ pub(super) async fn render(page: &BuiltinPage<'_>) -> Result<Markup> {
     }))
 }
 
-/// How long ago `then` was: `just now`, `5m ago`, `3h ago`, `2d ago`.
-fn time_ago(now: DateTime<Utc>, then: DateTime<Utc>) -> String {
-    let ms = (now - then).num_milliseconds();
-    if ms < MINUTE_MS {
-        "just now".to_string()
-    } else if ms < HOUR_MS {
-        format!("{}m ago", ms / MINUTE_MS)
-    } else if ms < DAY_MS {
-        format!("{}h ago", ms / HOUR_MS)
-    } else {
-        format!("{}d ago", ms / DAY_MS)
-    }
-}
 
-/// JavaScript's `Number.prototype.toFixed(1)`: `{:.1}`, but an exact tie
-/// rounds away from zero.
-fn to_fixed_1(value: f64) -> String {
-    let magnitude = value.abs();
-    let quarters = magnitude * 4.0;
-    let tie_rounding_down = quarters.fract() == 0.0 && quarters % 4.0 == 1.0;
-    let rounded = if tie_rounding_down { magnitude + 0.05 } else { magnitude };
-    let sign = if value < 0.0 { "-" } else { "" };
-    format!("{sign}{rounded:.1}")
-}
 
 /// How long a run took: `1.3s`, `250ms`; `…` while it runs, `—` otherwise.
 fn duration(elapsed_ms: Option<i64>, status: &str) -> String {
@@ -160,17 +135,6 @@ fn duration(elapsed_ms: Option<i64>, status: &str) -> String {
     }
 }
 
-/// The tone of the badge of a run's status.
-fn status_tone(status: &str) -> &'static str {
-    match status {
-        "completed" => "success",
-        "failed" => "critical",
-        "running" => "warning",
-        "pending" | "sleeping" => "info",
-        "canceled" => "neutral",
-        _ => "auto",
-    }
-}
 
 fn view(dashboard: &Dashboard) -> Markup {
     let now = dashboard.now;

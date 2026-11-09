@@ -23,16 +23,6 @@ fn shops_label(shops: Option<&Value>) -> String {
     }
 }
 
-fn is_truthy(value: Option<&Value>) -> bool {
-    match value {
-        None | Some(Value::Null) => false,
-        Some(Value::Bool(value)) => *value,
-        Some(Value::String(text)) => !text.is_empty(),
-        Some(Value::Object(object)) => !object.is_empty(),
-        Some(Value::Array(items)) => !items.is_empty(),
-        Some(Value::Number(_)) => true,
-    }
-}
 
 pub(super) async fn render(page: &BuiltinPage<'_>) -> Result<Markup> {
     let crons = cron_items(page.app, &page.session.shopify_app, &page.session.shop).await?;
@@ -64,7 +54,7 @@ fn view(crons: &[Value]) -> Markup {
                     }
                 }
             }
-            @for (index, cron) in crons.iter().enumerate().filter(|(_, cron)| is_truthy(cron.get("input"))) {
+            @for (index, cron) in crons.iter().enumerate().filter(|(_, cron)| ui::is_truthy(cron.get("input"))) {
                 (ui::json_modal(
                     &format!("cron-input-{index}"),
                     &format!("Input — {}", name(cron)),
@@ -99,7 +89,7 @@ fn row(index: usize, cron: &Value) -> Markup {
             }
             s-table-cell {
                 s-stack direction="inline" gap="small-200" {
-                    @if is_truthy(cron.get("input")) {
+                    @if ui::is_truthy(cron.get("input")) {
                         s-button variant="secondary" commandFor=(format!("cron-input-{index}")) command="--show" { "Input" }
                     }
                     form method="post" {

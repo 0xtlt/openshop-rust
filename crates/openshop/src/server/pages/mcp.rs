@@ -6,8 +6,8 @@
 //! token. The secret of a token created or rotated is shown once, in a
 //! banner, with a button that copies it.
 //!
-//! The forms post to `/mcp/tokens`, which is this page too: a `POST` of
-//! `/mcp` is the MCP endpoint.
+//! The forms post to `/mcp`, as forms: a `POST` of `/mcp` with another body
+//! is the MCP endpoint.
 
 mod view;
 
@@ -33,10 +33,6 @@ const SET_PERMISSIONS: &str = "setPermissions";
 const ROTATE: &str = "rotateToken";
 /// The form of the modal that confirms a revocation.
 const REVOKE: &str = "revokeToken";
-
-/// Where the forms post: a path of this page. Not `/mcp`, whose `POST` is
-/// the MCP endpoint, for the clients of the server.
-const FORM_PATH: &str = "/mcp/tokens";
 
 /// The audits the edit modal of a token shows.
 const RECENT_AUDITS: i64 = 10;
