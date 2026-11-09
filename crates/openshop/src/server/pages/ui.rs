@@ -107,7 +107,11 @@ pub(super) fn config_field(name: &str, field: &Field, value: &str, saved: bool, 
     let placeholder = field.placeholder.as_deref();
     match field.field_type {
         FieldType::Password => {
-            let placeholder = if saved { Some("Saved; leave blank to keep") } else { placeholder };
+            let placeholder = if saved {
+                Some("Saved; leave blank to keep")
+            } else {
+                placeholder
+            };
             html! {
                 s-password-field name=(name) label=(label) details=[details] placeholder=[placeholder] error=[error] {}
             }
@@ -176,7 +180,10 @@ mod tests {
 
     fn fields() -> Fields {
         IndexMap::from([
-            ("endpoint".to_string(), Field::text("Endpoint").validate(validators::url())),
+            (
+                "endpoint".to_string(),
+                Field::text("Endpoint").validate(validators::url()),
+            ),
             ("apiKey".to_string(), Field::password("API key")),
             ("retries".to_string(), Field::number("Retries").optional()),
             ("sandbox".to_string(), Field::checkbox("Sandbox")),
@@ -205,7 +212,10 @@ mod tests {
         assert!(render("sandbox", "true", false, None).contains(r#"value="true" label="Sandbox" checked>"#));
         assert!(!render("sandbox", "false", false, None).contains("checked"));
         let zone = render("zone", "us", false, None);
-        assert!(zone.contains(r#"<s-option value="us" selected>US</s-option>"#), "{zone}");
+        assert!(
+            zone.contains(r#"<s-option value="us" selected>US</s-option>"#),
+            "{zone}"
+        );
         assert!(zone.contains(r#"<s-option value="eu">Europe</s-option>"#), "{zone}");
         assert_eq!(config_value(Some(&json!(3))), "3");
         assert_eq!(config_value(Some(&json!(null))), "");
@@ -233,13 +243,20 @@ mod tests {
         let sent = json!({ "endpoint": "not a url", "apiKey": "k", "sandbox": "false", "zone": "eu" });
         let refused = parse_provider_config(&fields(), None, Some(&sent), &JsonMap::new()).unwrap_err();
         let error = config_refusal(refused, "config.");
-        let errors = error.downcast_ref::<AdminPublicError>().unwrap().field_errors.clone().unwrap();
+        let errors = error
+            .downcast_ref::<AdminPublicError>()
+            .unwrap()
+            .field_errors
+            .clone()
+            .unwrap();
         assert_eq!(errors["config.endpoint"], "Must be a URL string (was \"not a url\")");
     }
 
     #[test]
     fn says_what_a_run_shows() {
-        let now = DateTime::parse_from_rfc3339("2026-10-06T12:00:00Z").unwrap().with_timezone(&Utc);
+        let now = DateTime::parse_from_rfc3339("2026-10-06T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
         let ago = |seconds: i64| time_ago(now, now - chrono::Duration::seconds(seconds));
         assert_eq!(ago(30), "just now");
         assert_eq!(ago(-300), "just now");

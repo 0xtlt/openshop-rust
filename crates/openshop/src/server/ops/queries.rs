@@ -20,9 +20,11 @@ const STATEMENT_TIMEOUT: &str = "10s";
 /// reads, and ends with a rollback when it is dropped.
 async fn bounded(db: &PgPool) -> Result<Transaction<'static, Postgres>> {
     let mut tx = db.begin().await?;
-    sqlx::query(sqlx::AssertSqlSafe(format!("SET LOCAL statement_timeout = '{STATEMENT_TIMEOUT}'")))
-        .execute(&mut *tx)
-        .await?;
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "SET LOCAL statement_timeout = '{STATEMENT_TIMEOUT}'"
+    )))
+    .execute(&mut *tx)
+    .await?;
     Ok(tx)
 }
 
@@ -308,7 +310,9 @@ fn logs_query(prefix: &str, filter: &LogFilter, limit: i64) -> Sql {
     ));
     query.push(LOGS_WITH_RUNS);
     filter.push(&mut query);
-    query.push(" ORDER BY l.created_at DESC, l.id DESC LIMIT ").push_bind(limit);
+    query
+        .push(" ORDER BY l.created_at DESC, l.id DESC LIMIT ")
+        .push_bind(limit);
     query
 }
 
@@ -387,7 +391,13 @@ pub(super) struct Tally {
     pub latest: Option<DateTime<Utc>>,
 }
 
-async fn tallies(db: &PgPool, column: &str, since: DateTime<Utc>, only_failing: bool, limit: i64) -> Result<Vec<Tally>> {
+async fn tallies(
+    db: &PgPool,
+    column: &str,
+    since: DateTime<Utc>,
+    only_failing: bool,
+    limit: i64,
+) -> Result<Vec<Tally>> {
     let mut tx = bounded(db).await?;
     let failing = if only_failing {
         " HAVING count(*) FILTER (WHERE status = 'failed') > 0"

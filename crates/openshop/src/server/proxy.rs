@@ -150,7 +150,13 @@ async fn handle(
         .filter_map(|(name, value)| Some((name.as_str().to_lowercase(), value.to_str().ok()?.to_string())))
         .collect();
     let query = parse_query(uri.query());
-    let auth = match resolve_proxy_auth(&app, uri.query().unwrap_or_default(), &query, &headers, route.auth_modes) {
+    let auth = match resolve_proxy_auth(
+        &app,
+        uri.query().unwrap_or_default(),
+        &query,
+        &headers,
+        route.auth_modes,
+    ) {
         Ok(auth) => auth,
         Err(error) => return json_error(StatusCode::UNAUTHORIZED, error),
     };
@@ -224,30 +230,38 @@ pub fn create_proxy_routes(
     log: bool,
 ) -> anyhow::Result<Router<OpenShop>> {
     let proxies = &app.config().proxies;
-    mount_routes("Proxy", prefix, proxies.keys().map(String::as_str), log, |route_path, key| {
-        let definition = &proxies[key];
-        let response_type = definition.response_type;
-        let mut method_router: MethodRouter<OpenShop> = MethodRouter::new().fallback(|| async { not_found() });
+    mount_routes(
+        "Proxy",
+        prefix,
+        proxies.keys().map(String::as_str),
+        log,
+        |route_path, key| {
+            let definition = &proxies[key];
+            let response_type = definition.response_type;
+            let mut method_router: MethodRouter<OpenShop> = MethodRouter::new().fallback(|| async { not_found() });
 
-        for (&method, handler) in &definition.handlers {
-            let route = ProxyRoute {
-                route_path: route_path.to_string(),
-                method,
-                response_type,
-                handler: handler.clone(),
-                auth_modes,
-            };
-            method_router = method_router.merge(on(
-                method_filter(method),
-                move |State(app): State<OpenShop>,
-                      method: Method,
-                      uri: Uri,
-                      params: RawPathParams,
-                      headers: HeaderMap,
-                      body: Bytes| { handle(route.clone(), app, method, uri, params, headers, body) },
-            ));
-        }
+            for (&method, handler) in &definition.handlers {
+                let route = ProxyRoute {
+                    route_path: route_path.to_string(),
+                    method,
+                    response_type,
+                    handler: handler.clone(),
+                    auth_modes,
+                };
+                method_router = method_router.merge(on(
+                    method_filter(method),
+                    move |State(app): State<OpenShop>,
+                          method: Method,
+                          uri: Uri,
+                          params: RawPathParams,
+                          headers: HeaderMap,
+                          body: Bytes| {
+                        handle(route.clone(), app, method, uri, params, headers, body)
+                    },
+                ));
+            }
 
-        (method_router, response_type.as_str().to_string())
-    })
+            (method_router, response_type.as_str().to_string())
+        },
+    )
 }

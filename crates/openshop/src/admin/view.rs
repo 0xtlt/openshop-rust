@@ -88,7 +88,11 @@ impl FormState {
     /// refused form is another one: a page with several forms shows the
     /// errors on the one that was sent. `form.of(Self::SAVE_REVIEW)`.
     pub fn of(&self, action: &str) -> &FormState {
-        if self.action.as_deref() == Some(action) { self } else { &NO_FORM }
+        if self.action.as_deref() == Some(action) {
+            self
+        } else {
+            &NO_FORM
+        }
     }
 
     /// The value sent for the field `name`, the first one when it was sent
@@ -103,7 +107,11 @@ impl FormState {
     /// The value sent for `name`, or `saved`, what the page shows otherwise:
     /// the `value` of a field rendered again after an error.
     pub fn value_or<'a>(&'a self, name: &str, saved: &'a str) -> &'a str {
-        if self.is_refused() { self.value(name).unwrap_or_default() } else { saved }
+        if self.is_refused() {
+            self.value(name).unwrap_or_default()
+        } else {
+            saved
+        }
     }
 
     /// Every value sent for `name`: the boxes checked of a group, the options of a multiple choice.
@@ -156,7 +164,10 @@ impl PageRequest {
     {
         let schema = InputSchema::of::<T>();
         let value = schema
-            .parse(fields_to_json(&schema.json_schema, &parse_fields(self.query.as_bytes())))
+            .parse(fields_to_json(
+                &schema.json_schema,
+                &parse_fields(self.query.as_bytes()),
+            ))
             .map_err(|summary| AdminPublicError::new("INVALID_INPUT", summary).status(400))?;
         loader(self.ctx.clone(), serde_json::from_value(value)?).await
     }
@@ -505,7 +516,10 @@ mod tests {
         assert_eq!(field_message("must be >= 1"), "Must be at least 1");
         assert_eq!(field_message("must be < 2.5"), "Must be less than 2.5");
         assert_eq!(field_message("must be at least 1 characters"), "Required");
-        assert_eq!(field_message("must be one of \"a\", \"b\""), "Must be one of \"a\", \"b\"");
+        assert_eq!(
+            field_message("must be one of \"a\", \"b\""),
+            "Must be one of \"a\", \"b\""
+        );
         let typed = fields_to_json(&schema, &parse_fields(b"title=Great&rating=4&mode=slow"));
         assert_eq!(typed, json!({ "title": "Great", "rating": 4, "mode": "slow" }));
     }
@@ -540,7 +554,12 @@ mod tests {
         let json = serde_json::to_value(&outcome).unwrap();
         assert_eq!(json["field_errors"]["handle"], "Already taken");
         // Without field errors, nothing is said of them.
-        assert!(serde_json::to_value(Outcome::toast("Saved")).unwrap().get("field_errors").is_none());
+        assert!(
+            serde_json::to_value(Outcome::toast("Saved"))
+                .unwrap()
+                .get("field_errors")
+                .is_none()
+        );
     }
 
     #[tokio::test]

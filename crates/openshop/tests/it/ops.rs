@@ -105,7 +105,7 @@ async fn without_a_password_the_dashboard_does_not_exist() {
     for server in [
         ServerOptions::default(),
         ServerOptions {
-            ui: UiSource::Embedded,
+            ui: UiSource::Server,
             dev: false,
         },
     ] {
@@ -255,7 +255,7 @@ async fn the_session_cookie_is_secure_unless_the_server_is_reached_over_plain_ht
         (
             Some("https://app.example.com"),
             ServerOptions {
-                ui: UiSource::Embedded,
+                ui: UiSource::Server,
                 dev: true,
             },
             false,

@@ -36,7 +36,9 @@ pub(super) fn connection_status(configured: bool, last_check_ok: Option<bool>) -
 }
 
 fn not_found() -> anyhow::Error {
-    AdminPublicError::new("NOT_FOUND", "Provider not found").status(404).into()
+    AdminPublicError::new("NOT_FOUND", "Provider not found")
+        .status(404)
+        .into()
 }
 
 pub(super) async fn render(page: &BuiltinPage<'_>) -> Result<Markup> {
@@ -63,7 +65,11 @@ fn view(providers: &[ProviderItem<'_>], selected: usize, form: &FormState) -> Ma
     // The form refused is shown again on the provider it was sent for only.
     let none = FormState::default();
     let refused = form.of(SAVE);
-    let saving = if refused.value(PROVIDER) == Some(current.name) { refused } else { &none };
+    let saving = if refused.value(PROVIDER) == Some(current.name) {
+        refused
+    } else {
+        &none
+    };
     let (tone, label) = connection_status(current.configured, current.last_check_ok);
     html! {
         s-page heading="Providers" {
@@ -149,9 +155,9 @@ async fn check(page: &BuiltinPage<'_>, name: &str) -> Result<Outcome> {
     let outcome = check_provider_connection(page.app, page.session, name).await?;
     match (&outcome, outcome.error()) {
         (CheckOutcome::NotFound, _) => Err(not_found()),
-        (CheckOutcome::NoChecker, _) => {
-            Err(AdminPublicError::new("NO_CHECKER", "No checker defined").status(400).into())
-        }
+        (CheckOutcome::NoChecker, _) => Err(AdminPublicError::new("NO_CHECKER", "No checker defined")
+            .status(400)
+            .into()),
         (CheckOutcome::Answered(true), _) => Ok(Outcome::toast("Connection OK!")),
         // The status and the time of the check are shown again with the page.
         (CheckOutcome::Answered(false), _) => Ok(Outcome::error("Failed")),
@@ -215,11 +221,16 @@ mod tests {
         assert!(html.contains(r#"<s-section heading="warehouse">"#), "{html}");
         assert!(html.contains(r#"<s-badge tone="critical">Error</s-badge>"#), "{html}");
         // Two forms: the check, then the configuration, each naming the provider.
-        let check = html.find(r#"<input type="hidden" name="_action" value="check">"#).unwrap();
-        let save = html.find(r#"<input type="hidden" name="_action" value="save">"#).unwrap();
+        let check = html
+            .find(r#"<input type="hidden" name="_action" value="check">"#)
+            .unwrap();
+        let save = html
+            .find(r#"<input type="hidden" name="_action" value="save">"#)
+            .unwrap();
         assert!(check < save, "{html}");
         assert_eq!(
-            html.matches(r#"<input type="hidden" name="provider" value="warehouse">"#).count(),
+            html.matches(r#"<input type="hidden" name="provider" value="warehouse">"#)
+                .count(),
             2,
             "{html}"
         );
@@ -234,8 +245,14 @@ mod tests {
             html.contains(r#"<s-password-field name="config.apiKey" label="API key" placeholder="Saved; leave blank to keep"></s-password-field>"#),
             "{html}"
         );
-        assert!(html.contains(r#"name="config.sandbox" value="true" label="Sandbox" checked>"#), "{html}");
-        assert!(html.contains(r#"<s-option value="us" selected>US</s-option>"#), "{html}");
+        assert!(
+            html.contains(r#"name="config.sandbox" value="true" label="Sandbox" checked>"#),
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"<s-option value="us" selected>US</s-option>"#),
+            "{html}"
+        );
         assert!(
             html.contains(r#"Last checked: <time datetime="2026-11-09T14:56:46.123Z">2026-11-09 14:56:46 UTC</time>"#),
             "{html}"
@@ -246,7 +263,10 @@ mod tests {
 
     #[test]
     fn chooses_the_provider_with_a_form_that_changes_the_url() {
-        let (first, second) = (warehouse(), Provider::new("erp<x>").field("token", Field::password("Token")));
+        let (first, second) = (
+            warehouse(),
+            Provider::new("erp<x>").field("token", Field::password("Token")),
+        );
         let mut erp = item("erp<x>", &second);
         erp.fields = JsonMap::new();
         erp.config = JsonMap::new();
@@ -254,17 +274,26 @@ mod tests {
         erp.last_checked_at = None;
         let providers = [item("warehouse", &first), erp];
         let html = view(&providers, 1, &FormState::default()).into_string();
-        assert!(html.contains(r#"<form method="get" data-openshop-autosubmit>"#), "{html}");
+        assert!(
+            html.contains(r#"<form method="get" data-openshop-autosubmit>"#),
+            "{html}"
+        );
         assert!(
             html.contains(r#"<s-select name="provider" label="Provider" value="erp&lt;x&gt;">"#),
             "{html}"
         );
-        assert!(html.contains(r#"<s-option value="warehouse">warehouse</s-option>"#), "{html}");
+        assert!(
+            html.contains(r#"<s-option value="warehouse">warehouse</s-option>"#),
+            "{html}"
+        );
         assert!(
             html.contains(r#"<s-option value="erp&lt;x&gt;" selected>erp&lt;x&gt;</s-option>"#),
             "{html}"
         );
-        assert!(html.contains(r#"<s-badge tone="warning">Not configured</s-badge>"#), "{html}");
+        assert!(
+            html.contains(r#"<s-badge tone="warning">Not configured</s-badge>"#),
+            "{html}"
+        );
         assert!(html.contains(r#"<s-password-field name="config.token" label="Token"></s-password-field>"#));
         assert!(!html.contains("Last checked"), "{html}");
         assert!(!html.contains("config.endpoint"), "{html}");
@@ -275,7 +304,12 @@ mod tests {
         let provider = warehouse();
         let providers = [item("warehouse", &provider)];
         let form = refused(
-            &[("_action", "save"), ("provider", "warehouse"), ("config.endpoint", "nope"), ("config.zone", "eu")],
+            &[
+                ("_action", "save"),
+                ("provider", "warehouse"),
+                ("config.endpoint", "nope"),
+                ("config.zone", "eu"),
+            ],
             &[("config.endpoint", "Must be a URL"), ("config.apiKey", "Required")],
         );
         let html = view(&providers, 0, &form).into_string();
@@ -283,15 +317,29 @@ mod tests {
             html.contains(r#"<s-text-field name="config.endpoint" label="Endpoint" value="nope" error="Must be a URL"></s-text-field>"#),
             "{html}"
         );
-        assert!(html.contains(r#"name="config.apiKey" label="API key" placeholder="Saved; leave blank to keep" error="Required">"#), "{html}");
+        assert!(
+            html.contains(
+                r#"name="config.apiKey" label="API key" placeholder="Saved; leave blank to keep" error="Required">"#
+            ),
+            "{html}"
+        );
         // A checkbox that was not sent was not checked.
         assert!(!html.contains(r#"label="Sandbox" checked"#), "{html}");
-        assert!(html.contains(r#"<s-option value="eu" selected>Europe</s-option>"#), "{html}");
+        assert!(
+            html.contains(r#"<s-option value="eu" selected>Europe</s-option>"#),
+            "{html}"
+        );
 
         // The form of another provider is not shown on this one.
-        let other = refused(&[("provider", "erp"), ("config.endpoint", "nope")], &[("config.endpoint", "Bad")]);
+        let other = refused(
+            &[("provider", "erp"), ("config.endpoint", "nope")],
+            &[("config.endpoint", "Bad")],
+        );
         let html = view(&providers, 0, &other).into_string();
-        assert!(html.contains(r#"value="https://warehouse.test"></s-text-field>"#), "{html}");
+        assert!(
+            html.contains(r#"value="https://warehouse.test"></s-text-field>"#),
+            "{html}"
+        );
         assert!(!html.contains("Bad"), "{html}");
     }
 

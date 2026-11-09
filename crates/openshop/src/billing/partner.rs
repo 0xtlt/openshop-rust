@@ -280,7 +280,12 @@ mod tests {
         let subscription = read_partner_subscription(example()).unwrap().unwrap();
         assert_eq!(subscription.billing_period, "EVERY_30_DAYS");
         assert_eq!(
-            subscription.current_billing_cycle.as_ref().unwrap().end_time.to_rfc3339(),
+            subscription
+                .current_billing_cycle
+                .as_ref()
+                .unwrap()
+                .end_time
+                .to_rfc3339(),
             "2026-05-01T00:00:00+00:00"
         );
         let plan = subscription.plan_item().unwrap();
@@ -298,7 +303,10 @@ mod tests {
             Some("gid://shopify/AppSubscription/987654321")
         );
 
-        assert_eq!(read_partner_subscription(json!({ "activeSubscription": null })).unwrap(), None);
+        assert_eq!(
+            read_partner_subscription(json!({ "activeSubscription": null })).unwrap(),
+            None
+        );
         assert!(read_partner_subscription(json!({})).is_err());
     }
 
@@ -332,7 +340,10 @@ mod tests {
         assert_eq!(subscription.items[0].usage.as_ref().unwrap().cost.amount, "1.25");
         assert_eq!(subscription.items[1].discount.as_ref().unwrap().percentage, Some(20.0));
         assert_eq!(subscription.items[2].price, AppPricingPrice::Other);
-        assert_eq!(subscription.pending_update.as_ref().unwrap().billing_period, "EVERY_30_DAYS");
+        assert_eq!(
+            subscription.pending_update.as_ref().unwrap().billing_period,
+            "EVERY_30_DAYS"
+        );
     }
 
     #[test]
@@ -364,7 +375,10 @@ mod tests {
             .and_then(|call| call.operation)
         };
         assert_eq!(name(PARTNER_IDS).as_deref(), Some(PARTNER_IDS_OPERATION));
-        assert_eq!(name(PARTNER_SUBSCRIPTION).as_deref(), Some(PARTNER_SUBSCRIPTION_OPERATION));
+        assert_eq!(
+            name(PARTNER_SUBSCRIPTION).as_deref(),
+            Some(PARTNER_SUBSCRIPTION_OPERATION)
+        );
     }
 
     #[test]
@@ -372,7 +386,10 @@ mod tests {
         let written = read_partner_subscription(example()).unwrap();
         let read = read_partner_subscription(partner_subscription_data(written.as_ref())).unwrap();
         assert_eq!(read, written);
-        assert_eq!(read_partner_subscription(partner_subscription_data(None)).unwrap(), None);
+        assert_eq!(
+            read_partner_subscription(partner_subscription_data(None)).unwrap(),
+            None
+        );
         let ids = read_partner_ids(partner_ids_data("gid://shopify/App/1", "gid://shopify/Shop/2")).unwrap();
         assert_eq!(ids.shop, "gid://shopify/Shop/2");
     }

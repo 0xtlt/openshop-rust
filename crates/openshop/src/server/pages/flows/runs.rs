@@ -6,9 +6,9 @@ use chrono::{DateTime, NaiveDate, Utc};
 use indexmap::IndexMap;
 use maud::{Markup, html};
 
+use super::super::ui::{status_tone, time_ago};
 use super::super::{BuiltinPage, ui};
 use super::format::run_duration;
-use super::super::ui::{status_tone, time_ago};
 use super::{DELETE, DELETE_FORM, DELETE_MODAL, FlowsView, IDS, PAGE_SIZE, REFRESH_MS};
 use crate::db::schema::FlowRun;
 use crate::runtime::time::to_iso;
@@ -90,7 +90,11 @@ impl RunsQuery {
             query.append_pair("select", "all");
         }
         let query = query.finish();
-        if query.is_empty() { pathname.to_string() } else { format!("{pathname}?{query}") }
+        if query.is_empty() {
+            pathname.to_string()
+        } else {
+            format!("{pathname}?{query}")
+        }
     }
 }
 
@@ -245,9 +249,7 @@ fn run_row(run: &FlowRun, every_flow: bool, checked: bool, now: DateTime<Utc>) -
 fn pagination(page: &FlowsView<'_>) -> Markup {
     let query = page.query;
     let previous = (query.page > 1).then(|| query.href(page.pathname, query.page - 1, false));
-    let next = page
-        .has_next
-        .then(|| query.href(page.pathname, query.page + 1, false));
+    let next = page.has_next.then(|| query.href(page.pathname, query.page + 1, false));
     html! {
         @if previous.is_some() || next.is_some() {
             s-stack direction="inline" justifyContent="center" alignItems="center" gap="small-200" padding="base" {

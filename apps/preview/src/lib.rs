@@ -8,18 +8,12 @@
 //! dashboard is at `/ops`. Its password is `preview`, or the one the
 //! application gives.
 //!
-//! Set `PREVIEW_AS_SHOP=1` to look at the admin UI itself, as the staff of a
+//! Set `PREVIEW_AS_SHOP=1` to look at the admin itself, as the staff of a
 //! fake shop: App Bridge is then replaced by a stub that signs session tokens
-//! for it. Development only: never expose it.
-//!
-//! Set `PREVIEW_UI_DIR` to the `dist` of a template, e.g. `templates/custom/dist`,
-//! to preview its own bundle with its custom pages (build it first with
-//! `mise run templates:ui`). `openshop dev` names the one it builds with
-//! `OPENSHOP_UI_DIR`.
+//! for it, adds them to the requests of the page as App Bridge's `fetch`
+//! does, and shows the toasts. Development only: never expose it.
 
-use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
 
 use openshop::builder::Route;
 use openshop::engine::{Scheduler, Worker};
@@ -28,90 +22,43 @@ use openshop::server::ServerOptions;
 use openshop::server::{router, serve};
 use openshop::testing::{MockTransport, TestDb, session_token};
 use openshop::{DispatchOptions, OpenShop, OpenShopConfig, Result, UiSource, Value, WorkerConfig, json, response};
+use response::{IntoResponse, header};
 
 /// The shop the previewed application is installed on.
 pub const SHOP: &str = "preview.myshopify.com";
 const API_KEY: &str = "preview-key";
 const API_SECRET: &str = "preview-secret";
 
-const APP_BRIDGE_STUB: &str = r#"<script>
-      window.shopify = {
-        idToken: () => fetch('/routes/preview-token').then((response) => response.text()),
-        toast: { show: (message) => { console.log('[toast]', message); return 'toast'; } },
-      };
-    </script>"#;
-
-/// Copies the files of a bundle, without its shell.
-fn copy_dir(from: &Path, to: &Path) -> std::io::Result<()> {
-    std::fs::create_dir_all(to)?;
-    for entry in std::fs::read_dir(from)? {
-        let entry = entry?;
-        let target = to.join(entry.file_name());
-        if entry.file_type()?.is_dir() {
-            copy_dir(&entry.path(), &target)?;
-        } else if entry.file_name() != "index.html" {
-            std::fs::copy(entry.path(), target)?;
-        }
-    }
-    Ok(())
-}
-
-/// The built UI. `PREVIEW_UI_DIR` previews another bundle, e.g. `templates/custom/dist`,
-/// and `openshop dev` names the one it builds with `OPENSHOP_UI_DIR`.
-fn built_ui_dir() -> PathBuf {
-    let named = ["PREVIEW_UI_DIR", "OPENSHOP_UI_DIR"]
-        .into_iter()
-        .find_map(std::env::var_os);
-    match named {
-        Some(dir) => PathBuf::from(dir),
-        None => Path::new(env!("CARGO_MANIFEST_DIR")).join("../../crates/openshop/ui-dist"),
-    }
-}
-
-/// Copies the built UI, with a shell that loads the App Bridge stub.
-fn stub_ui(shell: &str, built: &Path, stubbed: &Path) -> Result<()> {
-    let app_bridge = r#"<script src="https://cdn.shopify.com/shopifycloud/app-bridge.js"></script>"#;
-    if !shell.contains(app_bridge) {
-        openshop::bail!(
-            "{} does not load App Bridge the expected way",
-            built.join("index.html").display()
-        );
-    }
-    copy_dir(built, stubbed)?;
-    // The shell last: it names the files of the build.
-    std::fs::write(stubbed.join("index.html"), shell.replace(app_bridge, APP_BRIDGE_STUB))?;
-    Ok(())
-}
-
-/// A copy of the built UI whose shell loads the App Bridge stub, kept up to
-/// date: `openshop dev` builds the bundle again when a page changes, and may
-/// still be building the first one.
-fn stubbed_ui_dir(built: PathBuf) -> Result<PathBuf> {
-    let stubbed = std::env::temp_dir().join(format!("openshop-preview-ui-{}", std::process::id()));
-    std::fs::create_dir_all(&stubbed)?;
-    let shell = |built: &Path| std::fs::read_to_string(built.join("index.html")).ok();
-
-    let mut copied = shell(&built);
-    if let Some(shell) = &copied {
-        stub_ui(shell, &built, &stubbed)?;
-    }
-    let directory = stubbed.clone();
-    tokio::spawn(async move {
-        loop {
-            tokio::time::sleep(Duration::from_millis(250)).await;
-            let built_shell = shell(&built);
-            if built_shell.is_none() || built_shell == copied {
-                continue;
-            }
-            match stub_ui(built_shell.as_deref().unwrap_or_default(), &built, &directory) {
-                Ok(()) => copied = built_shell,
-                // The files of a build are moved into place one by one.
-                Err(error) => eprintln!("[preview] {error:#}"),
-            }
-        }
-    });
-    Ok(stubbed)
-}
+/// App Bridge as far as the admin needs it, for a page opened in a regular
+/// browser: a session token for the fake shop, added to the requests of the
+/// page as App Bridge's `fetch` adds it; the bounce page loads the page again
+/// with one; a toast shows at the bottom of the page.
+const APP_BRIDGE_STUB: &str = r#"(() => {
+  const native = window.fetch.bind(window)
+  const idToken = () => native('/routes/preview-token').then((response) => response.text())
+  const toast = (message, options = {}) => {
+    const shown = Object.assign(document.createElement('div'), { textContent: message })
+    shown.style.cssText = `position:fixed;bottom:16px;left:50%;transform:translateX(-50%);z-index:9999;padding:8px 16px;border-radius:8px;color:#fff;font:14px system-ui;background:${options.isError ? '#c70a24' : '#303030'}`
+    document.body.append(shown)
+    setTimeout(() => shown.remove(), 3000)
+    return 'toast'
+  }
+  window.shopify = { idToken, toast: { show: toast }, loading: () => {} }
+  window.fetch = async (input, init = {}) => {
+    const url = new URL(input instanceof Request ? input.url : input, location.href)
+    if (url.origin !== location.origin) return native(input, init)
+    const headers = new Headers(init.headers ?? (input instanceof Request ? input.headers : undefined))
+    headers.set('Authorization', `Bearer ${await idToken()}`)
+    return native(input, { ...init, headers })
+  }
+  const reload = new URLSearchParams(location.search).get('shopify-reload')
+  if (reload) idToken().then((token) => {
+    const url = new URL(reload, location.origin)
+    url.searchParams.set('id_token', token)
+    location.replace(url)
+  })
+})()
+"#;
 
 /// The preview of an application.
 pub struct Preview {
@@ -159,6 +106,18 @@ impl Preview {
                     Ok(response::text(session_token(SHOP, API_SECRET, API_KEY, "preview-user")))
                 }),
             );
+            config.routes.insert(
+                "/preview-app-bridge.js".to_string(),
+                Route::public().get(|_ctx| async move {
+                    Ok((
+                        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+                        APP_BRIDGE_STUB,
+                    )
+                        .into_response())
+                }),
+            );
+            config.shopify_endpoints = std::mem::take(&mut config.shopify_endpoints)
+                .app_bridge(format!("http://localhost:{port}/routes/preview-app-bridge.js"));
         }
 
         let database = TestDb::create_with_models(&config.models).await?;
@@ -187,16 +146,10 @@ impl Preview {
         }
         openshop::sqlx::raw_sql(history).execute(app.db()).await?;
 
-        let built = built_ui_dir();
-        let stubbed = if as_shop {
-            Some(stubbed_ui_dir(built.clone())?)
-        } else {
-            None
-        };
-        // As a shop, the shell is served without a signed launch, like `dev`.
-        // Otherwise the admin answers as in production: not without a shop.
+        // As a shop, the page reloads when the preview starts again, like
+        // `dev`. Otherwise the admin answers as in production: not without a shop.
         let options = ServerOptions {
-            ui: UiSource::Dir(stubbed.clone().unwrap_or(built)),
+            ui: UiSource::Server,
             dev: as_shop,
         };
         // Loopback only: as a shop, this server hands out session tokens to anyone who asks.
@@ -207,10 +160,10 @@ impl Preview {
         let mut scheduler = Scheduler::start(&app)?;
 
         if as_shop {
-            println!("[preview] Admin UI, as the staff of {SHOP}: http://localhost:{port}/");
+            println!("[preview] The admin, as the staff of {SHOP}: http://localhost:{port}/?shop={SHOP}&embedded=1");
         } else {
             println!("[preview] Without a shop, as in production: http://localhost:{port}/");
-            println!("[preview] Set PREVIEW_AS_SHOP=1 to open the admin UI as the staff of a fake shop.");
+            println!("[preview] Set PREVIEW_AS_SHOP=1 to open the admin as the staff of a fake shop.");
         }
         println!("[preview] Operator dashboard: http://localhost:{port}/ops (password: {ops_password})");
         println!("[preview] Press Ctrl-C to stop.");
@@ -220,9 +173,6 @@ impl Preview {
         scheduler.stop();
         worker.stop().await;
         let _ = server.shutdown().await;
-        if let Some(stubbed) = stubbed {
-            let _ = std::fs::remove_dir_all(stubbed);
-        }
         database.cleanup().await
     }
 }

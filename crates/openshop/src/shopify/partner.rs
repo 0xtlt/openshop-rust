@@ -433,9 +433,14 @@ mod tests {
     #[test]
     fn each_field_comes_from_the_code_else_from_the_environment() {
         let env = PartnerApi::new().partner_id("1111111").token("prtapi_from_env");
-        let client = resolve(&PartnerApi::new().partner_id(" 7438846 "), &env).unwrap().unwrap();
+        let client = resolve(&PartnerApi::new().partner_id(" 7438846 "), &env)
+            .unwrap()
+            .unwrap();
         assert_eq!(client.partner_id(), "7438846");
-        assert_eq!(client.url(), "https://partners.shopify.com/7438846/api/2026-10/graphql.json");
+        assert_eq!(
+            client.url(),
+            "https://partners.shopify.com/7438846/api/2026-10/graphql.json"
+        );
         assert_eq!(client.plan_ttl(), DEFAULT_PLAN_TTL);
         assert_eq!(client.inner.token, "prtapi_from_env");
         let line = client.startup_line();
@@ -448,7 +453,9 @@ mod tests {
         assert!(!format!("{client:?}").contains("prtapi_from_env"));
         assert!(!format!("{env:?}").contains("prtapi_from_env"));
 
-        let ttl = resolve(&PartnerApi::new().plan_ttl(Duration::ZERO), &env).unwrap().unwrap();
+        let ttl = resolve(&PartnerApi::new().plan_ttl(Duration::ZERO), &env)
+            .unwrap()
+            .unwrap();
         assert_eq!(ttl.plan_ttl(), Duration::ZERO);
         assert_eq!(
             PartnerApi::new().token("a").or(env.clone()),
@@ -466,17 +473,26 @@ mod tests {
              from the Admin API"
         );
         let missing_id = error(PartnerApi::new(), PartnerApi::new().token("prtapi_hunter2"));
-        assert!(missing_id.contains("has a token (SHOPIFY_PARTNER_API_TOKEN) but no Partner ID"), "{missing_id}");
+        assert!(
+            missing_id.contains("has a token (SHOPIFY_PARTNER_API_TOKEN) but no Partner ID"),
+            "{missing_id}"
+        );
         assert!(!missing_id.contains("hunter2"));
 
         // The token in the place of the Partner ID is not printed.
-        let swapped = error(PartnerApi::new(), PartnerApi::new().partner_id("prtapi_hunter2").token("prtapi_x"));
+        let swapped = error(
+            PartnerApi::new(),
+            PartnerApi::new().partner_id("prtapi_hunter2").token("prtapi_x"),
+        );
         assert_eq!(
             swapped,
             "[openshop] SHOPIFY_PARTNER_ID is not valid: expected the number in the URL of the Partner \
              Dashboard, such as 1234567"
         );
-        let spaced = error(PartnerApi::new().partner_id("1").token("prtapi hunter2"), PartnerApi::new());
+        let spaced = error(
+            PartnerApi::new().partner_id("1").token("prtapi hunter2"),
+            PartnerApi::new(),
+        );
         assert_eq!(
             spaced,
             "[openshop] Invalid config: partner_api.token is not valid: expected the access token of a Partner \

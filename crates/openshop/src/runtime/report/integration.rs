@@ -43,9 +43,18 @@ impl Integration for Reports {
 
 /// Everything of an event that can carry a URL or a credential.
 fn scrub_event(event: &mut Event<'static>) {
-    let exceptions = event.exception.iter_mut().filter_map(|exception| exception.value.as_mut());
-    let breadcrumbs = event.breadcrumbs.iter_mut().filter_map(|breadcrumb| breadcrumb.message.as_mut());
-    exceptions.chain(breadcrumbs).chain(event.message.as_mut()).for_each(scrub);
+    let exceptions = event
+        .exception
+        .iter_mut()
+        .filter_map(|exception| exception.value.as_mut());
+    let breadcrumbs = event
+        .breadcrumbs
+        .iter_mut()
+        .filter_map(|breadcrumb| breadcrumb.message.as_mut());
+    exceptions
+        .chain(breadcrumbs)
+        .chain(event.message.as_mut())
+        .for_each(scrub);
     if let Some(entry) = &mut event.logentry {
         scrub(&mut entry.message);
         entry.params.iter_mut().for_each(scrub_value);

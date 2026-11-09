@@ -52,7 +52,10 @@ pub async fn resolve_mcp_bearer_token(app: &OpenShop, authorization: Option<&str
     };
 
     // scrypt is deliberately slow: its cost is bounded, see `verifier`.
-    match TokenVerifier::shared().verify(&parsed.token, &stored.token_hash).await? {
+    match TokenVerifier::shared()
+        .verify(&parsed.token, &stored.token_hash)
+        .await?
+    {
         Verification::Valid => {}
         Verification::Invalid => return Ok(rejected(401, "Unauthorized: invalid MCP token", Some(parsed.token_id))),
         Verification::Busy => {

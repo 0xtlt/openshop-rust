@@ -101,7 +101,11 @@ impl LogFilters {
             params.append_pair("levels", &self.levels_param());
         }
         let query = params.finish();
-        if query.is_empty() { pathname.to_string() } else { format!("{pathname}?{query}") }
+        if query.is_empty() {
+            pathname.to_string()
+        } else {
+            format!("{pathname}?{query}")
+        }
     }
 
     /// The file of the lines these filters keep, all of them: `json` or `csv`.
@@ -419,20 +423,35 @@ mod tests {
         first.log.payload = Some(json!({ "orderId": "<42>" }));
         let mut context = line(2, "warn", "before", "2026-11-09T12:00:01Z");
         context.matched = Some(false);
-        let html = logs_section("/runs/r1", "r1", &filters, &logs(vec![first, context], 5, Some("1.x")), None).into_string();
+        let html = logs_section(
+            "/runs/r1",
+            "r1",
+            &filters,
+            &logs(vec![first, context], 5, Some("1.x")),
+            None,
+        )
+        .into_string();
         // The search is a form of the URL, which keeps the levels.
         assert!(html.contains(r#"<form method="get""#), "{html}");
         assert!(html.contains(r#"name="q" label="Search logs""#), "{html}");
         assert!(html.contains(r#"value="order"></s-search-field>"#), "{html}");
-        assert!(html.contains(r#"<input type="hidden" name="levels" value="error,warn">"#), "{html}");
-        assert!(html.contains(r#"commandFor="log-query-help" command="--show">?</s-button>"#), "{html}");
+        assert!(
+            html.contains(r#"<input type="hidden" name="levels" value="error,warn">"#),
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"commandFor="log-query-help" command="--show">?</s-button>"#),
+            "{html}"
+        );
         // A link per level, which turns it on or off, with its count.
         assert!(
             html.contains(r#"<s-button href="/runs/r1?q=order&amp;levels=error%2Cwarn%2Cinfo" variant="secondary">INFO (4)</s-button>"#),
             "{html}"
         );
         assert!(
-            html.contains(r#"<s-button href="/runs/r1?q=order&amp;levels=warn" variant="primary">ERROR (1)</s-button>"#),
+            html.contains(
+                r#"<s-button href="/runs/r1?q=order&amp;levels=warn" variant="primary">ERROR (1)</s-button>"#
+            ),
             "{html}"
         );
         assert!(html.contains(">WARN (0)</s-button>"), "{html}");
@@ -441,7 +460,10 @@ mod tests {
             html.contains(r#"data-openshop-download="/api/runs/r1/logs/export?q=order&amp;levels=error%2Cwarn&amp;format=csv" data-openshop-filename="run-r1-logs.csv">CSV</s-button>"#),
             "{html}"
         );
-        assert!(html.contains(r#"data-openshop-filename="run-r1-logs.json">JSON</s-button>"#), "{html}");
+        assert!(
+            html.contains(r#"data-openshop-filename="run-r1-logs.json">JSON</s-button>"#),
+            "{html}"
+        );
         // Lines are data: escaped. The match is highlighted, its context faded.
         assert!(html.contains("&lt;b&gt;Order&lt;/b&gt; failed"), "{html}");
         assert!(html.contains(r#"orderId=&quot;&lt;42&gt;&quot;"#), "{html}");
@@ -461,8 +483,14 @@ mod tests {
             line(2, "info", "old", "2026-11-09T12:00:00Z"),
         ];
         let since = "2026-11-09T12:00:03Z".parse().unwrap();
-        let html = logs_section("/runs/r1", "r1", &LogFilters::read(None, None), &logs(lines, 2, None), Some(since))
-            .into_string();
+        let html = logs_section(
+            "/runs/r1",
+            "r1",
+            &LogFilters::read(None, None),
+            &logs(lines, 2, None),
+            Some(since),
+        )
+        .into_string();
         assert_eq!(html.matches(NEW_LINE).count(), 1, "{html}");
         assert!(html.find(NEW_LINE).unwrap() < html.find(">new<").unwrap(), "{html}");
         // Every level: the search form does not name them.
@@ -485,7 +513,13 @@ mod tests {
             "{html}"
         );
         let help = help_modal().into_string();
-        assert!(help.contains(r#"<s-modal id="log-query-help" heading="Query syntax">"#), "{help}");
-        assert!(help.contains("<strong>last:5m</strong> — Last 5 minutes (s/m/h/d)"), "{help}");
+        assert!(
+            help.contains(r#"<s-modal id="log-query-help" heading="Query syntax">"#),
+            "{help}"
+        );
+        assert!(
+            help.contains("<strong>last:5m</strong> — Last 5 minutes (s/m/h/d)"),
+            "{help}"
+        );
     }
 }

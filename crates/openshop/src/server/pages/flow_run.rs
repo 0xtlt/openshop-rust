@@ -76,8 +76,6 @@ fn is_finished(status: &str) -> bool {
     matches!(status, "failed" | "completed" | "canceled")
 }
 
-
-
 /// How long the run took, `1.3s`; `Running…` while it runs.
 fn duration(run: &FlowRun) -> String {
     match (run.started_at, run.completed_at) {
@@ -90,7 +88,6 @@ fn duration(run: &FlowRun) -> String {
         _ => "—".to_string(),
     }
 }
-
 
 pub(super) async fn render(page: &BuiltinPage<'_>) -> Result<Markup> {
     let Some(run) = find_run(page.app, page.session, run_id(page)).await? else {
@@ -221,14 +218,22 @@ pub(super) async fn submit(page: &BuiltinPage<'_>, action: &str, fields: &[(Stri
                     .status(422)
                     .into());
             }
-            retry_finished_run(page.app, page.session, id, mode).await?.map_err(refused)?;
-            Ok(Outcome::toast(if mode == RESET { "Run restarted" } else { "Run resumed" }))
+            retry_finished_run(page.app, page.session, id, mode)
+                .await?
+                .map_err(refused)?;
+            Ok(Outcome::toast(if mode == RESET {
+                "Run restarted"
+            } else {
+                "Run resumed"
+            }))
         }
         DELETE => {
             let Some(run) = find_run(page.app, page.session, id).await? else {
                 return Err(run_not_found());
             };
-            delete_finished_run(page.app, page.session, id).await?.map_err(refused)?;
+            delete_finished_run(page.app, page.session, id)
+                .await?
+                .map_err(refused)?;
             Ok(Outcome::redirect(flow_href(&run.flow_name)).with_toast("Run deleted"))
         }
         _ => Err(super::no_action()),
@@ -296,7 +301,10 @@ mod tests {
             assert!(!html.contains("retry-modal"), "{status}: {html}");
         }
         let html = render(&run("running"));
-        assert!(html.contains(r#"<s-page heading="Run #00000000-0000-0000-0000-000000000007""#), "{html}");
+        assert!(
+            html.contains(r#"<s-page heading="Run #00000000-0000-0000-0000-000000000007""#),
+            "{html}"
+        );
         assert!(html.contains(r#"<s-badge tone="warning">running</s-badge>"#), "{html}");
         assert!(html.contains(r#"<s-text type="strong">Running…</s-text>"#), "{html}");
         assert!(html.contains(r#"<time datetime="2026-11-09T12:00:00.123Z">"#), "{html}");
@@ -321,7 +329,9 @@ mod tests {
         assert!(html.contains(r#"<s-text type="strong">1.3s</s-text>"#), "{html}");
         assert!(html.contains(r#"<time datetime="2026-11-09T12:00:01.373Z">"#), "{html}");
         assert!(
-            html.contains(r#"<s-banner tone="critical" heading="Error">&lt;script&gt;alert(1)&lt;/script&gt;</s-banner>"#),
+            html.contains(
+                r#"<s-banner tone="critical" heading="Error">&lt;script&gt;alert(1)&lt;/script&gt;</s-banner>"#
+            ),
             "{html}"
         );
         // The header opens the modals, whose forms run the actions.
@@ -329,7 +339,10 @@ mod tests {
             html.contains(r#"<s-button slot="primary-action" variant="primary" commandFor="retry-modal" command="--show">Retry</s-button>"#),
             "{html}"
         );
-        assert!(html.contains(r#"commandFor="delete-modal" command="--show">Delete</s-button>"#), "{html}");
+        assert!(
+            html.contains(r#"commandFor="delete-modal" command="--show">Delete</s-button>"#),
+            "{html}"
+        );
         for mode in [RESUME, RESET] {
             assert!(
                 html.contains(&format!(
@@ -345,12 +358,20 @@ mod tests {
             "{html}"
         );
         assert!(
-            html.contains(r#"<s-button slot="primary-action" type="submit" variant="primary" tone="critical">Delete</s-button>"#),
+            html.contains(
+                r#"<s-button slot="primary-action" type="submit" variant="primary" tone="critical">Delete</s-button>"#
+            ),
             "{html}"
         );
         // The input, in a modal that copies it.
-        assert!(html.contains(r#"<s-button variant="secondary" commandFor="run-input" command="--show">Input</s-button>"#), "{html}");
-        assert!(html.contains(r#"<s-modal id="run-input" heading="Input" size="large">"#), "{html}");
+        assert!(
+            html.contains(r#"<s-button variant="secondary" commandFor="run-input" command="--show">Input</s-button>"#),
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"<s-modal id="run-input" heading="Input" size="large">"#),
+            "{html}"
+        );
         assert!(html.contains("&quot;limit&quot;: &quot;&lt;10&gt;&quot;"), "{html}");
         assert!(!html.contains("<10>"), "{html}");
     }

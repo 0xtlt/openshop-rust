@@ -354,10 +354,7 @@ pub(crate) fn json_block(value: &Value) -> String {
 /// A panel of the page, under its title. `content` is markup, edge to edge:
 /// a table, a chart, or a [`body`].
 pub(crate) fn panel(title: &str, content: &str) -> String {
-    format!(
-        "<section class=\"panel\"><h2>{}</h2>{content}</section>",
-        escape(title)
-    )
+    format!("<section class=\"panel\"><h2>{}</h2>{content}</section>", escape(title))
 }
 
 /// Content of a panel that keeps away from its edges.
@@ -443,9 +440,11 @@ impl Row {
         let href = self.href.as_deref().map(escape);
         // Without a link of its own to where the row leads, its first cell is
         // the one a keyboard reaches; the others repeat it for the pointer.
-        let mut reachable = href
-            .as_ref()
-            .is_some_and(|href| self.cells.iter().any(|cell| cell.content.contains(&format!("href=\"{href}\""))));
+        let mut reachable = href.as_ref().is_some_and(|href| {
+            self.cells
+                .iter()
+                .any(|cell| cell.content.contains(&format!("href=\"{href}\"")))
+        });
         let cells: String = self
             .cells
             .iter()
@@ -502,10 +501,7 @@ pub(crate) fn legend(total: &str, bad: Option<&str>) -> String {
     let bad = bad
         .map(|bad| format!("<span><i class=\"bad\"></i>{}</span>", escape(bad)))
         .unwrap_or_default();
-    format!(
-        "<div class=\"legend\"><span><i></i>{}</span>{bad}</div>",
-        escape(total)
-    )
+    format!("<div class=\"legend\"><span><i></i>{}</span>{bad}</div>", escape(total))
 }
 
 pub(crate) fn note(text: &str) -> String {
@@ -537,7 +533,10 @@ mod tests {
             content: "<p>content</p>",
         });
         assert!(html.contains("<title>sync &lt;1&gt; · OpenShop ops</title>"), "{html}");
-        assert!(html.contains("<a href=\"/ops/runs\" aria-current=\"page\">Runs</a>"), "{html}");
+        assert!(
+            html.contains("<a href=\"/ops/runs\" aria-current=\"page\">Runs</a>"),
+            "{html}"
+        );
         assert!(html.contains("<a href=\"/ops/logs\">Logs</a>"), "{html}");
         assert!(
             html.contains("<div class=\"trail\"><a href=\"/ops/runs\">Runs</a><span>/</span><strong>sync &lt;1&gt;</strong></div><div class=\"ranges\"></div>"),
@@ -559,7 +558,10 @@ mod tests {
             refreshed.contains("<meta http-equiv=\"refresh\" content=\"30\">"),
             "{refreshed}"
         );
-        assert!(refreshed.contains("<title>Overview · OpenShop ops</title>"), "{refreshed}");
+        assert!(
+            refreshed.contains("<title>Overview · OpenShop ops</title>"),
+            "{refreshed}"
+        );
     }
 
     #[test]

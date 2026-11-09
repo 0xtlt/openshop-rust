@@ -62,7 +62,10 @@ impl Params {
 
     /// The value of a parameter, when it has one.
     fn get(&self, name: &str) -> Option<&str> {
-        self.0.get(name).map(|value| value.trim()).filter(|value| !value.is_empty())
+        self.0
+            .get(name)
+            .map(|value| value.trim())
+            .filter(|value| !value.is_empty())
     }
 
     fn owned(&self, name: &str) -> Option<String> {
@@ -77,7 +80,12 @@ impl Params {
     /// The address of `path` with the parameters `keep` of this request, and
     /// `changes` applied to them: a value replaces one, `None` drops it.
     fn href(&self, path: &str, keep: &[&str], changes: &[(&str, Option<&str>)]) -> String {
-        let changed = |name: &str| changes.iter().find(|(changed, _)| *changed == name).map(|(_, value)| *value);
+        let changed = |name: &str| {
+            changes
+                .iter()
+                .find(|(changed, _)| *changed == name)
+                .map(|(_, value)| *value)
+        };
         let kept = keep
             .iter()
             .filter(|name| changed(name).is_none())
@@ -101,7 +109,11 @@ fn ranges(params: &Params, path: &str, keep: &[&str], current: Range) -> String 
     let links: String = Range::ALL
         .iter()
         .map(|range| {
-            let marked = if *range == current { " aria-current=\"true\"" } else { "" };
+            let marked = if *range == current {
+                " aria-current=\"true\""
+            } else {
+                ""
+            };
             let href = params.href(path, keep, &[("range", Some(range.key())), ("before", None)]);
             format!("<a href=\"{}\"{marked}>{}</a>", escape(&href), range.key())
         })
@@ -289,7 +301,12 @@ fn tally_table(first: &str, tallies: &[Tally], href: impl Fn(&str) -> String, em
         .map(|tally| {
             let href = href(&tally.name);
             row(vec![
-                format!("<a class=\"mono\" href=\"{}\">{}</a>", escape(&href), escape(&tally.name)).into(),
+                format!(
+                    "<a class=\"mono\" href=\"{}\">{}</a>",
+                    escape(&href),
+                    escape(&tally.name)
+                )
+                .into(),
                 failures(tally.failed),
                 count(tally.runs),
                 share(tally.failed, tally.runs).into(),
@@ -588,11 +605,7 @@ fn log_line_row(line: &LogLine) -> Row {
             }
             _ => muted("—").into(),
         },
-        line.shop
-            .as_deref()
-            .map(shop_link)
-            .unwrap_or_else(|| muted("—"))
-            .into(),
+        line.shop.as_deref().map(shop_link).unwrap_or_else(|| muted("—")).into(),
         time(&line.created_at).into(),
     ]);
     // A line leads to the run that wrote it.
@@ -728,7 +741,14 @@ pub(super) async fn flows(State(app): State<OpenShop>, RawQuery(raw): RawQuery) 
         panel(
             &format!("Flows, {}", range.label()),
             &table(
-                &["Flow", "Runs", "Failed", "Failure rate", "Mean duration", "Latest run (UTC)"],
+                &[
+                    "Flow",
+                    "Runs",
+                    "Failed",
+                    "Failure rate",
+                    "Mean duration",
+                    "Latest run (UTC)",
+                ],
                 &rows,
                 "The application has no flow.",
             ),
@@ -765,11 +785,7 @@ fn shop_row(shop: &Shop, with_app: bool) -> Row {
         time(since).into(),
         count(shop.runs),
         failures(shop.failed),
-        shop.latest
-            .as_ref()
-            .map(time)
-            .unwrap_or_else(|| "—".to_string())
-            .into(),
+        shop.latest.as_ref().map(time).unwrap_or_else(|| "—".to_string()).into(),
         wide(mono(shop.scopes.as_deref().unwrap_or_default())),
     ]);
     row(cells).to(shop_href(&shop.shop))
@@ -824,7 +840,11 @@ pub(super) async fn shops(State(app): State<OpenShop>, RawQuery(raw): RawQuery) 
 }
 
 /// `/ops/shops/:shop`: a shop, with its installation, its providers and its runs.
-pub(super) async fn shop(State(app): State<OpenShop>, Path(domain): Path<String>, RawQuery(raw): RawQuery) -> ApiResult {
+pub(super) async fn shop(
+    State(app): State<OpenShop>,
+    Path(domain): Path<String>,
+    RawQuery(raw): RawQuery,
+) -> ApiResult {
     let db = app.db();
     let params = Params::new(raw.as_deref());
     let range = Range::parse(params.get("range"));
@@ -889,11 +909,7 @@ pub(super) async fn shop(State(app): State<OpenShop>, Path(domain): Path<String>
                 cells.push(escape(&installation.app_handle).into());
             }
             cells.extend(match saved {
-                None => [
-                    status("not configured").into(),
-                    muted("—").into(),
-                    muted("—").into(),
-                ],
+                None => [status("not configured").into(), muted("—").into(), muted("—").into()],
                 Some(state) => [
                     match state.last_check_ok {
                         Some(true) => status_as("completed", "check passed"),
@@ -936,11 +952,7 @@ pub(super) async fn shop(State(app): State<OpenShop>, Path(domain): Path<String>
             ),
             panel(
                 "Providers",
-                &table(
-                    &provider_headers,
-                    &provider_rows,
-                    "The application has no provider.",
-                ),
+                &table(&provider_headers, &provider_rows, "The application has no provider."),
             ),
             panel(
                 "Crons turned off",
@@ -1021,7 +1033,14 @@ pub(super) async fn crons(State(app): State<OpenShop>) -> ApiResult {
         panel(
             "Schedules",
             &table(
-                &["Cron", "Flow", "Schedule", "Runs for", "Next run (UTC)", "Turned off by"],
+                &[
+                    "Cron",
+                    "Flow",
+                    "Schedule",
+                    "Runs for",
+                    "Next run (UTC)",
+                    "Turned off by",
+                ],
                 &rows,
                 "The application has no cron.",
             ),
@@ -1055,7 +1074,11 @@ mod tests {
             "/ops/runs?range=7d&shop=one.myshopify.com"
         );
         assert_eq!(
-            params.href("/ops/runs", &keep, &[("range", Some("1h")), ("before", Some("2026-10-11T08:00:00Z"))]),
+            params.href(
+                "/ops/runs",
+                &keep,
+                &[("range", Some("1h")), ("before", Some("2026-10-11T08:00:00Z"))]
+            ),
             "/ops/runs?status=failed&shop=one.myshopify.com&range=1h&before=2026-10-11T08%3A00%3A00Z"
         );
         assert_eq!(Params::new(None).href("/ops", &["range"], &[]), "/ops");
@@ -1066,21 +1089,35 @@ mod tests {
         let params = Params::new(Some("range=7d&status=failed&q=%3Cb%3E"));
         let keep = ["range", "status", "q"];
         assert_eq!(
-            chips(&params, "/ops/runs", &keep, &[("status", "Status is"), ("flow", "Flow is"), ("q", "Error has")]),
+            chips(
+                &params,
+                "/ops/runs",
+                &keep,
+                &[("status", "Status is"), ("flow", "Flow is"), ("q", "Error has")]
+            ),
             "<div class=\"chips\">\
              <a class=\"chip\" href=\"/ops/runs?range=7d&amp;q=%3Cb%3E\" title=\"Remove this filter\">Status is <b>failed</b> ×</a>\
              <a class=\"chip\" href=\"/ops/runs?range=7d&amp;status=failed\" title=\"Remove this filter\">Error has <b>&lt;b&gt;</b> ×</a>\
              </div>"
         );
-        assert_eq!(chips(&Params::new(None), "/ops/runs", &keep, &[("status", "Status is")]), "");
+        assert_eq!(
+            chips(&Params::new(None), "/ops/runs", &keep, &[("status", "Status is")]),
+            ""
+        );
     }
 
     #[test]
     fn the_periods_keep_the_filters_and_mark_the_current_one() {
         let params = Params::new(Some("status=failed&before=2026-10-11T08:00:00Z"));
         let html = ranges(&params, "/ops/runs", &["range", "status"], Range::Day);
-        assert!(html.contains("<a href=\"/ops/runs?status=failed&amp;range=24h\" aria-current=\"true\">24h</a>"), "{html}");
-        assert!(html.contains("<a href=\"/ops/runs?status=failed&amp;range=7d\">7d</a>"), "{html}");
+        assert!(
+            html.contains("<a href=\"/ops/runs?status=failed&amp;range=24h\" aria-current=\"true\">24h</a>"),
+            "{html}"
+        );
+        assert!(
+            html.contains("<a href=\"/ops/runs?status=failed&amp;range=7d\">7d</a>"),
+            "{html}"
+        );
         assert!(!html.contains("before"), "{html}");
     }
 

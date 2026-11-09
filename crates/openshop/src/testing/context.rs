@@ -14,6 +14,7 @@ use uuid::Uuid;
 
 use super::db::TestDb;
 use super::fake::FakeProviders;
+use super::proxy_signature;
 use super::shopify::FakeShopify;
 use super::transport::MockTransport;
 use super::{session_token, to_query_string};
@@ -22,7 +23,6 @@ use crate::declare::App;
 use crate::engine::dispatch::DispatchOptions;
 use crate::engine::runner::{RunFlowOptions, RunOutcome, run_flow};
 use crate::runtime::RuntimeEnv;
-use super::proxy_signature;
 use crate::server::shopify_apps::{DEFAULT_SHOPIFY_APP_HANDLE, client_id_in_place_of};
 use crate::server::{ServerHandle, ServerOptions, create_router, serve};
 use crate::shopify::{PartnerApi, ShopifyEndpoints};

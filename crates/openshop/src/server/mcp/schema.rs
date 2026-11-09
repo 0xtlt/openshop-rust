@@ -225,8 +225,12 @@ pub(crate) fn property_errors(value: &Value, schema: &Value) -> Vec<(String, Str
         let error = match object.get(key) {
             None if required.contains(&key.as_str()) => Some("is required".to_string()),
             None => None,
-            Some(child) => validate_value(child, property, schema, key, 1)
-                .map(|error| error.strip_prefix(&format!("{key} ")).map(str::to_string).unwrap_or(error)),
+            Some(child) => validate_value(child, property, schema, key, 1).map(|error| {
+                error
+                    .strip_prefix(&format!("{key} "))
+                    .map(str::to_string)
+                    .unwrap_or(error)
+            }),
         };
         if let Some(error) = error {
             errors.push((key.clone(), error));
@@ -407,7 +411,10 @@ mod tests {
             },
             "$defs": { "Rating": { "type": "integer", "minimum": 1, "maximum": 5 } },
         });
-        let errors = property_errors(&json!({ "title": "ok", "rating": 9, "note": null, "tags": ["a", 2] }), &schema);
+        let errors = property_errors(
+            &json!({ "title": "ok", "rating": 9, "note": null, "tags": ["a", 2] }),
+            &schema,
+        );
         assert_eq!(
             errors,
             [

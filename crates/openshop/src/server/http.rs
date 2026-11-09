@@ -52,10 +52,7 @@ pub(crate) fn containing(text: &str) -> String {
 
 /// Runs code of the application: a panic in it fails it as an error it
 /// returned would, `<what> panicked`.
-pub(crate) async fn catch_panic<T>(
-    what: &str,
-    work: impl Future<Output = anyhow::Result<T>>,
-) -> anyhow::Result<T> {
+pub(crate) async fn catch_panic<T>(what: &str, work: impl Future<Output = anyhow::Result<T>>) -> anyhow::Result<T> {
     AssertUnwindSafe(work)
         .catch_unwind()
         .await

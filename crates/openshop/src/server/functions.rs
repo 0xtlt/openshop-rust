@@ -402,10 +402,12 @@ async fn create_instance(
         return Ok(json_error(StatusCode::NOT_FOUND, "Function not found"));
     };
     let body = json_object_body(&body);
-    Ok(match create_function_instance(&app, &session, &function, &body).await? {
-        Ok(data) => json_response(StatusCode::CREATED, json!({ "ok": true, "data": data })),
-        Err(refusal) => refusal.response(),
-    })
+    Ok(
+        match create_function_instance(&app, &session, &function, &body).await? {
+            Ok(data) => json_response(StatusCode::CREATED, json!({ "ok": true, "data": data })),
+            Err(refusal) => refusal.response(),
+        },
+    )
 }
 
 /// What a Cart Transform that has an instance answers to a second one.
@@ -438,7 +440,9 @@ impl InstanceRefusal {
                 "Function type \"{}\" does not support update. Delete and recreate instead.",
                 kind.as_str()
             ),
-            Self::ModeRequired => "mode query parameter is required for discount functions with multiple modes".to_string(),
+            Self::ModeRequired => {
+                "mode query parameter is required for discount functions with multiple modes".to_string()
+            }
             Self::UserErrors(errors) => user_error_messages(errors),
         }
     }
@@ -446,10 +450,9 @@ impl InstanceRefusal {
     fn response(self) -> Response {
         let message = self.message();
         match self {
-            Self::AlreadyRegistered(Some(errors)) => json_response(
-                StatusCode::CONFLICT,
-                json!({ "error": message, "userErrors": errors }),
-            ),
+            Self::AlreadyRegistered(Some(errors)) => {
+                json_response(StatusCode::CONFLICT, json!({ "error": message, "userErrors": errors }))
+            }
             Self::AlreadyRegistered(None) => json_error(StatusCode::CONFLICT, message),
             Self::UserErrors(errors) => user_errors_response(&errors, StatusCode::BAD_REQUEST),
             Self::InvalidConfig(_) | Self::NoUpdate(_) | Self::ModeRequired => {
@@ -512,10 +515,12 @@ async fn update_instance(
         return Ok(json_error(StatusCode::NOT_FOUND, "Function not found"));
     };
     let body = json_object_body(&body);
-    Ok(match update_function_instance(&app, &session, &function, &id, &body).await? {
-        Ok(()) => json_response(StatusCode::OK, json!({ "ok": true })),
-        Err(refusal) => refusal.response(),
-    })
+    Ok(
+        match update_function_instance(&app, &session, &function, &id, &body).await? {
+            Ok(()) => json_response(StatusCode::OK, json!({ "ok": true })),
+            Err(refusal) => refusal.response(),
+        },
+    )
 }
 
 /// Updates the instance `id` of `function` in the shop of the session from
@@ -563,10 +568,12 @@ async fn delete_instance(
     };
     let query = parse_query(raw_query.as_deref());
     let mode = query.get("mode").map(String::as_str);
-    Ok(match delete_function_instance(&app, &session, &function, &id, mode).await? {
-        Ok(()) => json_response(StatusCode::OK, json!({ "ok": true })),
-        Err(refusal) => refusal.response(),
-    })
+    Ok(
+        match delete_function_instance(&app, &session, &function, &id, mode).await? {
+            Ok(()) => json_response(StatusCode::OK, json!({ "ok": true })),
+            Err(refusal) => refusal.response(),
+        },
+    )
 }
 
 /// Deletes the instance `id` of `function` in the shop of the session. `mode`

@@ -114,7 +114,11 @@ mod tests {
             std::fs::create_dir_all(&dir).unwrap();
             let name = format!("OPENSHOP_TEST_ENV_{}", command.to_ascii_uppercase());
             std::fs::write(dir.join(".env"), format!("{name}=from-file\n")).unwrap();
-            assert_eq!(load_dev_env(&[command.to_string(), "arg".to_string()], &dir), 1, "{command}");
+            assert_eq!(
+                load_dev_env(&[command.to_string(), "arg".to_string()], &dir),
+                1,
+                "{command}"
+            );
             assert_eq!(std::env::var(&name).unwrap(), "from-file");
             std::fs::remove_dir_all(dir).ok();
         }

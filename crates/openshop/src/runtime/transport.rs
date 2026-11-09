@@ -100,7 +100,11 @@ fn headers(response: &reqwest::Response) -> Vec<(String, String)> {
 /// before anything is read, and a body without one, or lying about it, is
 /// counted.
 pub(crate) async fn read_body(mut response: reqwest::Response, limit: usize) -> Result<Vec<u8>, TransportError> {
-    let too_large = || TransportError::new(format!("[openshop] The response is larger than {limit} bytes: not read"));
+    let too_large = || {
+        TransportError::new(format!(
+            "[openshop] The response is larger than {limit} bytes: not read"
+        ))
+    };
     if response.content_length().is_some_and(|length| length > limit as u64) {
         return Err(too_large());
     }
@@ -227,7 +231,11 @@ mod tests {
         assert!(error.to_string().contains("larger than 10485760 bytes"), "{error}");
 
         // A body without a length that goes on is counted.
-        let url = answering("HTTP/1.1 200 OK\r\nconnection: close\r\n\r\n".to_string(), vec![b'x'; 2048]).await;
+        let url = answering(
+            "HTTP/1.1 200 OK\r\nconnection: close\r\n\r\n".to_string(),
+            vec![b'x'; 2048],
+        )
+        .await;
         let response = reqwest::get(url).await.unwrap();
         assert!(read_body(response, 1024).await.is_err());
     }

@@ -11,8 +11,7 @@ license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 authors.workspace = true
-# The templates of `openshop init` are read from `templates/` at the root of the repository,
-# the shell of an admin UI bundle from `crates/openshop-ui`.
+# The templates of `openshop init` are read from `templates/` at the root of the repository.
 include = ["src/**", "templates/**", "build.rs", "Cargo.toml"]
 
 [[bin]]
@@ -22,11 +21,8 @@ path = "src/main.rs"
 [dependencies]
 anyhow.workspace = true
 notify.workspace = true
-# Reads the sources of a project for the admin pages that have a view.
-proc-macro2 = { workspace = true, features = ["span-locations"] }
 # Reads `cargo metadata`.
 serde_json.workspace = true
-syn = { workspace = true, features = ["visit"] }
 tokio.workspace = true
 # The questions of `openshop init`.
 dialoguer.workspace = true

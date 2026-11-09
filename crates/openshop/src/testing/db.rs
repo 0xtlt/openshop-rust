@@ -123,9 +123,11 @@ impl TestDb {
 
 async fn drop_schema(options: &PgConnectOptions, schema: &str) -> Result<()> {
     let mut connection = PgConnection::connect_with(options).await?;
-    sqlx::raw_sql(sqlx::AssertSqlSafe(format!("DROP SCHEMA IF EXISTS \"{schema}\" CASCADE")))
-        .execute(&mut connection)
-        .await?;
+    sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+        "DROP SCHEMA IF EXISTS \"{schema}\" CASCADE"
+    )))
+    .execute(&mut connection)
+    .await?;
     connection.close().await?;
     Ok(())
 }
@@ -197,13 +199,19 @@ mod tests {
     fn the_test_database_url_is_explicit_and_wins() {
         let remote = "postgresql://u:p@db.internal:5432/tests";
         assert_eq!(url(Some(remote), None).unwrap(), remote);
-        assert_eq!(url(Some(remote), Some("postgresql://u:p@prod.example/app")).unwrap(), remote);
+        assert_eq!(
+            url(Some(remote), Some("postgresql://u:p@prod.example/app")).unwrap(),
+            remote
+        );
     }
 
     #[tokio::test]
     async fn an_unreachable_database_fails_with_what_to_do() {
         let options = PgConnectOptions::from_str("postgresql://u:p@127.0.0.1:1/db").unwrap();
         let error = connect(&options).await.unwrap_err().to_string();
-        assert!(error.contains("127.0.0.1:1") && error.contains("mise run db:up"), "{error}");
+        assert!(
+            error.contains("127.0.0.1:1") && error.contains("mise run db:up"),
+            "{error}"
+        );
     }
 }

@@ -456,10 +456,7 @@ async fn retry_run(
     let query = parse_query(raw_query.as_deref());
     let mode = query.get("mode").map(String::as_str).unwrap_or("resume");
     Ok(match retry_finished_run(&app, &session, &id, mode).await? {
-        Ok(run_id) => json_response(
-            StatusCode::OK,
-            json!({ "ok": true, "runId": run_id, "mode": mode }),
-        ),
+        Ok(run_id) => json_response(StatusCode::OK, json!({ "ok": true, "runId": run_id, "mode": mode })),
         Err(refusal) => refusal.response(),
     })
 }

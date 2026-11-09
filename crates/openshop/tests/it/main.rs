@@ -10,7 +10,7 @@
 
 mod common;
 
-mod admin_views;
+mod admin_launch;
 mod api;
 mod auth;
 mod billing;
@@ -40,7 +40,6 @@ mod server_limits;
 mod server_pages;
 mod server_routes;
 mod shopify_endpoints;
-mod static_ui;
 mod testing_harness;
 mod typed_providers;
 mod webhooks;

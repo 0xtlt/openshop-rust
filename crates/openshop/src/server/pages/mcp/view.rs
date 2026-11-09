@@ -513,11 +513,17 @@ mod tests {
             "{html}"
         );
         assert!(
-            html.contains(r#"<s-button variant="secondary" data-openshop-copy="https://app.example.com/mcp">Copy URL</s-button>"#),
+            html.contains(
+                r#"<s-button variant="secondary" data-openshop-copy="https://app.example.com/mcp">Copy URL</s-button>"#
+            ),
             "{html}"
         );
         assert!(html.contains("No MCP tokens yet"), "{html}");
-        assert_eq!(html.matches(r#"commandFor="create-mcp-token-modal" command="--show""#).count(), 2);
+        assert_eq!(
+            html.matches(r#"commandFor="create-mcp-token-modal" command="--show""#)
+                .count(),
+            2
+        );
         // No secret, and no modal of a token.
         assert!(!html.contains("Copy this token now"), "{html}");
         assert!(!html.contains("edit-mcp-token-"), "{html}");
@@ -530,8 +536,14 @@ mod tests {
         let tokens = [active, token("d2", "CI", "disabled"), token("r3", "Old", "revoked")];
         let html = render(&tokens, None, &FormState::default());
 
-        assert!(html.contains(r#"<s-text type="strong">Claude &lt;Desktop&gt;</s-text>"#), "{html}");
-        assert!(html.contains("Token ID <code>mtk_a1</code> · Fingerprint <code>ab12</code>"), "{html}");
+        assert!(
+            html.contains(r#"<s-text type="strong">Claude &lt;Desktop&gt;</s-text>"#),
+            "{html}"
+        );
+        assert!(
+            html.contains("Token ID <code>mtk_a1</code> · Fingerprint <code>ab12</code>"),
+            "{html}"
+        );
         assert!(html.contains("Stale: gone"), "{html}");
         assert!(html.contains(r#"<s-badge tone="success">active</s-badge>"#), "{html}");
         assert!(html.contains(r#"<s-badge tone="neutral">disabled</s-badge>"#), "{html}");
@@ -544,23 +556,53 @@ mod tests {
         assert!(html.contains(r#"<time datetime="2026-11-09T08:00:00.000Z">"#), "{html}");
 
         // Disable the active one, enable the disabled one; nothing for the revoked one.
-        let disable = form_of(&html, r#"value="updateToken"><input type="hidden" name="id" value="a1">"#);
+        let disable = form_of(
+            &html,
+            r#"value="updateToken"><input type="hidden" name="id" value="a1">"#,
+        );
         assert!(disable.contains(r#"name="status" value="disabled""#), "{disable}");
         assert!(disable.contains(">Disable</s-button>"), "{disable}");
-        let enable = form_of(&html, r#"value="updateToken"><input type="hidden" name="id" value="d2">"#);
+        let enable = form_of(
+            &html,
+            r#"value="updateToken"><input type="hidden" name="id" value="d2">"#,
+        );
         assert!(enable.contains(r#"name="status" value="active""#), "{enable}");
-        assert!(!html.contains(r#"value="updateToken"><input type="hidden" name="id" value="r3">"#), "{html}");
+        assert!(
+            !html.contains(r#"value="updateToken"><input type="hidden" name="id" value="r3">"#),
+            "{html}"
+        );
 
         // Rotate and revoke, which a revoked token cannot.
-        let rotate = form_of(&html, r#"value="rotateToken"><input type="hidden" name="id" value="a1">"#);
-        assert!(rotate.contains(r#"<s-button type="submit" variant="secondary">Rotate</s-button>"#), "{rotate}");
-        let rotate_revoked = form_of(&html, r#"value="rotateToken"><input type="hidden" name="id" value="r3">"#);
-        assert!(rotate_revoked.contains(r#"variant="secondary" disabled>Rotate"#), "{rotate_revoked}");
-        assert!(html.contains(r#"commandFor="revoke-mcp-token-a1" command="--show">Revoke"#), "{html}");
-        assert!(html.contains(r#"commandFor="revoke-mcp-token-r3" command="--show" disabled>Revoke"#), "{html}");
+        let rotate = form_of(
+            &html,
+            r#"value="rotateToken"><input type="hidden" name="id" value="a1">"#,
+        );
+        assert!(
+            rotate.contains(r#"<s-button type="submit" variant="secondary">Rotate</s-button>"#),
+            "{rotate}"
+        );
+        let rotate_revoked = form_of(
+            &html,
+            r#"value="rotateToken"><input type="hidden" name="id" value="r3">"#,
+        );
+        assert!(
+            rotate_revoked.contains(r#"variant="secondary" disabled>Rotate"#),
+            "{rotate_revoked}"
+        );
+        assert!(
+            html.contains(r#"commandFor="revoke-mcp-token-a1" command="--show">Revoke"#),
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"commandFor="revoke-mcp-token-r3" command="--show" disabled>Revoke"#),
+            "{html}"
+        );
 
         // The revocation is confirmed in a modal, its form posts the token.
-        let revoke = form_of(&html, r#"value="revokeToken"><input type="hidden" name="id" value="a1">"#);
+        let revoke = form_of(
+            &html,
+            r#"value="revokeToken"><input type="hidden" name="id" value="a1">"#,
+        );
         assert!(
             revoke.contains(r#"<s-modal id="revoke-mcp-token-a1" heading="Revoke Claude &lt;Desktop&gt;?""#),
             "{revoke}"
@@ -588,7 +630,10 @@ mod tests {
         let tokens = [active, token("r3", "Old", "revoked")];
         let html = render(&tokens, None, &FormState::default());
 
-        let edit = form_of(&html, r#"value="setPermissions"><input type="hidden" name="id" value="a1">"#);
+        let edit = form_of(
+            &html,
+            r#"value="setPermissions"><input type="hidden" name="id" value="a1">"#,
+        );
         assert!(
             edit.contains(r#"<s-modal id="edit-mcp-token-a1" heading="Edit Claude" accessibilityLabel="Edit MCP token" size="large">"#),
             "{edit}"
@@ -607,7 +652,9 @@ mod tests {
         assert!(edit.contains(r#"label="Read &lt;demo&gt; status""#), "{edit}");
         assert!(edit.contains("Trigger OpenShop flow runs."), "{edit}");
         assert!(
-            edit.contains(r#"<s-button slot="primary-action" type="submit" variant="primary">Save permissions</s-button>"#),
+            edit.contains(
+                r#"<s-button slot="primary-action" type="submit" variant="primary">Save permissions</s-button>"#
+            ),
             "{edit}"
         );
         // Its recent audit.
@@ -620,12 +667,18 @@ mod tests {
         assert!(!edit.contains("data-openshop-open"), "{edit}");
 
         // A revoked token shows them and cannot change them.
-        let revoked = form_of(&html, r#"value="setPermissions"><input type="hidden" name="id" value="r3">"#);
+        let revoked = form_of(
+            &html,
+            r#"value="setPermissions"><input type="hidden" name="id" value="r3">"#,
+        );
         assert!(
             revoked.contains(r#"labelAccessibilityVisibility="exclusive" checked disabled>"#),
             "{revoked}"
         );
-        assert!(revoked.contains(r#"variant="primary" disabled>Save permissions"#), "{revoked}");
+        assert!(
+            revoked.contains(r#"variant="primary" disabled>Save permissions"#),
+            "{revoked}"
+        );
         assert!(!revoked.contains("Recent audit"), "{revoked}");
     }
 
@@ -649,7 +702,10 @@ mod tests {
             modal.contains(r#"<s-text-field name="name" label="Name" placeholder="Claude Desktop" value="" error="Token name is required."></s-text-field>"#),
             "{modal}"
         );
-        assert!(modal.contains(r#"<s-option value="365" selected>1 year</s-option>"#), "{modal}");
+        assert!(
+            modal.contains(r#"<s-option value="365" selected>1 year</s-option>"#),
+            "{modal}"
+        );
         assert!(
             modal.contains(r#"value="run_flows" label="Run flows" labelAccessibilityVisibility="exclusive" checked>"#),
             "{modal}"
@@ -668,7 +724,10 @@ mod tests {
             modal.contains(r#"<s-select name="expiresInDays" label="Expiration" value="90">"#),
             "{modal}"
         );
-        assert!(modal.contains(r#"<s-option value="none">No expiration</s-option>"#), "{modal}");
+        assert!(
+            modal.contains(r#"<s-option value="none">No expiration</s-option>"#),
+            "{modal}"
+        );
         assert!(!modal.contains(" checked"), "{modal}");
 
         let edit = FormState {
@@ -678,21 +737,29 @@ mod tests {
             message: None,
         };
         let html = render(&tokens, None, &edit);
-        let refused = form_of(&html, r#"value="setPermissions"><input type="hidden" name="id" value="b2">"#);
+        let refused = form_of(
+            &html,
+            r#"value="setPermissions"><input type="hidden" name="id" value="b2">"#,
+        );
         assert!(refused.contains(r#"size="large" data-openshop-open>"#), "{refused}");
         assert!(
             refused.contains(r#"<s-banner tone="critical">Unknown permission &quot;nope&quot;</s-banner>"#),
             "{refused}"
         );
         assert!(
-            refused.contains(r#"value="read_crons" label="Read crons" labelAccessibilityVisibility="exclusive" checked>"#),
+            refused
+                .contains(r#"value="read_crons" label="Read crons" labelAccessibilityVisibility="exclusive" checked>"#),
             "{refused}"
         );
         assert!(
-            !refused.contains(r#"value="read_logs" label="Read logs" labelAccessibilityVisibility="exclusive" checked>"#),
+            !refused
+                .contains(r#"value="read_logs" label="Read logs" labelAccessibilityVisibility="exclusive" checked>"#),
             "{refused}"
         );
-        let other = form_of(&html, r#"value="setPermissions"><input type="hidden" name="id" value="a1">"#);
+        let other = form_of(
+            &html,
+            r#"value="setPermissions"><input type="hidden" name="id" value="a1">"#,
+        );
         assert!(!other.contains("data-openshop-open"), "{other}");
         assert!(
             other.contains(r#"value="read_logs" label="Read logs" labelAccessibilityVisibility="exclusive" checked>"#),
@@ -711,8 +778,14 @@ mod tests {
             html.contains(r#"<s-banner tone="success">Token rotated. Copy the new value now.</s-banner>"#),
             "{html}"
         );
-        assert!(html.contains(r#"<s-banner tone="warning" heading="Copy this token now">"#), "{html}");
-        assert!(html.contains("This value is shown once. Store it before leaving this page."), "{html}");
+        assert!(
+            html.contains(r#"<s-banner tone="warning" heading="Copy this token now">"#),
+            "{html}"
+        );
+        assert!(
+            html.contains("This value is shown once. Store it before leaving this page."),
+            "{html}"
+        );
         assert!(
             html.contains(r#"<code style="word-break:break-all">oshp_mcp_mtk_x.s3cr&lt;e&gt;t</code>"#),
             "{html}"

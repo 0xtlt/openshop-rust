@@ -233,7 +233,11 @@ impl FakeShopify {
     /// The names of the operations sent, in order: `(anonymous)` for one
     /// without a name.
     pub fn operations(&self) -> Vec<String> {
-        locked(&self.state).calls.iter().map(|call| call.name().to_string()).collect()
+        locked(&self.state)
+            .calls
+            .iter()
+            .map(|call| call.name().to_string())
+            .collect()
     }
 
     /// The operations Shopify was sent that nothing answered, once each, in
@@ -301,7 +305,11 @@ impl FakeShopify {
         } else {
             answered.join(", ")
         };
-        let api = if call.url.contains("/admin/api/") { "Admin API" } else { "Partner API" };
+        let api = if call.url.contains("/admin/api/") {
+            "Admin API"
+        } else {
+            "Partner API"
+        };
         errors_response(&format!(
             "[openshop] The test does not answer the {api} operation `{name}`: answer it with \
              `ctx.shopify.on(\"{name}\", data)`. Answered: {answered}."
@@ -437,7 +445,9 @@ impl<'a> Tokens<'a> {
     /// The next token, past the white space, the commas and the comments.
     fn next(&mut self) -> Option<Token<'a>> {
         loop {
-            let trimmed = self.rest.trim_start_matches(|c: char| c.is_whitespace() || c == ',' || c == '\u{feff}');
+            let trimmed = self
+                .rest
+                .trim_start_matches(|c: char| c.is_whitespace() || c == ',' || c == '\u{feff}');
             if let Some(comment) = trimmed.strip_prefix('#') {
                 self.rest = comment.find('\n').map_or("", |end| &comment[end..]);
                 continue;
@@ -520,11 +530,17 @@ mod tests {
     fn names_the_operation_of_a_document() {
         for (document, name) in [
             ("query Shop { shop { name } }", Some("Shop")),
-            ("#graphql\n    query ListShopifyFunctions($after: String) {\n x }", Some("ListShopifyFunctions")),
+            (
+                "#graphql\n    query ListShopifyFunctions($after: String) {\n x }",
+                Some("ListShopifyFunctions"),
+            ),
             ("mutation CreateThing($input: X!) { a }", Some("CreateThing")),
             ("subscription Changes { a }", Some("Changes")),
             ("  # a comment { query Not }\n query Real { a }", Some("Real")),
-            ("fragment F on Shop { name { x } } query AfterFragment { shop { ...F } }", Some("AfterFragment")),
+            (
+                "fragment F on Shop { name { x } } query AfterFragment { shop { ...F } }",
+                Some("AfterFragment"),
+            ),
             ("\u{feff}query WithBom { a }", Some("WithBom")),
             ("query($id: ID!) { node(id: $id) { id } }", None),
             ("query { shop { name } }", None),
@@ -579,14 +595,21 @@ mod tests {
             });
 
         let call = |body| GraphqlCall::of(&request(body)).unwrap();
-        let product = |id: &str| call(json!({ "query": "query Product($id: ID!) { product(id: $id) { id } }", "variables": { "id": id } }));
+        let product = |id: &str| {
+            call(json!({ "query": "query Product($id: ID!) { product(id: $id) { id } }", "variables": { "id": id } }))
+        };
         assert_eq!(data(shopify.answer(&product("gid://1"))), json!({ "product": "any" }));
-        assert_eq!(data(shopify.answer(&product("gid://2"))), json!({ "product": "second" }));
+        assert_eq!(
+            data(shopify.answer(&product("gid://2"))),
+            json!({ "product": "second" })
+        );
         // The operation name of the body wins over the text.
         let named = call(json!({ "query": "query Other { x }", "operationName": "Count" }));
         assert_eq!(data(shopify.answer(&named)), json!({ "count": 3 }));
         let refused = shopify
-            .answer(&call(json!({ "query": "query Count { x }", "variables": { "fail": true } })))
+            .answer(&call(
+                json!({ "query": "query Count { x }", "variables": { "fail": true } }),
+            ))
             .unwrap()
             .unwrap();
         assert_eq!(

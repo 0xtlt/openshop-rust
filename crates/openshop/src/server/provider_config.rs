@@ -118,11 +118,7 @@ fn coerce_field_value(name: &str, field: &Field, value: Option<Value>) -> Result
         }
         (FieldType::Checkbox, other) => refuse("a boolean", other),
         (FieldType::Select, Value::String(text))
-            if field
-                .options
-                .iter()
-                .flatten()
-                .any(|option| option.value == *text) =>
+            if field.options.iter().flatten().any(|option| option.value == *text) =>
         {
             Ok(Some(value))
         }
@@ -274,8 +270,13 @@ mod tests {
     }
 
     fn parse(provider: &Provider, raw_config: Option<&Value>, existing_config: &JsonMap) -> Result<JsonMap, String> {
-        parse_provider_config(&provider.fields, provider.transformer.as_ref(), raw_config, existing_config)
-            .map_err(String::from)
+        parse_provider_config(
+            &provider.fields,
+            provider.transformer.as_ref(),
+            raw_config,
+            existing_config,
+        )
+        .map_err(String::from)
     }
 
     fn warehouse() -> Provider {
@@ -318,7 +319,11 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(
-            invalid.fields.iter().map(|(field, _)| field.as_str()).collect::<Vec<_>>(),
+            invalid
+                .fields
+                .iter()
+                .map(|(field, _)| field.as_str())
+                .collect::<Vec<_>>(),
             ["endpoint", "retries"]
         );
     }
@@ -511,12 +516,18 @@ mod tests {
     fn refuses_a_checkbox_that_is_not_a_boolean() {
         for bad in [json!("yes"), json!("on"), json!(1), json!([])] {
             let error = typed_error(json!({ "mode": "live", "sandbox": bad }));
-            assert!(error.starts_with("Field \"sandbox\": must be a boolean (was "), "{error}");
+            assert!(
+                error.starts_with("Field \"sandbox\": must be a boolean (was "),
+                "{error}"
+            );
         }
         for (sent, saved) in [(json!(true), true), (json!("true"), true), (json!("false"), false)] {
-            let parsed =
-                parse(&typed(), Some(&json!({ "mode": "live", "sandbox": sent })), &JsonMap::new())
-                    .unwrap();
+            let parsed = parse(
+                &typed(),
+                Some(&json!({ "mode": "live", "sandbox": sent })),
+                &JsonMap::new(),
+            )
+            .unwrap();
             assert_eq!(parsed["sandbox"], saved);
         }
     }
@@ -544,8 +555,7 @@ mod tests {
                 Value::Object(data)
             });
         // The summary of a validator is not forwarded for a password.
-        let error =
-            parse(&provider, Some(&json!({ "token": "secret-token" })), &JsonMap::new()).unwrap_err();
+        let error = parse(&provider, Some(&json!({ "token": "secret-token" })), &JsonMap::new()).unwrap_err();
         assert_eq!(error, "Field \"token\" is invalid");
 
         // A stored password is neither validated nor transformed again.
@@ -567,8 +577,7 @@ mod tests {
             "token",
             Field::password("Token").validate(|value| Err(format!("invalid token: {value}"))),
         );
-        let error = parse(&refusing, Some(&json!({ "token": "review-secret" })), &JsonMap::new())
-            .unwrap_err();
+        let error = parse(&refusing, Some(&json!({ "token": "review-secret" })), &JsonMap::new()).unwrap_err();
         assert_eq!(error, "Field \"token\" is invalid");
 
         let plain = Provider::new("erp").field("token", Field::password("Token"));

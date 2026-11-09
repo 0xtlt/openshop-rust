@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+- **Breaking.** The Leptos admin UI is removed: `crates/openshop-ui`, the
+  committed bundle `crates/openshop/ui-dist`, trunk and the WebAssembly target,
+  the `ui` and `embedded-ui` features, `openshop::ui`, `openshop build-ui`,
+  `OPENSHOP_UI_DIR`, and `UiSource::{Embedded, Dir, Assets}`: `UiSource` is
+  `Server` or `None`. A `#[view]` that does not return `Markup` is refused at
+  compile time. The internal RPC transport of the Leptos views,
+  `/api/pages/custom/…/_rpc/…`, is removed with them; `GET /api/pages/custom`
+  and its `access` stay, and `ctx.call_loader` and `ctx.call_action` call a
+  function of a page in a test. `openshop dev` no longer runs trunk, and the
+  preview of the templates (`mise run dev:custom`) serves the admin the server
+  renders, with a stub of App Bridge. The CI jobs `ui`, `templates-ui` and
+  `ui-dist` are gone, and the lockfile has 83 crates fewer. An application with
+  Leptos views follows [Migrate to the server-rendered
+  admin](docs/src/guides/migrate-to-server-rendered-ui.md).
+- A page of the admin is framed by the admin of the shop of its session only
+  (`frame-ancestors https://<shop> https://admin.shopify.com`), as the Leptos
+  shell was; any shop in development. The failure of a page or of a form is
+  reported to Sentry as `admin <route> view` or `admin <route> <action>`, with
+  the `request_id` tag.
 - The `custom` and `public` templates write their admin pages as views the
   server renders: `maud` in place of `leptos` and the `ui` feature, forms in
   place of `use_action`, and their tests call the pages with `ctx.page` and

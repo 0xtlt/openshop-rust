@@ -62,7 +62,10 @@ impl std::fmt::Debug for RuntimeEnv {
 /// development, since `NODE_ENV` is set by tooling that has nothing to do with
 /// where secrets may be stored in the clear.
 fn environment(openshop_env: Option<&str>, node_env: Option<&str>) -> (bool, bool) {
-    let production = [openshop_env, node_env].into_iter().flatten().any(|value| value == "production");
+    let production = [openshop_env, node_env]
+        .into_iter()
+        .flatten()
+        .any(|value| value == "production");
     (production, matches!(openshop_env, Some("development" | "test")))
 }
 

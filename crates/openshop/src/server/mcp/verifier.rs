@@ -207,7 +207,10 @@ mod tests {
         assert_eq!(CHECKS.load(Ordering::SeqCst), 3);
 
         // The stored hash changed (rotation): the old secret is checked again.
-        assert_eq!(verifier.verify("secret", "rotated").await.unwrap(), Verification::Invalid);
+        assert_eq!(
+            verifier.verify("secret", "rotated").await.unwrap(),
+            Verification::Invalid
+        );
         assert_eq!(CHECKS.load(Ordering::SeqCst), 4);
     }
 

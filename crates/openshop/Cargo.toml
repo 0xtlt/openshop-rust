@@ -1,6 +1,6 @@
 [package]
 name = "openshop"
-description = "Shopify integration framework with flows, providers, an embedded admin UI, and background workers."
+description = "Shopify integration framework with flows, providers, an admin rendered by the server, and background workers."
 keywords = ["shopify", "framework", "axum", "postgres", "workflow"]
 categories = ["web-programming", "asynchronous"]
 readme = "../../README.md"
@@ -11,56 +11,42 @@ license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 authors.workspace = true
-include = ["src/**", "migrations/**", "ui-dist/**", "build.rs", "Cargo.toml"]
+include = ["src/**", "migrations/**", "build.rs", "Cargo.toml"]
 
 # The schema the tests' `graphql!` operations are checked against.
 [package.metadata.shopify_api]
 api-version = "2026-10"
 
 [features]
-default = ["embedded-ui", "sentry"]
-# Embed the prebuilt WebAssembly admin UI (`ui-dist/`) in the binary.
-embedded-ui = ["dep:rust-embed"]
+default = ["sentry"]
 # Report failed runs, failed handlers and panics to Sentry: the `sentry` setting
 # of `app!`. An event is named after the route its request matched.
 sentry = ["dep:sentry", "axum/matched-path"]
 # Test harness: isolated databases, fake providers, signed requests.
 testing = ["shopify_api/testing"]
-# The views of custom admin pages, written next to their loaders and actions
-# and compiled to WebAssembly: `#[view]` in an `#[admin_page]` block.
-ui = ["dep:openshop-ui"]
 
 [dependencies]
 openshop-macros.workspace = true
 openshop-shared.workspace = true
-openshop-ui = { path = "../openshop-ui", version = "0.0.12-beta.0", optional = true }
 
 anyhow.workspace = true
 schemars.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-
-# The server. An application with views is also compiled to WebAssembly, where
-# only the views of its admin pages are kept.
-[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 aes-gcm.workspace = true
 axum.workspace = true
 base64.workspace = true
-brotli.workspace = true
 chrono.workspace = true
 chrono-tz.workspace = true
 croner.workspace = true
-flate2.workspace = true
 futures.workspace = true
 hex.workspace = true
 hmac.workspace = true
 indexmap.workspace = true
 maud.workspace = true
-mime_guess.workspace = true
 rand.workspace = true
 regex.workspace = true
 reqwest.workspace = true
-rust-embed = { workspace = true, optional = true }
 scrypt.workspace = true
 sentry = { workspace = true, optional = true }
 serde_urlencoded.workspace = true
@@ -78,10 +64,8 @@ url.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
-openshop = { path = ".", features = ["testing", "ui"] }
-# The views of `tests/it/admin_views.rs`.
-leptos = "0.8"
-# The server-rendered views of `tests/it/server_views.rs`: `html!` names `maud`.
+openshop = { path = ".", features = ["testing"] }
+# The views of the admin pages of the tests: `html!` names `maud`.
 maud.workspace = true
 # The transport that keeps events, for `tests/sentry.rs`.
 sentry = { workspace = true, features = ["test"] }

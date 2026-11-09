@@ -33,7 +33,8 @@ a non-production environment before changing production.
    cargo update -p openshop
    ```
 
-   If the project has its own admin UI bundle, rebuild it.
+   Open each custom admin page and send each of its forms: their views and
+   `openshop.js` change with the framework.
 
 3. Compare the current project with the template it was made from,
    `templates/<name>/` and `templates/shared/` in the matching release. Generated

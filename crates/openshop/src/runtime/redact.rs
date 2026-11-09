@@ -83,7 +83,10 @@ mod tests {
     fn a_secret_is_shown_as_set_or_empty() {
         assert_eq!(format!("{:?}", redacted("hunter2")), "[redacted]");
         assert_eq!(format!("{:?}", redacted("")), "\"\"");
-        assert_eq!(format!("{:?}", redacted_option(&Some("hunter2".into()))), "Some([redacted])");
+        assert_eq!(
+            format!("{:?}", redacted_option(&Some("hunter2".into()))),
+            "Some([redacted])"
+        );
         assert_eq!(format!("{:?}", redacted_option(&None)), "None");
     }
 
@@ -142,7 +145,10 @@ mod tests {
         let shown = format!("{keys:?} {toml:?}");
         assert_hidden(&shown);
         // What is not a secret is still there to debug with.
-        assert!(shown.contains("public-key") && shown.contains("shopify.app.toml"), "{shown}");
+        assert!(
+            shown.contains("public-key") && shown.contains("shopify.app.toml"),
+            "{shown}"
+        );
         assert!(shown.contains("api_secret: [redacted]"), "{shown}");
 
         let env = crate::runtime::RuntimeEnv {
@@ -212,7 +218,10 @@ mod tests {
         };
         let shown = format!("{provider:?} {token:?}");
         assert_hidden(&shown);
-        assert!(shown.contains("a.myshopify.com") && shown.contains("mtk_abc"), "{shown}");
+        assert!(
+            shown.contains("a.myshopify.com") && shown.contains("mtk_abc"),
+            "{shown}"
+        );
     }
 
     #[test]
@@ -231,6 +240,9 @@ mod tests {
         };
         let shown = format!("{request:?}");
         assert_hidden(&shown);
-        assert!(shown.contains("application/json") && shown.contains("public-key"), "{shown}");
+        assert!(
+            shown.contains("application/json") && shown.contains("public-key"),
+            "{shown}"
+        );
     }
 }

@@ -1,32 +1,27 @@
-//! Admin API for custom admin pages: discovery, access checks and the RPC
-//! endpoint behind loaders and actions.
-
-use std::time::Instant;
+//! Custom admin pages on the server: their access rules, the context of their
+//! functions, the call of a function through its rules and its schema, and the
+//! Admin API that lists them and says whether a path may be opened.
 
 use axum::Router;
-use axum::body::Bytes;
 use axum::extract::{Extension, RawQuery, State};
-use axum::http::header::CONTENT_TYPE;
-use axum::http::{HeaderMap, StatusCode, Uri};
-use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::http::StatusCode;
+use axum::response::Response;
+use axum::routing::get;
 use indexmap::IndexMap;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
-use super::http::{catch_panic, header, json_response, parse_query};
-use super::shop::ShopSession;
+use super::http::{catch_panic, json_response, parse_query};
 use super::mcp::schema::property_errors;
+use super::shop::ShopSession;
 use crate::admin::{
     AdminAuthorize, AdminContext, AdminFunction, AdminFunctionKind, AdminPublicError, CustomAdminPage, field_message,
 };
 use crate::app::OpenShop;
 use crate::engine::step::error_message;
 use crate::runtime::context_logger::ContextLogger;
-use crate::runtime::report;
 use crate::runtime::logger;
-use crate::types::{CustomAdminPageAccess, CustomAdminPagesResponse, JsonMap};
-use openshop_shared::rpc::decode_uri_component;
+use crate::types::{CustomAdminPageAccess, CustomAdminPagesResponse};
 use openshop_shared::{custom_admin_route_params, match_custom_admin_path};
 
 /// The most specific page matching a path. Pages are sorted with static
@@ -87,7 +82,12 @@ async fn is_allowed(
     }
 }
 
-pub(crate) async fn page_is_allowed(app: &OpenShop, session: &ShopSession, page: &CustomAdminPage, pathname: &str) -> bool {
+pub(crate) async fn page_is_allowed(
+    app: &OpenShop,
+    session: &ShopSession,
+    page: &CustomAdminPage,
+    pathname: &str,
+) -> bool {
     let check = async {
         let Some(params) = custom_admin_route_params(&page.route_pattern, pathname) else {
             return Ok(false);
@@ -171,12 +171,8 @@ fn public_error(code: &str, message: &str, status: u16) -> anyhow::Error {
     AdminPublicError::new(code, message).status(status).into()
 }
 
-fn rpc_not_found() -> anyhow::Error {
-    public_error("NOT_FOUND", "Not found", 404)
-}
-
 /// The loader or the action `name` of the page at `page_path`, with the
-/// values of the dynamic segments of the path: what the admin UI calls there.
+/// values of the dynamic segments of the path: what a test calls there.
 /// `None` when no page matches the path, or the page has no function of that
 /// kind by that name.
 pub(crate) fn find_function<'a>(
@@ -187,15 +183,11 @@ pub(crate) fn find_function<'a>(
 ) -> Option<(&'a CustomAdminPage, IndexMap<String, String>, &'a AdminFunction)> {
     let page = find_matching_page(pages, page_path)?;
     let params = custom_admin_route_params(&page.route_pattern, page_path)?;
-    let function = page
-        .page
-        .functions
-        .get(name)
-        .filter(|function| function.kind == kind)?;
+    let function = page.page.functions.get(name).filter(|function| function.kind == kind)?;
     Some((page, params, function))
 }
 
-/// Runs `function` of `page` as the admin UI calls it: the access rules of
+/// Runs `function` of `page`, as a form of the page and a test call it: the access rules of
 /// the page and of the pages it is nested under and the rule of the function
 /// first (`403 FORBIDDEN` when one says no), then the input schema
 /// (`422 INVALID_INPUT`, with the error of each field it can tell), then the
@@ -217,7 +209,11 @@ pub(crate) async fn call_function(
             if fields.is_empty() {
                 refusal
             } else {
-                refusal.field_errors(fields.iter().map(|(field, error)| (field.as_str(), field_message(error))))
+                refusal.field_errors(
+                    fields
+                        .iter()
+                        .map(|(field, error)| (field.as_str(), field_message(error))),
+                )
             }
         })?,
         None if function.kind == AdminFunctionKind::Action => {
@@ -228,129 +224,10 @@ pub(crate) async fn call_function(
     (function.handler)(context, input).await
 }
 
-async fn execute_rpc(
-    app: &OpenShop,
-    session: &ShopSession,
-    path: &str,
-    headers: &HeaderMap,
-    body: &[u8],
-    request_id: &str,
-    metadata: &mut JsonMap,
-) -> anyhow::Result<String> {
-    if !app.config().custom_pages_enabled() {
-        return Err(rpc_not_found());
-    }
-
-    let suffix = path
-        .split_once("/pages/custom")
-        .map(|(_, suffix)| suffix)
-        .unwrap_or_default();
-    const MARKER: &str = "/_rpc/";
-    let marker_index = suffix.rfind(MARKER).ok_or_else(rpc_not_found)?;
-    // Empty for the page at `/`, the home of the admin.
-    let page_path = &suffix[..marker_index];
-    let mut parts = suffix[marker_index + MARKER.len()..].split('/');
-    let kind = match parts.next() {
-        Some("loader") => AdminFunctionKind::Loader,
-        Some("action") => AdminFunctionKind::Action,
-        _ => return Err(rpc_not_found()),
-    };
-    let encoded_name = parts.next().filter(|name| !name.is_empty()).ok_or_else(rpc_not_found)?;
-    if parts.next().is_some() {
-        return Err(rpc_not_found());
-    }
-    let name = decode_uri_component(encoded_name).ok_or_else(rpc_not_found)?;
-
-    let pages = app.custom_pages();
-    let (page, params, definition) = find_function(pages, page_path, kind, &name).ok_or_else(rpc_not_found)?;
-    report::describe(|request| {
-        request.unit("admin", format_args!("{} {name}", page.route_pattern));
-    });
-
-    let idempotency_key = header(headers, "idempotency-key").map(str::to_string);
-    let context = create_context(app, session, params, request_id.to_string(), idempotency_key);
-    let input = serde_json::from_slice::<Value>(body)
-        .ok()
-        .and_then(|body| body.get("input").cloned())
-        .unwrap_or(Value::Null);
-    let output = call_function(pages, page, definition, context, input).await?;
-
-    metadata.insert("pageId".into(), Value::from(page.id.clone()));
-    metadata.insert("functionName".into(), Value::from(name));
-    metadata.insert("kind".into(), Value::from(kind.as_str()));
-    metadata.insert("status".into(), Value::from(200));
-    Ok(output.to_string())
-}
-
-async fn rpc(
-    State(app): State<OpenShop>,
-    Extension(session): Extension<ShopSession>,
-    uri: Uri,
-    headers: HeaderMap,
-    body: Bytes,
-) -> Response {
-    let started_at = Instant::now();
-    let request_id = Uuid::new_v4().to_string();
-    let mut metadata = JsonMap::new();
-    metadata.insert("requestId".into(), Value::from(request_id.clone()));
-    metadata.insert("shop".into(), Value::from(session.shop.clone()));
-    metadata.insert("shopifyApp".into(), Value::from(session.shopify_app.clone()));
-    metadata.insert("actorId".into(), Value::from(session.actor.id.clone()));
-    // The id the page shows with the error: what its event is found by.
-    report::describe(|request| {
-        request.tag("request_id", &request_id);
-    });
-
-    // A panicking access rule or function is an internal error, not a dropped connection.
-    let execution = execute_rpc(&app, &session, uri.path(), &headers, &body, &request_id, &mut metadata);
-    let outcome = catch_panic("admin function", execution).await;
-    metadata.insert(
-        "durationMs".into(),
-        Value::from(started_at.elapsed().as_millis() as u64),
-    );
-
-    match outcome {
-        Ok(output) => {
-            logger::info_with("[openshop] Custom admin function completed", Value::Object(metadata));
-            ([(CONTENT_TYPE, "application/json; charset=UTF-8")], output).into_response()
-        }
-        Err(error) => match error.downcast_ref::<AdminPublicError>() {
-            Some(public) => {
-                metadata.insert("status".into(), Value::from(public.status));
-                metadata.insert("code".into(), Value::from(public.code.clone()));
-                logger::warn_with("[openshop] Custom admin function rejected", Value::Object(metadata));
-
-                let mut payload = JsonMap::new();
-                payload.insert("error".into(), Value::from(public.message.clone()));
-                payload.insert("code".into(), Value::from(public.code.clone()));
-                payload.insert("requestId".into(), Value::from(request_id));
-                if let Some(field_errors) = &public.field_errors {
-                    payload.insert("fieldErrors".into(), json!(field_errors));
-                }
-                if let Some(details) = &public.details {
-                    payload.insert("details".into(), json!(details));
-                }
-                let status = StatusCode::from_u16(public.status).unwrap_or(StatusCode::BAD_REQUEST);
-                json_response(status, Value::Object(payload))
-            }
-            None => {
-                metadata.insert("error".into(), Value::from(error_message(&error)));
-                logger::error_with("[openshop] Custom admin function failed", Value::Object(metadata));
-                report::error(&error);
-                json_response(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    json!({ "error": "Internal server error", "code": "INTERNAL_ERROR", "requestId": request_id }),
-                )
-            }
-        },
-    }
-}
-
 pub fn create_custom_admin_page_routes() -> Router<OpenShop> {
     Router::new()
-        .route("/api/pages/custom", get(list_pages).post(rpc))
-        .route("/api/pages/custom/access", get(page_access).post(rpc))
-        .route("/api/pages/custom/{*rest}", post(rpc))
+        .route("/api/pages/custom", get(list_pages))
+        .route("/api/pages/custom/access", get(page_access))
 }
 
 #[cfg(test)]

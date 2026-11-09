@@ -215,7 +215,9 @@ pub(crate) async fn queue_run(
 
     // The deadline and the date from which the run can be claimed are dates of the
     // clock of the database, which is the one the workers compare them with.
-    let deadline_ms = flow.timeout.map(|timeout| timeout.as_millis().min(i64::MAX as u128) as i64);
+    let deadline_ms = flow
+        .timeout
+        .map(|timeout| timeout.as_millis().min(i64::MAX as u128) as i64);
     let retry_policy = resolve_retry_policy(&[Some(config.retry_policy), Some(flow.retry_policy), run_retry_policy]);
     let delay_ms = delay.map(millis).unwrap_or(0).min(i64::MAX as u64) as i64;
 

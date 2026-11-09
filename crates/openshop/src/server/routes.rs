@@ -111,7 +111,10 @@ async fn handle(
         // The handler refused its input.
         Err(error) if error.is::<InvalidInput>() => json_error(StatusCode::UNPROCESSABLE_ENTITY, error.to_string()),
         Err(error) => {
-            report_failure(format!("[openshop] Server route error for {method_name} {route_path}"), &error);
+            report_failure(
+                format!("[openshop] Server route error for {method_name} {route_path}"),
+                &error,
+            );
             internal_error()
         }
     }
@@ -128,21 +131,29 @@ pub fn assert_route_definition(route: &Route, route_path: &str) -> anyhow::Resul
 
 pub fn create_server_routes(app: &OpenShop, log: bool) -> anyhow::Result<Router<OpenShop>> {
     let definitions = &app.config().routes;
-    mount_routes("Server", "/routes", definitions.keys().map(String::as_str), log, |route_path, key| {
-        let route = definitions[key].clone();
-        let allowed = route.allowed_methods().join(", ");
-        let registered = Arc::new(RegisteredRoute {
-            path: route_path.to_string(),
-            definition: route,
-        });
-        let handler = any(
-            move |State(app): State<OpenShop>,
-                  method: Method,
-                  uri: Uri,
-                  params: RawPathParams,
-                  headers: HeaderMap,
-                  body: Bytes| { handle(registered.clone(), app, method, uri, params, headers, body) },
-        );
-        (handler, allowed)
-    })
+    mount_routes(
+        "Server",
+        "/routes",
+        definitions.keys().map(String::as_str),
+        log,
+        |route_path, key| {
+            let route = definitions[key].clone();
+            let allowed = route.allowed_methods().join(", ");
+            let registered = Arc::new(RegisteredRoute {
+                path: route_path.to_string(),
+                definition: route,
+            });
+            let handler = any(
+                move |State(app): State<OpenShop>,
+                      method: Method,
+                      uri: Uri,
+                      params: RawPathParams,
+                      headers: HeaderMap,
+                      body: Bytes| {
+                    handle(registered.clone(), app, method, uri, params, headers, body)
+                },
+            );
+            (handler, allowed)
+        },
+    )
 }

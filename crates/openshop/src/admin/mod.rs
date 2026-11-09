@@ -1,5 +1,5 @@
-//! Server side of application-defined admin pages: page access rules, loaders
-//! and actions called by the WebAssembly admin UI over RPC.
+//! Admin pages of the application: their access rules, their loaders, their
+//! actions, and their view, which the server renders.
 
 use std::future::Future;
 use std::sync::Arc;
@@ -25,9 +25,9 @@ use openshop_shared::{
 pub use crate::types::{CustomAdminPageAccess, CustomAdminPagesResponse, ResolvedAdminPages};
 
 mod view;
-pub(crate) use view::{field_message, fields_to_json, parse_fields, with_outcome};
-pub use view::{ACTION_FIELD, AdminView, FormState, Outcome, PageRequest, output};
 pub use openshop_shared::AdminFunctionKind;
+pub use view::{ACTION_FIELD, AdminView, FormState, Outcome, PageRequest, output};
+pub(crate) use view::{field_message, fields_to_json, parse_fields, with_outcome};
 
 /// The Shopify staff member behind the session token.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -542,7 +542,10 @@ mod tests {
 
         let error = AdminPublicError::new("PLAN_REQUIRED", "Choose a plan")
             .status(402)
-            .detail("pricingUrl", "https://admin.shopify.com/store/demo/charges/app/pricing_plans")
+            .detail(
+                "pricingUrl",
+                "https://admin.shopify.com/store/demo/charges/app/pricing_plans",
+            )
             .detail("pricingLink", "shopify:admin/charges/app/pricing_plans");
         let details = error.details.unwrap();
         assert_eq!(details.keys().collect::<Vec<_>>(), ["pricingUrl", "pricingLink"]);

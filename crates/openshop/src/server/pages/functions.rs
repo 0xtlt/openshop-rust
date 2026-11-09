@@ -120,7 +120,10 @@ async fn listed(page: &BuiltinPage<'_>, function: &AppFunction<'_>) -> Option<Ve
     match function_instances(page.app, page.session, function).await {
         Ok(items) => Some(items.iter().map(Instance::of).collect()),
         Err(error) => {
-            report_failure("[openshop] The instances of a Shopify Function could not be listed", &error);
+            report_failure(
+                "[openshop] The instances of a Shopify Function could not be listed",
+                &error,
+            );
             None
         }
     }
@@ -301,7 +304,10 @@ mod tests {
         );
         assert_eq!(
             route("/functions/volume-discount/gid%3A%2F%2Fshopify%2FDiscountNode%2F1"),
-            Some(Route::Edit("volume-discount".into(), "gid://shopify/DiscountNode/1".into()))
+            Some(Route::Edit(
+                "volume-discount".into(),
+                "gid://shopify/DiscountNode/1".into()
+            ))
         );
         assert_eq!(route("/functions/a/b/c"), None);
         assert_eq!(route("/functionsx"), None);

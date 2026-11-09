@@ -23,7 +23,6 @@ fn shops_label(shops: Option<&Value>) -> String {
     }
 }
 
-
 pub(super) async fn render(page: &BuiltinPage<'_>) -> Result<Markup> {
     let crons = cron_items(page.app, &page.session.shopify_app, &page.session.shop).await?;
     Ok(view(&crons))
@@ -66,7 +65,9 @@ fn view(crons: &[Value]) -> Markup {
 }
 
 fn name(cron: &Value) -> &str {
-    Some(text(cron, "name")).filter(|name| !name.is_empty()).unwrap_or_else(|| text(cron, "flow"))
+    Some(text(cron, "name"))
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| text(cron, "flow"))
 }
 
 fn row(index: usize, cron: &Value) -> Markup {
@@ -111,7 +112,10 @@ pub(super) async fn submit(page: &BuiltinPage<'_>, action: &str, fields: &[(Stri
     if action != TOGGLE {
         return Err(super::no_action());
     }
-    let (Some(key), Some(enabled)) = (field(fields, "key").filter(|key| !key.is_empty()), field(fields, "enabled")) else {
+    let (Some(key), Some(enabled)) = (
+        field(fields, "key").filter(|key| !key.is_empty()),
+        field(fields, "enabled"),
+    ) else {
         return Err(AdminPublicError::new("INVALID_INPUT", "key and enabled are required").into());
     };
     let enabled = enabled == "true";
@@ -137,12 +141,24 @@ mod tests {
         ];
         let html = view(&crons).into_string();
         assert!(html.contains(r#"<input type="hidden" name="key" value="a">"#), "{html}");
-        assert!(html.contains(r#"<input type="hidden" name="enabled" value="false">"#), "{html}");
-        assert!(html.contains(r#"<input type="hidden" name="key" value="b&lt;x&gt;">"#), "{html}");
+        assert!(
+            html.contains(r#"<input type="hidden" name="enabled" value="false">"#),
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"<input type="hidden" name="key" value="b&lt;x&gt;">"#),
+            "{html}"
+        );
         assert!(html.contains("a.myshopify.com, b.myshopify.com"), "{html}");
-        assert!(html.contains(r#"<s-modal id="cron-input-0" heading="Input — Quick sync" size="large">"#), "{html}");
+        assert!(
+            html.contains(r#"<s-modal id="cron-input-0" heading="Input — Quick sync" size="large">"#),
+            "{html}"
+        );
         // The input, and a button that copies it.
-        assert!(html.contains("data-openshop-copy=\"{\n  &quot;limit&quot;: 10\n}\""), "{html}");
+        assert!(
+            html.contains("data-openshop-copy=\"{\n  &quot;limit&quot;: 10\n}\""),
+            "{html}"
+        );
         assert!(!html.contains("cron-input-1"), "{html}");
         assert!(view(&[]).into_string().contains("No crons configured"));
     }

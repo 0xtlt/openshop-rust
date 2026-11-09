@@ -102,10 +102,7 @@ mod tests {
         }
         // A name is one DNS label, 63 characters at most.
         let longest = "a".repeat(63);
-        assert_eq!(
-            strict_shop_domain(&longest),
-            Some(format!("{longest}.myshopify.com"))
-        );
+        assert_eq!(strict_shop_domain(&longest), Some(format!("{longest}.myshopify.com")));
         for name in ["a".repeat(64), "a".repeat(10_000)] {
             assert_eq!(strict_shop_domain(&name), None);
             assert_eq!(strict_shop_domain(&format!("{name}.myshopify.com")), None);

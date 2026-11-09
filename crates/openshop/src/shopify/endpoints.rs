@@ -172,11 +172,21 @@ impl ShopifyEndpoints {
         };
         let (path, query) = path.split_once('?').unwrap_or((path, ""));
         let path = path.trim_end_matches('/');
-        let page = |base: String| if path.is_empty() { base } else { format!("{base}/{path}") };
+        let page = |base: String| {
+            if path.is_empty() {
+                base
+            } else {
+                format!("{base}/{path}")
+            }
+        };
         match &self.admin_origin {
             Some(origin) => {
                 let shop: String = url::form_urlencoded::byte_serialize(shop.as_bytes()).collect();
-                let query = if query.is_empty() { String::new() } else { format!("{query}&") };
+                let query = if query.is_empty() {
+                    String::new()
+                } else {
+                    format!("{query}&")
+                };
                 format!(
                     "{}?{query}shop={shop}{fragment}",
                     page(format!("{}/admin", origin.trim_end_matches('/')))
@@ -184,8 +194,15 @@ impl ShopifyEndpoints {
             }
             None => {
                 let store = shop.strip_suffix(".myshopify.com").unwrap_or(shop);
-                let query = if query.is_empty() { String::new() } else { format!("?{query}") };
-                format!("{}{query}{fragment}", page(format!("https://admin.shopify.com/store/{store}")))
+                let query = if query.is_empty() {
+                    String::new()
+                } else {
+                    format!("?{query}")
+                };
+                format!(
+                    "{}{query}{fragment}",
+                    page(format!("https://admin.shopify.com/store/{store}"))
+                )
             }
         }
     }
@@ -439,14 +456,24 @@ mod tests {
         let endpoints = Endpoints::resolve(&code, &env).unwrap();
         // Written as an origin: lower case, no trailing `/`.
         assert_eq!(endpoints.partner_origin(), "http://localhost:9393");
-        assert_eq!(endpoints.shown, ShopifyEndpoints::new().partner_origin("http://localhost:9393"));
-        assert!(endpoints.startup_line().unwrap().contains("(shopify_endpoints.partner_origin)"));
-
-        let error = |code: ShopifyEndpoints, env: ShopifyEndpoints| {
-            Endpoints::resolve(&code, &env).unwrap_err().to_string()
-        };
         assert_eq!(
-            error(ShopifyEndpoints::new().partner_origin("http://partners.example.com"), ShopifyEndpoints::new()),
+            endpoints.shown,
+            ShopifyEndpoints::new().partner_origin("http://localhost:9393")
+        );
+        assert!(
+            endpoints
+                .startup_line()
+                .unwrap()
+                .contains("(shopify_endpoints.partner_origin)")
+        );
+
+        let error =
+            |code: ShopifyEndpoints, env: ShopifyEndpoints| Endpoints::resolve(&code, &env).unwrap_err().to_string();
+        assert_eq!(
+            error(
+                ShopifyEndpoints::new().partner_origin("http://partners.example.com"),
+                ShopifyEndpoints::new()
+            ),
             "[openshop] Invalid config: shopify_endpoints.partner_origin is not valid: invalid Partner API \
              origin, expected `https://host[:port]` (or `http://` to localhost): `http://` is taken for \
              `localhost`, `127.0.0.1` or `[::1]` only: use `https://`"
@@ -474,7 +501,10 @@ mod tests {
         );
         let endpoints = Endpoints::resolve(&code, &env).unwrap();
         // The code's admin origin, written without its `/`.
-        assert_eq!(endpoints.admin_origin.as_ref().map(AdminOrigin::as_str), Some(SIMULATOR));
+        assert_eq!(
+            endpoints.admin_origin.as_ref().map(AdminOrigin::as_str),
+            Some(SIMULATOR)
+        );
         // No App Bridge in the code: the environment's.
         assert_eq!(
             endpoints.app_bridge.as_ref().map(ScriptUrl::as_str),
@@ -523,7 +553,10 @@ mod tests {
             shopify.admin_url(shop, "orders?query=open#top"),
             "https://admin.shopify.com/store/demo-shop/orders?query=open#top"
         );
-        assert_eq!(local.admin_url(shop, ""), "http://localhost:9393/admin?shop=demo-shop.myshopify.com");
+        assert_eq!(
+            local.admin_url(shop, ""),
+            "http://localhost:9393/admin?shop=demo-shop.myshopify.com"
+        );
         assert_eq!(
             local.admin_url(shop, "orders?query=open#top"),
             "http://localhost:9393/admin/orders?query=open&shop=demo-shop.myshopify.com#top"
@@ -541,19 +574,29 @@ mod tests {
 
     #[test]
     fn or_keeps_the_fields_that_are_set() {
-        let declared = ShopifyEndpoints::new().admin_origin("https://a.example").polaris("https://a.example/p.js");
+        let declared = ShopifyEndpoints::new()
+            .admin_origin("https://a.example")
+            .polaris("https://a.example/p.js");
         let startup = ShopifyEndpoints::new().admin_origin(SIMULATOR);
         assert_eq!(
             startup.or(declared),
-            ShopifyEndpoints::new().admin_origin(SIMULATOR).polaris("https://a.example/p.js")
+            ShopifyEndpoints::new()
+                .admin_origin(SIMULATOR)
+                .polaris("https://a.example/p.js")
         );
     }
 
     #[test]
     fn scripts_are_https_or_on_this_machine() {
         for (url, written) in [
-            ("https://cdn.example.com/app-bridge.js", "https://cdn.example.com/app-bridge.js"),
-            ("http://localhost:9393/__lsf/admin/app-bridge.js", "http://localhost:9393/__lsf/admin/app-bridge.js"),
+            (
+                "https://cdn.example.com/app-bridge.js",
+                "https://cdn.example.com/app-bridge.js",
+            ),
+            (
+                "http://localhost:9393/__lsf/admin/app-bridge.js",
+                "http://localhost:9393/__lsf/admin/app-bridge.js",
+            ),
             ("http://127.0.0.1:9393/a.js", "http://127.0.0.1:9393/a.js"),
             ("http://[::1]:9393/a.js", "http://[::1]:9393/a.js"),
             ("HTTPS://Example.COM/a b.js?q=1", "https://example.com/a%20b.js?q=1"),
@@ -577,11 +620,13 @@ mod tests {
 
     #[test]
     fn an_invalid_value_names_its_setting_or_its_variable() {
-        let error = |code: ShopifyEndpoints, env: ShopifyEndpoints| {
-            Endpoints::resolve(&code, &env).unwrap_err().to_string()
-        };
+        let error =
+            |code: ShopifyEndpoints, env: ShopifyEndpoints| Endpoints::resolve(&code, &env).unwrap_err().to_string();
         assert_eq!(
-            error(ShopifyEndpoints::new().admin_origin("http://localhost:9393/admin"), ShopifyEndpoints::new()),
+            error(
+                ShopifyEndpoints::new().admin_origin("http://localhost:9393/admin"),
+                ShopifyEndpoints::new()
+            ),
             "[openshop] Invalid config: shopify_endpoints.admin_origin is not valid: invalid admin origin, \
              expected `https://host[:port]` (or `http://` to localhost): it has a path: give the scheme, the \
              host and the port only"
@@ -590,11 +635,17 @@ mod tests {
             ShopifyEndpoints::new(),
             env(Some("http://user:shpat_secret@localhost:9393"), None, None),
         );
-        assert!(from_env.starts_with("[openshop] SHOPIFY_ADMIN_ORIGIN is not valid: invalid admin origin"), "{from_env}");
+        assert!(
+            from_env.starts_with("[openshop] SHOPIFY_ADMIN_ORIGIN is not valid: invalid admin origin"),
+            "{from_env}"
+        );
         assert!(!from_env.contains("shpat_secret"), "{from_env}");
         assert!(
-            error(ShopifyEndpoints::new(), env(None, Some("http://example.com/a.js"), None))
-                .starts_with("[openshop] SHOPIFY_APP_BRIDGE_URL is not valid: invalid script URL")
+            error(
+                ShopifyEndpoints::new(),
+                env(None, Some("http://example.com/a.js"), None)
+            )
+            .starts_with("[openshop] SHOPIFY_APP_BRIDGE_URL is not valid: invalid script URL")
         );
         assert!(
             error(ShopifyEndpoints::new().polaris("polaris.js"), ShopifyEndpoints::new())

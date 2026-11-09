@@ -249,10 +249,7 @@ pub(crate) async fn check_provider_connection(
     Ok(match tokio::time::timeout(CHECK_TIMEOUT, check).await {
         Ok(Ok(ok)) => CheckOutcome::Answered(ok),
         Err(_) => CheckOutcome::TimedOut,
-        Ok(Err(error)) => CheckOutcome::Failed(client_error(
-            &format!("Check of provider \"{name}\" failed"),
-            &error,
-        )),
+        Ok(Err(error)) => CheckOutcome::Failed(client_error(&format!("Check of provider \"{name}\" failed"), &error)),
     })
 }
 

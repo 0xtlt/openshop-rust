@@ -23,10 +23,9 @@ afterwards has no effect on a running process.
 | `OPENSHOP_ENV` | Production | Unset: neither production nor development | `production` enables production safety checks. `development` or `test` allows plaintext secrets without `ENCRYPTION_KEY` (`openshop dev` does so itself) |
 | `NODE_ENV` | No | — | `production` is honored like `OPENSHOP_ENV=production`. It never allows plaintext secrets: only `OPENSHOP_ENV` does |
 | `PORT` | No | `3000` | HTTP port of `dev` and `start` |
-| `OPENSHOP_UI_DIR` | No | The bundle set with the `admin_ui` setting of `app!`, then the embedded admin UI | Directory of a custom admin UI bundle served by `dev` and `start` |
 | `SHOPIFY_ADMIN_ORIGIN` | No | Unset: `https://{shop}` | Where the Admin API, OAuth and the token requests of every shop go, when the code sets no `admin_origin` [endpoint](../guides/custom-shopify-endpoints.md): a simulator, a proxy or an API of your own, such as `http://localhost:9393` |
-| `SHOPIFY_APP_BRIDGE_URL` | No | Unset: Shopify's CDN | The App Bridge script of the admin UI, when the code sets no `app_bridge` [endpoint](../guides/custom-shopify-endpoints.md) |
-| `SHOPIFY_POLARIS_URL` | No | Unset: Shopify's CDN | The Polaris script of the admin UI and of the page that says where the app opens from, when the code sets no `polaris` [endpoint](../guides/custom-shopify-endpoints.md) |
+| `SHOPIFY_APP_BRIDGE_URL` | No | Unset: Shopify's CDN | The App Bridge script of the pages of the admin, when the code sets no `app_bridge` [endpoint](../guides/custom-shopify-endpoints.md) |
+| `SHOPIFY_POLARIS_URL` | No | Unset: Shopify's CDN | The Polaris script of the pages of the admin and of the page that says where the app opens from, when the code sets no `polaris` [endpoint](../guides/custom-shopify-endpoints.md) |
 | `SHOPIFY_PARTNER_ORIGIN` | No | Unset: `https://partners.shopify.com` | Where the Partner API requests go, when the code sets no `partner_origin` [endpoint](../guides/custom-shopify-endpoints.md) |
 | `SHOPIFY_PARTNER_ID` | With `SHOPIFY_PARTNER_API_TOKEN` | Unset | The number in the URL of the Partner Dashboard, when the code sets no `partner_api.partner_id`. With a token, billing reads the plans from the Partner API ([Billing](billing.md#the-partner-api)) |
 | `SHOPIFY_PARTNER_API_TOKEN` | With `SHOPIFY_PARTNER_ID` | Unset | The access token of a Partner API client of the organization, when the code sets no `partner_api.token`. A secret: never logged |
@@ -39,8 +38,7 @@ afterwards has no effect on a running process.
 Notes:
 
 - An empty value counts as unset for `SHOPIFY_API_KEY`, `SHOPIFY_API_SECRET`,
-  `HOST`, `SHOPIFY_APP_URL`, `ENCRYPTION_KEY`, `OPENSHOP_UI_DIR`,
-  `SHOPIFY_ADMIN_ORIGIN`, `SHOPIFY_APP_BRIDGE_URL`, `SHOPIFY_POLARIS_URL`,
+  `HOST`, `SHOPIFY_APP_URL`, `ENCRYPTION_KEY`, `SHOPIFY_ADMIN_ORIGIN`, `SHOPIFY_APP_BRIDGE_URL`, `SHOPIFY_POLARIS_URL`,
   `SHOPIFY_PARTNER_ORIGIN`, `SHOPIFY_PARTNER_ID`, and
   `SHOPIFY_PARTNER_API_TOKEN`.
 - `SHOPIFY_ADMIN_ORIGIN`, `SHOPIFY_APP_BRIDGE_URL`, `SHOPIFY_POLARIS_URL` and

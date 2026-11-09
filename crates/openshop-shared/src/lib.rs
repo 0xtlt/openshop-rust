@@ -1,6 +1,5 @@
-//! Types and pure logic shared by the OpenShop server and its WebAssembly admin UI.
-//!
-//! Everything here compiles for both native targets and `wasm32-unknown-unknown`.
+//! Types and pure logic of the OpenShop server that need nothing of it: the
+//! paths of the admin pages, their modes, and the encoding of a path segment.
 
 pub mod custom_pages;
 pub mod json;
@@ -16,4 +15,4 @@ pub use pages::{
     ADMIN_PAGE_IDS, AdminNavigationResources, AdminPageId, AdminPageMode, AdminPagesConfig, ResolvedAdminPages,
     admin_page_from_api_path, admin_page_from_ui_path, resolve_admin_pages,
 };
-pub use rpc::{AdminFunctionKind, build_admin_function_rpc_url};
+pub use rpc::AdminFunctionKind;

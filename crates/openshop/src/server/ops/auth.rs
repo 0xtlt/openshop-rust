@@ -148,7 +148,11 @@ impl OpsAuth {
                 guesses.retain(|_, known| now < known.next_attempt + FORGET_AFTER);
                 if guesses.len() >= MAX_CLIENTS {
                     // Still full: the one that attempted longest ago is forgotten.
-                    if let Some(oldest) = guesses.iter().min_by_key(|(_, known)| known.next_attempt).map(|(key, _)| *key) {
+                    if let Some(oldest) = guesses
+                        .iter()
+                        .min_by_key(|(_, known)| known.next_attempt)
+                        .map(|(key, _)| *key)
+                    {
                         guesses.remove(&oldest);
                     }
                 }

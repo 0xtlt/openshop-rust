@@ -150,7 +150,11 @@ fn output_modal(step: &StepResult, output: &Value) -> Markup {
     let shown = preview(&full);
     // What the buttons copy and download: the `pre` of the modal, or the whole
     // document beside it when the modal shows only its beginning.
-    let source = if shown == full { format!("{id}-shown") } else { format!("{id}-full") };
+    let source = if shown == full {
+        format!("{id}-shown")
+    } else {
+        format!("{id}-full")
+    };
     html! {
         s-modal id=(id) heading=(format!("Output — {}", step.step_name)) size="large" {
             s-stack gap="small-200" {
@@ -205,7 +209,10 @@ mod tests {
             .iter()
             .map(|row| (row.step.id.as_u128(), row.label.as_str(), row.is_retry))
             .collect();
-        assert_eq!(summary, [(1, "1", false), (2, "1.2", true), (3, "2", false), (4, "1.3", true)]);
+        assert_eq!(
+            summary,
+            [(1, "1", false), (2, "1.2", true), (3, "2", false), (4, "1.3", true)]
+        );
         // Steps of the same millisecond, by id.
         let steps = [
             step(2, "second", "2026-10-06T12:00:00.0004Z"),
@@ -245,7 +252,9 @@ mod tests {
         let table = steps_table(&rows).into_string();
         let id = format!("output-{}", Uuid::from_u128(1));
         assert!(
-            table.contains(&format!(r#"<s-button variant="secondary" commandFor="{id}" command="--show">Output</s-button>"#)),
+            table.contains(&format!(
+                r#"<s-button variant="secondary" commandFor="{id}" command="--show">Output</s-button>"#
+            )),
             "{table}"
         );
         assert!(table.contains("<strong>fetch&lt;all&gt;</strong>"), "{table}");
@@ -257,20 +266,33 @@ mod tests {
         let modals = output_modals(&rows).into_string();
         assert_eq!(modals.matches("<s-modal ").count(), 1, "{modals}");
         assert!(
-            modals.contains(&format!(r#"<s-modal id="{id}" heading="Output — fetch&lt;all&gt;" size="large">"#)),
+            modals.contains(&format!(
+                r#"<s-modal id="{id}" heading="Output — fetch&lt;all&gt;" size="large">"#
+            )),
             "{modals}"
         );
         let full = serde_json::to_string_pretty(steps[0].output.as_ref().unwrap()).unwrap();
         // The modal shows the beginning; the buttons copy and download all of it.
         assert!(modals.contains("\n…</pre>"), "{modals}");
-        assert!(modals.contains("&quot;note&quot;: &quot;&lt;b&gt;&amp;&lt;/b&gt;&quot;"), "{modals}");
+        assert!(
+            modals.contains("&quot;note&quot;: &quot;&lt;b&gt;&amp;&lt;/b&gt;&quot;"),
+            "{modals}"
+        );
         let escaped = html! { (full) }.into_string();
         // The whole document once, beside the beginning the modal shows.
-        assert!(modals.contains(&format!(r#"<pre id="{id}-full" hidden>{escaped}</pre>"#)), "{modals}");
-        assert_eq!(modals.matches(&escaped).count(), 1, "{modals}");
-        assert!(modals.contains(&format!(r#"data-openshop-copy-from="{id}-full""#)), "{modals}");
         assert!(
-            modals.contains(&format!(r#"data-openshop-download-from="{id}-full" data-openshop-filename="fetch&lt;all&gt;.json""#)),
+            modals.contains(&format!(r#"<pre id="{id}-full" hidden>{escaped}</pre>"#)),
+            "{modals}"
+        );
+        assert_eq!(modals.matches(&escaped).count(), 1, "{modals}");
+        assert!(
+            modals.contains(&format!(r#"data-openshop-copy-from="{id}-full""#)),
+            "{modals}"
+        );
+        assert!(
+            modals.contains(&format!(
+                r#"data-openshop-download-from="{id}-full" data-openshop-filename="fetch&lt;all&gt;.json""#
+            )),
             "{modals}"
         );
         assert!(modals.contains(&format_size(full.len())), "{modals}");
@@ -282,6 +304,9 @@ mod tests {
         let modals = output_modals(&step_rows(&steps)).into_string();
         let id = format!("output-{}", Uuid::from_u128(3));
         assert!(!modals.contains("hidden"), "{modals}");
-        assert!(modals.contains(&format!(r#"data-openshop-copy-from="{id}-shown""#)), "{modals}");
+        assert!(
+            modals.contains(&format!(r#"data-openshop-copy-from="{id}-shown""#)),
+            "{modals}"
+        );
     }
 }

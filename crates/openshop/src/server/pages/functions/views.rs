@@ -75,10 +75,7 @@ impl Instance {
     }
 
     fn name(&self) -> &str {
-        self.label
-            .as_deref()
-            .or(self.title.as_deref())
-            .unwrap_or("(untitled)")
+        self.label.as_deref().or(self.title.as_deref()).unwrap_or("(untitled)")
     }
 
     /// `Active` for a Cart Transform, Shopify's status of a discount, else
@@ -92,18 +89,29 @@ impl Instance {
                 .unwrap_or_default();
         }
         self.status.clone().unwrap_or_else(|| {
-            if self.enabled == Some(true) { "Active" } else { "Inactive" }.to_string()
+            if self.enabled == Some(true) {
+                "Active"
+            } else {
+                "Inactive"
+            }
+            .to_string()
         })
     }
 
     fn is_active(&self) -> bool {
-        self.state.as_deref() == Some("active") || self.status.as_deref() == Some("ACTIVE") || self.enabled == Some(true)
+        self.state.as_deref() == Some("active")
+            || self.status.as_deref() == Some("ACTIVE")
+            || self.enabled == Some(true)
     }
 
     /// `threshold: 3, percent: 10`, or `—`. A password of `fields` is not
     /// written out, as its field does not show it.
     fn summary(&self, fields: &Fields) -> String {
-        let is_password = |key: &str| fields.get(key).is_some_and(|field| field.field_type == FieldType::Password);
+        let is_password = |key: &str| {
+            fields
+                .get(key)
+                .is_some_and(|field| field.field_type == FieldType::Password)
+        };
         let summary = self
             .config
             .iter()
@@ -148,13 +156,8 @@ pub(super) fn list_view(functions: &[AppFunction<'_>]) -> Markup {
 }
 
 fn card(function: &AppFunction<'_>) -> Markup {
-    let modes = mode_choice(function).map(|modes| {
-        modes
-            .iter()
-            .map(|mode| mode.as_str())
-            .collect::<Vec<_>>()
-            .join(", ")
-    });
+    let modes =
+        mode_choice(function).map(|modes| modes.iter().map(|mode| mode.as_str()).collect::<Vec<_>>().join(", "));
     html! {
         s-box padding="large-100" background="base" border="base" borderRadius="large" {
             s-stack direction="inline" justifyContent="space-between" alignItems="center" {
@@ -409,7 +412,6 @@ mod tests {
         }
     }
 
-
     #[test]
     fn lists_the_functions_with_their_type_and_modes() {
         let (discount, cart) = (discount(), cart_transform());
@@ -420,11 +422,17 @@ mod tests {
         let html = list_view(&functions).into_string();
         assert!(html.contains("<s-heading>Discount</s-heading>"), "{html}");
         assert!(html.contains("<s-badge>Discount</s-badge>"), "{html}");
-        assert!(html.contains(r#"<s-badge tone="info">automatic, code</s-badge>"#), "{html}");
+        assert!(
+            html.contains(r#"<s-badge tone="info">automatic, code</s-badge>"#),
+            "{html}"
+        );
         assert!(html.contains("<s-heading>Bundle &lt;cart&gt;</s-heading>"), "{html}");
         assert!(html.contains("<s-badge>Cart Transform</s-badge>"), "{html}");
         assert!(html.contains("1 config fields"), "{html}");
-        assert!(html.contains(r#"<s-button href="/functions/volume-discount">Manage</s-button>"#), "{html}");
+        assert!(
+            html.contains(r#"<s-button href="/functions/volume-discount">Manage</s-button>"#),
+            "{html}"
+        );
         assert!(list_view(&[]).into_string().contains("No functions configured"));
     }
 
@@ -433,14 +441,24 @@ mod tests {
         let definition = discount();
         let function = AppFunction::of("discount", &definition);
         let instances = [
-            instance(json!({ "id": "gid://shopify/DiscountNode/1", "title": "Volume <10>", "status": "ACTIVE",
-                             "config": { "percent": 10, "stack": false } })),
-            instance(json!({ "id": "gid://shopify/DiscountNode/2", "title": "Legacy", "status": "EXPIRED", "config": {} })),
+            instance(
+                json!({ "id": "gid://shopify/DiscountNode/1", "title": "Volume <10>", "status": "ACTIVE",
+                             "config": { "percent": 10, "stack": false } }),
+            ),
+            instance(
+                json!({ "id": "gid://shopify/DiscountNode/2", "title": "Legacy", "status": "EXPIRED", "config": {} }),
+            ),
         ];
         let html = instances_view(&function, Some(&instances)).into_string();
         assert!(html.contains("2 instances — Discount"), "{html}");
-        assert!(html.contains(r#"<s-table-header listSlot="primary">Title</s-table-header>"#), "{html}");
-        assert!(html.contains("<s-table-cell>Volume &lt;10&gt;</s-table-cell>"), "{html}");
+        assert!(
+            html.contains(r#"<s-table-header listSlot="primary">Title</s-table-header>"#),
+            "{html}"
+        );
+        assert!(
+            html.contains("<s-table-cell>Volume &lt;10&gt;</s-table-cell>"),
+            "{html}"
+        );
         assert!(html.contains(r#"<s-badge tone="success">ACTIVE</s-badge>"#), "{html}");
         assert!(html.contains(r#"<s-badge tone="warning">EXPIRED</s-badge>"#), "{html}");
         assert!(html.contains("percent: 10, stack: false"), "{html}");
@@ -472,23 +490,38 @@ mod tests {
     fn offers_a_cart_transform_only_to_a_shop_known_to_have_none() {
         let definition = cart_transform();
         let function = AppFunction::of("cartTransform", &definition);
-        let one = [instance(json!({ "id": "gid://shopify/CartTransform/1", "label": "Bundle <cart>",
-                                    "state": "active", "blockOnFailure": true, "config": {} }))];
+        let one = [instance(
+            json!({ "id": "gid://shopify/CartTransform/1", "label": "Bundle <cart>",
+                                    "state": "active", "blockOnFailure": true, "config": {} }),
+        )];
         let html = instances_view(&function, Some(&one)).into_string();
-        assert!(html.contains(r#"<s-table-header listSlot="primary">Label</s-table-header>"#), "{html}");
+        assert!(
+            html.contains(r#"<s-table-header listSlot="primary">Label</s-table-header>"#),
+            "{html}"
+        );
         assert!(html.contains(r#"<s-badge tone="success">Active</s-badge>"#), "{html}");
         assert!(html.contains("1 instance — Cart Transform"), "{html}");
         assert!(!html.contains("Create instance"), "{html}");
-        assert!(instances_view(&function, Some(&[])).into_string().contains("Create first instance"));
+        assert!(
+            instances_view(&function, Some(&[]))
+                .into_string()
+                .contains("Create first instance")
+        );
         assert!(!instances_view(&function, None).into_string().contains("Create"));
     }
 
     #[test]
     fn names_and_states_an_instance_as_shopify_describes_it() {
         let bare = instance(json!({ "id": "1", "enabled": true }));
-        assert_eq!((bare.name(), bare.state().as_str(), bare.is_active()), ("(untitled)", "Active", true));
+        assert_eq!(
+            (bare.name(), bare.state().as_str(), bare.is_active()),
+            ("(untitled)", "Active", true)
+        );
         let off = instance(json!({ "id": "1", "title": "Rules", "enabled": false }));
-        assert_eq!((off.name(), off.state().as_str(), off.is_active()), ("Rules", "Inactive", false));
+        assert_eq!(
+            (off.name(), off.state().as_str(), off.is_active()),
+            ("Rules", "Inactive", false)
+        );
         assert_eq!(off.summary(&Fields::new()), "—");
     }
 
@@ -506,8 +539,14 @@ mod tests {
             html.contains(r#"<s-button slot="primary-action" variant="primary" type="submit">Create</s-button>"#),
             "{html}"
         );
-        assert!(html.contains(r#"<s-select name="mode" label="Discount mode" value="automatic">"#), "{html}");
-        assert!(html.contains(r#"<s-option value="code">Discount code</s-option>"#), "{html}");
+        assert!(
+            html.contains(r#"<s-select name="mode" label="Discount mode" value="automatic">"#),
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"<s-option value="code">Discount code</s-option>"#),
+            "{html}"
+        );
         assert!(
             html.contains(r#"<s-number-field name="config.percent" label="Percent" value=""></s-number-field>"#),
             "{html}"
@@ -534,7 +573,9 @@ mod tests {
         );
         assert!(html.contains(r#"<s-option value="code" selected>"#), "{html}");
         assert!(
-            html.contains(r#"<s-banner tone="critical">Field &quot;percent&quot;: must be at least 0 (was -1)</s-banner>"#),
+            html.contains(
+                r#"<s-banner tone="critical">Field &quot;percent&quot;: must be at least 0 (was -1)</s-banner>"#
+            ),
             "{html}"
         );
     }
@@ -543,10 +584,17 @@ mod tests {
     fn renders_the_form_of_an_instance_with_its_deletion() {
         let definition = discount();
         let function = AppFunction::of("discount", &definition);
-        let saved = instance(json!({ "id": "gid://shopify/DiscountNode/1", "title": "Volume", "config": { "percent": 10 } }));
+        let saved =
+            instance(json!({ "id": "gid://shopify/DiscountNode/1", "title": "Volume", "config": { "percent": 10 } }));
         let html = form_view(&function, Some(&saved), &FormState::default()).into_string();
-        assert!(html.contains(r#"<input type="hidden" name="_action" value="update"><s-page heading="Edit instance">"#), "{html}");
-        assert!(html.contains(r#"name="config.percent" label="Percent" value="10""#), "{html}");
+        assert!(
+            html.contains(r#"<input type="hidden" name="_action" value="update"><s-page heading="Edit instance">"#),
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"name="config.percent" label="Percent" value="10""#),
+            "{html}"
+        );
         assert!(html.contains(">Save</s-button>"), "{html}");
         assert!(
             html.contains(r#"<s-button variant="secondary" tone="critical" commandFor="delete-function-instance-modal" command="--show">Delete instance</s-button>"#),
@@ -559,13 +607,23 @@ mod tests {
         );
         assert_eq!(html.matches(r#"<s-select name="mode""#).count(), 2, "{html}");
         assert!(
-            html.contains(r#"<s-button slot="primary-action" type="submit" variant="primary" tone="critical">Delete</s-button>"#),
+            html.contains(
+                r#"<s-button slot="primary-action" type="submit" variant="primary" tone="critical">Delete</s-button>"#
+            ),
             "{html}"
         );
         // A refused deletion opens its modal again.
-        let form = refused(DELETE, &[("_action", DELETE), ("mode", "")], &[("mode", "Choose")], None);
+        let form = refused(
+            DELETE,
+            &[("_action", DELETE), ("mode", "")],
+            &[("mode", "Choose")],
+            None,
+        );
         let html = form_view(&function, Some(&saved), &form).into_string();
-        assert!(html.contains(r#"accessibilityLabel="Confirm function instance deletion" data-openshop-open>"#), "{html}");
+        assert!(
+            html.contains(r#"accessibilityLabel="Confirm function instance deletion" data-openshop-open>"#),
+            "{html}"
+        );
         assert!(html.contains(r#"value="" error="Choose""#), "{html}");
         // The other form is shown as it was.
         assert!(html.contains(r#"value="10""#), "{html}");
@@ -575,7 +633,9 @@ mod tests {
     fn a_type_without_update_is_read_only() {
         let definition = cart_transform();
         let function = AppFunction::of("cartTransform", &definition);
-        let saved = instance(json!({ "id": "gid://shopify/CartTransform/1", "blockOnFailure": true, "config": { "message": "hi" } }));
+        let saved = instance(
+            json!({ "id": "gid://shopify/CartTransform/1", "blockOnFailure": true, "config": { "message": "hi" } }),
+        );
         let html = form_view(&function, Some(&saved), &FormState::default()).into_string();
         assert!(html.contains(r#"type="submit" disabled>Save</s-button>"#), "{html}");
         assert!(html.contains("This function type does not support updates."), "{html}");
@@ -586,13 +646,17 @@ mod tests {
         // No discount, no mode.
         assert!(!html.contains(r#"name="mode""#), "{html}");
         let new = form_view(&function, None, &FormState::default()).into_string();
-        assert!(new.contains(r#"label="Block checkout when the Cart Transform fails">"#), "{new}");
+        assert!(
+            new.contains(r#"label="Block checkout when the Cart Transform fails">"#),
+            "{new}"
+        );
         assert!(new.contains("New Cart Transform"), "{new}");
     }
 
     #[test]
     fn a_password_saved_is_never_shown() {
-        let definition = Function::new(FunctionType::DeliveryCustomization, "rules").field("token", Field::password("Token"));
+        let definition =
+            Function::new(FunctionType::DeliveryCustomization, "rules").field("token", Field::password("Token"));
         let function = AppFunction::of("rules", &definition);
         let saved = instance(json!({ "id": "1", "config": { "token": "s3cret" } }));
         let html = form_view(&function, Some(&saved), &FormState::default()).into_string();
@@ -602,5 +666,4 @@ mod tests {
         assert!(!listed.contains("s3cret"), "{listed}");
         assert!(listed.contains("token: ••••••••"), "{listed}");
     }
-
 }

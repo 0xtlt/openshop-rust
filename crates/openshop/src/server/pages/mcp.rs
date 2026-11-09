@@ -198,8 +198,9 @@ mod tests {
 
     #[test]
     fn reads_the_create_form_as_the_api_takes_it() {
-        let fields =
-            parse_fields(b"_action=createToken&name=Claude&expiresInDays=30&permissions=read_logs&permissions=run_flows");
+        let fields = parse_fields(
+            b"_action=createToken&name=Claude&expiresInDays=30&permissions=read_logs&permissions=run_flows",
+        );
         assert_eq!(
             Value::Object(create_body(&fields)),
             json!({ "name": "Claude", "expiresInDays": 30, "permissions": ["read_logs", "run_flows"] })
@@ -227,7 +228,10 @@ mod tests {
         assert_eq!(public.field_errors.as_ref().unwrap()["name"], "Token name is required.");
         let revoked = refusal(TokenRefusal::Revoked("rotate"));
         let public = revoked.downcast_ref::<AdminPublicError>().unwrap();
-        assert_eq!((public.status, public.message.as_str()), (409, "Cannot rotate a revoked token"));
+        assert_eq!(
+            (public.status, public.message.as_str()),
+            (409, "Cannot rotate a revoked token")
+        );
         assert!(public.field_errors.is_none());
         let missing = refusal(TokenRefusal::NotFound);
         assert_eq!(missing.downcast_ref::<AdminPublicError>().unwrap().status, 404);

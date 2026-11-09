@@ -1,5 +1,5 @@
 //! The HTTP server: OAuth, the Admin API, webhooks, app proxies, public routes,
-//! the MCP endpoint, the embedded admin UI and the operator dashboard.
+//! the MCP endpoint, the admin it renders and the operator dashboard.
 
 pub mod admin_pages;
 pub mod api;
@@ -14,6 +14,7 @@ pub mod functions;
 pub mod hmac;
 pub mod http;
 pub mod jwt;
+mod launch;
 mod limits;
 mod linger;
 pub mod log_query;
@@ -27,19 +28,18 @@ pub mod routes;
 pub mod shop;
 pub mod shop_domain;
 pub mod shopify_apps;
-pub mod static_ui;
 pub mod webhooks;
 
 use std::net::SocketAddr;
 use std::sync::{Arc, LazyLock};
 
 use anyhow::{Context, Result};
-use axum::{Router, ServiceExt};
 use axum::extract::{DefaultBodyLimit, Request, State};
 use axum::http::{HeaderName, HeaderValue, Method, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::Response;
 use axum::routing::{get, post};
+use axum::{Router, ServiceExt};
 use regex::Regex;
 use serde_json::json;
 use tokio::net::TcpListener;
@@ -58,7 +58,6 @@ use crate::types::AdminPageMode;
 use openshop_shared::admin_page_from_api_path;
 
 pub use self::limits::{DEFAULT_MAX_CONCURRENT_REQUESTS, DEFAULT_REQUEST_TIMEOUT};
-pub use self::static_ui::UiSource;
 
 const ROBOTS_HEADER: &str = "noindex, nofollow, noarchive, nosnippet";
 /// Request bodies above this size are rejected with `413` unless the
@@ -66,13 +65,30 @@ const ROBOTS_HEADER: &str = "noindex, nofollow, noarchive, nosnippet";
 pub const DEFAULT_MAX_REQUEST_BODY_BYTES: usize = 2 * 1024 * 1024;
 const ROBOTS_TXT: &str = "User-agent: *\nDisallow: /\n";
 
+/// The admin the server serves.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum UiSource {
+    /// API only: no admin is served, and CORS is enabled on `/api`.
+    None,
+    /// The admin the server renders, page by page. The default.
+    #[default]
+    Server,
+}
+
+impl UiSource {
+    pub fn is_enabled(&self) -> bool {
+        !matches!(self, Self::None)
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct ServerOptions {
     /// Admin UI to serve: the one the server renders, by default. With
     /// `UiSource::None` the server is API-only and enables CORS on `/api`.
     pub ui: UiSource,
-    /// Development mode: the UI shell is served without the signed-query gate,
-    /// and reloads when the server is started again or its bundle rebuilt.
+    /// Development mode: a page of the admin may be framed by any shop and by
+    /// `localhost`, and reloads when the server is started again; CORS is
+    /// enabled on `/api`.
     pub dev: bool,
 }
 
@@ -185,9 +201,8 @@ pub(crate) fn create_router(app: &OpenShop, options: ServerOptions, log: bool) -
         api = with_cors(api, &cors);
     }
 
-    // Development: a page of the admin UI reloads when the server is started
-    // again or its bundle rebuilt.
-    let reload = (options.dev && options.ui.is_enabled()).then(|| Arc::new(reload::Served::new(&options.ui)));
+    // Development: a page of the admin reloads when the server is started again.
+    let reload = (options.dev && options.ui.is_enabled()).then(|| Arc::new(reload::Served::new()));
 
     let ui_options = options.clone();
     let ui_reload = reload.clone();
@@ -195,12 +210,9 @@ pub(crate) fn create_router(app: &OpenShop, options: ServerOptions, log: bool) -
         let options = ui_options.clone();
         let reload = ui_reload.clone();
         async move {
-            if matches!(options.ui, UiSource::Server) {
-                pages::serve(state.0, options, reload, request).await
-            } else if options.ui.is_enabled() {
-                static_ui::serve_ui(state, options, reload, request).await
-            } else {
-                not_found()
+            match options.ui {
+                UiSource::Server => pages::serve(state.0, options, reload, request).await,
+                UiSource::None => not_found(),
             }
         }
     };

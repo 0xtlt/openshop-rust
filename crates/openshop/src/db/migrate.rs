@@ -148,11 +148,11 @@ async fn ensure_migrations_table(pool: &PgPool) -> Result<()> {
 
 async fn applied_migrations(pool: &PgPool) -> Result<Vec<(String, String)>> {
     ensure_migrations_table(pool).await?;
-    Ok(
-        sqlx::query_as(sqlx::AssertSqlSafe(format!("SELECT tag, checksum FROM {MIGRATIONS_TABLE} ORDER BY tag")))
-            .fetch_all(pool)
-            .await?,
-    )
+    Ok(sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "SELECT tag, checksum FROM {MIGRATIONS_TABLE} ORDER BY tag"
+    )))
+    .fetch_all(pool)
+    .await?)
 }
 
 fn assert_unmodified(file: &MigrationFile, applied: &[(String, String)]) -> Result<bool> {
@@ -204,15 +204,16 @@ pub async fn assert_migrated(pool: &PgPool, cwd: &Path) -> Result<()> {
         );
     }
 
-    let applied: Vec<(String,)> = match sqlx::query_as(sqlx::AssertSqlSafe(format!("SELECT tag FROM {MIGRATIONS_TABLE}")))
-        .fetch_all(pool)
-        .await
-    {
-        Ok(applied) => applied,
-        // `undefined_table`: no migration was ever applied.
-        Err(sqlx::Error::Database(error)) if error.code().as_deref() == Some("42P01") => Vec::new(),
-        Err(error) => return Err(error.into()),
-    };
+    let applied: Vec<(String,)> =
+        match sqlx::query_as(sqlx::AssertSqlSafe(format!("SELECT tag FROM {MIGRATIONS_TABLE}")))
+            .fetch_all(pool)
+            .await
+        {
+            Ok(applied) => applied,
+            // `undefined_table`: no migration was ever applied.
+            Err(sqlx::Error::Database(error)) if error.code().as_deref() == Some("42P01") => Vec::new(),
+            Err(error) => return Err(error.into()),
+        };
     let pending: Vec<&str> = files
         .iter()
         .map(|file| file.tag.as_str())
@@ -244,11 +245,12 @@ pub async fn migrate_schema(pool: &PgPool, cwd: &Path) -> Result<Vec<String>> {
         let mut tx = pool.begin().await?;
         // Serialize concurrent migrators (several replicas deploying at once).
         sqlx::query(MIGRATION_LOCK).execute(&mut *tx).await?;
-        let applied: Vec<(String, String)> =
-            sqlx::query_as(sqlx::AssertSqlSafe(format!("SELECT tag, checksum FROM {MIGRATIONS_TABLE} WHERE tag = $1")))
-                .bind(&file.tag)
-                .fetch_all(&mut *tx)
-                .await?;
+        let applied: Vec<(String, String)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+            "SELECT tag, checksum FROM {MIGRATIONS_TABLE} WHERE tag = $1"
+        )))
+        .bind(&file.tag)
+        .fetch_all(&mut *tx)
+        .await?;
         if assert_unmodified(&file, &applied)? {
             continue;
         }
@@ -496,12 +498,19 @@ pub async fn push_schema(pool: &PgPool, models: &[Table], production: bool) -> R
 
     // A fresh database, or one that is up to date, takes everything in one round trip.
     let together: Vec<&str> = steps.iter().map(|step| step.sql.as_str()).collect();
-    if sqlx::raw_sql(sqlx::AssertSqlSafe(&*together.join("\n"))).execute(pool).await.is_ok() {
+    if sqlx::raw_sql(sqlx::AssertSqlSafe(&*together.join("\n")))
+        .execute(pool)
+        .await
+        .is_ok()
+    {
         return Ok(());
     }
     // Something cannot be added to an existing table: apply the rest, and say what is left to a migration.
     for step in steps {
-        match (sqlx::raw_sql(sqlx::AssertSqlSafe(&*step.sql)).execute(pool).await, step.addition) {
+        match (
+            sqlx::raw_sql(sqlx::AssertSqlSafe(&*step.sql)).execute(pool).await,
+            step.addition,
+        ) {
             (Ok(_), _) => {}
             (Err(error), None) => return Err(error.into()),
             (Err(error), Some((table, what))) => tracing::warn!(
@@ -637,7 +646,9 @@ mod tests {
         generate_framework(&dir, &[], false).unwrap();
         let error = check_migrations(&dir, &models).unwrap_err().to_string();
         assert!(
-            error.contains("\n  - CREATE TABLE IF NOT EXISTS \"reviews\"\n  - CREATE TABLE IF NOT EXISTS \"review_votes\"\n"),
+            error.contains(
+                "\n  - CREATE TABLE IF NOT EXISTS \"reviews\"\n  - CREATE TABLE IF NOT EXISTS \"review_votes\"\n"
+            ),
             "{error}"
         );
 
@@ -846,7 +857,11 @@ mod tests {
         let [path] = &generated.files[..] else {
             panic!("{:?}", generated.files)
         };
-        assert!(std::fs::read_to_string(path).unwrap().contains("CREATE TABLE IF NOT EXISTS \"reviews\""));
+        assert!(
+            std::fs::read_to_string(path)
+                .unwrap()
+                .contains("CREATE TABLE IF NOT EXISTS \"reviews\"")
+        );
         assert_eq!(generated.snapshot, Some(folder.join(SNAPSHOT_FILE)));
         check_migrations(&dir, &[reviews]).unwrap();
         std::fs::remove_dir_all(dir).ok();
@@ -904,5 +919,4 @@ mod tests {
         let error = assert_unmodified(&file, &[("0001_a".into(), checksum("SELECT 1;"))]).unwrap_err();
         assert!(error.to_string().contains("was modified after it was applied"));
     }
-
 }

@@ -1,11 +1,10 @@
-use std::borrow::Cow;
 use std::time::Duration;
 
 use crate::common::noop_flow;
 use openshop::builder::Route;
-use openshop::server::{DEFAULT_MAX_REQUEST_BODY_BYTES, ServerOptions};
-use openshop::testing::{TestContext, TestOptions, sign_query, to_query_string};
-use openshop::{OpenShopConfig, UiSource, Value, json, response};
+use openshop::server::DEFAULT_MAX_REQUEST_BODY_BYTES;
+use openshop::testing::TestContext;
+use openshop::{OpenShopConfig, Value, json, response};
 use reqwest::Method;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -158,54 +157,6 @@ async fn responses_are_compressed_when_the_client_accepts_it() {
         .unwrap();
     assert!(small.headers().get("content-encoding").is_none());
     assert_eq!(small.json::<Value>().await.unwrap()["status"], "ok");
-    ctx.shutdown().await.unwrap();
-}
-
-fn bundled_asset(path: &str) -> Option<Cow<'static, [u8]>> {
-    match path {
-        "index.html" => Some(Cow::Borrowed(
-            br#"<html><head><meta name="shopify-api-key" content="" /></head><body>custom bundle</body></html>"#,
-        )),
-        "app-0123456789abcdef.js" => Some(Cow::Borrowed(b"console.log('custom')")),
-        _ => None,
-    }
-}
-
-#[tokio::test]
-async fn serves_a_ui_bundle_compiled_into_the_application() {
-    let ctx = TestContext::with_options(
-        OpenShopConfig::builder().build().unwrap(),
-        TestOptions {
-            access_token: Some("shpat_test".to_string()),
-            server: ServerOptions {
-                ui: UiSource::Assets(bundled_asset),
-                dev: false,
-            },
-            ..Default::default()
-        },
-    )
-    .await
-    .unwrap();
-
-    let query = to_query_string(&sign_query(&[("shop", ctx.shop.as_str())], &ctx.secret));
-    let shell = ctx.http.get(ctx.url_for(&format!("/?{query}"))).send().await.unwrap();
-    assert_eq!(shell.status(), 200);
-    let html = shell.text().await.unwrap();
-    assert!(html.contains("custom bundle"));
-    assert!(html.contains(r#"<meta name="shopify-api-key" content="test-app" />"#));
-
-    let asset = ctx
-        .http
-        .get(ctx.url_for("/app-0123456789abcdef.js"))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(asset.status(), 200);
-    assert_eq!(asset.headers()["cache-control"], "public, max-age=31536000, immutable");
-    assert_eq!(asset.text().await.unwrap(), "console.log('custom')");
-
-    let missing = ctx.http.get(ctx.url_for("/missing.js")).send().await.unwrap();
-    assert_eq!(missing.status(), 404);
     ctx.shutdown().await.unwrap();
 }
 

@@ -12,8 +12,8 @@ use maud::{Markup, html};
 use serde_json::Value;
 
 use super::BuiltinPage;
-use super::ui::{status_tone, time_ago, to_fixed_1};
 use super::providers::connection_status;
+use super::ui::{status_tone, time_ago, to_fixed_1};
 use crate::admin::{AdminPublicError, Outcome};
 use crate::db::schema::FlowRun;
 use crate::server::api::pages::resolved_admin_pages;
@@ -30,7 +30,6 @@ const RECENT_LIMIT: &str = "10";
 const RECENT_SHOWN: usize = 5;
 /// The failed runs the banner names.
 const FAILED_SHOWN: usize = 3;
-
 
 /// A run as the dashboard shows it.
 struct Run {
@@ -123,8 +122,6 @@ pub(super) async fn render(page: &BuiltinPage<'_>) -> Result<Markup> {
     }))
 }
 
-
-
 /// How long a run took: `1.3s`, `250ms`; `…` while it runs, `—` otherwise.
 fn duration(elapsed_ms: Option<i64>, status: &str) -> String {
     match elapsed_ms.map(|ms| ms.max(0)) {
@@ -135,10 +132,13 @@ fn duration(elapsed_ms: Option<i64>, status: &str) -> String {
     }
 }
 
-
 fn view(dashboard: &Dashboard) -> Markup {
     let now = dashboard.now;
-    let runs = dashboard.flows.as_ref().map(|(_, runs)| runs.as_slice()).unwrap_or_default();
+    let runs = dashboard
+        .flows
+        .as_ref()
+        .map(|(_, runs)| runs.as_slice())
+        .unwrap_or_default();
     let failed: Vec<&Run> = runs.iter().filter(|run| run.status == "failed").collect();
     html! {
         s-page heading="Dashboard" data-openshop-refresh=(REFRESH_MS) {
@@ -294,7 +294,9 @@ mod tests {
     use chrono::Duration;
 
     fn now() -> DateTime<Utc> {
-        DateTime::parse_from_rfc3339("2026-11-09T12:00:00Z").unwrap().with_timezone(&Utc)
+        DateTime::parse_from_rfc3339("2026-11-09T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc)
     }
 
     fn run(id: &str, flow: &str, status: &str, minutes_ago: i64, elapsed_ms: Option<i64>) -> Run {
@@ -344,19 +346,28 @@ mod tests {
             "{html}"
         );
         // The failed runs, each with a link.
-        assert!(html.contains(r#"<s-banner tone="critical" heading="2 failed runs">"#), "{html}");
+        assert!(
+            html.contains(r#"<s-banner tone="critical" heading="2 failed runs">"#),
+            "{html}"
+        );
         assert!(
             html.contains(r#"<s-paragraph><s-text type="strong">syncOrders</s-text> — 5m ago <s-link href="/runs/r1">View</s-link></s-paragraph>"#),
             "{html}"
         );
         assert!(html.contains(r#"— 2d ago <s-link href="/runs/r4">"#), "{html}");
         // The cards.
-        assert!(html.contains(r#"<s-text color="subdued">Flows</s-text><s-heading>2</s-heading>"#), "{html}");
+        assert!(
+            html.contains(r#"<s-text color="subdued">Flows</s-text><s-heading>2</s-heading>"#),
+            "{html}"
+        );
         assert!(
             html.contains(r#"<s-heading>3</s-heading><s-text color="subdued">(1 disabled)</s-text>"#),
             "{html}"
         );
-        assert!(html.contains(r#"<s-text color="subdued">Providers</s-text><s-heading>2</s-heading>"#), "{html}");
+        assert!(
+            html.contains(r#"<s-text color="subdued">Providers</s-text><s-heading>2</s-heading>"#),
+            "{html}"
+        );
         assert!(
             html.contains(r#"<s-text color="subdued">Last activity</s-text><s-heading>5m ago</s-heading>"#),
             "{html}"
@@ -372,15 +383,29 @@ mod tests {
         assert!(html.contains(r#"<s-text color="subdued">1.3s</s-text>"#), "{html}");
         assert!(html.contains(r#"<s-text color="subdued">999ms</s-text>"#), "{html}");
         assert!(html.contains(r#"<s-text color="subdued">…</s-text>"#), "{html}");
-        assert!(html.contains(r#"<s-button variant="tertiary" href="/flows">View all runs</s-button>"#), "{html}");
-        // The providers, each with its status and a link to its form.
-        assert!(html.contains(r#"<s-badge tone="success">Connected</s-badge>"#), "{html}");
-        assert!(html.contains(r#"<s-badge tone="warning">Not configured</s-badge>"#), "{html}");
         assert!(
-            html.contains(r#"<s-button variant="secondary" href="/providers?provider=erp%20%26%20co">Configure</s-button>"#),
+            html.contains(r#"<s-button variant="tertiary" href="/flows">View all runs</s-button>"#),
             "{html}"
         );
-        assert!(html.contains(r#"<s-text type="strong">erp &amp; co</s-text>"#), "{html}");
+        // The providers, each with its status and a link to its form.
+        assert!(
+            html.contains(r#"<s-badge tone="success">Connected</s-badge>"#),
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"<s-badge tone="warning">Not configured</s-badge>"#),
+            "{html}"
+        );
+        assert!(
+            html.contains(
+                r#"<s-button variant="secondary" href="/providers?provider=erp%20%26%20co">Configure</s-button>"#
+            ),
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"<s-text type="strong">erp &amp; co</s-text>"#),
+            "{html}"
+        );
     }
 
     #[test]
@@ -433,7 +458,10 @@ mod tests {
         assert!(!html.contains("Last activity"), "{html}");
         assert!(!html.contains(">Flows<"), "{html}");
         assert!(!html.contains("s-banner"), "{html}");
-        assert!(html.contains(">Crons<") && html.contains(r#"heading="Providers""#), "{html}");
+        assert!(
+            html.contains(">Crons<") && html.contains(r#"heading="Providers""#),
+            "{html}"
+        );
 
         let html = view(&Dashboard {
             providers: None,

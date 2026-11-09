@@ -230,8 +230,11 @@ fn normalize_resources(
             }
         }
         let mut definition = resource.clone();
-        definition.required_permissions =
-            assert_known_permissions(&format!("mcp.{list}.{uri}"), &resource.required_permissions, permissions)?;
+        definition.required_permissions = assert_known_permissions(
+            &format!("mcp.{list}.{uri}"),
+            &resource.required_permissions,
+            permissions,
+        )?;
         resources.insert(uri.clone(), RegisteredMcpResource { source, definition });
     }
     Ok(resources)

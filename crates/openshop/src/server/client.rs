@@ -98,7 +98,16 @@ mod tests {
 
     #[test]
     fn a_proxy_on_a_private_network_names_the_client_it_saw() {
-        for proxy in ["127.0.0.1", "::1", "10.0.0.2", "172.16.5.4", "192.168.1.1", "169.254.1.1", "fd00::2", "::ffff:10.0.0.2"] {
+        for proxy in [
+            "127.0.0.1",
+            "::1",
+            "10.0.0.2",
+            "172.16.5.4",
+            "192.168.1.1",
+            "169.254.1.1",
+            "fd00::2",
+            "::ffff:10.0.0.2",
+        ] {
             // The client wrote the first address; the proxy added the last.
             let headers = forwarded(&["6.6.6.6, 198.51.100.4"]);
             assert_eq!(client_ip(peer(proxy).as_ref(), &headers), ip("198.51.100.4"), "{proxy}");
@@ -106,7 +115,11 @@ mod tests {
             assert_eq!(client_ip(peer(proxy).as_ref(), &headers), ip("198.51.100.4"), "{proxy}");
         }
         // Nothing usable: the proxy itself is the client.
-        for headers in [HeaderMap::new(), forwarded(&["unknown"]), forwarded(&["198.51.100.4, nope"])] {
+        for headers in [
+            HeaderMap::new(),
+            forwarded(&["unknown"]),
+            forwarded(&["198.51.100.4, nope"]),
+        ] {
             assert_eq!(client_ip(peer("10.0.0.2").as_ref(), &headers), ip("10.0.0.2"));
         }
     }

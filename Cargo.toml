@@ -10,8 +10,6 @@ members = [
   "templates/public",
   "apps/preview",
 ]
-# The admin UI targets wasm32 and is built with trunk, with its own profile and lockfile.
-exclude = ["crates/openshop-ui"]
 
 [workspace.package]
 version = "0.0.12-beta.0"
@@ -31,27 +29,23 @@ aes-gcm = "0.11"
 anyhow = "1"
 axum = { version = "0.8", default-features = false, features = ["http1", "json", "query", "tokio"] }
 base64 = "0.23"
-brotli = "9"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde", "std"] }
 chrono-tz = { version = "0.10", default-features = false }
 croner = "4"
 # Without its editor and password prompts.
 dialoguer = { version = "0.12", default-features = false }
-flate2 = "1"
 futures = { version = "0.3", default-features = false, features = ["std", "alloc"] }
 hex = "0.4"
 hmac = "0.13"
 indexmap = { version = "2", features = ["serde"] }
-# The HTML of the server-rendered admin pages: `html!`, compiled with the server.
+# The HTML of the admin pages, which the server renders: `html!`.
 maud = "0.27"
-mime_guess = "2"
 notify = "8"
 proc-macro2 = "1"
 quote = "1"
 rand = "0.10"
 regex = "1"
 reqwest = { version = "0.13", default-features = false, features = ["json", "query", "rustls"] }
-rust-embed = { version = "8", features = ["debug-embed"] }
 schemars = "1"
 # Without its transport: reports are sent with the `reqwest` of the workspace.
 sentry = { version = "0.49", default-features = false, features = ["anyhow", "backtrace", "contexts", "debug-images", "httpdate", "panic"] }

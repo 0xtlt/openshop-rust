@@ -28,16 +28,17 @@ pub(super) fn run_duration(run: &FlowRun) -> String {
     }
 }
 
-
 #[cfg(test)]
 pub(super) mod tests {
     use super::*;
-    use chrono::{DateTime, Utc};
     use chrono::Duration;
+    use chrono::{DateTime, Utc};
 
     /// A run of `syncOrders` that started and finished `started` and `completed` ms after 2026-10-06 12:00 UTC.
     pub(in crate::server::pages::flows) fn run(status: &str, started: Option<i64>, completed: Option<i64>) -> FlowRun {
-        let base = DateTime::parse_from_rfc3339("2026-10-06T12:00:00Z").unwrap().with_timezone(&Utc);
+        let base = DateTime::parse_from_rfc3339("2026-10-06T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
         FlowRun {
             id: uuid::Uuid::nil(),
             app_handle: "default".to_string(),
@@ -58,8 +59,6 @@ pub(super) mod tests {
         }
     }
 
-
-
     #[test]
     fn says_how_long_a_run_took() {
         assert_eq!(run_duration(&run("completed", Some(0), Some(999))), "999ms");
@@ -70,5 +69,4 @@ pub(super) mod tests {
         assert_eq!(run_duration(&run("pending", None, None)), "—");
         assert_eq!(run_duration(&run("sleeping", Some(0), None)), "—");
     }
-
 }

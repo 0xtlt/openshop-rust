@@ -287,7 +287,10 @@ mod tests {
         assert_eq!(error, MISSING_KEY);
         assert!(error.contains("openssl rand -hex 32") && error.contains("OPENSHOP_ENV=development"));
         assert_eq!(
-            crypto.encrypt_config(&object(json!({ "apiKey": "sk-123" }))).unwrap_err().to_string(),
+            crypto
+                .encrypt_config(&object(json!({ "apiKey": "sk-123" })))
+                .unwrap_err()
+                .to_string(),
             MISSING_KEY
         );
         assert_eq!(crypto.check_configured().unwrap_err().to_string(), MISSING_KEY);

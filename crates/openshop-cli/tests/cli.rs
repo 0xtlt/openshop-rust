@@ -55,7 +55,7 @@ fn help_after_a_command_of_the_cli_prints_the_usage_and_does_nothing_else() {
         &["init", "--help"][..],
         &["init", "my-app", "-h"],
         &["init-ui", "--help"],
-        &["build-ui", "-h"],
+        &["init-ui", "-h"],
     ] {
         let output = Command::new(env!("CARGO_BIN_EXE_openshop"))
             .args(args)
@@ -72,4 +72,19 @@ fn help_after_a_command_of_the_cli_prints_the_usage_and_does_nothing_else() {
     // Nothing was scaffolded.
     assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0);
     std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn build_ui_is_no_longer_a_command() {
+    // The admin is rendered by the server: there is no bundle to build.
+    let output = Command::new(env!("CARGO_BIN_EXE_openshop"))
+        .arg("build-ui")
+        .output()
+        .expect("the binary runs");
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("Unknown command: build-ui"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }

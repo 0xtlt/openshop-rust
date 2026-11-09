@@ -129,7 +129,7 @@
   }
 
   // The text of the element `id`, for a copy or a download that names it.
-  const textOf = (id) => document.getElementById(id)?.textContent ?? 
+  const textOf = (id) => document.getElementById(id)?.textContent ?? ''
 
   async function visit(url, { method = 'GET', body, push = true, button, quiet = false } = {}) {
     current?.abort()

@@ -1,7 +1,6 @@
 //! The admin rendered by the server, page by page (`UiSource::Server`):
-//! HTML made of Shopify's Polaris web components, one hand-written script
-//! (`openshop.js`), no bundle and no WebAssembly. Experimental, next to the
-//! Leptos admin UI; see `docs/src/reference/server-rendered-ui.md`.
+//! HTML made of Shopify's Polaris web components and one hand-written script
+//! (`openshop.js`). See `docs/src/reference/custom-admin-pages.md`.
 //!
 //! A page is a URL. A request for it is authenticated with a session token:
 //! the `Authorization` header that App Bridge's `fetch` adds to the requests
@@ -44,17 +43,17 @@ use super::admin_pages::{call_function, create_context, page_is_allowed};
 use super::api::pages::resolved_admin_pages;
 use super::http::{catch_panic, header, not_found, parse_query, report_failure};
 use super::jwt::read_jwt_audience;
+use super::launch::{forget_plan_on_welcome, is_installed_for_launch, is_ui_shell_path, open_from_shopify_admin};
 use super::reload::Served;
 use super::shop::{ShopSession, session_of};
 use super::shop_domain::normalize_shop_domain;
-use super::static_ui::{forget_plan_on_welcome, is_installed_for_launch, is_ui_shell_path, open_from_shopify_admin};
 use crate::admin::{
     ACTION_FIELD, AdminFunctionKind, AdminPublicError, CustomAdminPage, FormState, Outcome, PageRequest,
     fields_to_json, parse_fields, with_outcome,
 };
 use crate::app::OpenShop;
 use crate::engine::step::error_message;
-use crate::runtime::logger;
+use crate::runtime::{logger, report};
 use crate::types::{AdminPageMode, JsonMap};
 use openshop_shared::rpc::encode_uri_component as encode;
 use openshop_shared::{ADMIN_HOME_PATH, AdminPageId, custom_admin_route_params, match_custom_admin_path};
@@ -107,7 +106,12 @@ fn target<'a>(app: &'a OpenShop, pathname: &str) -> Option<Target<'a>> {
     openshop_shared::admin_page_from_ui_path(pathname).map(Target::Builtin)
 }
 
-pub(crate) async fn serve(app: OpenShop, options: ServerOptions, reload: Option<Arc<Served>>, request: Request) -> Response {
+pub(crate) async fn serve(
+    app: OpenShop,
+    options: ServerOptions,
+    reload: Option<Arc<Served>>,
+    request: Request,
+) -> Response {
     let pathname = request.uri().path().to_string();
     if !is_ui_shell_path(&pathname) || !matches!(*request.method(), Method::GET | Method::HEAD | Method::POST) {
         return not_found();
@@ -118,7 +122,7 @@ pub(crate) async fn serve(app: OpenShop, options: ServerOptions, reload: Option<
     let fetch = header(&headers, FETCH_HEADER).is_some();
     let endpoints = app.endpoints();
 
-    // A launch Shopify signed: the shop is installed first, as for the Leptos admin.
+    // A launch Shopify signed: the shop is installed first.
     if !fetch
         && query.contains_key("hmac")
         && let Ok((shopify_app, signed)) = app.apps().by_signed_query(&raw_query)
@@ -163,6 +167,7 @@ pub(crate) async fn serve(app: OpenShop, options: ServerOptions, reload: Option<
         };
     };
 
+    let shop = session.shop.clone();
     let call = PageCall {
         app: &app,
         reload: reload.as_deref(),
@@ -178,16 +183,17 @@ pub(crate) async fn serve(app: OpenShop, options: ServerOptions, reload: Option<
     } else {
         render(&call, StatusCode::OK, None, &FormState::default(), None).await
     };
-    finish(response, &app, options.dev)
+    finish(response, &app, options.dev, &shop)
 }
 
-/// The response with the headers of every page: framed by the admin only,
-/// never stored, never sniffed.
-fn finish(mut response: Response, app: &OpenShop, dev: bool) -> Response {
-    let mut ancestors = "https://*.myshopify.com https://admin.shopify.com".to_string();
-    if dev {
-        ancestors.push_str(" http://localhost:*");
-    }
+/// The response with the headers of every page: framed by the admin of its
+/// shop only (any shop in development), never stored, never sniffed.
+fn finish(mut response: Response, app: &OpenShop, dev: bool, shop: &str) -> Response {
+    let mut ancestors = if dev {
+        "https://*.myshopify.com https://admin.shopify.com http://localhost:*".to_string()
+    } else {
+        format!("https://{shop} https://admin.shopify.com")
+    };
     if let Some(origin) = &app.endpoints().admin_origin {
         ancestors.push_str(&format!(" {origin}"));
     }
@@ -215,13 +221,21 @@ fn see_other(location: &str) -> Response {
 }
 
 fn page_url(pathname: &str, query: &str) -> String {
-    if query.is_empty() { pathname.to_string() } else { format!("{pathname}?{query}") }
+    if query.is_empty() {
+        pathname.to_string()
+    } else {
+        format!("{pathname}?{query}")
+    }
 }
 
 /// The query of the URL without its `id_token`: App Bridge adds a fresh one.
 fn without_token(query: &str) -> String {
     url::form_urlencoded::Serializer::new(String::new())
-        .extend_pairs(parse_fields(query.as_bytes()).iter().filter(|(name, _)| name != "id_token"))
+        .extend_pairs(
+            parse_fields(query.as_bytes())
+                .iter()
+                .filter(|(name, _)| name != "id_token"),
+        )
         .finish()
 }
 
@@ -252,11 +266,18 @@ pub(crate) async fn bounce_page(State(app): State<OpenShop>, request: Request) -
     if !is_local_path(reload) {
         return not_found();
     }
-    let shopify_app = app.apps().by_handle(query.get("app").map(String::as_str)).ok().or_else(|| app.apps().all().first());
+    let shopify_app = app
+        .apps()
+        .by_handle(query.get("app").map(String::as_str))
+        .ok()
+        .or_else(|| app.apps().all().first());
     let api_key = shopify_app.map_or("", |shopify_app| shopify_app.api_key.as_str());
     let markup = shell::bounce(api_key, app.endpoints());
     (
-        [(CONTENT_TYPE, "text/html; charset=utf-8"), (axum::http::header::CACHE_CONTROL, "no-store")],
+        [
+            (CONTENT_TYPE, "text/html; charset=utf-8"),
+            (axum::http::header::CACHE_CONTROL, "no-store"),
+        ],
         markup.into_string(),
     )
         .into_response()
@@ -294,7 +315,12 @@ async fn render(
     };
     let menu = shell::Menu::of(app, &call.session).await;
     let document = shell::document(app, &call.session, &menu, notice, page, call.reload);
-    (status, [(CONTENT_TYPE, "text/html; charset=utf-8")], document.into_string()).into_response()
+    (
+        status,
+        [(CONTENT_TYPE, "text/html; charset=utf-8")],
+        document.into_string(),
+    )
+        .into_response()
 }
 
 /// What a page shows: itself, or what refused it, with its status.
@@ -399,6 +425,9 @@ async fn render_builtin(
         form,
         revealed: Mutex::new(revealed),
     };
+    report::describe(|description| {
+        description.unit("admin", page.pathname);
+    });
     let rendered = catch_panic("admin page", async {
         match id {
             None => home::render(&page).await,
@@ -434,6 +463,9 @@ async fn submit_builtin(
         form: &form,
         revealed: Mutex::new(None),
     };
+    report::describe(|description| {
+        description.unit("admin", format_args!("{} {action}", page.pathname));
+    });
     let outcome = catch_panic("admin page action", async {
         match id {
             None => home::submit(&page, action, fields).await,
@@ -446,7 +478,12 @@ async fn submit_builtin(
         }
     })
     .await;
-    (outcome, page.revealed.into_inner().unwrap_or_else(std::sync::PoisonError::into_inner))
+    (
+        outcome,
+        page.revealed
+            .into_inner()
+            .unwrap_or_else(std::sync::PoisonError::into_inner),
+    )
 }
 
 /// The answer of a page to an action it does not have.
@@ -460,10 +497,17 @@ async fn render_custom(call: &PageCall<'_>, page: &CustomAdminPage, form: &FormS
         return Err(StatusCode::FORBIDDEN);
     }
     let Some(view) = &page.page.view else {
-        return Ok(Shown::Page(not_ported(&page.route_pattern)));
+        return Ok(Shown::Page(without_view(&page.route_pattern)));
     };
     let params = custom_admin_route_params(&page.route_pattern, &call.pathname).ok_or(StatusCode::NOT_FOUND)?;
-    let ctx = create_context(app, &call.session, params, Uuid::new_v4().to_string(), None);
+    let request_id = Uuid::new_v4().to_string();
+    // What a failure of the view is reported as: the page and the request.
+    report::describe(|description| {
+        description
+            .unit("admin", format_args!("{} view", page.route_pattern))
+            .tag("request_id", &request_id);
+    });
+    let ctx = create_context(app, &call.session, params, request_id, None);
     let request = PageRequest {
         ctx,
         query: call.query.clone(),
@@ -511,7 +555,15 @@ async fn submit(call: &PageCall<'_>, body: &[u8]) -> Response {
         Ok(outcome) if !outcome.field_errors.is_empty() => {
             let form = refused(outcome.field_errors.clone(), outcome.toast.clone());
             let message = outcome.toast.clone().unwrap_or_else(|| first_error(&form.errors));
-            refuse(call, reads_form, &form, StatusCode::UNPROCESSABLE_ENTITY, &message, outcome.toast.as_deref()).await
+            refuse(
+                call,
+                reads_form,
+                &form,
+                StatusCode::UNPROCESSABLE_ENTITY,
+                &message,
+                outcome.toast.as_deref(),
+            )
+            .await
         }
         Ok(outcome) => answer(call, outcome, revealed).await,
         Err(error) => {
@@ -534,7 +586,9 @@ async fn submit(call: &PageCall<'_>, body: &[u8]) -> Response {
                 return fail(call, status, &message).await;
             }
             // The schema's summary is for the fields; the action's message is the action's to say.
-            let said = (error.downcast_ref::<AdminPublicError>().map(|public| public.code.as_str())
+            let said = (error
+                .downcast_ref::<AdminPublicError>()
+                .map(|public| public.code.as_str())
                 != Some("INVALID_INPUT"))
             .then(|| message.clone());
             let form = refused(errors, said);
@@ -595,15 +649,16 @@ async fn answer(call: &PageCall<'_>, outcome: Outcome, revealed: Option<Value>) 
             && let Some(toast) = &outcome.toast
             && let Ok(value) = HeaderValue::from_str(&encode(toast))
         {
-            let name = if outcome.error { TOAST_ERROR_HEADER } else { TOAST_HEADER };
+            let name = if outcome.error {
+                TOAST_ERROR_HEADER
+            } else {
+                TOAST_HEADER
+            };
             response.headers_mut().insert(name, value);
         }
         return response;
     }
-    let next = outcome
-        .redirect
-        .as_deref()
-        .filter(|path| is_local_path(path));
+    let next = outcome.redirect.as_deref().filter(|path| is_local_path(path));
     if !call.fetch {
         return see_other(next.unwrap_or(&page_url(&call.pathname, &call.query)));
     }
@@ -618,7 +673,11 @@ async fn answer(call: &PageCall<'_>, outcome: Outcome, revealed: Option<Value>) 
         None => render(call, StatusCode::OK, None, &FormState::default(), None).await,
     };
     if let Some(toast) = &outcome.toast {
-        let name = if outcome.error { TOAST_ERROR_HEADER } else { TOAST_HEADER };
+        let name = if outcome.error {
+            TOAST_ERROR_HEADER
+        } else {
+            TOAST_HEADER
+        };
         if let Ok(value) = HeaderValue::from_str(&encode(toast)) {
             response.headers_mut().insert(name, value);
         }
@@ -644,7 +703,16 @@ async fn run_action(
         .ok_or_else(not_found)?;
     let params = custom_admin_route_params(&page.route_pattern, &call.pathname).ok_or_else(not_found)?;
     let request_id = Uuid::new_v4().to_string();
-    let schema = function.input.as_ref().map_or(Value::Null, |input| input.json_schema.clone());
+    // What a failure of the action is reported as: the page, the action and the request.
+    report::describe(|description| {
+        description
+            .unit("admin", format_args!("{} {name}", page.route_pattern))
+            .tag("request_id", &request_id);
+    });
+    let schema = function
+        .input
+        .as_ref()
+        .map_or(Value::Null, |input| input.json_schema.clone());
     let input = fields_to_json(&schema, fields);
     let context = create_context(call.app, &call.session, params, request_id.clone(), None);
     let started = Instant::now();
@@ -677,12 +745,12 @@ async fn run_action(
     result.map(|_| outcome.unwrap_or_default())
 }
 
-/// A page that the server does not render yet.
-pub(super) fn not_ported(name: &str) -> Markup {
+/// A page of the application without a view: its functions, and nothing to show.
+fn without_view(name: &str) -> Markup {
     html! {
         s-page heading=(name) {
-            s-banner tone="info" heading="Not rendered by the server yet" {
-                s-paragraph { "This page of the admin is still part of the WebAssembly admin UI." }
+            s-banner tone="info" heading="This page has nothing to show" {
+                s-paragraph { "It declares no view." }
             }
         }
     }

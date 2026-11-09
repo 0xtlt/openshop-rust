@@ -334,7 +334,9 @@ mod tests {
     }
 
     fn now() -> DateTime<Utc> {
-        DateTime::parse_from_rfc3339("2026-10-06T12:05:00Z").unwrap().with_timezone(&Utc)
+        DateTime::parse_from_rfc3339("2026-10-06T12:05:00Z")
+            .unwrap()
+            .with_timezone(&Utc)
     }
 
     fn render(
@@ -370,17 +372,29 @@ mod tests {
     #[test]
     fn lists_the_flows_with_their_crons_and_a_run_form_each() {
         let html = render(&flows(), None, &first_page(), &[], false, &FormState::default());
-        assert!(html.contains(r#"<s-link href="/flows/syncOrders">syncOrders</s-link>"#), "{html}");
+        assert!(
+            html.contains(r#"<s-link href="/flows/syncOrders">syncOrders</s-link>"#),
+            "{html}"
+        );
         // A name is escaped in the markup and encoded in its link.
-        assert!(html.contains(r#"<s-link href="/flows/a%2Fb%20%3Cc%3E">a/b &lt;c&gt;</s-link>"#), "{html}");
+        assert!(
+            html.contains(r#"<s-link href="/flows/a%2Fb%20%3Cc%3E">a/b &lt;c&gt;</s-link>"#),
+            "{html}"
+        );
         assert!(html.contains(">*/5 * * * *</code>"), "{html}");
         assert!(html.contains(r#"<s-badge tone="info">Scheduled</s-badge>"#), "{html}");
         assert!(html.contains(r#"<s-badge tone="neutral">Manual</s-badge>"#), "{html}");
-        assert!(html.contains(r#"commandFor="run-flow-1" command="--show">Run</s-button>"#), "{html}");
+        assert!(
+            html.contains(r#"commandFor="run-flow-1" command="--show">Run</s-button>"#),
+            "{html}"
+        );
         // The form of each flow, in its modal, starts with the example of its schema.
         assert!(html.contains(r#"<input type="hidden" name="_action" value="run"><input type="hidden" name="flow" value="syncOrders"><s-modal id="run-flow-0" heading="Run syncOrders">"#), "{html}");
         assert!(html.contains("value=\"{\n  &quot;limit&quot;: 1\n}\""), "{html}");
-        assert!(html.contains(r#"<s-button slot="primary-action" variant="primary" type="submit">Run</s-button>"#), "{html}");
+        assert!(
+            html.contains(r#"<s-button slot="primary-action" variant="primary" type="submit">Run</s-button>"#),
+            "{html}"
+        );
         assert!(!html.contains("data-openshop-open"), "{html}");
         // Without runs: nothing to select, nothing to delete, nothing to refresh.
         assert!(html.contains("No runs yet"), "{html}");
@@ -405,10 +419,16 @@ mod tests {
             message: None,
         };
         let html = render(&flows(), None, &first_page(), &[], false, &form);
-        assert!(html.contains(r#"<s-modal id="run-flow-0" heading="Run syncOrders" data-openshop-open>"#), "{html}");
+        assert!(
+            html.contains(r#"<s-modal id="run-flow-0" heading="Run syncOrders" data-openshop-open>"#),
+            "{html}"
+        );
         assert!(html.contains(r#"value="{ nope" error="Invalid JSON""#), "{html}");
         // The other flow's form is as it was.
-        assert!(html.contains(r#"<s-modal id="run-flow-1" heading="Run a/b &lt;c&gt;">"#), "{html}");
+        assert!(
+            html.contains(r#"<s-modal id="run-flow-1" heading="Run a/b &lt;c&gt;">"#),
+            "{html}"
+        );
         assert_eq!(html.matches("error=").count(), 1, "{html}");
     }
 
@@ -422,24 +442,47 @@ mod tests {
         let html = render(&flows(), None, &first_page(), &runs, false, &FormState::default());
         // The checkbox of a run belongs to the form of the confirmation.
         assert!(html.contains(r#"<s-checkbox form="delete-runs" name="ids" value="0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0" label="Select run 0f1e2d3c" labelAccessibilityVisibility="exclusive"></s-checkbox>"#), "{html}");
-        assert!(html.contains(r#"<s-table-row clickDelegate="run-link-0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0">"#), "{html}");
+        assert!(
+            html.contains(r#"<s-table-row clickDelegate="run-link-0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0">"#),
+            "{html}"
+        );
         assert!(html.contains(r#"<s-link id="run-link-0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0" href="/runs/0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0">#0f1e2d3c</s-link>"#), "{html}");
-        assert!(html.contains(r#"<s-badge tone="success">completed</s-badge>"#), "{html}");
+        assert!(
+            html.contains(r#"<s-badge tone="success">completed</s-badge>"#),
+            "{html}"
+        );
         assert!(html.contains(r#"<s-badge tone="warning">running</s-badge>"#), "{html}");
         assert!(html.contains("<s-table-cell>1.3s</s-table-cell>"), "{html}");
         assert!(html.contains("<s-table-cell>…</s-table-cell>"), "{html}");
         assert!(html.contains(r#"<s-text>5m ago</s-text><s-text color="subdued"><time datetime="2026-10-06T12:00:00.000Z">2026-10-06 12:00:00 UTC</time></s-text>"#), "{html}");
         assert!(html.contains(r#"<s-text>4m ago</s-text>"#), "{html}");
         // Every flow: the column of the flow.
-        assert!(html.contains(r#"<s-table-header listSlot="secondary">Flow</s-table-header>"#), "{html}");
+        assert!(
+            html.contains(r#"<s-table-header listSlot="secondary">Flow</s-table-header>"#),
+            "{html}"
+        );
         assert!(html.contains("<s-table-cell>syncOrders</s-table-cell>"), "{html}");
         // A run is active: the page is fetched again.
-        assert!(html.contains(r#"<s-section heading="Runs" data-openshop-refresh="5000">"#), "{html}");
+        assert!(
+            html.contains(r#"<s-section heading="Runs" data-openshop-refresh="5000">"#),
+            "{html}"
+        );
         // The selection and its deletion.
-        assert!(html.contains(r#"<s-button variant="tertiary" href="/flows?select=all">Select all</s-button>"#), "{html}");
-        assert!(html.contains(r#"commandFor="delete-runs-modal" command="--show">Delete selected</s-button>"#), "{html}");
+        assert!(
+            html.contains(r#"<s-button variant="tertiary" href="/flows?select=all">Select all</s-button>"#),
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"commandFor="delete-runs-modal" command="--show">Delete selected</s-button>"#),
+            "{html}"
+        );
         assert!(html.contains(r#"<form id="delete-runs" method="post"><input type="hidden" name="_action" value="deleteRuns"><s-modal id="delete-runs-modal" heading="Delete runs">"#), "{html}");
-        assert!(html.contains(r#"<s-button slot="primary-action" variant="primary" tone="critical" type="submit">Delete</s-button>"#), "{html}");
+        assert!(
+            html.contains(
+                r#"<s-button slot="primary-action" variant="primary" tone="critical" type="submit">Delete</s-button>"#
+            ),
+            "{html}"
+        );
 
         // Over: no refresh.
         let html = render(&flows(), None, &first_page(), &runs[..1], false, &FormState::default());
@@ -460,12 +503,21 @@ mod tests {
         let runs = [run("failed", Some(0), Some(125_400))];
         let html = render(&flows(), Some("syncOrders"), &query, &runs, true, &FormState::default());
         assert!(html.contains(r#"<s-section heading="Runs — syncOrders">"#), "{html}");
-        assert!(html.contains(r#"<s-link href="/flows">Runs of every flow</s-link>"#), "{html}");
+        assert!(
+            html.contains(r#"<s-link href="/flows">Runs of every flow</s-link>"#),
+            "{html}"
+        );
         // The runs of one flow: no column of the flow.
-        assert!(!html.contains(r#"listSlot="secondary">Flow</s-table-header>"#), "{html}");
+        assert!(
+            !html.contains(r#"listSlot="secondary">Flow</s-table-header>"#),
+            "{html}"
+        );
         assert!(html.contains("<s-table-cell>2m 5s</s-table-cell>"), "{html}");
         // Every run of the page selected, until the selection is cleared.
-        assert!(html.contains(r#"labelAccessibilityVisibility="exclusive" checked></s-checkbox>"#), "{html}");
+        assert!(
+            html.contains(r#"labelAccessibilityVisibility="exclusive" checked></s-checkbox>"#),
+            "{html}"
+        );
         assert!(html.contains(r#"href="/flows/syncOrders?q=a%26b&amp;status=failed&amp;from=2026-11-01&amp;page=2">Clear selection</s-button>"#), "{html}");
         // The pages before and after, with the filters and without the selection.
         assert!(html.contains(r#"accessibilityLabel="Previous page" href="/flows/syncOrders?q=a%26b&amp;status=failed&amp;from=2026-11-01">"#), "{html}");
@@ -473,9 +525,15 @@ mod tests {
         // The filters: a form that navigates, with what the URL asked.
         assert!(html.contains(r#"<form method="get" slot="filters">"#), "{html}");
         assert!(html.contains(r#"name="q" label="Search runs" labelAccessibilityVisibility="exclusive" placeholder="Search by flow name, status, or ID..." value="a&amp;b">"#), "{html}");
-        assert!(html.contains(r#"<s-option value="failed" selected>Failed</s-option>"#), "{html}");
+        assert!(
+            html.contains(r#"<s-option value="failed" selected>Failed</s-option>"#),
+            "{html}"
+        );
         assert!(html.contains(r#"<s-date-field name="from" label="From" labelAccessibilityVisibility="exclusive" placeholder="From" value="2026-11-01">"#), "{html}");
-        assert!(html.contains(r#"<s-button variant="tertiary" href="/flows/syncOrders">Clear</s-button>"#), "{html}");
+        assert!(
+            html.contains(r#"<s-button variant="tertiary" href="/flows/syncOrders">Clear</s-button>"#),
+            "{html}"
+        );
 
         // The last page: no page after.
         let html = render(&flows(), Some("syncOrders"), &query, &[], false, &FormState::default());
@@ -492,7 +550,10 @@ mod tests {
         assert_eq!(selected_flow("/flows"), Some(None));
         assert_eq!(selected_flow("/flows/"), Some(None));
         assert_eq!(selected_flow("/flows/syncOrders"), Some(Some("syncOrders".to_string())));
-        assert_eq!(selected_flow("/flows/orders%2Fsync%20now"), Some(Some("orders/sync now".to_string())));
+        assert_eq!(
+            selected_flow("/flows/orders%2Fsync%20now"),
+            Some(Some("orders/sync now".to_string()))
+        );
         assert_eq!(selected_flow("/flows/a/b"), None);
         assert_eq!(selected_flow("/flows/%zz"), None);
         assert_eq!(selected_flow("/runs"), None);

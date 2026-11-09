@@ -8,10 +8,8 @@ on:
 env:
   CARGO_TERM_COLOR: always
   # The tools `.github/actions/install-release` installs from their GitHub
-  # release, with the SHA-256 of their archive. Keep trunk and mdbook in step
-  # with mise.toml.
-  TRUNK_VERSION: v0.22.1
-  TRUNK_SHA256: 2ab8d548fd5ed9cda50906f61fd8654204e7893bd52ebbfd90533862b7d71ee1
+  # release, with the SHA-256 of their archive. Keep mdbook in step with
+  # mise.toml.
   MDBOOK_VERSION: v0.5.4
   MDBOOK_SHA256: 3f28de05dafca9d0f2eab99c662116b0e37b89b1d96a08f8f430b9eeae958cd7
   CARGO_DENY_VERSION: 0.20.2
@@ -26,7 +24,7 @@ permissions:
 # next to it: a tag can be moved, a commit cannot. Dependabot proposes the next
 # one. `dtolnay/rust-toolchain` has no release, its commit is the one of its
 # `master` branch, and the toolchain is the one of `mise.toml`, so that CI runs
-# what a contributor runs. trunk, mdbook and cargo-deny are not installed by an
+# what a contributor runs. mdbook and cargo-deny are not installed by an
 # action that downloads a binary unchecked: their release archive is checked
 # against a SHA-256 written above.
 
@@ -66,52 +64,6 @@ jobs:
       # Each test owns a schema and a small pool: cap parallelism to stay under
       # the default max_connections of the service container.
       - run: cargo test --workspace --locked -- --test-threads=4
-
-  ui:
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: crates/openshop-ui
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
-        with:
-          toolchain: "1.99.1"
-          targets: wasm32-unknown-unknown
-          components: clippy, rustfmt
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-        with:
-          workspaces: crates/openshop-ui
-      - run: cargo fmt --check
-      - run: cargo clippy --target wasm32-unknown-unknown --locked -- -D warnings
-      - run: cargo test --locked
-
-  # The custom and public templates have admin pages with a view: `openshop
-  # build-ui` compiles them to WebAssembly, into their own admin UI bundle.
-  templates-ui:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
-        with:
-          toolchain: "1.99.1"
-          targets: wasm32-unknown-unknown
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-      - uses: ./.github/actions/install-release
-        with:
-          repository: trunk-rs/trunk
-          tag: ${{ env.TRUNK_VERSION }}
-          asset: trunk-x86_64-unknown-linux-gnu.tar.gz
-          sha256: ${{ env.TRUNK_SHA256 }}
-          binary: trunk
-      - run: cargo run -p openshop-cli --locked -- build-ui
-        working-directory: templates/custom
-      - run: cargo run -p openshop-cli --locked -- build-ui
-        working-directory: templates/public
 
   # `check` tests the templates as members of the workspace; this checks the
   # projects `openshop init` makes of them, on their own.
@@ -171,8 +123,8 @@ jobs:
           cd "$RUNNER_TEMP/app"
           CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target" cargo check --all-targets
 
-  # The version in `rust-version` of Cargo.toml (and of the admin UI) is a
-  # promise: this is what keeps it.
+  # The version in `rust-version` of Cargo.toml is a promise: this is what
+  # keeps it.
   msrv:
     runs-on: ubuntu-latest
     env:
@@ -185,18 +137,10 @@ jobs:
         with:
           # Keep in step with `rust-version`.
           toolchain: "1.94"
-          targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-        with:
-          workspaces: |
-            .
-            crates/openshop-ui
       - run: cargo check --workspace --all-targets --locked
-      - run: cargo check --all-targets --target wasm32-unknown-unknown --locked
-        working-directory: crates/openshop-ui
 
-  # Advisories, licenses and sources of the dependencies, as `deny.toml` says;
-  # the admin UI workspace has its own lockfile.
+  # Advisories, licenses and sources of the dependencies, as `deny.toml` says.
   deny:
     runs-on: ubuntu-latest
     steps:
@@ -213,41 +157,10 @@ jobs:
           sha256: ${{ env.CARGO_DENY_SHA256 }}
           binary: cargo-deny-${{ env.CARGO_DENY_VERSION }}-x86_64-unknown-linux-musl/cargo-deny
       - run: cargo-deny --all-features check
-      - run: cargo-deny --all-features --manifest-path crates/openshop-ui/Cargo.toml check
-
-  # The committed admin UI bundle (`crates/openshop/ui-dist`) is what
-  # applications embed: it has to be the one of the sources. Its bytes depend
-  # on the platform it is built on, so CI cannot build it again and compare:
-  # the hash of its sources, written when it was built, is compared instead.
-  # The build itself runs here too, to keep `build-dist.sh` working.
-  ui-dist:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: The bundle is built from these sources
-        run: |
-          crates/openshop-ui/sources-hash.sh | diff - crates/openshop-ui/ui-dist.sha256 || {
-            echo "::error::crates/openshop/ui-dist is not built from crates/openshop-ui: run \`mise run ui:build\` and commit the result"
-            exit 1
-          }
-      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
-        with:
-          toolchain: "1.99.1"
-          targets: wasm32-unknown-unknown
-      - uses: ./.github/actions/install-release
-        with:
-          repository: trunk-rs/trunk
-          tag: ${{ env.TRUNK_VERSION }}
-          asset: trunk-x86_64-unknown-linux-gnu.tar.gz
-          sha256: ${{ env.TRUNK_SHA256 }}
-          binary: trunk
-      - run: crates/openshop-ui/build-dist.sh "$RUNNER_TEMP/ui-dist"
 
   # The `Dockerfile` of a generated project is what a deployment builds: one
-  # project of a template with admin views (`custom`, which builds the bundle)
-  # and one without (`minimal`), built into an image. The repository is private,
+  # project of a template with admin pages of its own (`custom`) and one
+  # without (`minimal`), built into an image. The repository is private,
   # so the build gets the token the way `init-git` does, as a BuildKit secret: a
   # `gitconfig` that is never written to a layer. It lives in the runner temp
   # directory, outside the project, which is the build context.

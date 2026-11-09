@@ -1,12 +1,9 @@
 //! `#[admin_page]`: the `impl` block of a type as an admin page, its server side and its view.
 
 use proc_macro2::{Span, TokenStream};
-use quote::{quote, quote_spanned};
+use quote::quote;
 use syn::spanned::Spanned;
-use syn::{
-    Expr, FnArg, GenericArgument, Ident, ImplItem, ImplItemFn, ItemImpl, LitStr, PathArguments, ReturnType, Type,
-    parse_quote,
-};
+use syn::{Expr, FnArg, Ident, ImplItem, ImplItemFn, ItemImpl, LitStr, ReturnType, Type};
 
 use crate::util::{Argument, Arguments, camel_case, constant_ident, declared, own_names, plain_name, set_once, text};
 
@@ -118,55 +115,13 @@ fn server_view_parameters(function: &ImplItemFn) -> syn::Result<Vec<ViewParamete
         .collect()
 }
 
-/// Refuses a `#[view]` that is not `fn() -> impl IntoView` or
-/// `fn(params: RouteParams) -> impl IntoView`.
-fn check_view(function: &ImplItemFn) -> syn::Result<()> {
-    let signature = &function.sig;
-    if signature.asyncness.is_some()
-        || matches!(signature.output, ReturnType::Default)
-        || signature.receiver().is_some()
-        || !signature.generics.params.is_empty()
-        || signature.inputs.len() > 1
-    {
-        return Err(syn::Error::new(
-            signature.ident.span(),
-            "expected `fn() -> impl IntoView` or `fn(params: RouteParams) -> impl IntoView` for `#[view]`, or `fn(loader: Output, …) -> Markup` for a view the server renders",
-        ));
-    }
-    Ok(())
-}
-
-/// `Output` in `-> Result<Output>`: what the view receives from a loader or an action.
-fn output_type(function: &ImplItemFn) -> Option<&Type> {
-    let ReturnType::Type(_, returned) = &function.sig.output else {
-        return None;
-    };
-    let Type::Path(returned) = &**returned else {
-        return None;
-    };
-    let result = returned
-        .path
-        .segments
-        .last()
-        .filter(|segment| segment.ident == "Result")?;
-    let PathArguments::AngleBracketed(arguments) = &result.arguments else {
-        return None;
-    };
-    arguments.args.iter().find_map(|argument| match argument {
-        GenericArgument::Type(output) => Some(output),
-        _ => None,
-    })
-}
-
-/// A loader or an action as the view names it: `ReviewsPage::LIST_REVIEWS`.
+/// A loader or an action of the page: what the view reads, or what a form of
+/// the view names with a constant, `ReviewsPage::SAVE_REVIEW`.
 struct Reference {
     function: Ident,
     kind: Ident,
     name: LitStr,
     input: Option<Type>,
-    output: Option<Type>,
-    /// Where the function says what it returns.
-    returned: Span,
     /// Its own access rule.
     authorize: Option<Expr>,
 }
@@ -208,7 +163,7 @@ pub fn admin_page(arguments: Arguments, mut item: ItemImpl) -> syn::Result<Token
 
     let mut access: Option<Ident> = None;
     let mut view: Option<Ident> = None;
-    // The loaders a view the server renders reads, when the view is one.
+    // The loaders the view reads, and its form.
     let mut server_view: Option<Vec<ViewParameter>> = None;
     let mut functions = Vec::new();
     let mut references: Vec<Reference> = Vec::new();
@@ -217,11 +172,8 @@ pub fn admin_page(arguments: Arguments, mut item: ItemImpl) -> syn::Result<Token
         let ImplItem::Fn(function) = implemented else {
             continue;
         };
-        // The admin UI bundle has the view of the page, not what the server runs.
-        let on_server: syn::Attribute = parse_quote!(#[cfg(not(target_arch = "wasm32"))]);
         let Some((marker, arguments)) = take_marker(function)? else {
-            // Not marked: a helper of what the server runs.
-            function.attrs.insert(0, on_server);
+            // Not marked: a helper of the page.
             continue;
         };
         let ident = function.sig.ident.clone();
@@ -233,21 +185,18 @@ pub fn admin_page(arguments: Arguments, mut item: ItemImpl) -> syn::Result<Token
             if view.is_some() {
                 return Err(syn::Error::new(ident.span(), "an admin page has one `#[view]`"));
             }
-            if returns_markup(function) {
-                // Rendered by the server: not compiled into the admin UI bundle.
-                server_view = Some(server_view_parameters(function)?);
-                function.attrs.insert(0, on_server);
-            } else {
-                check_view(function)?;
+            if !returns_markup(function) {
+                return Err(syn::Error::new(
+                    function.sig.ident.span(),
+                    "a `#[view]` is rendered by the server: `fn(loader: Output, …) -> Markup`, each parameter named after a loader of the page, or `form: FormState`",
+                ));
             }
+            server_view = Some(server_view_parameters(function)?);
             view = Some(ident);
             continue;
         }
 
         let input = input_type(function, &marker)?.cloned();
-        let output = output_type(function).cloned();
-        let returned = function.sig.output.span();
-        function.attrs.insert(0, on_server);
 
         if marker == "access" {
             if let Some(argument) = arguments.first() {
@@ -308,8 +257,6 @@ pub fn admin_page(arguments: Arguments, mut item: ItemImpl) -> syn::Result<Token
             function: ident,
             name,
             input,
-            output,
-            returned,
             authorize: own_rule,
         });
     }
@@ -427,74 +374,12 @@ pub fn admin_page(arguments: Arguments, mut item: ItemImpl) -> syn::Result<Token
                 pub const #constant: &'static str = #name;
             });
         }
-    } else if view.is_some() {
-        for reference in &references {
-            let Reference {
-                function,
-                kind,
-                name,
-                input,
-                output,
-                returned,
-                ..
-            } = reference;
-            let constant = constant_ident(function);
-            if constant == "PATH" {
-                return Err(syn::Error::new(
-                    function.span(),
-                    "`PATH` is the path of the page: give the function another name",
-                ));
-            }
-            if let Some(taken) = own.iter().find(|ident| ***ident == constant && ***ident != *function) {
-                return Err(syn::Error::new(
-                    taken.span(),
-                    format!(
-                        "the view of the page calls `{function}` through the constant `{constant}`: give this item another name"
-                    ),
-                ));
-            }
-            let Some(output) = output else {
-                return Err(syn::Error::new(
-                    *returned,
-                    format!("the view of the page reads what `{function}` returns: write it as `-> Result<Output>`"),
-                ));
-            };
-            let input = input.as_ref().map_or_else(|| quote!(()), |input| quote!(#input));
-            let doc = format!(
-                "The {kind} `{}`, for the view of the page: what it takes, and what it returns.",
-                name.value()
-            );
-            constants.push(quote! {
-                #[doc = #doc]
-                #[allow(dead_code)]
-                pub const #constant: ::openshop::ui::AdminFunctionRef<#input, #output> =
-                    ::openshop::ui::AdminFunctionRef::#kind(#name);
-            });
-        }
     }
-    // The paths of the framework keep the span of the attribute, which an
-    // error about what the view is given points at too.
-    let openshop = quote!(::openshop);
+    // The forms of the view name the functions of the page by their constant.
     let page_view = match &view {
-        // A view the server renders: the names of the functions, for its forms.
-        Some(_) if server_view.is_some() => quote! {
-            #[cfg(not(target_arch = "wasm32"))]
+        Some(_) => quote! {
             impl #self_type {
                 #(#constants)*
-            }
-        },
-        // Refused with one message when the application has not enabled the feature `ui`.
-        Some(view) => quote_spanned! {view.span()=>
-            #openshop::__view! {
-                impl #self_type {
-                    #(#constants)*
-                }
-
-                impl #openshop::ui::PageView for #self_type {
-                    fn page_view() -> ::core::option::Option<#openshop::ui::BundlePage> {
-                        ::core::option::Option::Some(#openshop::ui::page_view(Self::PATH, Self::#view))
-                    }
-                }
             }
         },
         None => TokenStream::new(),
@@ -513,7 +398,6 @@ pub fn admin_page(arguments: Arguments, mut item: ItemImpl) -> syn::Result<Token
             pub const PATH: &'static str = #path;
         }
 
-        #[cfg(not(target_arch = "wasm32"))]
         #declared
 
         #page_view
@@ -580,53 +464,10 @@ mod tests {
         }
         assert!(!generated.contains("\"helper\""), "{generated}");
 
-        // What the server runs is not compiled into the admin UI bundle.
-        for expected in [
-            "# [cfg (not (target_arch = \"wasm32\"))] async fn staff (ctx : AdminContext) -> Result < bool >",
-            "# [cfg (not (target_arch = \"wasm32\"))] # [doc = r\" Lists reviews.\"] async fn list_reviews",
-            "# [cfg (not (target_arch = \"wasm32\"))] impl :: openshop :: declare :: Declared for ReviewsPage",
-            "# [cfg (not (target_arch = \"wasm32\"))] fn helper () -> u32 { 1 }",
-        ] {
-            assert!(generated.contains(expected), "missing `{expected}` in:\n{generated}");
-        }
-        // Without a view, nothing of the page is for the bundle.
-        assert!(!generated.contains(":: openshop :: ui"), "{generated}");
-    }
-
-    #[test]
-    fn a_view_is_kept_with_what_it_calls() {
-        let generated = admin_page(
-            parse_quote!("/reviews/:id"),
-            parse_quote! {
-                impl ReviewPage {
-                    #[loader]
-                    async fn review(ctx: AdminContext) -> Result<Review> { todo!() }
-
-                    #[action("save")]
-                    async fn save_review(ctx: AdminContext, input: SaveReview) -> openshop::Result<Vec<Review>> { todo!() }
-
-                    #[view]
-                    fn view(params: RouteParams) -> impl IntoView {
-                        use_loader(Self::REVIEW, || ());
-                    }
-                }
-            },
-        )
-        .unwrap()
-        .to_string();
-
-        for expected in [
-            // The view is compiled on both sides, without its marker.
-            "{ todo ! () } fn view (params : RouteParams) -> impl IntoView {",
-            // A constant per function: its kind, its name, what it takes and what it returns.
-            "pub const REVIEW : :: openshop :: ui :: AdminFunctionRef < () , Review > = :: openshop :: ui :: AdminFunctionRef :: loader (\"review\") ;",
-            "pub const SAVE_REVIEW : :: openshop :: ui :: AdminFunctionRef < SaveReview , Vec < Review > > = :: openshop :: ui :: AdminFunctionRef :: action (\"save\") ;",
-            ":: openshop :: __view ! { impl ReviewPage { # [doc = \"The loader `review`, for the view of the page: what it takes, and what it returns.\"]",
-            "impl :: openshop :: ui :: PageView for ReviewPage { fn page_view () -> :: core :: option :: Option < :: openshop :: ui :: BundlePage > { :: core :: option :: Option :: Some (:: openshop :: ui :: page_view (Self :: PATH , Self :: view)) } } }",
-        ] {
-            assert!(generated.contains(expected), "missing `{expected}` in:\n{generated}");
-        }
-        assert!(!generated.contains("# [view]"), "{generated}");
+        // An unmarked function stays as it is.
+        assert!(generated.contains("fn helper () -> u32 { 1 }"), "{generated}");
+        // Without a view, no constant names a function for its forms.
+        assert!(!generated.contains("pub const LIST_REVIEWS"), "{generated}");
     }
 
     #[test]
@@ -653,8 +494,8 @@ mod tests {
         .to_string();
 
         for expected in [
-            // The view is the server's, as the functions it calls.
-            "# [cfg (not (target_arch = \"wasm32\"))] fn view (home : Home , filter : Vec < Row >) -> Markup",
+            // The view is kept, without its marker.
+            "{ todo ! () } fn view (home : Home , filter : Vec < Row >) -> Markup",
             // Each parameter is a loader, run with its own rule, its input read from the query.
             ". view (| request : :: openshop :: admin :: PageRequest | async move { let home = request . load (Self :: home) . await ? ; request . authorize (Self :: staff) . await ? ; let filter = request . load_with (Self :: filter) . await ? ; :: openshop :: Result :: < :: openshop :: Markup > :: Ok (Self :: view (home , filter)) })",
             // The forms name an action by its constant.
@@ -662,9 +503,7 @@ mod tests {
         ] {
             assert!(generated.contains(expected), "missing `{expected}` in:\n{generated}");
         }
-        // Nothing of it is for the admin UI bundle.
-        assert!(!generated.contains("__view"), "{generated}");
-        assert!(!generated.contains("PageView"), "{generated}");
+        assert!(!generated.contains("# [view]"), "{generated}");
     }
 
     #[test]
@@ -741,41 +580,32 @@ mod tests {
 
     #[test]
     fn refuses_views_a_page_cannot_show() {
+        let not_rendered = "a `#[view]` is rendered by the server: `fn(loader: Output, …) -> Markup`, each parameter named after a loader of the page, or `form: FormState`";
+        // A Leptos view, which no bundle shows any more.
         assert_eq!(
-            refusal(parse_quote! { impl P { #[view] async fn view() -> impl IntoView { } } }),
-            "expected `fn() -> impl IntoView` or `fn(params: RouteParams) -> impl IntoView` for `#[view]`, or `fn(loader: Output, …) -> Markup` for a view the server renders"
+            refusal(parse_quote! { impl P { #[view] fn view() -> impl IntoView { } } }),
+            not_rendered
         );
         assert_eq!(
-            refusal(parse_quote! { impl P { #[view] fn view(params: RouteParams, other: u8) -> impl IntoView { } } }),
-            "expected `fn() -> impl IntoView` or `fn(params: RouteParams) -> impl IntoView` for `#[view]`, or `fn(loader: Output, …) -> Markup` for a view the server renders"
+            refusal(parse_quote! { impl P { #[view] fn view(params: RouteParams) -> impl IntoView { } } }),
+            not_rendered
         );
-        assert_eq!(
-            refusal(parse_quote! { impl P { #[view] fn view() { } } }),
-            "expected `fn() -> impl IntoView` or `fn(params: RouteParams) -> impl IntoView` for `#[view]`, or `fn(loader: Output, …) -> Markup` for a view the server renders"
-        );
+        assert_eq!(refusal(parse_quote! { impl P { #[view] fn view() { } } }), not_rendered);
         assert_eq!(
             refusal(parse_quote! { impl P {
-                #[view] fn list() -> impl IntoView { }
-                #[view] fn grid() -> impl IntoView { }
+                #[view] fn list() -> Markup { todo!() }
+                #[view] fn grid() -> Markup { todo!() }
             } }),
             "an admin page has one `#[view]`"
         );
         assert_eq!(
-            refusal(parse_quote! { impl P { #[view(lazy)] fn view() -> impl IntoView { } } }),
+            refusal(parse_quote! { impl P { #[view(lazy)] fn view() -> Markup { todo!() } } }),
             "`#[view]` takes no option"
-        );
-        // The view names its functions by a constant, typed after what they return.
-        assert_eq!(
-            refusal(parse_quote! { impl P {
-                #[loader] async fn list(ctx: AdminContext) -> Listed { todo!() }
-                #[view] fn view() -> impl IntoView { }
-            } }),
-            "the view of the page reads what `list` returns: write it as `-> Result<Output>`"
         );
         assert_eq!(
             refusal(parse_quote! { impl P {
                 #[loader] async fn path(ctx: AdminContext) -> Result<String> { todo!() }
-                #[view] fn view() -> impl IntoView { }
+                #[view] fn view() -> Markup { todo!() }
             } }),
             "`PATH` is the path of the page: give the function another name"
         );
@@ -791,9 +621,9 @@ mod tests {
             refusal(parse_quote! { impl P {
                 #[loader] async fn list(ctx: AdminContext) -> Result<String> { todo!() }
                 const LIST: u32 = 1;
-                #[view] fn view() -> impl IntoView { }
+                #[view] fn view() -> Markup { todo!() }
             } }),
-            "the view of the page calls `list` through the constant `LIST`: give this item another name"
+            "the view of the page names `list` with the constant `LIST`: give this item another name"
         );
         // Without a view there is no constant to collide with.
         assert!(

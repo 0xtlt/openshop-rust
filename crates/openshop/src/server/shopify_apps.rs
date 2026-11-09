@@ -574,7 +574,9 @@ scopes = "read_products,read_orders"
         let app_handle = |api_key: Option<&str>| {
             let apps = ShopifyApps::resolve(None, &env(api_key)).unwrap();
             let app = &apps.all()[0];
-            app.app_handle().map(str::to_string).unwrap_or_else(|error| error.to_string())
+            app.app_handle()
+                .map(str::to_string)
+                .unwrap_or_else(|error| error.to_string())
         };
         // No file: no handle, and the error says where to write it.
         assert_eq!(
@@ -672,7 +674,11 @@ scopes = "read_products,read_orders"
         assert_eq!(name(None), "Easy hide PayPal Express");
         assert_eq!(name(Some("dev-key")), DEFAULT_APP_NAME);
         assert_eq!(name(Some("other-key")), DEFAULT_APP_NAME);
-        std::fs::write(dir.join("shopify.app.dev.toml"), "client_id = 'dev-key'\nname = 'Hide PayPal (dev)' # linked\n").unwrap();
+        std::fs::write(
+            dir.join("shopify.app.dev.toml"),
+            "client_id = 'dev-key'\nname = 'Hide PayPal (dev)' # linked\n",
+        )
+        .unwrap();
         assert_eq!(name(Some("dev-key")), "Hide PayPal (dev)");
 
         // An app of `shopify.apps`: the name of its own file, else its key.
@@ -689,7 +695,10 @@ scopes = "read_products,read_orders"
                         },
                     ),
                     ("keys".to_string(), keys("prod-key", "secret", "https://a.example.com")),
-                    ("other".to_string(), keys("other-key", "secret", "https://b.example.com")),
+                    (
+                        "other".to_string(),
+                        keys("other-key", "secret", "https://b.example.com"),
+                    ),
                 ]
                 .into(),
             ),
@@ -756,7 +765,9 @@ scopes = "read_products,read_orders"
         assert_eq!(apps.by_signed_query(&query).unwrap().0.handle, "clientB");
 
         let body = r#"{"id":1}"#;
-        let (app, webhook) = apps.by_webhook(&webhook_headers(body, "secret-a"), body.as_bytes()).unwrap();
+        let (app, webhook) = apps
+            .by_webhook(&webhook_headers(body, "secret-a"), body.as_bytes())
+            .unwrap();
         assert_eq!(app.handle, "clientA");
         assert_eq!(webhook.topic(), "orders/create");
     }
@@ -820,7 +831,10 @@ scopes = "read_products,read_orders"
             &shop,
             &shopify_api::oauth::AuthorizationRequest::new("http://localhost:3000/auth/callback", "state"),
         );
-        assert!(link.starts_with("http://localhost:9292/admin/oauth/authorize?client_id=client-a-key&"), "{link}");
+        assert!(
+            link.starts_with("http://localhost:9292/admin/oauth/authorize?client_id=client-a-key&"),
+            "{link}"
+        );
         assert!(link.ends_with("&shop=local-supply-co.myshopify.com"), "{link}");
     }
 

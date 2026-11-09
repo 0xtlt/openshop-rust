@@ -65,7 +65,11 @@ fn expires_at_from_body(body: &JsonMap) -> Result<Option<DateTime<Utc>>, &'stati
 /// [`expires_at_from_body`], its refusal naming the field it is about.
 fn expiration(body: &JsonMap) -> Result<Option<DateTime<Utc>>, TokenRefusal> {
     expires_at_from_body(body).map_err(|message| TokenRefusal::Invalid {
-        field: if body.contains_key("expiresAt") { "expiresAt" } else { "expiresInDays" },
+        field: if body.contains_key("expiresAt") {
+            "expiresAt"
+        } else {
+            "expiresInDays"
+        },
         message: message.to_string(),
     })
 }
@@ -407,10 +411,12 @@ async fn create_token(
     Extension(session): Extension<ShopSession>,
     body: Bytes,
 ) -> ApiResult {
-    Ok(match create_token_for(&app, &session, &json_object_body(&body)).await? {
-        Ok((token, item)) => json_response(StatusCode::CREATED, json!({ "token": token, "item": item })),
-        Err(refused) => refused.response(),
-    })
+    Ok(
+        match create_token_for(&app, &session, &json_object_body(&body)).await? {
+            Ok((token, item)) => json_response(StatusCode::CREATED, json!({ "token": token, "item": item })),
+            Err(refused) => refused.response(),
+        },
+    )
 }
 
 async fn get_token(
@@ -493,10 +499,12 @@ async fn update_token(
     Path(id): Path<String>,
     body: Bytes,
 ) -> ApiResult {
-    Ok(match update_token_for(&app, &session, &id, &json_object_body(&body)).await? {
-        Ok(()) => json_response(StatusCode::OK, json!({ "ok": true })),
-        Err(refused) => refused.response(),
-    })
+    Ok(
+        match update_token_for(&app, &session, &id, &json_object_body(&body)).await? {
+            Ok(()) => json_response(StatusCode::OK, json!({ "ok": true })),
+            Err(refused) => refused.response(),
+        },
+    )
 }
 
 /// Grants the token `id` the `permissions` of `body` in place of the ones
@@ -548,10 +556,12 @@ async fn set_permissions(
     Path(id): Path<String>,
     body: Bytes,
 ) -> ApiResult {
-    Ok(match set_permissions_for(&app, &session, &id, &json_object_body(&body)).await? {
-        Ok(()) => json_response(StatusCode::OK, json!({ "ok": true })),
-        Err(refused) => refused.response(),
-    })
+    Ok(
+        match set_permissions_for(&app, &session, &id, &json_object_body(&body)).await? {
+            Ok(()) => json_response(StatusCode::OK, json!({ "ok": true })),
+            Err(refused) => refused.response(),
+        },
+    )
 }
 
 /// Gives the token `id` a new secret, which is returned, shown once: the
@@ -629,7 +639,6 @@ async fn revoke_token(
         Err(refused) => refused.response(),
     })
 }
-
 
 pub fn routes() -> Router<OpenShop> {
     Router::new()
