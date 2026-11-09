@@ -13,7 +13,29 @@ action is a form. Count about 30 minutes per page.
 
 ## 1. The project
 
-1. In `Cargo.toml`, remove `features = ["ui"]` from `openshop` and remove
+1. Install the `openshop` CLI of the release you move to: the one you have
+   runs trunk, and serves a bundle the server no longer has. From a checkout
+   of the repository at that release:
+
+   ```bash
+   cargo install --locked --path crates/openshop-cli --force
+   ```
+
+   or from GitHub, `cargo install --locked --force --git
+   https://github.com/0xtlt/openshop-rust --tag v<version> openshop-cli`.
+   Then check which one runs:
+
+   ```bash
+   openshop --version   # openshop <version> (<commit>)
+   ```
+
+   It prints the version, and the first 12 characters of the commit it was
+   built from. A CLI that answers `Unknown command: --version` is the old
+   one: `which openshop` says where it is, and the install did not replace
+   it. Run in a project that still has the Leptos admin, `openshop dev`
+   lists what is left of it (`features = ["ui"]`, `leptos`,
+   `UiSource::Dir`…) before it starts.
+2. In `Cargo.toml`, remove `features = ["ui"]` from `openshop` and remove
    `leptos`; add `maud`, whose `html!` the views are written with:
 
    ```toml
@@ -22,13 +44,13 @@ action is a form. Count about 30 minutes per page.
    maud = "0.27"
    ```
 
-2. Remove the `admin_ui: UiSource::Dir(…)` or `UiSource::Assets(…)` setting of
+3. Remove the `admin_ui: UiSource::Dir(…)` or `UiSource::Assets(…)` setting of
    `app!`, the `rust-embed` struct that served `dist/`, and `dist/` itself.
    `UiSource::None` (an API-only server) stays.
-3. Remove `OPENSHOP_UI_DIR` from the environment of your deployments, and the
+4. Remove `OPENSHOP_UI_DIR` from the environment of your deployments, and the
    `wasm32-unknown-unknown` target and trunk from your toolchain
    (`mise.toml`, CI).
-4. In the `Dockerfile`, remove what built the bundle: the WebAssembly target,
+5. In the `Dockerfile`, remove what built the bundle: the WebAssembly target,
    trunk, the `openshop` CLI, `openshop build`, the copy of `dist` and
    `ENV OPENSHOP_UI_DIR`. The image builds the application with
    `cargo build --release`, as the `Dockerfile` of a new project does.
@@ -240,15 +262,40 @@ A test that posted to it calls the function, or the page:
   `ctx.call_action::<Outcome>("/", "setHidden", json!({ "hidden": true }))`
   run the access rules, the schema and the function, as before, and give back
   what it returns;
-- `ctx.page("/")` asks for the page as the admin does: its HTML;
+- `ctx.page("/")` asks for the page as the admin does: the HTML of the whole
+  document, the menu and the page in `<main id="openshop-page">`;
 - `ctx.submit("/", &[("_action", HomePage::SET_HIDDEN), ("hidden", "true")])`
   sends a form of it: the page rendered again, the toast in the header
-  `x-openshop-toast` (percent-encoded), `422` with the error under each field
-  when the form is refused.
+  `x-openshop-toast` (an error toast in `x-openshop-toast-error`),
+  percent-encoded, `422` with the error under each field when the form is
+  refused. `openshop::testing::toast` and `toast_error` read the toasts
+  decoded.
+
+```rust,ignore
+use openshop::testing::{TestContext, toast};
+
+#[openshop::test(APP)]
+async fn hides_paypal_express(ctx: &TestContext) {
+    let hidden = ctx
+        .submit("/", &[("_action", HomePage::SET_HIDDEN), ("hidden", "true")])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(hidden.status(), 200);
+    assert_eq!(toast(&hidden).as_deref(), Some("Paypal Express hidden"));
+    let page = hidden.text().await.unwrap();
+    assert!(page.contains("Show Paypal Express"), "{page}");
+}
+```
+
+A helper of the tests names what the context sends and what it answers as
+`openshop::testing::RequestBuilder` and `openshop::testing::Response`: the
+tests need no `reqwest` dependency.
 
 ## 5. Check
 
-1. `cargo build` and `cargo test`.
-2. `openshop dev`, then open each page from Shopify admin: what it shows, each
+1. `openshop --version` prints the version you moved to.
+2. `cargo build` and `cargo test`, without a warning from `openshop`.
+3. `openshop dev`, then open each page from Shopify admin: what it shows, each
    form, each link.
-3. Deploy: the image has no bundle, and `OPENSHOP_UI_DIR` is not set.
+4. Deploy: the image has no bundle, and `OPENSHOP_UI_DIR` is not set.

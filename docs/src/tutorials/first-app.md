@@ -25,7 +25,13 @@ Install the `openshop` command once:
 
 ```bash
 cargo install --locked --git https://github.com/0xtlt/openshop-rust openshop-cli
+openshop --version
 ```
+
+`openshop --version` prints the version of the CLI and the commit it was
+built from, `openshop 0.0.12-beta.0 (1b8a53a4cac9)`. If it answers
+`Unknown command: --version`, an older CLI is installed: install it again with
+`--force`, which replaces it.
 
 Then create the project:
 
