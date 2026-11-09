@@ -56,8 +56,20 @@ fn is_page(item: &ItemImpl) -> bool {
     item.trait_.is_none() && marked(&item.attrs, "admin_page")
 }
 
+/// A `#[view]` of the admin UI bundle: one that returns `Markup` is rendered
+/// by the server, and needs no bundle.
 fn is_view(implemented: &ImplItem) -> bool {
-    matches!(implemented, ImplItem::Fn(function) if marked(&function.attrs, "view"))
+    let ImplItem::Fn(function) = implemented else {
+        return false;
+    };
+    let markup = match &function.sig.output {
+        syn::ReturnType::Type(_, returned) => matches!(
+            &**returned,
+            syn::Type::Path(returned) if returned.path.segments.last().is_some_and(|segment| segment.ident == "Markup")
+        ),
+        syn::ReturnType::Default => false,
+    };
+    marked(&function.attrs, "view") && !markup
 }
 
 /// The pages with a view among items, by their path from the crate root.
@@ -685,6 +697,16 @@ mod tests {
         );
         assert_eq!(scan(&project.0).unwrap(), Pages::default());
         assert_eq!(scan(&project.0.join("missing")).unwrap(), Pages::default());
+
+        // A view the server renders needs no bundle, even outside a module.
+        let rendered = Sources::new(
+            "rendered",
+            &[(
+                "src/main.rs",
+                "pub struct P;\n#[admin_page(\"/p\")]\nimpl P {\n    #[loader]\n    async fn list(ctx: AdminContext) -> Result<String> { todo!() }\n    #[view]\n    fn view(list: String) -> maud::Markup { todo!() }\n}\nfn main() {}\n",
+            )],
+        );
+        assert_eq!(scan(&rendered.0).unwrap(), Pages::default());
     }
 
     #[test]

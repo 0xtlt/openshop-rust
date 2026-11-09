@@ -62,7 +62,7 @@ fn launch_session(shopify_app: &ResolvedShopifyApp, query: &SignedQuery, shop: &
 /// token first, as the first `/api` request would, then by the client
 /// credentials grant the launch vouches for. The shop renders without the
 /// OAuth redirect, which Shopify does not display inside the admin frame.
-async fn is_installed_for_launch(
+pub(crate) async fn is_installed_for_launch(
     app: &OpenShop,
     shopify_app: &ResolvedShopifyApp,
     shop: &str,
@@ -84,7 +84,7 @@ async fn is_installed_for_launch(
 /// kept for the shop is forgotten, so that the next check reads the new one.
 /// Not an answer that has that plan and is younger than ten seconds: the
 /// route of the welcome link read it, then sent the launch here.
-async fn forget_plan_on_welcome(app: &OpenShop, shopify_app: &str, query: &SignedQuery) {
+pub(crate) async fn forget_plan_on_welcome(app: &OpenShop, shopify_app: &str, query: &SignedQuery) {
     if query.get("plan_handle").is_none() && query.get("charge_id").is_none() {
         return;
     }
@@ -109,6 +109,9 @@ pub enum UiSource {
     /// a lookup function taking the asset path (`index.html`, `app-1a2b3c.js`)
     /// and returning its bytes.
     Assets(fn(&str) -> Option<Cow<'static, [u8]>>),
+    /// The admin rendered by the server, page by page: no bundle, no
+    /// WebAssembly. Experimental: see `server::pages`.
+    Server,
 }
 
 #[cfg(feature = "embedded-ui")]
@@ -132,7 +135,7 @@ impl UiSource {
             return None;
         }
         match self {
-            Self::None => None,
+            Self::None | Self::Server => None,
             #[cfg(feature = "embedded-ui")]
             Self::Embedded => EmbeddedUi::get(path).map(|file| file.data),
             #[cfg(not(feature = "embedded-ui"))]
@@ -316,7 +319,7 @@ fn welcome_policy(polaris: Option<&ScriptUrl>) -> Cow<'static, str> {
 /// What a visitor is told when the admin is not opened for a shop: where the
 /// app opens from. It shows nothing of the application. Its Polaris is the
 /// one of the Shopify endpoints.
-fn open_from_shopify_admin(status: StatusCode, endpoints: &Endpoints) -> Response {
+pub(crate) fn open_from_shopify_admin(status: StatusCode, endpoints: &Endpoints) -> Response {
     let polaris = match &endpoints.polaris {
         Some(polaris) => Cow::Owned(escape(polaris.as_str())),
         None => Cow::Borrowed(SHOPIFY_POLARIS),
