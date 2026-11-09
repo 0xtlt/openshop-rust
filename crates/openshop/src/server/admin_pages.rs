@@ -84,7 +84,7 @@ async fn is_allowed(
     }
 }
 
-async fn page_is_allowed(app: &OpenShop, session: &ShopSession, page: &CustomAdminPage, pathname: &str) -> bool {
+pub(crate) async fn page_is_allowed(app: &OpenShop, session: &ShopSession, page: &CustomAdminPage, pathname: &str) -> bool {
     let check = async {
         let Some(params) = custom_admin_route_params(&page.route_pattern, pathname) else {
             return Ok(false);

@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- Experimental: the admin rendered by the server, page by page, with no
+  WebAssembly bundle (`admin_ui: UiSource::Server`, or `OPENSHOP_UI=server`).
+  A `#[view]` that returns `maud::Markup` takes what the page's loaders return,
+  each parameter named after a loader, and is rendered by the server; its
+  forms post to the page with the action in `_action`, and an action returns
+  an `Outcome` for a toast or a redirect. A page loaded in the admin without a
+  session token goes through `/auth/session-token`, the bounce page of
+  Shopify's libraries. `/crons` is the first page of the framework rendered
+  this way. The Leptos admin UI stays the default; see
+  [Server-rendered admin](docs/src/reference/server-rendered-ui.md).
 - An asset of the admin UI is compressed once per encoding and kept in
   memory; each request compressed it again. Under `openshop dev`, a debug
   build of the UI has a `.wasm` of 40 MB or more: each load compressed it for

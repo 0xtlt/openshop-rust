@@ -52,6 +52,7 @@
   - [Billing](reference/billing.md)
   - [Shopify Functions](reference/shopify-functions.md)
   - [Custom admin pages](reference/custom-admin-pages.md)
+  - [Server-rendered admin (design)](reference/server-rendered-ui.md)
   - [Operator dashboard](reference/operator-dashboard.md)
   - [MCP](reference/mcp.md)
   - [Security](reference/security.md)
