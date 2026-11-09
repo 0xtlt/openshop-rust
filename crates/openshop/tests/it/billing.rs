@@ -18,7 +18,7 @@ use openshop::response::{self, IntoResponse, StatusCode, header};
 use openshop::server::{ServerOptions, UiSource};
 use openshop::testing::{
     MockTransport, TEST_APP_GID, TEST_SHOP_GID, TestContext, TestOptions, app_pricing_subscription, sign_query,
-    subscription, to_query_string,
+    subscription, to_query_string, toast, toast_error,
 };
 use openshop::{AdminContext, AdminPublicError, OpenShopConfig, PartnerApi, ShopScope, ShopifyEndpoints, Value, json};
 use reqwest::Response;
@@ -281,6 +281,12 @@ async fn a_page_that_needs_a_plan_answers_402_with_the_pricing_page() {
         refused.headers()["x-openshop-toast-error"],
         "Choose%20a%20plan%20to%20use%20this%20feature"
     );
+    // What the admin shows, decoded.
+    assert_eq!(
+        toast_error(&refused).as_deref(),
+        Some("Choose a plan to use this feature")
+    );
+    assert_eq!(toast(&refused), None);
 
     // The Admin API is asked at each check: nothing is kept.
     transport.respond_json(subscriptions(&[("Plus", "ACTIVE")]));

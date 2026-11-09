@@ -585,22 +585,40 @@ impl TestContext {
 
     /// The page of the admin at `path`, as staff user `1` opens it from the
     /// menu: `ctx.page("/reviews").send().await?.text().await?` is its HTML,
-    /// the content of the page without the document around it.
+    /// the whole document the server renders: the `<ui-nav-menu>` of the
+    /// admin, then the page, rendered by its view, in
+    /// `<main id="openshop-page">`.
     pub fn page(&self, path: &str) -> reqwest::RequestBuilder {
         self.get(path).header("x-openshop-fetch", "1")
     }
 
     /// A form of the page of the admin at `path`, sent as the admin sends it:
-    /// `fields` with the name of its action in `_action`. The answer is the
-    /// page rendered again with the toast of the action in
-    /// `x-openshop-toast`, `204` with `x-openshop-location` when the action
-    /// goes to another page, `422` with the page and the error of each field
-    /// when the form is refused.
+    /// `fields` with the name of its action in `_action`. The answer is:
+    ///
+    /// - `200` and the page rendered again (the whole document, as
+    ///   [`page`](Self::page) gives it), with the toast of the action in
+    ///   `x-openshop-toast`, or its error toast in `x-openshop-toast-error`;
+    /// - `204` with `x-openshop-location` when the action goes to another
+    ///   page, `Outcome::redirect(…)`;
+    /// - `422` (or the status of the `AdminPublicError` that refused it) and
+    ///   the page with the error of each field when the form is refused and
+    ///   the view reads `form`;
+    /// - the status of the error and `x-openshop-toast-error`, without a body,
+    ///   when the action fails, or when the form is refused and the view does
+    ///   not read `form`.
+    ///
+    /// The toast headers are percent-encoded (`Saved%20Great`):
+    /// [`toast`](super::toast) and [`toast_error`](super::toast_error) read
+    /// them decoded.
     ///
     /// ```no_run
     /// # async fn example(ctx: &openshop::testing::TestContext) -> openshop::Result<()> {
+    /// use openshop::testing::{toast, toast_error};
+    ///
     /// let saved = ctx.submit("/settings", &[("_action", "saveSettings"), ("threshold", "8")]).send().await?;
-    /// assert_eq!(saved.headers()["x-openshop-toast"], "Saved");
+    /// assert_eq!(saved.status(), 200);
+    /// assert_eq!(toast(&saved).as_deref(), Some("Threshold saved"));
+    /// assert_eq!(toast_error(&saved), None);
     /// # Ok(())
     /// # }
     /// ```

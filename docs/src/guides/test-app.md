@@ -178,7 +178,12 @@ tests.
 - Use `ctx.call_loader(path, name, input)` and `ctx.call_action(…)` to call a
   loader or an action of an admin page, and assert on what it returns or on
   the error the page receives, such as `402 PLAN_REQUIRED`; `ctx.page(path)`
-  and `ctx.submit(path, fields)` to render the page and send its forms. See
-  [Test admin functions](../reference/testing.md#test-admin-functions).
+  and `ctx.submit(path, fields)` to render the page and send its forms, and
+  `toast(&response)` and `toast_error(&response)` to read the toast a form
+  got. See [Test admin functions](../reference/testing.md#test-admin-functions)
+  and [Test a page](../reference/testing.md#test-a-page).
+- Name the requests and the answers of the context in a helper as
+  `openshop::testing::RequestBuilder` and `openshop::testing::Response`: the
+  tests need no `reqwest` dependency.
 
 All helper options and lifecycle contracts are in the [testing reference](../reference/testing.md).
