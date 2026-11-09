@@ -16,7 +16,7 @@ use super::run_logs::{
 use crate::app::OpenShop;
 use crate::db::schema::{FlowRun, StepResult};
 use crate::engine::abort::cancel_run;
-use crate::engine::dispatch::{DispatchOptions, lock_flow, reject_when_active};
+use crate::engine::dispatch::{DispatchOptions, QueuedRun, lock_flow, reject_when_active};
 use crate::engine::errors::{FlowConcurrencyError, InvalidFlowInput, UnknownFlowError};
 use crate::runtime::time::parse_date;
 use crate::server::http::{ApiResult, containing, json_error, json_object_body, json_response, parse_query};
@@ -222,18 +222,37 @@ async fn export_run_logs(
     }
 }
 
-async fn run_flow(
-    State(app): State<OpenShop>,
-    Extension(session): Extension<ShopSession>,
-    Path(name): Path<String>,
-    body: Bytes,
-) -> ApiResult {
-    let body = json_object_body(&body);
-    let input = match body.get("input") {
-        Some(Value::Null) | None => json!({}),
-        Some(input) => input.clone(),
-    };
+/// Why a flow was not started, for the merchant.
+pub(crate) enum NotStarted {
+    /// The flow rejects concurrent runs and one is active (`409`).
+    Conflict(FlowConcurrencyError),
+    /// No flow has this name (`404`).
+    Unknown(String),
+    /// The input fails the input schema of the flow (`422`).
+    Invalid(InvalidFlowInput),
+}
 
+impl NotStarted {
+    /// What the merchant is told: `Flow "syncOrders" not found`.
+    pub(crate) fn message(&self) -> String {
+        match self {
+            Self::Conflict(conflict) => conflict.to_string(),
+            Self::Unknown(name) => format!("Flow \"{name}\" not found"),
+            Self::Invalid(invalid) => invalid.to_string(),
+        }
+    }
+}
+
+/// Queues a run of the flow `name` for the session's shop and app, with
+/// `input` (`null` is `{}`). The inner `Err` is a start the merchant is told
+/// about; any other failure is unexpected.
+pub(crate) async fn start_flow(
+    app: &OpenShop,
+    session: &ShopSession,
+    name: &str,
+    input: Value,
+) -> anyhow::Result<Result<QueuedRun, NotStarted>> {
+    let input = if input.is_null() { json!({}) } else { input };
     let dispatched = app
         .dispatch_flow(
             DispatchOptions::new(name, session.shop.clone())
@@ -242,22 +261,35 @@ async fn run_flow(
         )
         .await;
     match dispatched {
-        Ok(result) => Ok(json_response(StatusCode::ACCEPTED, json!(result))),
+        Ok(result) => Ok(Ok(result)),
         Err(error) => {
             if let Some(conflict) = error.downcast_ref::<FlowConcurrencyError>() {
-                Ok(concurrency_conflict(conflict))
+                Ok(Err(NotStarted::Conflict(conflict.clone())))
             } else if let Some(unknown) = error.downcast_ref::<UnknownFlowError>() {
-                Ok(json_error(
-                    StatusCode::NOT_FOUND,
-                    format!("Flow \"{}\" not found", unknown.flow_name),
-                ))
+                Ok(Err(NotStarted::Unknown(unknown.flow_name.clone())))
             } else if let Some(invalid) = error.downcast_ref::<InvalidFlowInput>() {
-                Ok(json_error(StatusCode::UNPROCESSABLE_ENTITY, invalid.to_string()))
+                Ok(Err(NotStarted::Invalid(invalid.clone())))
             } else {
-                Err(error.into())
+                Err(error)
             }
         }
     }
+}
+
+async fn run_flow(
+    State(app): State<OpenShop>,
+    Extension(session): Extension<ShopSession>,
+    Path(name): Path<String>,
+    body: Bytes,
+) -> ApiResult {
+    let body = json_object_body(&body);
+    let input = body.get("input").cloned().unwrap_or(Value::Null);
+    Ok(match start_flow(&app, &session, &name, input).await? {
+        Ok(result) => json_response(StatusCode::ACCEPTED, json!(result)),
+        Err(NotStarted::Conflict(conflict)) => concurrency_conflict(&conflict),
+        Err(refused @ NotStarted::Unknown(_)) => json_error(StatusCode::NOT_FOUND, refused.message()),
+        Err(refused @ NotStarted::Invalid(_)) => json_error(StatusCode::UNPROCESSABLE_ENTITY, refused.message()),
+    })
 }
 
 /// `409` for a flow that rejects concurrent runs, with the run that is active.
@@ -543,16 +575,41 @@ async fn bulk_delete(
     let Some(ids) = body.get("ids").and_then(Value::as_array).filter(|ids| !ids.is_empty()) else {
         return Ok(json_error(StatusCode::BAD_REQUEST, "No IDs provided"));
     };
-    if ids.len() > 100 {
-        return Ok(json_error(StatusCode::BAD_REQUEST, "Max 100 runs per batch"));
-    }
+    let ids: Vec<&str> = ids.iter().map(|id| id.as_str().unwrap_or_default()).collect();
+    Ok(match delete_run_batch(&app, &session, &ids).await? {
+        Ok(batch) => json_response(
+            StatusCode::OK,
+            json!({ "deleted": batch.deleted, "skipped": batch.skipped }),
+        ),
+        Err(refused) => json_error(StatusCode::BAD_REQUEST, refused),
+    })
+}
 
-    let candidates: Vec<Uuid> = ids.iter().filter_map(|id| Uuid::parse_str(id.as_str()?).ok()).collect();
-    let deleted = delete_runs(&app, &session, &candidates).await?;
-    Ok(json_response(
-        StatusCode::OK,
-        json!({ "deleted": deleted.len(), "skipped": ids.len() - deleted.len() }),
-    ))
+/// What a deletion of several runs did.
+pub(crate) struct DeletedBatch {
+    pub(crate) deleted: usize,
+    /// The ids that named no run of the session that is over: active, of
+    /// another shop, gone, or not an id.
+    pub(crate) skipped: usize,
+}
+
+/// Deletes the runs that `ids` names and that are over, at most 100 at a
+/// time. The inner `Err` is a batch refused, said for the merchant (`Max 100
+/// runs per batch`).
+pub(crate) async fn delete_run_batch(
+    app: &OpenShop,
+    session: &ShopSession,
+    ids: &[&str],
+) -> Result<Result<DeletedBatch, &'static str>, sqlx::Error> {
+    if ids.len() > 100 {
+        return Ok(Err("Max 100 runs per batch"));
+    }
+    let candidates: Vec<Uuid> = ids.iter().filter_map(|id| Uuid::parse_str(id).ok()).collect();
+    let deleted = delete_runs(app, session, &candidates).await?.len();
+    Ok(Ok(DeletedBatch {
+        deleted,
+        skipped: ids.len() - deleted,
+    }))
 }
 
 pub fn routes() -> Router<OpenShop> {
