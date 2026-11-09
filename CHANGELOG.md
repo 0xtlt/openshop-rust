@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- The `custom` template asks for `read_discounts` and `write_discounts`: its
+  volume discount Function has instances, which the Functions page of the
+  admin lists, creates, updates and deletes, and Shopify refused without them.
 - **Breaking.** The Leptos admin UI is removed: `crates/openshop-ui`, the
   committed bundle `crates/openshop/ui-dist`, trunk and the WebAssembly target,
   the `ui` and `embedded-ui` features, `openshop::ui`, `openshop build-ui`,
