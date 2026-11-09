@@ -603,9 +603,13 @@ impl Inner {
         options.on_heartbeat = Some(heartbeat);
         options.lease_duration = Some(Duration::from_millis(self.config.lease_duration_ms));
         options.interrupt = Some(interrupt);
-        // Extend the lease at least twice per lease period.
+        // Extend the lease four times per lease period, at most every 15 s. The
+        // execution gives the lease up at 90% of it from the last extension. A
+        // heartbeat that fails or times out (a quarter of the lease) then leaves
+        // the next ones time to extend it. With one every half lease, the next
+        // came after that point: a single late heartbeat dropped the flow.
         options.heartbeat_interval =
-            Some(HEARTBEAT_INTERVAL.min(Duration::from_millis((self.config.lease_duration_ms / 2).max(1))));
+            Some(HEARTBEAT_INTERVAL.min(Duration::from_millis((self.config.lease_duration_ms / 4).max(1))));
 
         // A panic outside of the flow body (which the runner handles itself) must
         // neither leak this worker's slot nor leave the run leased.
