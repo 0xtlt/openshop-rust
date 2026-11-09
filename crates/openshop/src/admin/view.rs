@@ -17,8 +17,8 @@ use std::sync::LazyLock;
 use anyhow::Result;
 use indexmap::IndexMap;
 use maud::Markup;
-use serde::Serialize;
 use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 use super::{AdminContext, AdminPublicError};
@@ -172,7 +172,10 @@ impl PageRequest {
 /// let created = Outcome::redirect("/reviews/42").with_toast("Review created");
 /// # let _ = (saved, created);
 /// ```
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+///
+/// `Deserialize`: a test reads it from `ctx.call_action::<Outcome>(…)`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Outcome {
     pub toast: Option<String>,
     /// The toast reports a failure.
@@ -242,11 +245,25 @@ impl Outcome {
 
 /// The error of a field as a form shows it, from what the input schema says
 /// of its value: `is required` is `Required`, `must be integer` is `Must be a
-/// whole number`.
+/// whole number`, `must be >= 1` is `Must be at least 1`.
 pub(crate) fn field_message(error: &str) -> String {
     let error = error.strip_suffix(" or null").unwrap_or(error);
+    let bound = |prefix: &str| error.strip_prefix(prefix).filter(|bound| bound.parse::<f64>().is_ok());
+    if let Some(minimum) = bound("must be >= ") {
+        return format!("Must be at least {minimum}");
+    }
+    if let Some(maximum) = bound("must be <= ") {
+        return format!("Must be at most {maximum}");
+    }
+    if let Some(minimum) = bound("must be > ") {
+        return format!("Must be more than {minimum}");
+    }
+    if let Some(maximum) = bound("must be < ") {
+        return format!("Must be less than {maximum}");
+    }
     match error {
-        "is required" => "Required".to_string(),
+        "is required" | "must be at least 1 characters" => "Required".to_string(),
+        "must be at most 1 characters" => "Must be at most 1 character".to_string(),
         "must be integer" => "Must be a whole number".to_string(),
         "must be number" => "Must be a number".to_string(),
         "must be boolean" => "Must be true or false".to_string(),
@@ -277,9 +294,19 @@ pub(crate) async fn with_outcome<F: Future>(future: F) -> (F::Output, Option<Out
         .await
 }
 
-/// What a page function returned, as JSON. An [`Outcome`] is also kept for
-/// the form that ran the function. What `#[admin_page]` calls.
-#[doc(hidden)]
+/// What a function of a page returns, as JSON. An [`Outcome`] is also kept
+/// for the form that ran the function: what `#[admin_page]` calls, and what
+/// an action made by hand returns to answer one.
+///
+/// ```
+/// use openshop::admin::{Outcome, output};
+/// use openshop::builder::{AdminPage, InputSchema};
+///
+/// let page = AdminPage::new("/reviews").action("refresh", InputSchema::any(), |_ctx, _input| async move {
+///     output(Outcome::toast("Refreshed"))
+/// });
+/// # let _ = page;
+/// ```
 pub fn output<R: Serialize + 'static>(output: R) -> Result<Value> {
     if let Some(outcome) = (&output as &dyn Any).downcast_ref::<Outcome>() {
         // Outside a form there is nobody to tell.
@@ -475,6 +502,10 @@ mod tests {
             ]
         );
         assert_eq!(field_message("must be integer or null"), "Must be a whole number");
+        assert_eq!(field_message("must be >= 1"), "Must be at least 1");
+        assert_eq!(field_message("must be < 2.5"), "Must be less than 2.5");
+        assert_eq!(field_message("must be at least 1 characters"), "Required");
+        assert_eq!(field_message("must be one of \"a\", \"b\""), "Must be one of \"a\", \"b\"");
         let typed = fields_to_json(&schema, &parse_fields(b"title=Great&rating=4&mode=slow"));
         assert_eq!(typed, json!({ "title": "Great", "rating": 4, "mode": "slow" }));
     }

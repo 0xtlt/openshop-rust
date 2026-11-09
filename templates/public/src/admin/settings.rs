@@ -1,9 +1,7 @@
 //! The `/settings` page: under how many units a variant of the shop runs low.
 
-use leptos::prelude::*;
-use leptos::task::spawn_local;
+use maud::html;
 use openshop::prelude::*;
-use openshop::ui::{AdminActionOptions, shopify, use_action, use_loader};
 use serde::{Deserialize, Serialize};
 
 #[input]
@@ -32,8 +30,10 @@ impl SettingsPage {
         })
     }
 
+    /// Saves the threshold of the shop. A number out of range is refused by
+    /// the input schema, under its field.
     #[action]
-    async fn save_settings(ctx: AdminContext, input: SaveSettings) -> Result<Settings> {
+    async fn save_settings(ctx: AdminContext, input: SaveSettings) -> Result<Outcome> {
         use crate::models::stock_settings::{NewStockSettings, StockSettings};
 
         // The rows of the shop of the session: one, once its merchant saved.
@@ -51,55 +51,36 @@ impl SettingsPage {
                     .await?;
             }
         }
-        Ok(Settings {
-            threshold: input.threshold,
-        })
+        Ok(Outcome::toast(format!(
+            "A variant runs low under {} units",
+            input.threshold
+        )))
     }
 
+    /// Rendered by the server with what `settings` returns, and the form the
+    /// page refused, if it refused one.
     #[view]
-    fn view() -> impl IntoView {
-        let settings = use_loader(Self::SETTINGS, || ());
-        let save = use_action(Self::SAVE_SETTINGS);
-        // What the field holds: what was saved, then what the merchant types.
-        let threshold = RwSignal::new(String::new());
-        Effect::new(move |_| {
-            if let Some(saved) = settings.data.get() {
-                threshold.set(saved.threshold.to_string());
-            }
-        });
-        let save_threshold = move |_| {
-            let Ok(units) = threshold.get_untracked().trim().parse::<i32>() else {
-                shopify::toast_error("Enter a number of units");
-                return;
-            };
-            spawn_local(async move {
-                let options = AdminActionOptions::new().revalidate(Self::SETTINGS);
-                if let Ok(Some(saved)) = save.invoke(SaveSettings { threshold: units }, options).await {
-                    shopify::toast(&format!("A variant runs low under {} units", saved.threshold));
+    fn view(settings: Settings, form: FormState) -> Markup {
+        let saved = settings.threshold.to_string();
+        html! {
+            s-page heading="Settings" {
+                s-section heading="Low stock" {
+                    form method="post" {
+                        input type="hidden" name="_action" value=(Self::SAVE_SETTINGS);
+                        s-stack gap="base" {
+                            s-number-field
+                                name="threshold"
+                                label="A variant runs low under"
+                                suffix="units"
+                                min="1"
+                                max="1000"
+                                value=(form.value_or("threshold", &saved))
+                                error=[form.error("threshold")] {}
+                            s-button type="submit" variant="primary" { "Save" }
+                        }
+                    }
                 }
-            });
-        };
-
-        view! {
-            <s-page heading="Settings">
-                {move || settings.error.get().map(|error| view! { <s-banner tone="critical">{error.message}</s-banner> })}
-                {move || save.error.get().map(|error| view! { <s-banner tone="critical">{error.message}</s-banner> })}
-                <s-section heading="Low stock">
-                    <s-stack gap="base">
-                        <s-number-field
-                            label="A variant runs low under"
-                            suffix="units"
-                            min="1"
-                            max="1000"
-                            prop:value=move || threshold.get()
-                            on:input=move |event| threshold.set(event_target_value(&event))
-                        />
-                        <s-button variant="primary" loading=move || save.pending.get() on:click=save_threshold>
-                            "Save"
-                        </s-button>
-                    </s-stack>
-                </s-section>
-            </s-page>
+            }
         }
     }
 }

@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+- The `custom` and `public` templates write their admin pages as views the
+  server renders: `maud` in place of `leptos` and the `ui` feature, forms in
+  place of `use_action`, and their tests call the pages with `ctx.page` and
+  `ctx.submit`. Their `Dockerfile` builds the app alone: no WebAssembly target,
+  trunk, `openshop build` or `dist/`. `openshop init-ui` writes a page with a
+  view, an action and its form, and adds `maud`. The guides and the references
+  describe the server-rendered admin; [Migrate to the server-rendered
+  admin](docs/src/guides/migrate-to-server-rendered-ui.md) is the guide of an
+  application that has Leptos views.
+- `ctx.page(path)` asks for a page of the admin as the admin does, and
+  `ctx.submit(path, fields)` sends one of its forms. `Outcome` is
+  `Deserialize`, for `ctx.call_action::<Outcome>`, and
+  `openshop::admin::output` is public, for an action made by hand. A field
+  refused by its schema says `Must be at least 1` rather than `must be >= 1`,
+  and an empty text that needs a character `Required`.
 - The admin is rendered by the server by default: `UiSource::Server` is the
   default of `admin_ui`, of `ServerOptions` and of the test harness, and
   `OPENSHOP_UI=server` is no longer needed. A test or a server that served no

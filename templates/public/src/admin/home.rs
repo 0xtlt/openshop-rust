@@ -1,10 +1,8 @@
 //! The home of the admin: what the last stock check of the shop found, and a
 //! way to run one now.
 
-use leptos::prelude::*;
-use leptos::task::spawn_local;
+use maud::html;
 use openshop::prelude::*;
-use openshop::ui::{AdminActionOptions, shopify, use_action, use_loader};
 use serde::{Deserialize, Serialize};
 
 /// A variant that runs low, as the page shows it.
@@ -83,74 +81,55 @@ impl HomePage {
         })
     }
 
+    /// Queues a check for the shop of the session, which a worker runs: the
+    /// page is rendered again, with a toast.
     #[action]
-    async fn check_now(ctx: AdminContext) -> Result<()> {
+    async fn check_now(ctx: AdminContext) -> Result<Outcome> {
         use crate::flows::check_stock::check_stock;
 
-        // Queued for the shop of the session, and run by a worker.
         check_stock::dispatch(&ctx).await?;
-        Ok(())
+        Ok(Outcome::toast("Stock check started"))
     }
 
+    /// Rendered by the server with what `summary` returns. While a check runs,
+    /// the page is fetched again every 5 seconds.
     #[view]
-    fn view() -> impl IntoView {
-        let summary = use_loader(Self::SUMMARY, || ());
-        let check = use_action(Self::CHECK_NOW);
-        let check_now = move |_| {
-            spawn_local(async move {
-                let options = AdminActionOptions::new().revalidate(Self::SUMMARY);
-                if let Ok(Some(())) = check.invoke((), options).await {
-                    shopify::toast("Stock check started");
-                }
-            });
+    fn view(summary: Summary) -> Markup {
+        let found = match &summary.checked_at {
+            Some(at) => format!("{} variants run low. Last check: {at}.", summary.low_stock.len()),
+            None => "No check yet.".to_string(),
         };
-
-        view! {
-            <s-page heading="Stock watch">
-                {move || summary.loading.get().then(|| view! { <s-spinner accessibilityLabel="Loading the last check" /> })}
-                {move || summary.error.get().map(|error| view! { <s-banner tone="critical">{error.message}</s-banner> })}
-                {move || check.error.get().map(|error| view! { <s-banner tone="critical">{error.message}</s-banner> })}
-                {move || {
-                    summary.data.get().map(|last| {
-                        let found = match &last.checked_at {
-                            Some(at) => format!("{} variants run low. Last check: {at}.", last.low_stock.len()),
-                            None => "No check yet.".to_string(),
-                        };
-                        view! {
-                            {last.checking.then(|| view! {
-                                <s-banner tone="info">
-                                    "A check is running. "
-                                    <s-link on:click=move |_| summary.revalidate()>"Refresh"</s-link>
-                                </s-banner>
-                            })}
-                            <s-section heading=format!("Under {} units", last.threshold)>
-                                <s-paragraph>{found}</s-paragraph>
-                                <s-stack gap="small">
-                                    {last
-                                        .low_stock
-                                        .into_iter()
-                                        .map(|variant| {
-                                            let tone = if variant.available > 0 { "warning" } else { "critical" };
-                                            view! {
-                                                <s-stack direction="inline" justifyContent="space-between" alignItems="center">
-                                                    <s-stack direction="inline" gap="small" alignItems="center">
-                                                        <s-text type="strong">{variant.name}</s-text>
-                                                        <s-text color="subdued">{variant.sku}</s-text>
-                                                    </s-stack>
-                                                    <s-badge tone=tone>{format!("{} left", variant.available)}</s-badge>
-                                                </s-stack>
-                                            }
-                                        })
-                                        .collect_view()}
-                                </s-stack>
-                            </s-section>
+        html! {
+            s-page heading="Stock watch" {
+                @if summary.checking {
+                    s-banner tone="info" data-openshop-refresh="5000" {
+                        "A check is running. "
+                        s-link href=(Self::PATH) { "Refresh" }
+                    }
+                }
+                s-section heading=(format!("Under {} units", summary.threshold)) {
+                    s-paragraph { (found) }
+                    s-stack gap="small" {
+                        @for variant in &summary.low_stock {
+                            s-stack direction="inline" justifyContent="space-between" alignItems="center" {
+                                s-stack direction="inline" gap="small" alignItems="center" {
+                                    s-text type="strong" { (variant.name) }
+                                    @if let Some(sku) = &variant.sku {
+                                        s-text color="subdued" { (sku) }
+                                    }
+                                }
+                                s-badge tone=(if variant.available > 0 { "warning" } else { "critical" }) {
+                                    (variant.available) " left"
+                                }
+                            }
                         }
-                    })
-                }}
-                <s-button variant="primary" loading=move || check.pending.get() on:click=check_now>
-                    "Check now"
-                </s-button>
-            </s-page>
+                    }
+                }
+                form method="post" {
+                    input type="hidden" name="_action" value=(Self::CHECK_NOW);
+                    s-button type="submit" variant="primary" { "Check now" }
+                }
+            }
         }
     }
 }

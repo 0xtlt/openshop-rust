@@ -18,6 +18,7 @@
   - [Add proxy routes](guides/add-proxy-routes.md)
   - [Add a server route](guides/add-server-route.md)
   - [Add a custom admin page](guides/add-admin-page.md)
+  - [Migrate to the server-rendered admin](guides/migrate-to-server-rendered-ui.md)
   - [Charge with managed pricing](guides/charge-with-managed-pricing.md)
   - [Test an app](guides/test-app.md)
   - [Use custom Shopify endpoints](guides/custom-shopify-endpoints.md)

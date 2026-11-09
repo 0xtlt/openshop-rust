@@ -583,6 +583,34 @@ impl TestContext {
         self.request(reqwest::Method::DELETE, path)
     }
 
+    /// The page of the admin at `path`, as staff user `1` opens it from the
+    /// menu: `ctx.page("/reviews").send().await?.text().await?` is its HTML,
+    /// the content of the page without the document around it.
+    pub fn page(&self, path: &str) -> reqwest::RequestBuilder {
+        self.get(path).header("x-openshop-fetch", "1")
+    }
+
+    /// A form of the page of the admin at `path`, sent as the admin sends it:
+    /// `fields` with the name of its action in `_action`. The answer is the
+    /// page rendered again with the toast of the action in
+    /// `x-openshop-toast`, `204` with `x-openshop-location` when the action
+    /// goes to another page, `422` with the page and the error of each field
+    /// when the form is refused.
+    ///
+    /// ```no_run
+    /// # async fn example(ctx: &openshop::testing::TestContext) -> openshop::Result<()> {
+    /// let saved = ctx.submit("/settings", &[("_action", "saveSettings"), ("threshold", "8")]).send().await?;
+    /// assert_eq!(saved.headers()["x-openshop-toast"], "Saved");
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn submit(&self, path: &str, fields: &[(&str, &str)]) -> reqwest::RequestBuilder {
+        self.post(path)
+            .header("x-openshop-fetch", "1")
+            .header(reqwest::header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .body(serde_urlencoded::to_string(fields).unwrap_or_default())
+    }
+
     /// Reset all fakes call history
     pub fn reset_fakes(&self) {
         self.fakes.reset();

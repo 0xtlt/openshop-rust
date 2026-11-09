@@ -252,7 +252,11 @@ async fn the_provider_shown_is_the_one_of_the_url() {
 
     // The first one, with a form that chooses another.
     let first = send(fetch(&ctx, Method::GET, "/providers")).await;
-    assert!(first.body.contains(r#"<form method="get" data-openshop-autosubmit>"#), "{}", first.body);
+    assert!(
+        first.body.contains(r#"<form method="get" data-openshop-autosubmit>"#),
+        "{}",
+        first.body
+    );
     assert!(
         first
             .body

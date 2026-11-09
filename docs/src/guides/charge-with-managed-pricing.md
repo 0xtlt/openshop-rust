@@ -117,38 +117,17 @@ itself, and `pricingLink`, its App Bridge link
 
 ## 4. Send the merchant to the plans
 
-In the view of the page, open `pricingLink` in the top window of the admin when
-the loader answers `PLAN_REQUIRED`:
+A page whose loader answers `PLAN_REQUIRED` shows the message of the error
+with a **See the plans** button, which opens `pricingLink` in the top window
+of the admin: the view of the page is not rendered, and has nothing to do. An
+action refused this way shows the message in an error toast.
 
-```rust,ignore
-#[view]
-fn view() -> impl IntoView {
-    let report = use_loader(Self::REPORT, || ());
-    let plans = move || {
-        report
-            .error
-            .get()
-            // `openshop::billing` is the server's: the view names the code.
-            .filter(|error| error.code.as_deref() == Some("PLAN_REQUIRED"))
-            .and_then(|error| error.detail("pricingLink").map(str::to_string))
-    };
-    view! {
-        <s-page heading="Reports">
-            {move || plans().map(|link| view! {
-                <s-banner heading="Choose a plan" tone="warning">
-                    <a href=link target="_top">"See the plans"</a>
-                </s-banner>
-            })}
-        </s-page>
-    }
-}
-```
-
-A page can show its own "no plan" state instead of an error. Its loader reads
-the plan with `ctx.shopify.plan_among(&[…])`, which is the check of
+A page can show its own "no plan" state instead of that message. Its loader
+reads the plan with `ctx.shopify.plan_among(&[…])`, which is the check of
 `require_plan` without the `402`: `Some(plan)`, or `None` without one of the
 plans. It asks the Partner API again as `require_plan` does, so a merchant
-back from the plan selection page sees the new plan at once:
+back from the plan selection page sees the new plan at once. The view links to
+the plans with `target="_top"`:
 
 ```rust,ignore
 #[loader]
@@ -163,16 +142,21 @@ async fn report(ctx: AdminContext) -> Result<Value> {
 The view shows the banner when `plan` is `null`, with the link of the loader:
 
 ```rust,ignore
-let plans = move || {
-    report
-        .data
-        .get()
-        .filter(|report| report["plan"].is_null())
-        .and_then(|report| report["pricingLink"].as_str().map(str::to_string))
-};
+#[view]
+fn view(report: Value) -> Markup {
+    html! {
+        s-page heading="Reports" {
+            @if let Some(plans) = report["pricingLink"].as_str() {
+                s-banner heading="Choose a plan" tone="warning" {
+                    s-button variant="primary" href=(plans) target="_top" { "See the plans" }
+                }
+            }
+        }
+    }
+}
 ```
 
-On the server, outside a view, `billing::pricing_url(&ctx)?` is the same page,
+Outside a page, `billing::pricing_url(&ctx)?` is the same page,
 for a redirect or an email, and `ctx.admin_url("settings/payments")` any other
 page of the admin of the shop. A server route gives them for the shop it names,
 installed or not: `ctx.pricing_url(&shop)?` and `ctx.admin_url(&shop,

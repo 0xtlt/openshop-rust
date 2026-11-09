@@ -86,15 +86,11 @@ tables of its models. It does not update an existing app. See the
 At most one of the four `--openshop-*` arguments; a second one fails with
 ``[openshop] Name one source for `openshop` ``. The commit the CLI was built from
 is the one `cargo install --git` took; for a CLI built from a local checkout,
-make sure it is pushed, or pass `--openshop-path`. The `Dockerfile` of a project
-with admin views installs the CLI of the `rev`, `tag` or `branch` of the
-manifest, so it follows any of them.
+make sure it is pushed, or pass `--openshop-path`.
 
 A non-empty target fails with
 `[openshop] Target directory is not empty: <path>`, before any question about
-the template. The `custom` and `public` templates have admin pages with a
-view, compiled to WebAssembly: install the toolchain once with
-`rustup target add wasm32-unknown-unknown` and `cargo install trunk`.
+the template.
 
 If `init` fails after it started writing, it removes the files it wrote and the
 directories it made, nothing else: a directory it shares with another `init`
@@ -109,22 +105,20 @@ openshop init-ui
 ```
 
 `init-ui` gives an app a first [custom admin page](custom-admin-pages.md) with
-a view, and what views are compiled with. Run it from the project root:
+a view, and `maud`, which views are written with. Run it from the project root:
 without a `Cargo.toml` in the current directory it fails with
 ``[openshop] No Cargo.toml here. Run `openshop init-ui` from the root of an OpenShop project.``
 
 The command writes `src/admin/hello.rs`, an example `/hello` page with a
-loader and its view, declares it in `src/admin/mod.rs`, and adds `dist/`,
-where the bundle is built, to `.gitignore`. When the page already exists it
-fails with `[openshop] src/admin/hello.rs already exists.`
+loader, an action and its view, and declares it in `src/admin/mod.rs`. When the
+page already exists it fails with
+`[openshop] src/admin/hello.rs already exists.`
 
-In `Cargo.toml`, it adds the `ui` feature to the `openshop` dependency and
-adds `leptos`. When `openshop` is not declared on one line of
-`[dependencies]`, the manifest is left as it is and the lines to add are
-printed.
+In `Cargo.toml`, it adds `maud` after `openshop`. When `[dependencies]` has
+no `openshop`, the manifest is left as it is and the line to add is printed.
 
-It then prints what to write in `src/main.rs`: `mod admin;`, the page in the
-`admin_pages` of `app!`, and the `admin_ui` setting.
+It then prints what to write in `src/main.rs`: `mod admin;` and the page in
+the `admin_pages` of `app!`.
 
 ### Build the admin UI bundle
 

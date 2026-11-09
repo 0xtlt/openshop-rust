@@ -26,9 +26,7 @@ pub use crate::types::{CustomAdminPageAccess, CustomAdminPagesResponse, Resolved
 
 mod view;
 pub(crate) use view::{field_message, fields_to_json, parse_fields, with_outcome};
-#[doc(hidden)]
-pub use view::output;
-pub use view::{ACTION_FIELD, AdminView, FormState, Outcome, PageRequest};
+pub use view::{ACTION_FIELD, AdminView, FormState, Outcome, PageRequest, output};
 pub use openshop_shared::AdminFunctionKind;
 
 /// The Shopify staff member behind the session token.

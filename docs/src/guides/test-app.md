@@ -176,8 +176,9 @@ tests.
   the application. A test that starts its context ends with
   `ctx.shutdown().await`.
 - Use `ctx.call_loader(path, name, input)` and `ctx.call_action(…)` to call a
-  loader or an action of an admin page as its view does, and assert on what it
-  returns or on the error the page receives, such as `402 PLAN_REQUIRED`. See
+  loader or an action of an admin page, and assert on what it returns or on
+  the error the page receives, such as `402 PLAN_REQUIRED`; `ctx.page(path)`
+  and `ctx.submit(path, fields)` to render the page and send its forms. See
   [Test admin functions](../reference/testing.md#test-admin-functions).
 
 All helper options and lifecycle contracts are in the [testing reference](../reference/testing.md).
