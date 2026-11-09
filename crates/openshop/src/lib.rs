@@ -704,9 +704,9 @@ pub use openshop_macros::FunctionConfig;
 /// ordinary helpers.
 ///
 /// With a view, the block gains a constant per loader and action, named after
-/// the function: `ReviewsPage::LIST_REVIEWS`. It carries what the function
-/// takes and what it returns, for `use_loader` and `use_action`; the function
-/// then states what it returns as `Result<Output>`.
+/// the function: `ReviewsPage::SAVE_REVIEW`, the name a form of the view
+/// sends in `_action`. The view, a function that returns `maud::Markup`,
+/// receives what each loader it names returns.
 ///
 /// The type is listed in the `admin_pages` of [`app!`], which is enough for
 /// the page to be served; its path is the constant `PATH`.
