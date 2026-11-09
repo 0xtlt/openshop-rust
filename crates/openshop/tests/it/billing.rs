@@ -12,7 +12,7 @@ use openshop::billing::{
     SubscriptionStatus,
 };
 use openshop::builder::{AdminFunction, AdminPage, InputSchema, Route};
-use openshop::response;
+use openshop::response::{self, IntoResponse, StatusCode, header};
 use openshop::server::{ServerOptions, UiSource};
 use openshop::testing::{
     MockTransport, TEST_APP_GID, TEST_SHOP_GID, TestContext, TestOptions, app_pricing_subscription, sign_query,
@@ -56,6 +56,29 @@ fn subscriptions(plans: &[(&str, &str)]) -> Value {
     json!({ "data": { "currentAppInstallation": { "activeSubscriptions": subscriptions } } })
 }
 
+/// `/routes/welcome`: the welcome link of a plan, as the billing reference
+/// writes it. It reads the plan again for a launch Shopify signed only.
+fn welcome_route() -> Route {
+    Route::public().get(|ctx| async move {
+        let Some(launch) = ctx.shopify_launch() else {
+            // Not signed by Shopify: the app's page in the admin, and no Partner API call.
+            let shop = ctx.request.query().get("shop").cloned().unwrap_or_default();
+            let location = ctx.admin_url(&shop, &format!("apps/{}", ctx.app_handle(&shop)?))?;
+            return Ok((StatusCode::FOUND, [(header::LOCATION, location)]).into_response());
+        };
+        if launch.is_plan_welcome() {
+            let refreshed = async { ctx.for_shop(&launch).await?.shopify.refresh_plans().await };
+            if let Err(error) = refreshed.await {
+                ctx.logger
+                    .warn(format!("The plan of {} was not read again: {error:#}", launch.shop));
+            }
+        }
+        // Still in the frame of the admin: the app's home, with the signed query.
+        let location = format!("/?{}", launch.query);
+        Ok((StatusCode::FOUND, [(header::LOCATION, location)]).into_response())
+    })
+}
+
 /// `/reports`: a loader for the Pro and Plus plans, an action for any plan.
 /// `/routes/plans`: the links a route gives for the shop of `?shop=`.
 fn config() -> OpenShopConfig {
@@ -82,6 +105,7 @@ fn config() -> OpenShopConfig {
     OpenShopConfig::builder()
         .admin_page(page)
         .route("/plans", plans)
+        .route("/welcome", welcome_route())
         .build()
         .unwrap()
 }
@@ -556,4 +580,86 @@ async fn without_the_partner_api_active_subscriptions_does_not_warn() {
     drop(logs);
     assert!(warnings.is_empty(), "{warnings:?}");
     ctx.shutdown().await.unwrap();
+}
+
+/// A `GET` of the welcome route with `query`: its status and where it sends.
+async fn welcome(ctx: &TestContext, query: &str) -> (u16, String) {
+    let response = ctx
+        .http
+        .get(format!("{}/routes/welcome?{query}", ctx.url))
+        .send()
+        .await
+        .unwrap();
+    let location = response
+        .headers()
+        .get("location")
+        .map(|location| location.to_str().unwrap().to_string())
+        .unwrap_or_default();
+    (response.status().as_u16(), location)
+}
+
+#[tokio::test]
+async fn a_welcome_route_reads_the_plan_again_only_for_a_launch_shopify_signed() {
+    let cwd = project(Some("hide-paypal"));
+    let ctx = partner_context(MockTransport::new(), cwd.clone()).await;
+    let partner_calls = || ctx.shopify.calls_to(PARTNER_SUBSCRIPTION_OPERATION).len();
+    // The check that sent the merchant to the plans: no plan, kept.
+    ctx.shopify.active_subscription(None);
+    assert_eq!(answer(&ctx, "loader", "report").await.0, 402);
+    assert_eq!(partner_calls(), 1);
+    ctx.shopify.active_subscription(app_pricing_subscription("pro"));
+
+    // Anyone can call the route: without Shopify's signature, it sends to the
+    // app in the admin and asks the Partner API nothing.
+    let admin = "https://admin.shopify.com/store/test-integration/apps/hide-paypal".to_string();
+    let host = "YWRtaW4uc2hvcGlmeS5jb20vc3RvcmUvdGVzdA";
+    let forged = to_query_string(&sign_query(
+        &[("host", host), ("plan_handle", "pro"), ("shop", TEST_SHOP)],
+        "not-the-secret",
+    ));
+    for query in [format!("shop={TEST_SHOP}&plan_handle=pro"), forged] {
+        assert_eq!(welcome(&ctx, &query).await, (302, admin.clone()), "{query}");
+    }
+    assert_eq!(partner_calls(), 1);
+    // Signed, but not the welcome link of a plan: no Partner API call either.
+    let home = to_query_string(&sign_query(&[("host", host), ("shop", TEST_SHOP)], TEST_SECRET));
+    assert_eq!(welcome(&ctx, &home).await, (302, format!("/?{home}")));
+    assert_eq!(partner_calls(), 1);
+
+    // The welcome link Shopify signed: one Partner API call, and the app's
+    // home in the frame, with the signed query.
+    let signed = to_query_string(&sign_query(
+        &[("host", host), ("plan_handle", "pro"), ("shop", TEST_SHOP)],
+        TEST_SECRET,
+    ));
+    assert_eq!(welcome(&ctx, &signed).await, (302, format!("/?{signed}")));
+    assert_eq!(partner_calls(), 2);
+    // The plan read there is kept: the next check passes without asking.
+    assert_eq!(
+        answer(&ctx, "loader", "report").await,
+        (200, json!({ "plan": "pro", "handle": "pro" }))
+    );
+    assert_eq!(partner_calls(), 2);
+
+    // A Partner API that fails does not stop the merchant: the failure is
+    // logged, with the route and the shop.
+    ctx.shopify
+        .on_with(PARTNER_SUBSCRIPTION_OPERATION, |_| anyhow::bail!("Throttled"));
+    let logs = LogCapture::start().await;
+    assert_eq!(welcome(&ctx, &signed).await, (302, format!("/?{signed}")));
+    let warning = logs
+        .at("warn")
+        .into_iter()
+        .find(|line| line.message.starts_with("The plan of "))
+        .expect("the warning of the route");
+    drop(logs);
+    assert_eq!(
+        warning.message,
+        format!(
+            "The plan of {TEST_SHOP} was not read again: [openshop] The Partner API answered with errors: Throttled"
+        )
+    );
+    assert_eq!(warning.context, Some(json!({ "route": "GET /welcome" })));
+    ctx.shutdown().await.unwrap();
+    std::fs::remove_dir_all(cwd).ok();
 }

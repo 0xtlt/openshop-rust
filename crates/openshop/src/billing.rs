@@ -625,26 +625,37 @@ impl ShopifyClient {
     /// the Partner API takes four requests a second for the whole
     /// organization. The Admin API is asked at each call anyway.
     ///
-    /// On a welcome link, read the plan as a best effort: when the Partner
-    /// API fails, log it and send the merchant into the app anyway. A check
-    /// that does not find the plan asks again once the kept answer is
-    /// [`MIN_REFRESH`] old. With `?`, a merchant who just paid would get a
-    /// `500`.
+    /// On the welcome link of a plan that a route serves, read the plan only
+    /// for a launch Shopify signed ([`RouteContext::shopify_launch`](crate::RouteContext::shopify_launch)):
+    /// anyone can call a route, and an open route must not spend the
+    /// organization's rate limit. Read it as a best effort: when the Partner
+    /// API fails, log it and send the merchant into the app anyway. With `?`,
+    /// a merchant who just paid would get a `500`. A check that does not find
+    /// the plan asks again once the kept answer is [`MIN_REFRESH`] old.
     ///
     /// ```
     /// use openshop::prelude::*;
     /// use openshop::response::{IntoResponse, Response, StatusCode, header};
     ///
-    /// /// The welcome link of the plans: read the plan again, then back to the app.
+    /// /// The welcome link of a plan, which the admin opens in the app's frame.
     /// #[route(GET, "/welcome")]
     /// async fn welcome(ctx: RouteContext) -> Result<Response> {
-    ///     let shop = ctx.request.query().get("shop").cloned().unwrap_or_default();
-    ///     let refreshed = async { ctx.for_shop(&shop).await?.shopify.refresh_plans().await };
-    ///     if let Err(error) = refreshed.await {
-    ///         ctx.logger.warn(format!("The plan of {shop} was not read again: {error:#}"));
+    ///     let Some(launch) = ctx.shopify_launch() else {
+    ///         // Not signed by Shopify: the app's page in the admin, and no Partner API call.
+    ///         let shop = ctx.request.query().get("shop").cloned().unwrap_or_default();
+    ///         let location = ctx.admin_url(&shop, &format!("apps/{}", ctx.app_handle(&shop)?))?;
+    ///         return Ok((StatusCode::FOUND, [(header::LOCATION, location)]).into_response());
+    ///     };
+    ///     // Only a launch Shopify signed reads the plan again: an open route must
+    ///     // not spend the organization's rate limit of the Partner API.
+    ///     if launch.is_plan_welcome() {
+    ///         let refreshed = async { ctx.for_shop(&launch).await?.shopify.refresh_plans().await };
+    ///         if let Err(error) = refreshed.await {
+    ///             ctx.logger.warn(format!("The plan of {} was not read again: {error:#}", launch.shop));
+    ///         }
     ///     }
-    ///     let app = format!("apps/{}", ctx.app_handle(&shop)?);
-    ///     let location = ctx.admin_url(&shop, &app)?;
+    ///     // Still in the admin's frame: the app's home, with the signed query.
+    ///     let location = format!("/?{}", launch.query);
     ///     Ok((StatusCode::FOUND, [(header::LOCATION, location)]).into_response())
     /// }
     /// ```

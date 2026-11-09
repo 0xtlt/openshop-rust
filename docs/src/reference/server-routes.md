@@ -258,9 +258,9 @@ unverified payload as proof of identity.
 ## Links to the Shopify admin
 
 A route sends a merchant to the admin of a shop that may not have the app
-installed, or before anything is asked of it: the welcome link of a plan, a
-link in an email. These read the configuration only, and take the shop as
-`for_shop` does:
+installed, or before anything is asked of it: a link in an email, a welcome
+link opened outside the admin. These read the configuration only, and take the
+shop as `for_shop` does:
 
 | Method | Returns |
 | --- | --- |
@@ -272,17 +272,11 @@ link in an email. These read the configuration only, and take the shop as
 use openshop::prelude::*;
 use openshop::response::{IntoResponse, Response, StatusCode, header};
 
-/// The welcome link of the plans: read the plan again, then back to the app.
-#[route(GET, "/welcome")]
-pub async fn welcome(ctx: RouteContext) -> Result<Response> {
+/// A link to the app in the admin of `?shop=`, for an email.
+#[route(GET, "/open")]
+pub async fn open(ctx: RouteContext) -> Result<Response> {
     let shop = ctx.request.query().get("shop").cloned().unwrap_or_default();
-    // Best effort: a failure is logged, and the merchant goes on into the app.
-    let refreshed = async { ctx.for_shop(&shop).await?.shopify.refresh_plans().await };
-    if let Err(error) = refreshed.await {
-        ctx.logger.warn(format!("The plan of {shop} was not read again: {error:#}"));
-    }
-    let app = format!("apps/{}", ctx.app_handle(&shop)?);
-    let location = ctx.admin_url(&shop, &app)?;
+    let location = ctx.admin_url(&shop, &format!("apps/{}", ctx.app_handle(&shop)?))?;
     Ok((StatusCode::FOUND, [(header::LOCATION, location)]).into_response())
 }
 ```
@@ -293,16 +287,79 @@ while several apps are configured; whether the shop installed the app is not
 asked. `app_handle` and `pricing_url` also fail when the `shopify.app.toml` of
 the app has no `handle`.
 
-Do not use `?` on `for_shop` or `refresh_plans()` in a welcome link: when the
-Partner API fails, a merchant who just paid would land on a `500`. A plan check
-that does not find the plan asks the Partner API again once the kept answer is
-ten seconds old (see [Billing](billing.md#the-welcome-link-of-a-route)).
+A route that wants a context of the shop, with `app_handle()` and
+`admin_url(path)` of its own, calls `for_shop`.
 
-The query of a welcome link is not signed when it reaches a server route:
-anyone can call it. `refresh_plans()` asks the Partner API at each call,
-whatever the age of the kept answer, and the Partner API takes four requests a
-second for the whole organization. A route that wants a context of the shop,
-with `app_handle()` and `admin_url(path)` of its own, calls `for_shop`.
+Do not redirect a launch of the admin to the admin: the route runs in the
+app's frame, and Shopify's admin cannot be framed. The welcome link of a plan is such a
+launch: see [A launch Shopify signed](#a-launch-shopify-signed).
+
+## A launch Shopify signed
+
+The admin opens a path of the app in its frame with a query Shopify signs:
+`hmac`, `timestamp`, `shop`, `host`, and what the app's own link adds, such as
+the `plan_handle` of the welcome link of a plan. Anyone can call a route with
+any query. `ctx.shopify_launch()` says whether Shopify signed this one:
+
+| Method | Returns |
+| --- | --- |
+| `ctx.shopify_launch()` | `Option<ShopifyLaunch>`: the launch when the query verifies. `None` without `hmac`, with one that does not verify, older than 90 seconds, or for a `shop` that is not a `*.myshopify.com` domain. `RouteAuthContext` has it too. |
+
+It checks what the admin UI checks for its own launches: the `hmac` is the one
+the secret of a Shopify app of the application gives, the `timestamp` is of
+the last 90 seconds, and one app only matches.
+
+| `ShopifyLaunch` | Type | Contract |
+| --- | --- | --- |
+| `shop` | `String` | The shop of the launch, normalized. |
+| `shopify_app` | `String` | The Shopify app whose secret signed it, as the configuration names it: `default` for the app of the environment. |
+| `params` | `IndexMap<String, String>` | The parameters of the query, the first value of each. |
+| `query` | `String` | The query as Shopify signed it, without `?`: a redirect to another page of the app in the same frame passes it on, `/?{query}`, for that page to verify it too. |
+| `param(name)` | `Option<&str>` | A parameter. |
+| `plan_handle()`, `charge_id()` | `Option<&str>` | What the welcome link of a plan carries. |
+| `is_plan_welcome()` | `bool` | Whether it carries `plan_handle` or `charge_id`. |
+
+The shop of a launch is the one the admin vouched for, not one a caller named:
+`ctx.for_shop(&launch)` resolves it, for the app that signed it. Whether the
+shop installed the app is not part of the launch: `for_shop` checks it.
+
+The welcome link of a plan reads the plan again only for a launch Shopify
+signed, and as a best effort:
+
+```rust,ignore
+use openshop::prelude::*;
+use openshop::response::{IntoResponse, Response, StatusCode, header};
+
+/// The welcome link of a plan, which the admin opens in the app's frame.
+#[route(GET, "/welcome")]
+pub async fn welcome(ctx: RouteContext) -> Result<Response> {
+    let Some(launch) = ctx.shopify_launch() else {
+        // Not signed by Shopify: the app's page in the admin, and no Partner API call.
+        let shop = ctx.request.query().get("shop").cloned().unwrap_or_default();
+        let location = ctx.admin_url(&shop, &format!("apps/{}", ctx.app_handle(&shop)?))?;
+        return Ok((StatusCode::FOUND, [(header::LOCATION, location)]).into_response());
+    };
+    // Only a launch Shopify signed reads the plan again: an open route must
+    // not spend the organization's rate limit of the Partner API.
+    if launch.is_plan_welcome() {
+        let refreshed = async { ctx.for_shop(&launch).await?.shopify.refresh_plans().await };
+        if let Err(error) = refreshed.await {
+            ctx.logger.warn(format!("The plan of {} was not read again: {error:#}", launch.shop));
+        }
+    }
+    // Still in the admin's frame: the app's home, with the signed query.
+    let location = format!("/?{}", launch.query);
+    Ok((StatusCode::FOUND, [(header::LOCATION, location)]).into_response())
+}
+```
+
+The route must not use `?` on `for_shop` or `refresh_plans()`: when the
+Partner API fails, a merchant who just paid would land on a `500`. A call
+without the signature asks the Partner API nothing: an open route must not
+spend the organization's rate limit. See
+[Billing](billing.md#the-welcome-link-of-a-route) for why the plan is read
+anyway at the next check.
+
 
 ## Logging
 

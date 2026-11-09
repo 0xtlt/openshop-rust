@@ -165,8 +165,8 @@ not_wasm! {
         AdminMenuItem, AdminPageId, AdminPageMode, AdminPagesConfig, Concurrency, Cron, CronShops, ErrorContext,
         FlowContext, FunctionConfig, JsonMap, McpConfig, McpContext, McpPermission, McpResourceContent, McpRiskLevel,
         ProviderConfig, ProxyAuthKind, ProxyContext, RetryPolicy, RouteAuthContext, RouteAuthOutcome, RouteContext,
-        RouteRequest, RouteShopContext, RouteShopInput, ShopScope, ShopifyAppConfig, ShopifyConfig, StepOptions,
-        WebhookContext, WorkerConfig,
+        RouteRequest, RouteShopContext, RouteShopInput, ShopScope, ShopifyAppConfig, ShopifyConfig, ShopifyLaunch,
+        StepOptions, WebhookContext, WorkerConfig,
     };
 }
 
@@ -198,7 +198,8 @@ pub mod prelude {
         pub use crate::{
             AdminContext, App, Cron, ErrorContext, FlowContext, FunctionConfig, InvalidInput, Liquid, McpConfig,
             McpContext, McpPermission, McpRiskLevel, Model, PartnerApi, ProviderConfig, ProxyContext, PublicError, QueuedRun,
-            RetryPolicy, RouteAuthContext, RouteAuthOutcome, RouteContext, RunOutcome, ShopScope, ShopifyEndpoints, Uuid,
+            RetryPolicy, RouteAuthContext, RouteAuthOutcome, RouteContext, RunOutcome, ShopScope, ShopifyEndpoints,
+            ShopifyLaunch, Uuid,
             WebhookContext, WorkerConfig, flow, graphql, liquid, mcp_resource, mcp_tool, provider, proxy, response,
             route, tracing, validators, webhook,
         };

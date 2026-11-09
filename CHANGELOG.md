@@ -11,13 +11,30 @@
   did. Without the Partner API, nothing is logged: apps on manual pricing use
   it rightly. `active_plans()`, `refresh_plans()`, `require_plan` and
   `any_plan` do not warn.
-- The welcome link that a server route serves reads the plan as a best effort,
-  in the guide Charge with managed pricing and in the billing reference: it
-  logs a failure of the Partner API and sends the merchant into the app. The
-  guide used `?`, which gave a merchant who just paid a `500`. The rustdoc of
-  `refresh_plans()` has the route, compiled. The reference of server routes
-  and the SDK reference no longer say that `refresh_plans()` asks at most once
-  every ten seconds: it asks at each call.
+- A server route knows a launch Shopify signed: `ctx.shopify_launch()`
+  (also on `RouteAuthContext`) returns a `ShopifyLaunch`, with the `shop`,
+  the `shopify_app` whose secret signed it, the `params` and the signed
+  `query`, and `plan_handle()`, `charge_id()` and `is_plan_welcome()`. It
+  checks what the admin UI checks for its launches (`hmac`, a `timestamp` of
+  the last 90 seconds, one app). `None` for an unsigned, forged, changed or
+  old query. `ctx.for_shop(&launch)` resolves its shop for its app.
+- The welcome link that a server route serves reads the plan again only for a
+  launch Shopify signed with `plan_handle` (or `charge_id`), as a best effort,
+  in the guide Charge with managed pricing, the billing reference, the server
+  routes reference and the rustdoc of `refresh_plans()` (compiled).
+  - Anyone can call a route, and `refresh_plans()` asks the Partner API at
+    each call: an open route spent the organization's four requests a second.
+    Without the signature, nothing is asked: the next plan check reads the
+    plan, since the kept "no plan" answer is more than ten seconds old by
+    then.
+  - The guide used `?`, which gave a merchant who just paid a `500` when the
+    Partner API failed. The route now logs it and goes on.
+  - The route sent a signed launch to the app's page in the admin. The admin
+    runs it in the app's frame, and Shopify's admin refuses frames
+    (`X-Frame-Options: DENY`). It now sends it to the app's home in the frame,
+    `/?{launch.query}`, which verifies the launch again.
+  - The server routes and SDK references no longer say that `refresh_plans()`
+    asks at most once every ten seconds: it asks at each call.
 - Server routes have a `ctx.logger`, a `ContextLogger`, as webhooks and admin
   pages do. `RouteContext` and `RouteAuthContext` log with `route`, the method
   and the declared path (`POST /orders/:id`). The `RouteShopContext` of
@@ -161,8 +178,8 @@
   without `for_shop`: `RouteContext` (and `RouteAuthContext`) gain
   `app_handle(shop) -> Result<&str>`, `admin_url(shop, path) ->
   Result<String>` and `pricing_url(shop) -> Result<String>`, which take the
-  shop as `for_shop` does and fail as it does, but for the installation. The
-  welcome link of the plans redirects with
+  shop as `for_shop` does and fail as it does, but for the installation. A
+  link in an email redirects with
   `ctx.admin_url(&shop, &format!("apps/{}", ctx.app_handle(&shop)?))?`.
 - `AdminPublicError::detail(name, value)` sends texts with the error, in
   `details` of the response and of `AdminRpcError` (`error.detail(name)`).

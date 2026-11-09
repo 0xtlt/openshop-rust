@@ -1367,6 +1367,87 @@ impl RouteRequest {
     }
 }
 
+/// A launch of the app that Shopify signed, as a server route receives it:
+/// what [`RouteContext::shopify_launch`] gives. The admin opens a path of the
+/// app in its frame with a signed query (`hmac`, `timestamp`, `shop`, `host`…):
+/// the welcome link of a plan does, with `plan_handle` (or `charge_id`).
+///
+/// It is checked as the launch of the admin UI is: the `hmac` of the query
+/// is the one the secret of a Shopify app of the application signs, its
+/// `timestamp` is of the last 90 seconds, and its `shop` is a
+/// `*.myshopify.com` domain. Whether the shop installed the app is not asked:
+/// [`RouteContext::for_shop`] does, and takes a `&ShopifyLaunch`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShopifyLaunch {
+    /// The shop of the launch, normalized: `demo.myshopify.com`.
+    pub shop: String,
+    /// The Shopify app whose secret signed it, as the configuration names
+    /// it: `default` for the app of the environment.
+    pub shopify_app: String,
+    /// The parameters of the query, the first value of each, `hmac`
+    /// included: what the app's own link added, such as `plan_handle`, and
+    /// what the admin added.
+    pub params: IndexMap<String, String>,
+    /// The query string as Shopify signed it, without `?`. A redirect to
+    /// another page of the app in the same frame passes it on
+    /// (`/?{query}`), so that the page verifies the launch too, within the
+    /// 90 seconds of its `timestamp`.
+    pub query: String,
+}
+
+impl ShopifyLaunch {
+    /// A parameter of the query.
+    pub fn param(&self, name: &str) -> Option<&str> {
+        self.params.get(name).map(String::as_str)
+    }
+
+    /// `plan_handle`: the plan the merchant just chose, on the welcome link
+    /// of a plan of managed pricing.
+    pub fn plan_handle(&self) -> Option<&str> {
+        self.param("plan_handle")
+    }
+
+    /// `charge_id`: the charge the merchant just approved, on the welcome
+    /// link of the Billing API and of the apps enrolled in Shopify App
+    /// Pricing before April 2026.
+    pub fn charge_id(&self) -> Option<&str> {
+        self.param("charge_id")
+    }
+
+    /// Whether it is the welcome link of a plan: `plan_handle` or
+    /// `charge_id` is in the query. The admin UI forgets the plan it kept
+    /// for the shop on such a launch.
+    pub fn is_plan_welcome(&self) -> bool {
+        self.plan_handle().is_some() || self.charge_id().is_some()
+    }
+}
+
+impl From<&ShopifyLaunch> for RouteShopInput {
+    /// The shop of the launch, for the Shopify app that signed it.
+    fn from(launch: &ShopifyLaunch) -> Self {
+        Self::new(launch.shop.as_str()).shopify_app(launch.shopify_app.as_str())
+    }
+}
+
+/// The launch of the app the query of `request` is, when Shopify signed it.
+fn route_shopify_launch(app: &OpenShop, request: &RouteRequest) -> Option<ShopifyLaunch> {
+    let query = request.uri.query()?;
+    let (shopify_app, signed) = app.apps().by_signed_query(query).ok()?;
+    let shop = signed
+        .get("shop")
+        .and_then(crate::server::shop_domain::normalize_shop_domain)?;
+    let mut params = IndexMap::new();
+    for (name, value) in signed.params() {
+        params.entry(name.clone()).or_insert_with(|| value.clone());
+    }
+    Some(ShopifyLaunch {
+        shop,
+        shopify_app: shopify_app.handle.clone(),
+        params,
+        query: query.to_string(),
+    })
+}
+
 /// What the authentication function of a route receives.
 #[derive(Clone)]
 pub struct RouteAuthContext {
@@ -1383,6 +1464,12 @@ impl RouteAuthContext {
     /// its database, its Shopify client, its providers and a logger.
     pub async fn for_shop(&self, shop: impl Into<RouteShopInput>) -> Result<RouteShopContext> {
         route_shop_context(&self.app, &self.logger, shop.into()).await
+    }
+
+    /// As [`RouteContext::shopify_launch`]: an authentication function can
+    /// accept a request that Shopify signed.
+    pub fn shopify_launch(&self) -> Option<ShopifyLaunch> {
+        route_shopify_launch(&self.app, &self.request)
     }
 
     /// As [`RouteContext::app_handle`].
@@ -1458,6 +1545,27 @@ impl<A> RouteContext<A> {
         route_shop_context(&self.app, &self.logger, shop.into()).await
     }
 
+    /// The launch of the app this request is, when Shopify signed its query:
+    /// the admin opened a path of the app in its frame, such as the welcome
+    /// link of a plan. `None` for a query without `hmac`, with one that does
+    /// not verify, or older than 90 seconds: anyone can call a route, and
+    /// only a signed query says which shop the admin opened it for.
+    ///
+    /// ```
+    /// use openshop::prelude::*;
+    ///
+    /// #[route(GET, "/launched", json)]
+    /// async fn launched(ctx: RouteContext) -> Result<Value> {
+    ///     Ok(match ctx.shopify_launch() {
+    ///         Some(launch) => json!({ "shop": launch.shop, "plan": launch.plan_handle() }),
+    ///         None => json!({ "shop": null }),
+    ///     })
+    /// }
+    /// ```
+    pub fn shopify_launch(&self) -> Option<ShopifyLaunch> {
+        route_shopify_launch(&self.app, &self.request)
+    }
+
     /// The handle on Shopify of the app that serves `shop`, which the URLs
     /// of the Shopify admin name it by: what [`ShopScope::app_handle`] gives
     /// a context of the shop.
@@ -1484,15 +1592,19 @@ impl<A> RouteContext<A> {
     /// use openshop::prelude::*;
     /// use openshop::response::{IntoResponse, Response, StatusCode, header};
     ///
-    /// /// The welcome link of the plans: back to the app, in the admin of the shop.
-    /// #[route(GET, "/welcome")]
-    /// async fn welcome(ctx: RouteContext) -> Result<Response> {
+    /// /// A link to the app in the admin of `?shop=`, for an email.
+    /// #[route(GET, "/open")]
+    /// async fn open(ctx: RouteContext) -> Result<Response> {
     ///     let shop = ctx.request.query().get("shop").cloned().unwrap_or_default();
     ///     let app = format!("apps/{}", ctx.app_handle(&shop)?);
     ///     let location = ctx.admin_url(&shop, &app)?;
     ///     Ok((StatusCode::FOUND, [(header::LOCATION, location)]).into_response())
     /// }
     /// ```
+    ///
+    /// Not for a launch of the admin, such as the welcome link of a plan:
+    /// the route runs in the app's frame, and Shopify's admin cannot be
+    /// framed. See [`shopify_launch`](Self::shopify_launch).
     pub fn admin_url(&self, shop: impl Into<RouteShopInput>, path: &str) -> Result<String> {
         route_admin_url(&self.app, shop.into(), path)
     }
