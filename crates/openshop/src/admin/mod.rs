@@ -25,10 +25,10 @@ use openshop_shared::{
 pub use crate::types::{CustomAdminPageAccess, CustomAdminPagesResponse, ResolvedAdminPages};
 
 mod view;
-pub(crate) use view::{fields_to_json, parse_fields, with_outcome};
+pub(crate) use view::{field_message, fields_to_json, parse_fields, with_outcome};
 #[doc(hidden)]
 pub use view::output;
-pub use view::{ACTION_FIELD, AdminView, Outcome, PageRequest};
+pub use view::{ACTION_FIELD, AdminView, FormState, Outcome, PageRequest};
 pub use openshop_shared::AdminFunctionKind;
 
 /// The Shopify staff member behind the session token.
@@ -178,6 +178,9 @@ pub struct AdminPage {
     /// The view the server renders the page with, when it has one: see
     /// [`AdminPage::view`].
     pub view: Option<AdminView>,
+    /// The view shows a refused form itself, from [`PageRequest::form`]: see
+    /// [`AdminPage::view_with_form`].
+    pub view_reads_form: bool,
 }
 
 impl AdminPage {
@@ -188,6 +191,7 @@ impl AdminPage {
             page_access: None,
             functions: IndexMap::new(),
             view: None,
+            view_reads_form: false,
         }
     }
 
@@ -201,7 +205,23 @@ impl AdminPage {
         Fut: Future<Output = Result<maud::Markup>> + Send + 'static,
     {
         self.view = Some(Arc::new(move |request| Box::pin(view(request))));
+        self.view_reads_form = false;
         self
+    }
+
+    /// [`AdminPage::view`] for a view that shows a refused form itself: it
+    /// reads [`PageRequest::form`], the values sent and the error of each
+    /// field, and the page is rendered again with them (`422`). What
+    /// `#[view] fn(…, form: FormState) -> Markup` declares.
+    pub fn view_with_form<F, Fut>(self, view: F) -> Self
+    where
+        F: Fn(PageRequest) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<maud::Markup>> + Send + 'static,
+    {
+        Self {
+            view_reads_form: true,
+            ..self.view(view)
+        }
     }
 
     /// Gives the page an entry in the menu of the admin. A page with a

@@ -1,5 +1,13 @@
 //! The admin rendered by the server (`UiSource::Server`): a `#[view]` that
-//! returns `Markup`, its forms, the bounce page, and a page of the framework.
+//! returns `Markup`, its forms and the errors of their fields, the bounce
+//! page, and the pages of the framework, one module each.
+
+mod flow_run;
+mod flows;
+mod functions;
+mod home;
+mod mcp;
+mod providers;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -102,6 +110,57 @@ impl ReviewPage {
     }
 }
 
+#[input]
+struct NewReview {
+    #[schemars(length(min = 3))]
+    title: String,
+    rating: u8,
+}
+
+/// A page whose view shows a refused form again: the values sent and the
+/// error of each field.
+struct NewReviewPage;
+
+#[admin_page("/reviews/new")]
+impl NewReviewPage {
+    #[loader]
+    async fn draft(_ctx: AdminContext) -> Result<String> {
+        Ok("Saved draft".to_string())
+    }
+
+    #[action]
+    async fn save_review(_ctx: AdminContext, input: NewReview) -> Result<Outcome> {
+        match input.title.as_str() {
+            "taken" => Ok(Outcome::invalid([("title", "Already taken")])),
+            "loud" => Ok(Outcome::invalid([("rating", "Too loud")]).with_toast("Check the review")),
+            "public" => bail!(
+                AdminPublicError::new("DUPLICATE", "A review has this title")
+                    .status(409)
+                    .field_errors([("title", "Used by another review")])
+            ),
+            _ => Ok(Outcome::redirect("/reviews/1").with_toast("Review saved")),
+        }
+    }
+
+    #[view]
+    fn view(draft: String, form: FormState) -> Markup {
+        let saving = form.of(Self::SAVE_REVIEW);
+        html! {
+            s-page heading="New review" {
+                @if let Some(message) = &saving.message {
+                    s-banner tone="critical" heading=(message) {}
+                }
+                form method="post" {
+                    input type="hidden" name="_action" value=(Self::SAVE_REVIEW);
+                    s-text-field name="title" label="Title" value=(saving.value_or("title", &draft)) error=[saving.error("title")] {}
+                    s-number-field name="rating" label="Rating" value=(saving.value_or("rating", "5")) error=[saving.error("rating")] {}
+                    s-button type="submit" { "Save" }
+                }
+            }
+        }
+    }
+}
+
 struct PrivatePage;
 
 #[admin_page("/private", nav = "Private")]
@@ -138,10 +197,10 @@ impl SettingsPage {
 }
 
 static APP: App = app! {
-    admin_pages: [HomePage, ReviewPage, PrivatePage, SettingsPage],
+    admin_pages: [HomePage, NewReviewPage, ReviewPage, PrivatePage, SettingsPage],
 };
 
-async fn context() -> TestContext {
+pub(super) async fn context() -> TestContext {
     let mut config = APP.config().unwrap();
     config.crons.push(
         Cron::new("*/5 * * * *", "syncOrders")
@@ -166,19 +225,19 @@ async fn context() -> TestContext {
     .expect("test context")
 }
 
-struct Reply {
-    status: StatusCode,
-    headers: reqwest::header::HeaderMap,
-    body: String,
+pub(super) struct Reply {
+    pub(super) status: StatusCode,
+    pub(super) headers: reqwest::header::HeaderMap,
+    pub(super) body: String,
 }
 
 impl Reply {
-    fn header(&self, name: &str) -> Option<&str> {
+    pub(super) fn header(&self, name: &str) -> Option<&str> {
         self.headers.get(name).map(|value| value.to_str().unwrap())
     }
 }
 
-async fn send(request: RequestBuilder) -> Reply {
+pub(super) async fn send(request: RequestBuilder) -> Reply {
     let response = request.send().await.expect("response");
     Reply {
         status: response.status(),
@@ -187,18 +246,18 @@ async fn send(request: RequestBuilder) -> Reply {
     }
 }
 
-fn request(ctx: &TestContext, method: Method, path: &str) -> RequestBuilder {
+pub(super) fn request(ctx: &TestContext, method: Method, path: &str) -> RequestBuilder {
     ctx.http.request(method, ctx.url_for(path))
 }
 
 /// A request of `openshop.js`: App Bridge's `fetch` adds the session token.
-fn fetch(ctx: &TestContext, method: Method, path: &str) -> RequestBuilder {
+pub(super) fn fetch(ctx: &TestContext, method: Method, path: &str) -> RequestBuilder {
     request(ctx, method, path)
         .header(AUTHORIZATION, ctx.authorization_header())
         .header("x-openshop-fetch", "1")
 }
 
-fn form(request: RequestBuilder, body: impl Into<String>) -> RequestBuilder {
+pub(super) fn form(request: RequestBuilder, body: impl Into<String>) -> RequestBuilder {
     request
         .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
         .body(body.into())
@@ -389,6 +448,131 @@ async fn a_form_runs_its_action_and_the_page_is_rendered_again() {
 }
 
 #[tokio::test]
+async fn a_refused_form_is_rendered_again_with_the_error_of_each_field() {
+    let ctx = context().await;
+
+    let page = send(fetch(&ctx, Method::GET, "/reviews/new")).await;
+    assert_eq!(page.status, StatusCode::OK, "{}", page.body);
+    assert!(
+        page.body
+            .contains(r#"<s-text-field name="title" label="Title" value="Saved draft"></s-text-field>"#),
+        "{}",
+        page.body
+    );
+
+    // The input schema refuses it: the page again, what was sent and the error of each field.
+    let refused = send(form(
+        fetch(&ctx, Method::POST, "/reviews/new"),
+        "_action=saveReview&title=ab&rating=",
+    ))
+    .await;
+    assert_eq!(refused.status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(refused.header("x-openshop-toast-error"), None);
+    assert!(
+        refused.body.contains(r#"<s-text-field name="title" label="Title" value="ab" error="Must be at least 3 characters"></s-text-field>"#),
+        "{}",
+        refused.body
+    );
+    assert!(
+        refused
+            .body
+            .contains(r#"<s-number-field name="rating" label="Rating" value="" error="Required"></s-number-field>"#),
+        "{}",
+        refused.body
+    );
+    assert!(!refused.body.contains("s-banner"), "{}", refused.body);
+    let wrong_type = send(form(
+        fetch(&ctx, Method::POST, "/reviews/new"),
+        "_action=saveReview&title=abc&rating=lots",
+    ))
+    .await;
+    assert!(
+        wrong_type
+            .body
+            .contains(r#"value="lots" error="Must be a whole number""#),
+        "{}",
+        wrong_type.body
+    );
+
+    // The action refuses it, field by field.
+    let taken = send(form(
+        fetch(&ctx, Method::POST, "/reviews/new"),
+        "_action=saveReview&title=taken&rating=4",
+    ))
+    .await;
+    assert_eq!(taken.status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(
+        taken.body.contains(r#"value="taken" error="Already taken""#),
+        "{}",
+        taken.body
+    );
+    assert!(
+        taken.body.contains(r#"name="rating" label="Rating" value="4">"#),
+        "{}",
+        taken.body
+    );
+    // With a toast it asked for.
+    let loud = send(form(
+        fetch(&ctx, Method::POST, "/reviews/new"),
+        "_action=saveReview&title=loud&rating=4",
+    ))
+    .await;
+    assert_eq!(loud.header("x-openshop-toast-error"), Some("Check%20the%20review"));
+    assert!(loud.body.contains(r#"error="Too loud""#), "{}", loud.body);
+    // An error that names fields: its status, its message for the view.
+    let public = send(form(
+        fetch(&ctx, Method::POST, "/reviews/new"),
+        "_action=saveReview&title=public&rating=4",
+    ))
+    .await;
+    assert_eq!(public.status, StatusCode::CONFLICT);
+    assert!(
+        public.body.contains(r#"error="Used by another review""#),
+        "{}",
+        public.body
+    );
+    assert!(
+        public
+            .body
+            .contains(r#"<s-banner tone="critical" heading="A review has this title">"#),
+        "{}",
+        public.body
+    );
+
+    // Accepted: where the action sends it.
+    let saved = send(form(
+        fetch(&ctx, Method::POST, "/reviews/new"),
+        "_action=saveReview&title=Great&rating=5",
+    ))
+    .await;
+    assert_eq!(saved.status, StatusCode::NO_CONTENT);
+    assert_eq!(saved.header("x-openshop-location"), Some("/reviews/1"));
+
+    // Without the script: the page with the errors, in place of the redirect.
+    let plain = send(form(
+        request(&ctx, Method::POST, "/reviews/new").header(AUTHORIZATION, ctx.authorization_header()),
+        "_action=saveReview&title=ab&rating=4",
+    ))
+    .await;
+    assert_eq!(plain.status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(plain.body.starts_with("<!DOCTYPE html>"), "{}", plain.body);
+    assert!(
+        plain.body.contains(r#"error="Must be at least 3 characters""#),
+        "{}",
+        plain.body
+    );
+
+    // A view that does not read the form keeps the page as it was, with an error toast.
+    let home = send(form(fetch(&ctx, Method::POST, "/"), "_action=setHidden&hidden=maybe")).await;
+    assert_eq!(home.status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(
+        home.header("x-openshop-toast-error"),
+        Some("input.hidden%20must%20be%20boolean")
+    );
+    assert!(home.body.is_empty());
+}
+
+#[tokio::test]
 async fn the_crons_page_is_rendered_by_the_server() {
     let ctx = context().await;
 
@@ -425,6 +609,6 @@ async fn the_crons_page_is_rendered_by_the_server() {
     assert_eq!(missing.header("x-openshop-toast-error"), Some("Cron%20not%20found"));
 }
 
-fn urlencoding(text: &str) -> String {
+pub(super) fn urlencoding(text: &str) -> String {
     url::form_urlencoded::byte_serialize(text.as_bytes()).collect()
 }

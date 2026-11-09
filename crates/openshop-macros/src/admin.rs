@@ -78,14 +78,25 @@ fn returns_markup(function: &ImplItemFn) -> bool {
     }
 }
 
+/// A parameter of a server-rendered `#[view]`: its name, and whether it is
+/// taken by reference (`form: &FormState`).
+struct ViewParameter {
+    name: Ident,
+    by_reference: bool,
+}
+
+/// The name of the parameter of a server-rendered `#[view]` that receives the
+/// form the page refused, `form: FormState`.
+const FORM_PARAMETER: &str = "form";
+
 /// The parameters of a server-rendered `#[view]`, `fn(list: List, …) -> Markup`:
-/// each one is a loader of the page, by the name of its function.
-fn server_view_parameters(function: &ImplItemFn) -> syn::Result<Vec<Ident>> {
+/// each one is a loader of the page, by the name of its function, or `form`.
+fn server_view_parameters(function: &ImplItemFn) -> syn::Result<Vec<ViewParameter>> {
     let signature = &function.sig;
     let refusal = |span: Span| {
         syn::Error::new(
             span,
-            "expected `fn(loader: Output, …) -> Markup` for a server-rendered `#[view]`: each parameter is named after a loader of the page",
+            "expected `fn(loader: Output, …) -> Markup` for a server-rendered `#[view]`: each parameter is named after a loader of the page, or is `form: FormState`",
         )
     };
     if signature.asyncness.is_some() || signature.receiver().is_some() || !signature.generics.params.is_empty() {
@@ -96,9 +107,10 @@ fn server_view_parameters(function: &ImplItemFn) -> syn::Result<Vec<Ident>> {
         .iter()
         .map(|input| match input {
             FnArg::Typed(typed) => match &*typed.pat {
-                syn::Pat::Ident(pattern) if pattern.by_ref.is_none() && pattern.subpat.is_none() => {
-                    Ok(pattern.ident.clone())
-                }
+                syn::Pat::Ident(pattern) if pattern.by_ref.is_none() && pattern.subpat.is_none() => Ok(ViewParameter {
+                    name: pattern.ident.clone(),
+                    by_reference: matches!(&*typed.ty, Type::Reference(_)),
+                }),
                 other => Err(refusal(other.span())),
             },
             FnArg::Receiver(receiver) => Err(refusal(receiver.span())),
@@ -197,7 +209,7 @@ pub fn admin_page(arguments: Arguments, mut item: ItemImpl) -> syn::Result<Token
     let mut access: Option<Ident> = None;
     let mut view: Option<Ident> = None;
     // The loaders a view the server renders reads, when the view is one.
-    let mut server_view: Option<Vec<Ident>> = None;
+    let mut server_view: Option<Vec<ViewParameter>> = None;
     let mut functions = Vec::new();
     let mut references: Vec<Reference> = Vec::new();
     let mut names: Vec<String> = Vec::new();
@@ -304,19 +316,37 @@ pub fn admin_page(arguments: Arguments, mut item: ItemImpl) -> syn::Result<Token
 
     let access = access.map(|access| quote!(.access(Self::#access)));
     // A view the server renders: the loaders it names, each after the
-    // access rule of its own, then the view, a function of what they return.
+    // access rule of its own, then the view, a function of what they return
+    // and of the form the page refused, when it reads it.
     let server_render = match (&view, &server_view) {
         (Some(view), Some(parameters)) => {
             let mut loads = Vec::new();
-            for parameter in parameters {
-                let Some(loader) = references
+            let mut arguments = Vec::new();
+            let mut reads_form = false;
+            for ViewParameter {
+                name: parameter,
+                by_reference,
+            } in parameters
+            {
+                let loader = references
                     .iter()
-                    .find(|reference| reference.function == *parameter && reference.kind == "loader")
-                else {
+                    .find(|reference| reference.function == *parameter && reference.kind == "loader");
+                if parameter == FORM_PARAMETER {
+                    if let Some(loader) = loader {
+                        return Err(syn::Error::new(
+                            loader.function.span(),
+                            "`form` is the parameter of a server-rendered `#[view]` that receives the form the page refused: give the loader another name",
+                        ));
+                    }
+                    reads_form = true;
+                    arguments.push(if *by_reference { quote!(&form) } else { quote!(form) });
+                    continue;
+                }
+                let Some(loader) = loader else {
                     return Err(syn::Error::new(
                         parameter.span(),
                         format!(
-                            "`{parameter}` is not a loader of the page: each parameter of a server-rendered `#[view]` is named after a loader, and receives what it returns"
+                            "`{parameter}` is not a loader of the page: each parameter of a server-rendered `#[view]` is named after a loader, and receives what it returns, or is `form`, the form the page refused"
                         ),
                     ));
                 };
@@ -330,11 +360,22 @@ pub fn admin_page(arguments: Arguments, mut item: ItemImpl) -> syn::Result<Token
                     quote!(load)
                 };
                 loads.push(quote!(let #parameter = request.#load(Self::#function).await?;));
+                arguments.push(if *by_reference {
+                    quote!(&#parameter)
+                } else {
+                    quote!(#parameter)
+                });
             }
+            let (register, form) = if reads_form {
+                (quote!(view_with_form), quote!(let form = request.form;))
+            } else {
+                (quote!(view), TokenStream::new())
+            };
             quote! {
-                .view(|request: ::openshop::admin::PageRequest| async move {
+                .#register(|request: ::openshop::admin::PageRequest| async move {
                     #(#loads)*
-                    ::openshop::Result::<::openshop::Markup>::Ok(Self::#view(#(#parameters),*))
+                    #form
+                    ::openshop::Result::<::openshop::Markup>::Ok(Self::#view(#(#arguments),*))
                 })
             }
         }
@@ -627,28 +668,74 @@ mod tests {
     }
 
     #[test]
+    fn a_server_view_reads_the_form_the_page_refused() {
+        let generated = admin_page(
+            parse_quote!("/reviews/:id"),
+            parse_quote! {
+                impl ReviewPage {
+                    #[loader]
+                    async fn review(ctx: AdminContext) -> Result<Review> { todo!() }
+
+                    #[action]
+                    async fn save(ctx: AdminContext, input: SaveReview) -> Result<Outcome> { todo!() }
+
+                    #[view]
+                    fn view(form: FormState, review: &Review) -> Markup { todo!() }
+                }
+            },
+        )
+        .unwrap()
+        .to_string();
+        assert!(
+            generated.contains(". view_with_form (| request : :: openshop :: admin :: PageRequest | async move { let review = request . load (Self :: review) . await ? ; let form = request . form ; :: openshop :: Result :: < :: openshop :: Markup > :: Ok (Self :: view (form , & review)) })"),
+            "{generated}"
+        );
+
+        // A view without `form` keeps the page as it was when a form is refused.
+        let without = admin_page(
+            parse_quote!("/reviews/:id"),
+            parse_quote! { impl ReviewPage {
+                #[loader] async fn review(ctx: AdminContext) -> Result<Review> { todo!() }
+                #[view] fn view(review: Review) -> Markup { todo!() }
+            } },
+        )
+        .unwrap()
+        .to_string();
+        assert!(without.contains(". view (| request"), "{without}");
+        assert!(!without.contains("request . form"), "{without}");
+
+        assert_eq!(
+            refusal(parse_quote! { impl P {
+                #[loader] async fn form(ctx: AdminContext) -> Result<String> { todo!() }
+                #[view] fn view(form: String) -> Markup { todo!() }
+            } }),
+            "`form` is the parameter of a server-rendered `#[view]` that receives the form the page refused: give the loader another name"
+        );
+    }
+
+    #[test]
     fn a_server_view_reads_loaders_only() {
         assert_eq!(
             refusal(parse_quote! { impl P {
                 #[loader] async fn list(ctx: AdminContext) -> Result<String> { todo!() }
                 #[view] fn view(lists: String) -> Markup { todo!() }
             } }),
-            "`lists` is not a loader of the page: each parameter of a server-rendered `#[view]` is named after a loader, and receives what it returns"
+            "`lists` is not a loader of the page: each parameter of a server-rendered `#[view]` is named after a loader, and receives what it returns, or is `form`, the form the page refused"
         );
         assert_eq!(
             refusal(parse_quote! { impl P {
                 #[action] async fn save(ctx: AdminContext) -> Result<String> { todo!() }
                 #[view] fn view(save: String) -> Markup { todo!() }
             } }),
-            "`save` is not a loader of the page: each parameter of a server-rendered `#[view]` is named after a loader, and receives what it returns"
+            "`save` is not a loader of the page: each parameter of a server-rendered `#[view]` is named after a loader, and receives what it returns, or is `form`, the form the page refused"
         );
         assert_eq!(
             refusal(parse_quote! { impl P { #[view] async fn view() -> Markup { todo!() } } }),
-            "expected `fn(loader: Output, …) -> Markup` for a server-rendered `#[view]`: each parameter is named after a loader of the page"
+            "expected `fn(loader: Output, …) -> Markup` for a server-rendered `#[view]`: each parameter is named after a loader of the page, or is `form: FormState`"
         );
         assert_eq!(
             refusal(parse_quote! { impl P { #[view] fn view((a, b): (u8, u8)) -> maud::Markup { todo!() } } }),
-            "expected `fn(loader: Output, …) -> Markup` for a server-rendered `#[view]`: each parameter is named after a loader of the page"
+            "expected `fn(loader: Output, …) -> Markup` for a server-rendered `#[view]`: each parameter is named after a loader of the page, or is `form: FormState`"
         );
     }
 

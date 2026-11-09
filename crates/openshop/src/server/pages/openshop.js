@@ -8,8 +8,15 @@
  * - A link of the app (`<a>`, and the `s-link` and `s-button` Polaris announces with
  *   `shopify:navigate`) is fetched the same way, and back and forward too.
  * - What the server answers replaces the content of `#openshop-page`, the title, and the menu
- *   when it changed. `X-OpenShop-Location` sends the page elsewhere; `X-OpenShop-Toast` and
+ *   when it changed: a form refused field by field comes back as its page (422), with the
+ *   errors on its fields. `X-OpenShop-Location` sends the page elsewhere; `X-OpenShop-Toast` and
  *   `X-OpenShop-Toast-Error` are shown with `shopify.toast.show`.
+ *
+ * - What only a browser knows: a `<time datetime>` is written in its language and time zone; an
+ *   element with `data-openshop-refresh="3000"` has the page fetched again after that many
+ *   milliseconds (a run in progress), unless a field of the page has the focus; a button with
+ *   `data-openshop-copy` copies that text; one with `data-openshop-download="/api/…"` saves what
+ *   that URL answers, under the name of its `data-openshop-filename`.
  *
  * Every request carries `X-OpenShop-Fetch: 1`: the server answers it this way. Without this
  * script, a form posts as usual and the server answers with a redirect.
@@ -23,6 +30,7 @@
   // Paths of the server that are not pages.
   const SERVER = /^\/(api|auth|webhooks|proxy|ext|routes|health|ops|__openshop)(\/|$)/
   let current = null // the request in flight: a newer one replaces it
+  let refresh = null // the timer of `data-openshop-refresh`
 
   const app = () => window.shopify
   const attempt = (action) => {
@@ -57,13 +65,56 @@
     document.getElementById(ROOT).replaceChildren(...nodes)
     if (push) history.pushState(null, '', url)
     else if (url !== location.href) history.replaceState(null, '', url)
+    ready()
   }
 
-  async function visit(url, { method = 'GET', body, push = true, button } = {}) {
+  // What the page asks of the browser, once it is shown.
+  function ready() {
+    const root = document.getElementById(ROOT)
+    if (!root) return
+    for (const time of root.querySelectorAll('time[datetime]')) {
+      const date = new Date(time.getAttribute('datetime'))
+      if (!Number.isNaN(date.getTime())) time.textContent = date.toLocaleString()
+    }
+    clearTimeout(refresh)
+    const every = Number(root.querySelector('[data-openshop-refresh]')?.getAttribute('data-openshop-refresh'))
+    if (every > 0) refresh = setTimeout(function again() {
+      const busy = current || (document.activeElement !== document.body && root.contains(document.activeElement))
+      if (busy) refresh = setTimeout(again, every)
+      else visit(location.href, { push: false, quiet: true })
+    }, every)
+  }
+
+  async function copy(text) {
+    try {
+      await navigator.clipboard.writeText(text)
+      toast('Copied')
+    } catch {
+      toast('Could not copy', true)
+    }
+  }
+
+  async function download(url, name) {
+    loading(true)
+    try {
+      const response = await fetch(url, { headers: { 'X-OpenShop-Fetch': '1' } })
+      if (!response.ok) return toast(decoded(response, 'X-OpenShop-Toast-Error') || GENERIC_ERROR, true)
+      const link = Object.assign(document.createElement('a'), { download: name })
+      link.href = URL.createObjectURL(await response.blob())
+      link.click()
+      setTimeout(() => URL.revokeObjectURL(link.href), 0)
+    } catch {
+      toast(GENERIC_ERROR, true)
+    } finally {
+      loading(false)
+    }
+  }
+
+  async function visit(url, { method = 'GET', body, push = true, button, quiet = false } = {}) {
     current?.abort()
     const request = (current = new AbortController())
     button?.setAttribute('loading', '')
-    loading(true)
+    if (!quiet) loading(true)
     try {
       const headers = { 'X-OpenShop-Fetch': '1', Accept: 'text/html' }
       const response = await fetch(url, { method, body, headers, signal: request.signal })
@@ -73,16 +124,17 @@
       if (failure) toast(failure, true)
       const location_ = response.headers.get('X-OpenShop-Location')
       if (location_ && pageUrl(location_)) return visit(pageUrl(location_).href)
+      // A page, also one that is not `ok`: a form refused field by field (422), a page that is not there.
       const html = response.headers.get('Content-Type')?.includes('text/html')
-      if (response.ok && html) present(await response.text(), method === 'GET' ? response.url : location.href, push)
+      if (html) present(await response.text(), method === 'GET' ? response.url : location.href, push)
       else if (!failure) toast(GENERIC_ERROR, true)
     } catch (error) {
-      if (error.name !== 'AbortError') toast(GENERIC_ERROR, true)
+      if (error.name !== 'AbortError' && !quiet) toast(GENERIC_ERROR, true)
     } finally {
       button?.removeAttribute('loading')
       if (current === request) {
         current = null
-        loading(false)
+        if (!quiet) loading(false)
       }
     }
   }
@@ -117,10 +169,19 @@
     if (link && !event.defaultPrevented) follow(event, link)
   })
   document.addEventListener('click', (event) => {
-    const link = event.target instanceof Element && event.target.closest('a[href]')
+    const target = event.target instanceof Element ? event.target : null
+    const copied = target?.closest('[data-openshop-copy]')
+    if (copied) return copy(copied.getAttribute('data-openshop-copy'))
+    const saved = target?.closest('[data-openshop-download]')
+    if (saved) {
+      const name = saved.getAttribute('data-openshop-filename') || 'download'
+      return download(saved.getAttribute('data-openshop-download'), name)
+    }
+    const link = target?.closest('a[href]')
     if (link && !event.defaultPrevented && event.button === 0) follow(event, link)
   })
   addEventListener('popstate', () => visit(location.href, { push: false }))
+  ready()
 
   window.openshop = { visit, toast }
 })()

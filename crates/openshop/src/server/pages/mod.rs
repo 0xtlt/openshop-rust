@@ -12,10 +12,19 @@
 //! A form posts to the URL of its page, the name of its action in `_action`.
 //! The script's request is answered with the page rendered again (or
 //! `X-OpenShop-Location`) and the toast the action asked for, in a header; a
-//! plain post with a redirect to the page.
+//! plain post with a redirect to the page. A form the page refuses, field by
+//! field, is rendered again in place (`422`), with what was sent and the
+//! error of each field, when the view reads them.
 
 mod crons;
+mod flow_run;
+mod flows;
+mod functions;
+mod home;
+mod mcp;
+mod providers;
 mod shell;
+mod ui;
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -25,6 +34,7 @@ use axum::extract::{Request, State};
 use axum::http::header::{AUTHORIZATION, CONTENT_TYPE, LOCATION};
 use axum::http::{HeaderValue, Method, StatusCode};
 use axum::response::{IntoResponse, Response};
+use indexmap::IndexMap;
 use maud::{Markup, html};
 use serde_json::Value;
 use uuid::Uuid;
@@ -39,8 +49,8 @@ use super::shop::{ShopSession, session_of};
 use super::shop_domain::normalize_shop_domain;
 use super::static_ui::{forget_plan_on_welcome, is_installed_for_launch, is_ui_shell_path, open_from_shopify_admin};
 use crate::admin::{
-    ACTION_FIELD, AdminFunctionKind, AdminPublicError, CustomAdminPage, Outcome, PageRequest, fields_to_json,
-    parse_fields, with_outcome,
+    ACTION_FIELD, AdminFunctionKind, AdminPublicError, CustomAdminPage, FormState, Outcome, PageRequest,
+    fields_to_json, parse_fields, with_outcome,
 };
 use crate::app::OpenShop;
 use crate::engine::step::error_message;
@@ -166,7 +176,7 @@ pub(crate) async fn serve(app: OpenShop, options: ServerOptions, reload: Option<
         let body = to_bytes(request.into_body(), MAX_FORM_BYTES).await.unwrap_or_default();
         submit(&call, &body).await
     } else {
-        render(&call, StatusCode::OK, None).await
+        render(&call, StatusCode::OK, None, &FormState::default()).await
     };
     finish(response, &app, options.dev)
 }
@@ -253,29 +263,25 @@ pub(crate) async fn bounce_page(State(app): State<OpenShop>, request: Request) -
 }
 
 /// The page, rendered for the session. `notice` is a failure to show above
-/// it, for a plain post the action refused.
-async fn render(call: &PageCall<'_>, status: StatusCode, notice: Option<&str>) -> Response {
+/// it, for a plain post the action refused; `form`, the form the page
+/// refused, which its view shows again.
+async fn render(call: &PageCall<'_>, status: StatusCode, notice: Option<&str>, form: &FormState) -> Response {
     let app = call.app;
     let content = match target(app, &call.pathname) {
         None => Err(StatusCode::NOT_FOUND),
-        Some(Target::Custom(page)) => render_custom(call, page).await,
-        Some(Target::Home) => Ok(not_ported("Home")),
+        Some(Target::Custom(page)) => render_custom(call, page, form).await,
+        Some(Target::Home) => render_builtin(call, None, form).await,
         Some(Target::Builtin(page)) => {
             if resolved_admin_pages(app.config()).get(page) == AdminPageMode::Disabled {
                 Err(StatusCode::NOT_FOUND)
             } else {
-                match page {
-                    AdminPageId::Crons => crons::render(app, &call.session).await.map_err(|error| {
-                        report_failure("[openshop] The crons page could not be rendered", &error);
-                        StatusCode::INTERNAL_SERVER_ERROR
-                    }),
-                    other => Ok(not_ported(builtin_label(other))),
-                }
+                render_builtin(call, Some(page), form).await
             }
         }
     };
     let (status, page) = match content {
-        Ok(page) => (status, page),
+        Ok(Shown::Page(page)) => (status, page),
+        Ok(Shown::Refused(refused, page)) => (refused, page),
         Err(StatusCode::FORBIDDEN | StatusCode::NOT_FOUND) => (StatusCode::NOT_FOUND, disabled()),
         Err(failed) => (failed, unavailable()),
     };
@@ -284,33 +290,149 @@ async fn render(call: &PageCall<'_>, status: StatusCode, notice: Option<&str>) -
     (status, [(CONTENT_TYPE, "text/html; charset=utf-8")], document.into_string()).into_response()
 }
 
-async fn render_custom(call: &PageCall<'_>, page: &CustomAdminPage) -> Result<Markup, StatusCode> {
+/// What a page shows: itself, or what refused it, with its status.
+enum Shown {
+    Page(Markup),
+    Refused(StatusCode, Markup),
+}
+
+/// A failure of a page the merchant may read, `AdminPublicError`, as the page
+/// shows it; any other one is reported and the page is unavailable.
+fn shown_failure(error: &anyhow::Error, failure: &str) -> Result<Shown, StatusCode> {
+    match error.downcast_ref::<AdminPublicError>() {
+        Some(public) => Ok(Shown::Refused(
+            StatusCode::from_u16(public.status).unwrap_or(StatusCode::BAD_REQUEST),
+            html! {
+                s-page {
+                    s-banner tone="critical" heading=(public.message) {}
+                }
+            },
+        )),
+        None => {
+            report_failure(failure, error);
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
+        }
+    }
+}
+
+/// A request for a page of the framework: what its `render` and its
+/// `submit` are given.
+// The pages that read the query and the form are ported next.
+#[allow(dead_code)]
+pub(super) struct BuiltinPage<'a> {
+    pub(super) app: &'a OpenShop,
+    pub(super) session: &'a ShopSession,
+    /// The path of the page: `/flows/syncOrders`, `/runs/42`.
+    pub(super) pathname: &'a str,
+    /// The query string of its URL, without `?`.
+    pub(super) query: &'a str,
+    /// The form the page refused, which it shows again; empty otherwise.
+    pub(super) form: &'a FormState,
+}
+
+#[allow(dead_code)]
+impl BuiltinPage<'_> {
+    /// A parameter of the query string, `?flow=syncOrders`: the first one of that name.
+    pub(super) fn param(&self, name: &str) -> Option<String> {
+        parse_fields(self.query.as_bytes())
+            .into_iter()
+            .find(|(field, _)| field == name)
+            .map(|(_, value)| value)
+    }
+}
+
+/// The value of the field `name` of a form, the first one of that name.
+pub(super) fn field<'a>(fields: &'a [(String, String)], name: &str) -> Option<&'a str> {
+    fields
+        .iter()
+        .find(|(field, _)| field == name)
+        .map(|(_, value)| value.as_str())
+}
+
+/// Whether `pathname` is the page of a run, `/runs/42`, part of the flows.
+fn is_run_path(pathname: &str) -> bool {
+    pathname.starts_with("/runs/")
+}
+
+/// A page of the framework: the home of the admin (`None`) or one of the pages it lists.
+async fn render_builtin(call: &PageCall<'_>, id: Option<AdminPageId>, form: &FormState) -> Result<Shown, StatusCode> {
+    let page = BuiltinPage {
+        app: call.app,
+        session: &call.session,
+        pathname: &call.pathname,
+        query: &call.query,
+        form,
+    };
+    let rendered = catch_panic("admin page", async {
+        match id {
+            None => home::render(&page).await,
+            Some(AdminPageId::Crons) => crons::render(&page).await,
+            Some(AdminPageId::Providers) => providers::render(&page).await,
+            Some(AdminPageId::Flows) if is_run_path(page.pathname) => flow_run::render(&page).await,
+            Some(AdminPageId::Flows) => flows::render(&page).await,
+            Some(AdminPageId::Functions) => functions::render(&page).await,
+            Some(AdminPageId::Mcp) => mcp::render(&page).await,
+        }
+    })
+    .await;
+    match rendered {
+        Ok(markup) => Ok(Shown::Page(markup)),
+        Err(error) => shown_failure(&error, "[openshop] A page of the admin could not be rendered"),
+    }
+}
+
+/// A form of a page of the framework: the action it names.
+async fn submit_builtin(
+    call: &PageCall<'_>,
+    id: Option<AdminPageId>,
+    action: &str,
+    fields: &[(String, String)],
+) -> anyhow::Result<Outcome> {
+    let form = FormState::default();
+    let page = BuiltinPage {
+        app: call.app,
+        session: &call.session,
+        pathname: &call.pathname,
+        query: &call.query,
+        form: &form,
+    };
+    catch_panic("admin page action", async {
+        match id {
+            None => home::submit(&page, action, fields).await,
+            Some(AdminPageId::Crons) => crons::submit(&page, action, fields).await,
+            Some(AdminPageId::Providers) => providers::submit(&page, action, fields).await,
+            Some(AdminPageId::Flows) if is_run_path(page.pathname) => flow_run::submit(&page, action, fields).await,
+            Some(AdminPageId::Flows) => flows::submit(&page, action, fields).await,
+            Some(AdminPageId::Functions) => functions::submit(&page, action, fields).await,
+            Some(AdminPageId::Mcp) => mcp::submit(&page, action, fields).await,
+        }
+    })
+    .await
+}
+
+/// The answer of a page to an action it does not have.
+pub(super) fn no_action() -> anyhow::Error {
+    AdminPublicError::new("NOT_FOUND", "Not found").status(404).into()
+}
+
+async fn render_custom(call: &PageCall<'_>, page: &CustomAdminPage, form: &FormState) -> Result<Shown, StatusCode> {
     let app = call.app;
     if !page_is_allowed(app, &call.session, page, &call.pathname).await {
         return Err(StatusCode::FORBIDDEN);
     }
     let Some(view) = &page.page.view else {
-        return Ok(not_ported(&page.route_pattern));
+        return Ok(Shown::Page(not_ported(&page.route_pattern)));
     };
     let params = custom_admin_route_params(&page.route_pattern, &call.pathname).ok_or(StatusCode::NOT_FOUND)?;
     let ctx = create_context(app, &call.session, params, Uuid::new_v4().to_string(), None);
     let request = PageRequest {
         ctx,
         query: call.query.clone(),
+        form: form.clone(),
     };
     match catch_panic("admin view", view(request)).await {
-        Ok(markup) => Ok(markup),
-        Err(error) => match error.downcast_ref::<AdminPublicError>() {
-            Some(public) => Ok(html! {
-                s-page {
-                    s-banner tone="critical" heading=(public.message) {}
-                }
-            }),
-            None => {
-                report_failure("[openshop] Custom admin page could not be rendered", &error);
-                Err(StatusCode::INTERNAL_SERVER_ERROR)
-            }
-        },
+        Ok(markup) => Ok(Shown::Page(markup)),
+        Err(error) => shown_failure(&error, "[openshop] Custom admin page could not be rendered"),
     }
 }
 
@@ -322,36 +444,106 @@ async fn submit(call: &PageCall<'_>, body: &[u8]) -> Response {
         .find(|(name, _)| name == ACTION_FIELD)
         .map(|(_, value)| value.clone())
         .unwrap_or_default();
-    let outcome = match target(call.app, &call.pathname) {
+    let target = target(call.app, &call.pathname);
+    let outcome = match &target {
         Some(Target::Custom(page)) => run_action(call, page, &action, &fields).await,
-        Some(Target::Builtin(AdminPageId::Crons))
-            if resolved_admin_pages(call.app.config()).get(AdminPageId::Crons) != AdminPageMode::Disabled =>
+        Some(Target::Home) => submit_builtin(call, None, &action, &fields).await,
+        Some(Target::Builtin(page))
+            if resolved_admin_pages(call.app.config()).get(*page) != AdminPageMode::Disabled =>
         {
-            crons::submit(call.app, &call.session, &action, &fields).await
+            submit_builtin(call, Some(*page), &action, &fields).await
         }
-        _ => Err(AdminPublicError::new("NOT_FOUND", "Not found").status(404).into()),
+        _ => Err(no_action()),
+    };
+    // The view shows a refused form itself: every page of the framework, and a
+    // view of the application that reads its `form`.
+    let reads_form = match &target {
+        Some(Target::Custom(page)) => page.page.view_reads_form,
+        Some(_) => true,
+        None => false,
+    };
+    let refused = |errors: IndexMap<String, String>, message: Option<String>| FormState {
+        action: Some(action.clone()),
+        values: fields.clone(),
+        errors,
+        message,
     };
     match outcome {
+        Ok(outcome) if !outcome.field_errors.is_empty() => {
+            let form = refused(outcome.field_errors.clone(), outcome.toast.clone());
+            let message = outcome.toast.clone().unwrap_or_else(|| first_error(&form.errors));
+            refuse(call, reads_form, &form, StatusCode::UNPROCESSABLE_ENTITY, &message, outcome.toast.as_deref()).await
+        }
         Ok(outcome) => answer(call, outcome).await,
         Err(error) => {
-            let (status, message) = match error.downcast_ref::<AdminPublicError>() {
+            let (status, message, errors) = match error.downcast_ref::<AdminPublicError>() {
                 Some(public) => (
                     StatusCode::from_u16(public.status).unwrap_or(StatusCode::BAD_REQUEST),
                     public.message.clone(),
+                    public.field_errors.clone().unwrap_or_default(),
                 ),
                 None => {
                     report_failure("[openshop] Admin page action failed", &error);
-                    (StatusCode::INTERNAL_SERVER_ERROR, "Internal server error".to_string())
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "Internal server error".to_string(),
+                        IndexMap::new(),
+                    )
                 }
             };
-            if call.fetch {
-                // The page stays as it is, with an error toast.
-                (status, [(TOAST_ERROR_HEADER, encode(&message))]).into_response()
-            } else {
-                render(call, status, Some(&message)).await
+            if errors.is_empty() {
+                return fail(call, status, &message).await;
             }
+            // The schema's summary is for the fields; the action's message is the action's to say.
+            let said = (error.downcast_ref::<AdminPublicError>().map(|public| public.code.as_str())
+                != Some("INVALID_INPUT"))
+            .then(|| message.clone());
+            let form = refused(errors, said);
+            refuse(call, reads_form, &form, status, &message, None).await
         }
     }
+}
+
+/// The first error of a refused form, `title: Required`: what a toast says
+/// when the view does not show the fields.
+fn first_error(errors: &IndexMap<String, String>) -> String {
+    errors
+        .first()
+        .map(|(field, error)| format!("{field}: {error}"))
+        .unwrap_or_default()
+}
+
+/// A failure of the form: the script keeps the page as it is, with an error
+/// toast; a plain post gets the page with the message above it.
+async fn fail(call: &PageCall<'_>, status: StatusCode, message: &str) -> Response {
+    if call.fetch {
+        (status, [(TOAST_ERROR_HEADER, encode(message))]).into_response()
+    } else {
+        render(call, status, Some(message), &FormState::default()).await
+    }
+}
+
+/// A form refused field by field: rendered again in place, with what was
+/// sent and the errors, when the view shows them (`toast`, an error toast the
+/// action asked for); a failure of the form otherwise.
+async fn refuse(
+    call: &PageCall<'_>,
+    reads_form: bool,
+    form: &FormState,
+    status: StatusCode,
+    message: &str,
+    toast: Option<&str>,
+) -> Response {
+    if !reads_form {
+        return fail(call, status, message).await;
+    }
+    let mut response = render(call, status, None, form).await;
+    if let Some(toast) = toast.filter(|_| call.fetch)
+        && let Ok(value) = HeaderValue::from_str(&encode(toast))
+    {
+        response.headers_mut().insert(TOAST_ERROR_HEADER, value);
+    }
+    response
 }
 
 /// What a form gets after its action: the page again, or the page the
@@ -372,7 +564,7 @@ async fn answer(call: &PageCall<'_>, outcome: Outcome) -> Response {
             }
             response
         }
-        None => render(call, StatusCode::OK, None).await,
+        None => render(call, StatusCode::OK, None, &FormState::default()).await,
     };
     if let Some(toast) = &outcome.toast {
         let name = if outcome.error { TOAST_ERROR_HEADER } else { TOAST_HEADER };
@@ -434,18 +626,8 @@ async fn run_action(
     result.map(|_| outcome.unwrap_or_default())
 }
 
-fn builtin_label(page: AdminPageId) -> &'static str {
-    match page {
-        AdminPageId::Flows => "Flows",
-        AdminPageId::Providers => "Providers",
-        AdminPageId::Crons => "Crons",
-        AdminPageId::Mcp => "MCP",
-        AdminPageId::Functions => "Functions",
-    }
-}
-
-/// A page of the framework that the server does not render yet.
-fn not_ported(name: &str) -> Markup {
+/// A page that the server does not render yet.
+pub(super) fn not_ported(name: &str) -> Markup {
     html! {
         s-page heading=(name) {
             s-banner tone="info" heading="Not rendered by the server yet" {

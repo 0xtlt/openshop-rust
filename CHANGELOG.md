@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+- A form of the server-rendered admin that is refused field by field is
+  rendered again in place (`422`), with what was sent and the error of each
+  field, for a view that declares a `form: FormState` parameter: when the
+  input schema refuses it (each property it can tell, `Required`, `Must be at
+  least 3 characters`), when the action answers `Outcome::invalid([("title",
+  "Already taken")])`, and when it fails with an `AdminPublicError` that has
+  `field_errors`. `form.value_or("title", saved)` and
+  `error=[form.error("title")]` show them on a Polaris field. A view without
+  it keeps the page as it was, with an error toast, as before. A field left
+  empty is a missing number, not the text `""`. The `422` of the input schema
+  of an admin function also names each field in `fieldErrors` of the RPC
+  transport. A provider's configuration refused names every field it refuses,
+  not only the first.
 - Experimental: the admin rendered by the server, page by page, with no
   WebAssembly bundle (`admin_ui: UiSource::Server`, or `OPENSHOP_UI=server`).
   A `#[view]` that returns `maud::Markup` takes what the page's loaders return,

@@ -16,7 +16,10 @@ use uuid::Uuid;
 
 use super::http::{catch_panic, header, json_response, parse_query};
 use super::shop::ShopSession;
-use crate::admin::{AdminAuthorize, AdminContext, AdminFunction, AdminFunctionKind, AdminPublicError, CustomAdminPage};
+use super::mcp::schema::property_errors;
+use crate::admin::{
+    AdminAuthorize, AdminContext, AdminFunction, AdminFunctionKind, AdminPublicError, CustomAdminPage, field_message,
+};
 use crate::app::OpenShop;
 use crate::engine::step::error_message;
 use crate::runtime::context_logger::ContextLogger;
@@ -195,7 +198,8 @@ pub(crate) fn find_function<'a>(
 /// Runs `function` of `page` as the admin UI calls it: the access rules of
 /// the page and of the pages it is nested under and the rule of the function
 /// first (`403 FORBIDDEN` when one says no), then the input schema
-/// (`422 INVALID_INPUT`), then the function.
+/// (`422 INVALID_INPUT`, with the error of each field it can tell), then the
+/// function.
 pub(crate) async fn call_function(
     pages: &[CustomAdminPage],
     page: &CustomAdminPage,
@@ -207,9 +211,15 @@ pub(crate) async fn call_function(
         return Err(public_error("FORBIDDEN", "Forbidden", 403));
     }
     let input = match &function.input {
-        Some(schema) => schema
-            .parse(input)
-            .map_err(|summary| public_error("INVALID_INPUT", &summary, 422))?,
+        Some(schema) => schema.parse(input.clone()).map_err(|summary| {
+            let fields = property_errors(&input, &schema.json_schema);
+            let refusal = AdminPublicError::new("INVALID_INPUT", summary).status(422);
+            if fields.is_empty() {
+                refusal
+            } else {
+                refusal.field_errors(fields.iter().map(|(field, error)| (field.as_str(), field_message(error))))
+            }
+        })?,
         None if function.kind == AdminFunctionKind::Action => {
             return Err(public_error("INVALID_ACTION", "Action input schema is required", 500));
         }

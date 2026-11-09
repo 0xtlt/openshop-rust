@@ -19,13 +19,69 @@ fn js_number(text: &str) -> Value {
     }
 }
 
+/// A configuration refused: what the API answers, the first refusal, and
+/// every field refused, with what a form shows next to it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfigError {
+    /// `Field "endpoint": must be a URL string (was "x")`.
+    pub message: String,
+    /// Each field refused and its error as a form shows it:
+    /// `("endpoint", "Must be a URL string (was \"x\")")`.
+    pub fields: Vec<(String, String)>,
+}
+
+impl ConfigError {
+    fn of_field(name: &str, summary: &str) -> Self {
+        let mut letters = summary.chars();
+        let shown = letters
+            .next()
+            .map(|first| first.to_uppercase().chain(letters).collect())
+            .unwrap_or_default();
+        Self {
+            message: format!("Field \"{name}\": {summary}"),
+            fields: vec![(name.to_string(), shown)],
+        }
+    }
+
+    fn required(name: &str) -> Self {
+        Self {
+            message: format!("Field \"{name}\" is required"),
+            fields: vec![(name.to_string(), "Required".to_string())],
+        }
+    }
+
+    /// The refusals of several fields: the message of the first one.
+    fn all(refusals: Vec<ConfigError>) -> Option<Self> {
+        let message = refusals.first()?.message.clone();
+        Some(Self {
+            message,
+            fields: refusals.into_iter().flat_map(|refusal| refusal.fields).collect(),
+        })
+    }
+}
+
+impl std::fmt::Display for ConfigError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl From<ConfigError> for String {
+    fn from(error: ConfigError) -> Self {
+        error.message
+    }
+}
+
 /// The error for a value a validator refused. The summary of a validator may
 /// repeat the value, so for a password it is not forwarded: a secret never
 /// leaves in an error.
-fn validation_error(name: &str, field: &Field, summary: &str) -> String {
+fn validation_error(name: &str, field: &Field, summary: &str) -> ConfigError {
     match field.field_type {
-        FieldType::Password => format!("Field \"{name}\" is invalid"),
-        _ => format!("Field \"{name}\": {summary}"),
+        FieldType::Password => ConfigError {
+            message: format!("Field \"{name}\" is invalid"),
+            fields: vec![(name.to_string(), "Invalid".to_string())],
+        },
+        _ => ConfigError::of_field(name, summary),
     }
 }
 
@@ -33,8 +89,13 @@ fn validation_error(name: &str, field: &Field, summary: &str) -> String {
 /// types (`"3"` is 3, `"true"` is true). A value that is not of the type of its
 /// field, even after that, is refused with an error naming the field. A null or
 /// an empty string counts as no value.
-fn coerce_field_value(name: &str, field: &Field, value: Option<Value>) -> Result<Option<Value>, String> {
-    let refuse = |expected: &str, value: &Value| Err(format!("Field \"{name}\": must be {expected} (was {})", describe(value)));
+fn coerce_field_value(name: &str, field: &Field, value: Option<Value>) -> Result<Option<Value>, ConfigError> {
+    let refuse = |expected: &str, value: &Value| {
+        Err(ConfigError::of_field(
+            name,
+            &format!("must be {expected} (was {})", describe(value)),
+        ))
+    };
     let Some(value) = value.filter(|value| !is_missing(Some(value))) else {
         return Ok(None);
     };
@@ -42,7 +103,7 @@ fn coerce_field_value(name: &str, field: &Field, value: Option<Value>) -> Result
         (FieldType::Text | FieldType::Password, Value::String(_)) => Ok(Some(value)),
         (FieldType::Text, other) => refuse("a string", other),
         // A secret is not repeated in the error.
-        (FieldType::Password, _) => Err(format!("Field \"{name}\": must be a string")),
+        (FieldType::Password, _) => Err(ConfigError::of_field(name, "must be a string")),
         (FieldType::Number, Value::Number(_)) => Ok(Some(value)),
         (FieldType::Number, Value::String(text)) if !text.trim().is_empty() => match js_number(text) {
             Value::Null => refuse("a number", &value),
@@ -65,16 +126,19 @@ fn coerce_field_value(name: &str, field: &Field, value: Option<Value>) -> Result
         {
             Ok(Some(value))
         }
-        (FieldType::Select, other) => Err(format!(
-            "Field \"{name}\": must be one of {} (was {})",
-            field
-                .options
-                .iter()
-                .flatten()
-                .map(|option| format!("\"{}\"", option.value))
-                .collect::<Vec<_>>()
-                .join(", "),
-            describe(other)
+        (FieldType::Select, other) => Err(ConfigError::of_field(
+            name,
+            &format!(
+                "must be one of {} (was {})",
+                field
+                    .options
+                    .iter()
+                    .flatten()
+                    .map(|option| format!("\"{}\"", option.value))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                describe(other)
+            ),
         )),
     }
 }
@@ -114,17 +178,19 @@ pub fn public_provider_config(provider: &Provider, stored_config: &JsonMap) -> J
 
 /// Validates submitted configuration: the one of a provider, or of a Shopify
 /// Function instance, which has no transformer and no stored values. A blank
-/// password keeps the stored one.
+/// password keeps the stored one. Every field is checked: the error names
+/// each one that is refused.
 pub fn parse_provider_config(
     fields: &Fields,
     transformer: Option<&ProviderTransformer>,
     raw_config: Option<&Value>,
     existing_config: &JsonMap,
-) -> Result<JsonMap, String> {
+) -> Result<JsonMap, ConfigError> {
     let empty = JsonMap::new();
     let input = raw_config.and_then(Value::as_object).unwrap_or(&empty);
     let mut data = JsonMap::new();
     let mut kept = Vec::new();
+    let mut refusals = Vec::new();
 
     for (name, field) in fields {
         let submitted = input.get(name).cloned();
@@ -136,40 +202,64 @@ pub fn parse_provider_config(
                 kept.push(name.as_str());
                 Some(existing.clone())
             }
-            _ => coerce_field_value(name, field, submitted)?,
+            _ => match coerce_field_value(name, field, submitted) {
+                Ok(value) => value,
+                Err(refusal) => {
+                    refusals.push(refusal);
+                    continue;
+                }
+            },
         };
         if field.is_required() && is_missing(value.as_ref()) {
-            return Err(format!("Field \"{name}\" is required"));
+            refusals.push(ConfigError::required(name));
+            continue;
         }
         if let Some(value) = value.filter(|value| !is_missing(Some(value))) {
             data.insert(name.clone(), value);
         }
     }
+    if let Some(refused) = ConfigError::all(refusals) {
+        return Err(refused);
+    }
 
     let mut transformed = match transformer {
         Some(transformer) => match transformer(data) {
             Value::Object(transformed) => transformed,
-            _ => return Err("Provider transformer must return an object".to_string()),
+            _ => {
+                return Err(ConfigError {
+                    message: "Provider transformer must return an object".to_string(),
+                    fields: Vec::new(),
+                });
+            }
         },
         None => data,
     };
 
+    let mut refusals = Vec::new();
     for (name, field) in fields {
         let value = transformed.get(name).cloned();
         if field.is_required() && is_missing(value.as_ref()) {
-            return Err(format!("Field \"{name}\" is required"));
+            refusals.push(ConfigError::required(name));
+            continue;
         }
 
         if kept.contains(&name.as_str()) {
             continue;
         }
         if let (Some(validate), Some(value)) = (&field.validate, value.filter(|value| !is_missing(Some(value)))) {
-            let validated = validate(&value).map_err(|summary| validation_error(name, field, &summary))?;
-            transformed.insert(name.clone(), validated);
+            match validate(&value) {
+                Ok(validated) => {
+                    transformed.insert(name.clone(), validated);
+                }
+                Err(summary) => refusals.push(validation_error(name, field, &summary)),
+            }
         }
     }
 
-    Ok(transformed)
+    match ConfigError::all(refusals) {
+        Some(refused) => Err(refused),
+        None => Ok(transformed),
+    }
 }
 
 #[cfg(test)]
@@ -185,6 +275,7 @@ mod tests {
 
     fn parse(provider: &Provider, raw_config: Option<&Value>, existing_config: &JsonMap) -> Result<JsonMap, String> {
         parse_provider_config(&provider.fields, provider.transformer.as_ref(), raw_config, existing_config)
+            .map_err(String::from)
     }
 
     fn warehouse() -> Provider {
@@ -197,6 +288,39 @@ mod tests {
                 "retries",
                 Field::number("Retries").validate(validators::range(Some(0.0), Some(10.0))),
             )
+    }
+
+    #[test]
+    fn names_every_field_it_refuses() {
+        let refused = parse_provider_config(
+            &warehouse().fields,
+            None,
+            Some(&json!({ "endpoint": "nope", "retries": "x" })),
+            &JsonMap::new(),
+        )
+        .unwrap_err();
+        // The API answers the first refusal; a form shows each one under its field.
+        assert_eq!(refused.message, "Field \"apiKey\" is required");
+        assert_eq!(
+            refused.fields,
+            [
+                ("apiKey".to_string(), "Required".to_string()),
+                ("enabled".to_string(), "Required".to_string()),
+                ("retries".to_string(), "Must be a number (was \"x\")".to_string()),
+            ]
+        );
+        // The validators run once every field has a value of its type.
+        let invalid = parse_provider_config(
+            &warehouse().fields,
+            None,
+            Some(&json!({ "endpoint": "nope", "apiKey": "k", "enabled": "true", "retries": "11" })),
+            &JsonMap::new(),
+        )
+        .unwrap_err();
+        assert_eq!(
+            invalid.fields.iter().map(|(field, _)| field.as_str()).collect::<Vec<_>>(),
+            ["endpoint", "retries"]
+        );
     }
 
     #[test]

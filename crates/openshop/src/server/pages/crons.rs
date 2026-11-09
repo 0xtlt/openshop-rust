@@ -4,10 +4,9 @@ use anyhow::Result;
 use maud::{Markup, html};
 use serde_json::Value;
 
+use super::{BuiltinPage, field, ui};
 use crate::admin::{AdminPublicError, Outcome};
-use crate::app::OpenShop;
 use crate::server::mcp::core::{cron_items, set_cron_enabled};
-use crate::server::shop::ShopSession;
 
 /// The action of the form of a row.
 const TOGGLE: &str = "toggle";
@@ -35,8 +34,8 @@ fn is_truthy(value: Option<&Value>) -> bool {
     }
 }
 
-pub(super) async fn render(app: &OpenShop, session: &ShopSession) -> Result<Markup> {
-    let crons = cron_items(app, &session.shopify_app, &session.shop).await?;
+pub(super) async fn render(page: &BuiltinPage<'_>) -> Result<Markup> {
+    let crons = cron_items(page.app, &page.session.shopify_app, &page.session.shop).await?;
     Ok(view(&crons))
 }
 
@@ -66,11 +65,11 @@ fn view(crons: &[Value]) -> Markup {
                 }
             }
             @for (index, cron) in crons.iter().enumerate().filter(|(_, cron)| is_truthy(cron.get("input"))) {
-                s-modal id=(format!("cron-input-{index}")) heading=(format!("Input — {}", name(cron))) {
-                    pre style="font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;white-space:pre-wrap;margin:0" {
-                        (serde_json::to_string_pretty(cron.get("input").unwrap_or(&Value::Null)).unwrap_or_default())
-                    }
-                }
+                (ui::json_modal(
+                    &format!("cron-input-{index}"),
+                    &format!("Input — {}", name(cron)),
+                    cron.get("input").unwrap_or(&Value::Null),
+                ))
             }
         }
     }
@@ -118,24 +117,16 @@ fn row(index: usize, cron: &Value) -> Markup {
 }
 
 /// The form of a row: the cron enabled or disabled, said in a toast.
-pub(super) async fn submit(
-    app: &OpenShop,
-    session: &ShopSession,
-    action: &str,
-    fields: &[(String, String)],
-) -> Result<Outcome> {
-    let field = |name: &str| {
-        fields
-            .iter()
-            .find(|(field, _)| field == name)
-            .map(|(_, value)| value.as_str())
-    };
-    let (TOGGLE, Some(key), Some(enabled)) = (action, field("key").filter(|key| !key.is_empty()), field("enabled"))
-    else {
+pub(super) async fn submit(page: &BuiltinPage<'_>, action: &str, fields: &[(String, String)]) -> Result<Outcome> {
+    if action != TOGGLE {
+        return Err(super::no_action());
+    }
+    let (Some(key), Some(enabled)) = (field(fields, "key").filter(|key| !key.is_empty()), field(fields, "enabled")) else {
         return Err(AdminPublicError::new("INVALID_INPUT", "key and enabled are required").into());
     };
     let enabled = enabled == "true";
-    if !set_cron_enabled(app, &session.shopify_app, &session.shop, key, enabled).await? {
+    let session = page.session;
+    if !set_cron_enabled(page.app, &session.shopify_app, &session.shop, key, enabled).await? {
         return Err(AdminPublicError::new("NOT_FOUND", "Cron not found").status(404).into());
     }
     Ok(Outcome::toast(if enabled { "Cron enabled" } else { "Cron disabled" }))
@@ -159,7 +150,9 @@ mod tests {
         assert!(html.contains(r#"<input type="hidden" name="enabled" value="false">"#), "{html}");
         assert!(html.contains(r#"<input type="hidden" name="key" value="b&lt;x&gt;">"#), "{html}");
         assert!(html.contains("a.myshopify.com, b.myshopify.com"), "{html}");
-        assert!(html.contains(r#"<s-modal id="cron-input-0" heading="Input — Quick sync">"#), "{html}");
+        assert!(html.contains(r#"<s-modal id="cron-input-0" heading="Input — Quick sync" size="large">"#), "{html}");
+        // The input, and a button that copies it.
+        assert!(html.contains("data-openshop-copy=\"{\n  &quot;limit&quot;: 10\n}\""), "{html}");
         assert!(!html.contains("cron-input-1"), "{html}");
         assert!(view(&[]).into_string().contains("No crons configured"));
     }
