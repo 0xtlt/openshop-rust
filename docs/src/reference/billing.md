@@ -112,7 +112,7 @@ app and shop:
 | A check does not pass (no plan, or not the one asked) | The Partner API is asked again, unless the answer is younger than ten seconds (`billing::MIN_REFRESH`). A merchant who just chose a plan gets it at once; a merchant without one costs at most one request every ten seconds. |
 | A verified launch of the app with `plan_handle` (or `charge_id`) | The answer is forgotten: it is the welcome link of a plan, which the admin opens signed. |
 | `app/uninstalled` | The answer is forgotten. |
-| `ctx.shopify.refresh_plans()` | The Partner API is asked again, whatever the age of the answer: for the welcome link of a plan that a server route serves. Not for every request: the Partner API takes four requests a second for the whole organization. |
+| `ctx.shopify.refresh_plans()` | The Partner API is asked again, whatever the age of the answer: for the welcome link of a plan that a server route serves, as a best effort (see [The welcome link of a route](#the-welcome-link-of-a-route)). Not for every request: the Partner API takes four requests a second for the whole organization. |
 | Concurrent checks of a shop | One request; the others wait for it. |
 
 The trade-off: a plan that ends outside the app (a cancellation by Shopify, a
@@ -169,7 +169,21 @@ On the Partner API, the subscription is active by definition: Shopify answers
 
 `ctx.shopify.active_subscriptions()` reads
 `currentAppInstallation.activeSubscriptions` whatever the source: one request
-to the Admin API, which needs no access scope.
+to the Admin API, which needs no access scope. An app on manual pricing reads
+its plans there. An app on Shopify App Pricing does not: its subscriptions may
+have no Admin API subscription, and a paying merchant would look like one
+without a plan. Call `active_plans()` there.
+
+With the Partner API set, the first call of `active_subscriptions()` in the
+process logs a warning that says where it was called. The call still reads the
+Admin API and returns what it did before; the warning is not repeated:
+
+```text
+[openshop] active_subscriptions() at src/webhooks/orders.rs:12 reads the Admin API, but billing reads the plans from the Partner API. A subscription of Shopify App Pricing may not be in the Admin API, so a paying merchant can look like one without a plan. Call active_plans() instead, or keep active_subscriptions() only to read the Admin API on purpose. This warning is logged once per process.
+```
+
+An app enrolled before April 2026 that reads its legacy subscriptions on
+purpose keeps the call, and gets this line once per process.
 
 | `AppSubscription` field | Type | Shopify field |
 | --- | --- | --- |
@@ -268,6 +282,39 @@ In a view, the error of `use_loader` or `use_action` carries the details:
 `openshop::billing` is not compiled into the bundle). Open the link in the top
 window of the admin, as an App Bridge link: `window.open(link, "_top")`, or an
 `<a target="_top">` to it.
+
+## The welcome link of a route
+
+After the merchant approves a plan, Shopify sends them to the welcome link of
+the plan. When a path of the embedded app is the welcome link, the signed
+launch makes the next check read the plan again (see [The cache](#the-cache)).
+When a server route serves it, the route calls `refresh_plans()`, as a best
+effort: a failure is logged, and the merchant goes on into the app.
+
+```rust,ignore
+use openshop::prelude::*;
+use openshop::response::{IntoResponse, Response, StatusCode, header};
+
+/// The welcome link of the plans: read the plan again, then back to the app.
+#[route(GET, "/welcome")]
+pub async fn welcome(ctx: RouteContext) -> Result<Response> {
+    let shop = ctx.request.query().get("shop").cloned().unwrap_or_default();
+    // Best effort: a failure is logged, and the merchant goes on into the app.
+    let refreshed = async { ctx.for_shop(&shop).await?.shopify.refresh_plans().await };
+    if let Err(error) = refreshed.await {
+        ctx.logger.warn(format!("The plan of {shop} was not read again: {error:#}"));
+    }
+    let app = format!("apps/{}", ctx.app_handle(&shop)?);
+    let location = ctx.admin_url(&shop, &app)?;
+    Ok((StatusCode::FOUND, [(header::LOCATION, location)]).into_response())
+}
+```
+
+Do not use `?` on `for_shop(…)` or `refresh_plans()` there. When the Partner
+API fails, the merchant who just paid would land on a `500` instead of the
+app. Nothing is lost by going on: a check that does not find the plan asks the
+Partner API again once the kept answer is ten seconds old
+(`billing::MIN_REFRESH`).
 
 ## The pricing page and the pages of the admin
 

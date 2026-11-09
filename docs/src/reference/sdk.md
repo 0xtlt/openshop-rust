@@ -400,8 +400,8 @@ async fn product_title(ctx: &WebhookContext, id: &str) -> Result<Option<String>>
 | `client.execute(graphql!(…))` | An operation checked against Shopify's schema at compile time, with typed variables and a typed result. See [Typed GraphQL](graphql.md). |
 | `client.api().await?` | The `shopify_api::Shopify` client of the shop: `paginate`, bulk operations, webhook subscriptions, `execute_response`. |
 | `client.active_plans().await?` | The plans of the shop, read from the Partner API when it is set, else from the Admin API. See [Billing](billing.md#the-plans-of-a-shop). |
-| `client.refresh_plans().await?` | The same, asking the Partner API again unless its answer is younger than ten seconds. |
-| `client.active_subscriptions().await?` | The active subscriptions of the shop to the app, `currentAppInstallation.activeSubscriptions` of the Admin API, whatever the source. See [Billing](billing.md). |
+| `client.refresh_plans().await?` | The same, asking the Partner API again whatever the age of its answer. For a welcome link a route serves, as a best effort: see [Billing](billing.md#the-welcome-link-of-a-route). |
+| `client.active_subscriptions().await?` | The active subscriptions of the shop to the app, `currentAppInstallation.activeSubscriptions` of the Admin API, whatever the source. With the Partner API set, its first call logs a warning: use `active_plans()`. See [Billing](billing.md#admin-api-appsubscription). |
 | `client.shop`, `client.shopify_app` | Public fields. |
 
 `graphql()`:

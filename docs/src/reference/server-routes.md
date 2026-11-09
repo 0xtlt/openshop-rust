@@ -86,6 +86,7 @@ depends on the attribute:
 | `params` | `IndexMap<String, String>` | Dynamic route parameters. |
 | `auth` | `serde_json::Value` | Value produced by the authentication function; `null` on public routes. |
 | `db` | `PgPool` | The database of the application. |
+| `logger` | `ContextLogger` | Logs to the runtime logger with the `route`; see [Logging](#logging). |
 | `app` | `OpenShop` | The running application. |
 
 A route does not belong to a shop. To reach the Admin API or the providers of
@@ -169,7 +170,7 @@ a public `GET` next to an authenticated `POST`.
 The authentication function is an
 `async fn(RouteAuthContext) -> Result<RouteAuthOutcome<A>>`. It runs
 before the route function and receives the same `request`, `params`, `db`,
-and `app`, so both may read the body. It returns a `RouteAuthOutcome`:
+`logger` and `app`, so both may read the body. It returns a `RouteAuthOutcome`:
 
 | Outcome | Effect |
 | --- | --- |
@@ -223,6 +224,7 @@ contexts give for a shop:
 | `db` | `PgPool` | The database of the application. |
 | `shopify` | `ShopifyClient` | The Admin API of the shop. |
 | `connectors` | `Connectors` | The providers of the shop. |
+| `logger` | `ContextLogger` | Logs with the `route`, the `shop` and the `shopifyApp`; see [Logging](#logging). |
 | `app` | `OpenShop` | The running application. |
 
 `for_shop` takes anything that names a shop: a domain, or
@@ -270,14 +272,14 @@ link in an email. These read the configuration only, and take the shop as
 use openshop::prelude::*;
 use openshop::response::{IntoResponse, Response, StatusCode, header};
 
-/// The welcome link of the plans: back to the app, in the admin of the shop.
+/// The welcome link of the plans: read the plan again, then back to the app.
 #[route(GET, "/welcome")]
 pub async fn welcome(ctx: RouteContext) -> Result<Response> {
     let shop = ctx.request.query().get("shop").cloned().unwrap_or_default();
-    // The plan just chosen: read it again, for a shop that has the app. A
-    // failure is the next check's to report: the merchant goes back anyway.
-    if let Ok(tenant) = ctx.for_shop(&shop).await {
-        let _ = tenant.shopify.refresh_plans().await;
+    // Best effort: a failure is logged, and the merchant goes on into the app.
+    let refreshed = async { ctx.for_shop(&shop).await?.shopify.refresh_plans().await };
+    if let Err(error) = refreshed.await {
+        ctx.logger.warn(format!("The plan of {shop} was not read again: {error:#}"));
     }
     let app = format!("apps/{}", ctx.app_handle(&shop)?);
     let location = ctx.admin_url(&shop, &app)?;
@@ -291,10 +293,43 @@ while several apps are configured; whether the shop installed the app is not
 asked. `app_handle` and `pricing_url` also fail when the `shopify.app.toml` of
 the app has no `handle`.
 
+Do not use `?` on `for_shop` or `refresh_plans()` in a welcome link: when the
+Partner API fails, a merchant who just paid would land on a `500`. A plan check
+that does not find the plan asks the Partner API again once the kept answer is
+ten seconds old (see [Billing](billing.md#the-welcome-link-of-a-route)).
+
 The query of a welcome link is not signed when it reaches a server route:
-anyone can call it. `refresh_plans()` asks the Partner API at most once every
-ten seconds per shop, whatever calls it. A route that wants a context of the shop, with `app_handle()` and
-`admin_url(path)` of its own, calls `for_shop`.
+anyone can call it. `refresh_plans()` asks the Partner API at each call,
+whatever the age of the kept answer, and the Partner API takes four requests a
+second for the whole organization. A route that wants a context of the shop,
+with `app_handle()` and `admin_url(path)` of its own, calls `for_shop`.
+
+## Logging
+
+`ctx.logger` is a `ContextLogger`, as in a webhook or an admin page: `info`,
+`warn`, `error`, and their `_with` forms, which take a JSON payload. Each line
+goes to the runtime logger at its level, with its payload and what it was
+logged for:
+
+| Logger | Fields added to the payload |
+| --- | --- |
+| `RouteContext`, `RouteAuthContext` | `route`: the method and the declared path, `POST /orders/:id` |
+| `RouteShopContext`, from `ctx.for_shop(…)` | `route`, `shop`, `shopifyApp` |
+
+```rust,ignore
+#[route(POST, "/orders/:id", json)]
+pub async fn order(ctx: RouteContext) -> Result<Value> {
+    ctx.logger.info_with("Order received", json!({ "id": ctx.params["id"] }));
+    let tenant = ctx.for_shop("demo.myshopify.com").await?;
+    tenant.logger.warn("No warehouse for this shop");
+    Ok(json!({ "ok": true }))
+}
+```
+
+A key of the payload wins over a field of the same name. A route has no run:
+its lines are not stored in the database. When the application reports to
+[Sentry](sentry.md), they are the breadcrumbs of a failure of the route, without
+their payload. See [Logging](logging.md#handler-logger).
 
 ## Queue durable work
 

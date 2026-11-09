@@ -2,6 +2,30 @@
 
 ## Unreleased
 
+- `ctx.shopify.active_subscriptions()` warns when the plans are read from the
+  Partner API. It reads the Admin API (`currentAppInstallation`), where a
+  subscription of Shopify App Pricing may not be: a paying merchant looked
+  like one without a plan, in silence. Its first call in the process now logs
+  one warning that names where it was called and says to call
+  `active_plans()`. The call still reads the Admin API and returns what it
+  did. Without the Partner API, nothing is logged: apps on manual pricing use
+  it rightly. `active_plans()`, `refresh_plans()`, `require_plan` and
+  `any_plan` do not warn.
+- The welcome link that a server route serves reads the plan as a best effort,
+  in the guide Charge with managed pricing and in the billing reference: it
+  logs a failure of the Partner API and sends the merchant into the app. The
+  guide used `?`, which gave a merchant who just paid a `500`. The rustdoc of
+  `refresh_plans()` has the route, compiled. The reference of server routes
+  and the SDK reference no longer say that `refresh_plans()` asks at most once
+  every ten seconds: it asks at each call.
+- Server routes have a `ctx.logger`, a `ContextLogger`, as webhooks and admin
+  pages do. `RouteContext` and `RouteAuthContext` log with `route`, the method
+  and the declared path (`POST /orders/:id`). The `RouteShopContext` of
+  `ctx.for_shop(…)` logs with `route`, `shop` and `shopifyApp`. The lines are
+  the breadcrumbs of a failure of the route in Sentry. Breaking:
+  `RouteContext`, `RouteAuthContext` and `RouteShopContext` have a `logger`
+  field: a context built by hand needs `logger: ContextLogger::default()`.
+
 - `openshop::billing` reads the plan from the Partner API when it is set, as
   Shopify App Pricing asks: "Replace GraphQL Admin API checks, such as
   billing.check() and currentAppInstallation, with Partner API queries." An app

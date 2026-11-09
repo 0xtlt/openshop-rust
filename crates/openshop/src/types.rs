@@ -12,7 +12,7 @@ use futures::future::BoxFuture;
 use indexmap::IndexMap;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer, Serialize};
-use serde_json::Value;
+use serde_json::{Value, json};
 use sqlx::PgPool;
 use tokio_util::sync::CancellationToken;
 
@@ -1292,6 +1292,9 @@ pub struct RouteShopContext {
     pub db: PgPool,
     pub shopify: ShopifyClient,
     pub connectors: Connectors,
+    /// Logs to the runtime logger with `shop` and `shopifyApp`, and the
+    /// `route` that resolved the shop: see [`ContextLogger`].
+    pub logger: ContextLogger,
     pub app: OpenShop,
 }
 
@@ -1370,14 +1373,16 @@ pub struct RouteAuthContext {
     pub request: RouteRequest,
     pub params: IndexMap<String, String>,
     pub db: PgPool,
+    /// Logs to the runtime logger with the `route`, as the handler's does.
+    pub logger: ContextLogger,
     pub app: OpenShop,
 }
 
 impl RouteAuthContext {
     /// Resolves an installed shop, and gives what a context gives for it:
-    /// its database, its Shopify client and its providers.
+    /// its database, its Shopify client, its providers and a logger.
     pub async fn for_shop(&self, shop: impl Into<RouteShopInput>) -> Result<RouteShopContext> {
-        crate::server::connectors::resolve_shop_context(&self.app, shop.into()).await
+        route_shop_context(&self.app, &self.logger, shop.into()).await
     }
 
     /// As [`RouteContext::app_handle`].
@@ -1394,6 +1399,13 @@ impl RouteAuthContext {
     pub fn pricing_url(&self, shop: impl Into<RouteShopInput>) -> Result<String> {
         route_pricing_url(&self.app, shop.into())
     }
+}
+
+/// The shop a route resolves, whose logger carries the route too.
+async fn route_shop_context(app: &OpenShop, logger: &ContextLogger, shop: RouteShopInput) -> Result<RouteShopContext> {
+    let mut context = crate::server::connectors::resolve_shop_context(app, shop).await?;
+    context.logger = logger.extended(json!({ "shop": context.shop, "shopifyApp": context.shopify_app }));
+    Ok(context)
 }
 
 fn route_app_handle(app: &OpenShop, shop: RouteShopInput) -> Result<&str> {
@@ -1421,14 +1433,29 @@ pub struct RouteContext<A = Value> {
     /// What the authentication function of the route returned.
     pub auth: A,
     pub db: PgPool,
+    /// Logs to the runtime logger with the `route`, its method and declared
+    /// path (`GET /welcome`): see [`ContextLogger`]. The context of a shop
+    /// from [`for_shop`](Self::for_shop) has one that adds the shop.
+    ///
+    /// ```
+    /// use openshop::prelude::*;
+    ///
+    /// #[route(POST, "/orders/:id", json)]
+    /// async fn order(ctx: RouteContext) -> Result<Value> {
+    ///     ctx.logger.info_with("Order received", json!({ "id": ctx.params["id"] }));
+    ///     Ok(json!({ "ok": true }))
+    /// }
+    /// ```
+    pub logger: ContextLogger,
     pub app: OpenShop,
 }
 
 impl<A> RouteContext<A> {
     /// Resolves an installed shop, and gives what a context gives for it:
-    /// its database, its Shopify client and its providers.
+    /// its database, its Shopify client, its providers, and a logger whose
+    /// lines carry the shop next to the route.
     pub async fn for_shop(&self, shop: impl Into<RouteShopInput>) -> Result<RouteShopContext> {
-        crate::server::connectors::resolve_shop_context(&self.app, shop.into()).await
+        route_shop_context(&self.app, &self.logger, shop.into()).await
     }
 
     /// The handle on Shopify of the app that serves `shop`, which the URLs
@@ -1625,6 +1652,7 @@ impl<A: Send + 'static> Route<A> {
                         params,
                         auth,
                         db,
+                        logger,
                         app,
                     } = ctx;
                     match auth.downcast::<A>() {
@@ -1633,6 +1661,7 @@ impl<A: Send + 'static> Route<A> {
                             params,
                             auth: *auth,
                             db,
+                            logger,
                             app,
                         })),
                         Err(_) => Box::pin(async {

@@ -6,16 +6,17 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use crate::common::{TEST_SECRET, TEST_SHOP, json_body};
+use crate::common::{LogCapture, LoggedLine, TEST_SECRET, TEST_SHOP, json_body};
 use openshop::billing::{
-    self, BillingSource, PARTNER_IDS_OPERATION, PARTNER_SUBSCRIPTION_OPERATION, SubscriptionStatus,
+    self, ACTIVE_SUBSCRIPTIONS_OPERATION, BillingSource, PARTNER_IDS_OPERATION, PARTNER_SUBSCRIPTION_OPERATION,
+    SubscriptionStatus,
 };
 use openshop::builder::{AdminFunction, AdminPage, InputSchema, Route};
 use openshop::response;
 use openshop::server::{ServerOptions, UiSource};
 use openshop::testing::{
     MockTransport, TEST_APP_GID, TEST_SHOP_GID, TestContext, TestOptions, app_pricing_subscription, sign_query,
-    to_query_string,
+    subscription, to_query_string,
 };
 use openshop::{AdminContext, OpenShopConfig, PartnerApi, ShopScope, ShopifyEndpoints, Value, json};
 use openshop_shared::build_admin_function_rpc_url;
@@ -481,4 +482,78 @@ async fn a_shop_the_partner_api_does_not_know_is_an_error_and_a_429_is_sent_agai
     assert_eq!(sent.load(Ordering::SeqCst), 2);
     ctx.shutdown().await.unwrap();
     std::fs::remove_dir_all(cwd).ok();
+}
+
+/// The warnings `active_subscriptions()` logged among `logs`.
+fn admin_api_warnings(logs: &LogCapture) -> Vec<LoggedLine> {
+    logs.at("warn")
+        .into_iter()
+        .filter(|line| line.message.contains("active_subscriptions() at "))
+        .collect()
+}
+
+#[tokio::test]
+async fn with_the_partner_api_active_subscriptions_warns_once_where_it_is_called() {
+    let cwd = project(Some("hide-paypal"));
+    let transport = MockTransport::new();
+    let ctx = partner_context(transport, cwd.clone()).await;
+    ctx.shopify
+        .active_subscription(app_pricing_subscription("pro"))
+        .active_subscriptions([subscription("Pro")]);
+    let logs = LogCapture::start().await;
+
+    // The plan checks read the Partner API, and do not warn.
+    assert_eq!(answer(&ctx, "loader", "report").await.0, 200);
+    let client = ctx.app.shopify_client(TEST_SHOP, "default");
+    assert!(client.active_plans().await.unwrap().has_plan(&["pro"]));
+    assert!(admin_api_warnings(&logs).is_empty(), "{}", logs.text());
+
+    // `active_subscriptions()` still reads the Admin API, and says where it was called.
+    let at = format!("{}:{}", file!(), line!() + 1);
+    let subscriptions = client.active_subscriptions().await.unwrap();
+    assert!(subscriptions.has_plan(&["Pro"]));
+    assert_eq!(ctx.shopify.calls_to(ACTIVE_SUBSCRIPTIONS_OPERATION).len(), 1);
+    // Once per process: not for a second call, nor for the client of another context.
+    client.active_subscriptions().await.unwrap();
+    ctx.app
+        .shopify_client(TEST_SHOP, "default")
+        .active_subscriptions()
+        .await
+        .unwrap();
+    assert_eq!(ctx.shopify.calls_to(ACTIVE_SUBSCRIPTIONS_OPERATION).len(), 3);
+
+    let warnings = admin_api_warnings(&logs);
+    drop(logs);
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert_eq!(
+        warnings[0].message,
+        format!(
+            "[openshop] active_subscriptions() at {at} reads the Admin API, but billing reads the plans from the \
+             Partner API. A subscription of Shopify App Pricing may not be in the Admin API, so a paying merchant \
+             can look like one without a plan. Call active_plans() instead, or keep active_subscriptions() only \
+             to read the Admin API on purpose. This warning is logged once per process."
+        )
+    );
+    assert_eq!(
+        warnings[0].context,
+        Some(json!({ "shop": TEST_SHOP, "shopifyApp": "default" }))
+    );
+    ctx.shutdown().await.unwrap();
+    std::fs::remove_dir_all(cwd).ok();
+}
+
+#[tokio::test]
+async fn without_the_partner_api_active_subscriptions_does_not_warn() {
+    let transport = MockTransport::new();
+    transport.respond_json(subscriptions(&[("Pro", "ACTIVE")]));
+    let ctx = context(transport, ShopifyEndpoints::new(), None).await;
+    let logs = LogCapture::start().await;
+
+    let client = ctx.app.shopify_client(TEST_SHOP, "default");
+    assert!(client.active_subscriptions().await.unwrap().has_plan(&["Pro"]));
+    assert!(client.active_plans().await.unwrap().has_plan(&["pro"]));
+    let warnings = admin_api_warnings(&logs);
+    drop(logs);
+    assert!(warnings.is_empty(), "{warnings:?}");
+    ctx.shutdown().await.unwrap();
 }

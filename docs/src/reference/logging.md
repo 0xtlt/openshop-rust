@@ -85,9 +85,9 @@ personal data that is not required for diagnosis.
 
 ## Handler logger
 
-A webhook handler and the loaders, actions and access rules of an admin page
-have a `ctx.logger` too, a `ContextLogger`, with the methods of the flow
-logger:
+A webhook handler, the loaders, actions and access rules of an admin page, and
+a server route have a `ctx.logger` too, a `ContextLogger`, with the methods of
+the flow logger:
 
 ```rust,ignore
 use openshop::prelude::*;
@@ -107,6 +107,8 @@ lines of a flow do, with its payload and what the handler runs for:
 | --- | --- |
 | `WebhookContext` | `shop`, `shopifyApp`, `topic` |
 | `AdminContext` | `shop`, `shopifyApp`, `requestId` (the one of the error response and of the line OpenShop logs for the call) |
+| `RouteContext`, `RouteAuthContext` | `route`, the method and the declared path: `GET /welcome` |
+| `RouteShopContext`, what `ctx.for_shop(…)` of a route returns | `route`, `shop`, `shopifyApp` |
 
 A key of the payload wins over a field of the same name, and a payload that is
 not an object is logged under `payload`. When the application reports to

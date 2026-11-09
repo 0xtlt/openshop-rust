@@ -162,13 +162,45 @@ are how the app hears of it.
   signs its launch. OpenShop forgets the plan it kept for the shop when a
   verified launch has `plan_handle` (or `charge_id`), so the next check reads
   the new plan.
-- A welcome link served by a server route of the app calls
-  `ctx.for_shop(&shop).await?.shopify.refresh_plans().await?` to read it again.
+- A welcome link served by a server route of the app reads the plan again
+  with `refresh_plans()`. Do it as a best effort, as below.
 - A plan that ends outside the app, a cancellation or a frozen shop, is seen
   within five minutes, when the kept plan expires.
 
+A welcome link that a route serves logs a failure of the Partner API and sends
+the merchant into the app anyway. Do not use `?` on `for_shop` or
+`refresh_plans()` there: when the Partner API fails, a merchant who just paid
+would land on a `500`. A plan check that does not find the plan asks the
+Partner API again once the kept answer is ten seconds old.
+
+```rust,ignore
+// src/routes/welcome.rs
+use openshop::prelude::*;
+use openshop::response::{IntoResponse, Response, StatusCode, header};
+
+/// The welcome link of the plans: read the plan again, then back to the app.
+#[route(GET, "/welcome")]
+pub async fn welcome(ctx: RouteContext) -> Result<Response> {
+    let shop = ctx.request.query().get("shop").cloned().unwrap_or_default();
+    // Best effort: a failure is logged, and the merchant goes on into the app.
+    let refreshed = async { ctx.for_shop(&shop).await?.shopify.refresh_plans().await };
+    if let Err(error) = refreshed.await {
+        ctx.logger.warn(format!("The plan of {shop} was not read again: {error:#}"));
+    }
+    let app = format!("apps/{}", ctx.app_handle(&shop)?);
+    let location = ctx.admin_url(&shop, &app)?;
+    Ok((StatusCode::FOUND, [(header::LOCATION, location)]).into_response())
+}
+```
+
+`ctx.logger` writes the line with the route (see
+[Server routes](../reference/server-routes.md#logging)).
+
 A flow, a webhook or a route reads what the shop has now with
-`ctx.shopify.active_plans().await?`.
+`ctx.shopify.active_plans().await?`. Not with `active_subscriptions()`: it
+reads the Admin API, where a subscription of Shopify App Pricing may not be,
+so a paying merchant would look like one without a plan. With the Partner API
+set, its first call logs a warning that says where it was called.
 
 An app enrolled in Shopify App Pricing before April 2026, and an app of the
 Billing API, still get `app_subscriptions/update` until then. Its typed payload

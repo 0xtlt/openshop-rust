@@ -1,6 +1,7 @@
 //! The logger of a handler that is not a flow run: a webhook, a loader or an
-//! action of an admin page. It has the methods of [`FlowLogger`](super::FlowLogger),
-//! and its lines go to the process logger with what they were logged for.
+//! action of an admin page, a server route. It has the methods of
+//! [`FlowLogger`](super::FlowLogger), and its lines go to the process logger
+//! with what they were logged for.
 
 use std::sync::Arc;
 
@@ -9,18 +10,20 @@ use serde_json::{Map, Value};
 use super::logger::logger;
 use super::report::Trail;
 
-/// `ctx.logger` of a [`WebhookContext`](crate::WebhookContext) and of an
-/// [`AdminContext`](crate::AdminContext): the methods of
+/// `ctx.logger` of a [`WebhookContext`](crate::WebhookContext), of an
+/// [`AdminContext`](crate::AdminContext) and of a server route
+/// ([`RouteContext`](crate::RouteContext), [`RouteAuthContext`](crate::RouteAuthContext),
+/// [`RouteShopContext`](crate::RouteShopContext)): the methods of
 /// [`FlowLogger`](super::FlowLogger), `info`, `warn`, `error` and their
 /// `_with` forms, which take a JSON payload.
 ///
 /// A line goes to the [runtime logger](super::RuntimeLogger) at its level, as
-/// the flow logger's do, with its payload and what the context runs for: the shop,
-/// the Shopify app, and the topic of a webhook or the request of an admin page.
-/// A key of the payload wins over those. A handler has no run: its lines are
-/// not stored in the database, unlike those of a flow. When the application
-/// reports to Sentry, they are the breadcrumbs of a failure of the handler,
-/// without their payload.
+/// the flow logger's do, with its payload and what the context runs for: the
+/// shop, the Shopify app, and the topic of a webhook, the request of an admin
+/// page, or the route. A key of the payload wins over those. A handler has no
+/// run: its lines are not stored in the database, unlike those of a flow.
+/// When the application reports to Sentry, they are the breadcrumbs of a
+/// failure of the handler, without their payload.
 ///
 /// ```
 /// use openshop::{Result, WebhookContext, json, webhook};
@@ -68,6 +71,23 @@ impl ContextLogger {
         Self {
             fields: Arc::new(fields),
             trail: Trail::current_as(category),
+        }
+    }
+
+    /// The same logger, whose lines also carry `fields`: the shop a server
+    /// route resolved, next to the route. A field of `fields` wins over one
+    /// of the logger.
+    pub(crate) fn extended(&self, fields: Value) -> Self {
+        let mut fields = match fields {
+            Value::Object(fields) => fields,
+            _ => Map::new(),
+        };
+        for (key, value) in self.fields.iter() {
+            fields.entry(key.clone()).or_insert_with(|| value.clone());
+        }
+        Self {
+            fields: Arc::new(fields),
+            trail: self.trail.clone(),
         }
     }
 
@@ -156,5 +176,21 @@ mod tests {
         );
         assert_eq!(ContextLogger::default().context(json!({})), json!({}));
         assert_eq!(ContextLogger::new(json!("not an object")).context(Value::Null), json!({}));
+    }
+
+    #[test]
+    fn an_extended_logger_keeps_its_fields_and_adds_the_new_ones() {
+        let route = ContextLogger::new(json!({ "route": "GET /welcome" }));
+        let shop = route.extended(json!({ "shop": "demo.myshopify.com", "shopifyApp": "default" }));
+        assert_eq!(
+            shop.context(Value::Null),
+            json!({ "route": "GET /welcome", "shop": "demo.myshopify.com", "shopifyApp": "default" })
+        );
+        // A new field wins over one of the logger, which is left as it was.
+        assert_eq!(
+            route.extended(json!({ "route": "POST /other" })).context(Value::Null),
+            json!({ "route": "POST /other" })
+        );
+        assert_eq!(route.context(Value::Null), json!({ "route": "GET /welcome" }));
     }
 }
