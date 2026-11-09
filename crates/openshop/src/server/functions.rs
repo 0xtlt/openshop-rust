@@ -18,7 +18,7 @@ use super::function_mutations::{
     extract_payload, get_mutations, has_user_error_code, resolve_title, user_error_messages,
 };
 use super::http::{ApiResult, json_error, json_object_body, json_response, parse_query};
-use super::provider_config::parse_provider_config;
+use super::provider_config::{ConfigError, parse_provider_config};
 use super::shop::ShopSession;
 use crate::app::{OpenShop, OpenShopConfig};
 use crate::runtime::logger;
@@ -66,12 +66,67 @@ fn function_label(key: &str, definition: &Function) -> String {
         .unwrap_or_else(|| humanize(&definition.handle))
 }
 
-fn find_function<'a>(config: &'a OpenShopConfig, handle: &str) -> Option<(&'a Function, String)> {
+/// A function of the app, as the admin shows it: its definition, the key the
+/// app registered it under, and its label.
+pub(crate) struct AppFunction<'a> {
+    pub(crate) key: &'a str,
+    pub(crate) definition: &'a Function,
+    pub(crate) label: String,
+}
+
+impl<'a> AppFunction<'a> {
+    pub(crate) fn of(key: &'a str, definition: &'a Function) -> Self {
+        Self {
+            key,
+            definition,
+            label: function_label(key, definition),
+        }
+    }
+
+    /// Its handle, in Shopify and in the URLs of the admin.
+    pub(crate) fn handle(&self) -> &'a str {
+        &self.definition.handle
+    }
+
+    /// The ways a discount can be given (automatically, with a code), the
+    /// first one the default: automatic unless the discount says otherwise.
+    /// `None` for the other types of function.
+    pub(crate) fn modes(&self) -> Option<Vec<DiscountMode>> {
+        (self.definition.function_type == FunctionType::Discount).then(|| {
+            self.definition
+                .modes
+                .clone()
+                .unwrap_or_else(|| vec![DiscountMode::Automatic])
+        })
+    }
+
+    /// Whether an instance can be changed, or must be deleted and created again.
+    pub(crate) fn supports_update(&self) -> bool {
+        get_mutations(self.definition, None).update.is_some()
+    }
+
+    /// Whether a shop has one instance at most: a Cart Transform.
+    pub(crate) fn is_singleton(&self) -> bool {
+        self.definition.function_type == FunctionType::CartTransform
+    }
+}
+
+/// The functions of the app, in the order it declares them.
+pub(crate) fn app_functions(config: &OpenShopConfig) -> Vec<AppFunction<'_>> {
+    config
+        .functions
+        .iter()
+        .map(|(key, definition)| AppFunction::of(key, definition))
+        .collect()
+}
+
+/// The function of the app whose handle is `handle`.
+pub(crate) fn find_function<'a>(config: &'a OpenShopConfig, handle: &str) -> Option<AppFunction<'a>> {
     config
         .functions
         .iter()
         .find(|(_, definition)| definition.handle == handle)
-        .map(|(key, definition)| (definition, function_label(key, definition)))
+        .map(|(key, definition)| AppFunction::of(key, definition))
 }
 
 /// Pages read for one listing, at 50 nodes each: past that, the rest is not
@@ -192,38 +247,26 @@ async fn list_cart_transform_instances(
 
 /// List all function definitions
 async fn list_functions(State(app): State<OpenShop>) -> Response {
-    let functions: Vec<Value> = app
-        .config()
-        .functions
-        .iter()
-        .map(|(key, definition)| {
+    let functions: Vec<Value> = app_functions(app.config())
+        .into_iter()
+        .map(|function| {
+            let definition = function.definition;
             let fields: JsonMap = definition
                 .config
                 .iter()
                 .map(|(name, field)| (name.clone(), Value::Object(field.metadata())))
                 .collect();
-            let is_discount = definition.function_type == FunctionType::Discount;
 
             let mut item = JsonMap::new();
-            item.insert("key".into(), Value::from(key.clone()));
-            item.insert("label".into(), Value::from(function_label(key, definition)));
+            item.insert("key".into(), Value::from(function.key));
+            item.insert("label".into(), Value::from(function.label.clone()));
             item.insert("type".into(), json!(definition.function_type));
             item.insert("handle".into(), Value::from(definition.handle.clone()));
-            if is_discount {
-                let modes = definition
-                    .modes
-                    .clone()
-                    .unwrap_or_else(|| vec![DiscountMode::Automatic]);
+            if let Some(modes) = function.modes() {
                 item.insert("modes".into(), json!(modes));
             }
-            item.insert(
-                "supportsUpdate".into(),
-                Value::Bool(get_mutations(definition, None).update.is_some()),
-            );
-            item.insert(
-                "singleton".into(),
-                Value::Bool(definition.function_type == FunctionType::CartTransform),
-            );
+            item.insert("supportsUpdate".into(), Value::Bool(function.supports_update()));
+            item.insert("singleton".into(), Value::Bool(function.is_singleton()));
             item.insert("fields".into(), Value::Object(fields));
             Value::Object(item)
         })
@@ -244,15 +287,30 @@ async fn list_instances(
     Extension(session): Extension<ShopSession>,
     Path(handle): Path<String>,
 ) -> ApiResult {
-    let Some((definition, label)) = find_function(app.config(), &handle) else {
+    let Some(function) = find_function(app.config(), &handle) else {
         return Ok(json_error(StatusCode::NOT_FOUND, "Function not found"));
     };
+    let instances = function_instances(&app, &session, &function).await?;
+    Ok(json_response(StatusCode::OK, Value::Array(instances)))
+}
+
+/// The instances of a function in the shop of the session, read from Shopify
+/// page after page: `id`, its `config`, and what the type of the function
+/// says of it (`title`, `status` and dates of a discount, `title` and
+/// `enabled` of a customization, `label`, `state` and `blockOnFailure` of a
+/// Cart Transform).
+pub(crate) async fn function_instances(
+    app: &OpenShop,
+    session: &ShopSession,
+    function: &AppFunction<'_>,
+) -> anyhow::Result<Vec<Value>> {
+    let definition = function.definition;
+    let handle = function.handle();
     let mutations = get_mutations(definition, None);
-    let shopify = session.shopify_client(&app);
+    let shopify = session.shopify_client(app);
 
     if definition.function_type == FunctionType::CartTransform {
-        let instances = list_cart_transform_instances(&shopify, &handle, &label).await?;
-        return Ok(json_response(StatusCode::OK, Value::Array(instances)));
+        return list_cart_transform_instances(&shopify, handle, &function.label).await;
     }
 
     if definition.function_type == FunctionType::Discount {
@@ -298,7 +356,7 @@ async fn list_instances(
                 Value::Object(instance)
             })
             .collect();
-        return Ok(json_response(StatusCode::OK, Value::Array(instances)));
+        return Ok(instances);
     }
 
     // Generic list for non-discount types
@@ -317,7 +375,7 @@ async fn list_instances(
         mutations.list
     );
     let nodes = connection_pages(&shopify, &query, JsonMap::new(), mutations.list).await?;
-    let instances: Vec<Value> = nodes
+    Ok(nodes
         .iter()
         .map(|node| {
             let mut instance = JsonMap::new();
@@ -330,8 +388,7 @@ async fn list_instances(
             instance.insert("config".into(), metafield_config(node));
             Value::Object(instance)
         })
-        .collect();
-    Ok(json_response(StatusCode::OK, Value::Array(instances)))
+        .collect())
 }
 
 /// Create a function instance
@@ -341,46 +398,107 @@ async fn create_instance(
     Path(handle): Path<String>,
     body: Bytes,
 ) -> ApiResult {
-    let Some((definition, label)) = find_function(app.config(), &handle) else {
+    let Some(function) = find_function(app.config(), &handle) else {
         return Ok(json_error(StatusCode::NOT_FOUND, "Function not found"));
     };
     let body = json_object_body(&body);
+    Ok(match create_function_instance(&app, &session, &function, &body).await? {
+        Ok(data) => json_response(StatusCode::CREATED, json!({ "ok": true, "data": data })),
+        Err(refusal) => refusal.response(),
+    })
+}
+
+/// What a Cart Transform that has an instance answers to a second one.
+pub(crate) const ALREADY_REGISTERED: &str = "This Cart Transform already has an instance";
+
+/// A change of an instance refused, by the app or by Shopify: what the API
+/// answers, and what the page of the admin shows.
+#[derive(Debug)]
+pub(crate) enum InstanceRefusal {
+    /// The configuration sent is not one of the function: `400`.
+    InvalidConfig(ConfigError),
+    /// A second instance of a Cart Transform: `409`, with Shopify's
+    /// `userErrors` when Shopify is the one that said so.
+    AlreadyRegistered(Option<Vec<Value>>),
+    /// An update of a type whose instances are deleted and created again: `400`.
+    NoUpdate(FunctionType),
+    /// A discount of several modes deleted without its mode: `400`.
+    ModeRequired,
+    /// The `userErrors` of the mutation: `400`.
+    UserErrors(Vec<Value>),
+}
+
+impl InstanceRefusal {
+    /// What the API says of it, in its `error`.
+    pub(crate) fn message(&self) -> String {
+        match self {
+            Self::InvalidConfig(error) => error.message.clone(),
+            Self::AlreadyRegistered(_) => ALREADY_REGISTERED.to_string(),
+            Self::NoUpdate(kind) => format!(
+                "Function type \"{}\" does not support update. Delete and recreate instead.",
+                kind.as_str()
+            ),
+            Self::ModeRequired => "mode query parameter is required for discount functions with multiple modes".to_string(),
+            Self::UserErrors(errors) => user_error_messages(errors),
+        }
+    }
+
+    fn response(self) -> Response {
+        let message = self.message();
+        match self {
+            Self::AlreadyRegistered(Some(errors)) => json_response(
+                StatusCode::CONFLICT,
+                json!({ "error": message, "userErrors": errors }),
+            ),
+            Self::AlreadyRegistered(None) => json_error(StatusCode::CONFLICT, message),
+            Self::UserErrors(errors) => user_errors_response(&errors, StatusCode::BAD_REQUEST),
+            Self::InvalidConfig(_) | Self::NoUpdate(_) | Self::ModeRequired => {
+                json_error(StatusCode::BAD_REQUEST, message)
+            }
+        }
+    }
+}
+
+/// Creates an instance of `function` in the shop of the session from `body`,
+/// what the form of the admin sends: its `config`, the `mode` of a discount,
+/// and what the type of the function reads (`blockOnFailure`, `startsAt`,
+/// `code`, …). The payload of Shopify's mutation, or why it was refused.
+pub(crate) async fn create_function_instance(
+    app: &OpenShop,
+    session: &ShopSession,
+    function: &AppFunction<'_>,
+    body: &JsonMap,
+) -> anyhow::Result<Result<Option<Value>, InstanceRefusal>> {
+    let definition = function.definition;
+    let handle = function.handle();
     let function_config = match parse_provider_config(&definition.config, None, body.get("config"), &JsonMap::new()) {
         Ok(config) => config,
-        Err(error) => return Ok(json_error(StatusCode::BAD_REQUEST, error)),
+        Err(error) => return Ok(Err(InstanceRefusal::InvalidConfig(error))),
     };
-    let mode = discount_mode_from_body(&body, definition.first_mode());
-    let shopify = session.shopify_client(&app);
+    let mode = discount_mode_from_body(body, definition.first_mode());
+    let shopify = session.shopify_client(app);
     let is_cart_transform = definition.function_type == FunctionType::CartTransform;
-    let already_registered = "This Cart Transform already has an instance";
 
     if is_cart_transform
-        && !list_cart_transform_instances(&shopify, &handle, &label)
+        && !list_cart_transform_instances(&shopify, handle, &function.label)
             .await?
             .is_empty()
     {
-        return Ok(json_error(StatusCode::CONFLICT, already_registered));
+        return Ok(Err(InstanceRefusal::AlreadyRegistered(None)));
     }
 
     let title = resolve_title(definition.owner.as_ref(), &function_config);
-    let request = build_create_mutation(definition, &handle, mode, &title, &function_config, &body);
+    let request = build_create_mutation(definition, handle, mode, &title, &function_config, body);
 
     let result = shopify.graphql(&request.mutation, Some(request.variables)).await?;
     let errors = extract_errors(&result);
     if !errors.is_empty() {
         if is_cart_transform && has_user_error_code(&errors, "FUNCTION_ALREADY_REGISTERED") {
-            return Ok(json_response(
-                StatusCode::CONFLICT,
-                json!({ "error": already_registered, "userErrors": errors }),
-            ));
+            return Ok(Err(InstanceRefusal::AlreadyRegistered(Some(errors))));
         }
-        return Ok(user_errors_response(&errors, StatusCode::BAD_REQUEST));
+        return Ok(Err(InstanceRefusal::UserErrors(errors)));
     }
-
-    Ok(json_response(
-        StatusCode::CREATED,
-        json!({ "ok": true, "data": extract_payload(&result) }),
-    ))
+    Ok(Ok(extract_payload(&result).cloned()))
 }
 
 /// Update a function instance
@@ -390,37 +508,47 @@ async fn update_instance(
     Path((handle, id)): Path<(String, String)>,
     body: Bytes,
 ) -> ApiResult {
-    let Some((definition, _)) = find_function(app.config(), &handle) else {
+    let Some(function) = find_function(app.config(), &handle) else {
         return Ok(json_error(StatusCode::NOT_FOUND, "Function not found"));
     };
-
     let body = json_object_body(&body);
-    let mode = discount_mode_from_body(&body, definition.first_mode());
+    Ok(match update_function_instance(&app, &session, &function, &id, &body).await? {
+        Ok(()) => json_response(StatusCode::OK, json!({ "ok": true })),
+        Err(refusal) => refusal.response(),
+    })
+}
+
+/// Updates the instance `id` of `function` in the shop of the session from
+/// `body`, as [`create_function_instance`] reads it; refused for a type whose
+/// instances are deleted and created again.
+pub(crate) async fn update_function_instance(
+    app: &OpenShop,
+    session: &ShopSession,
+    function: &AppFunction<'_>,
+    id: &str,
+    body: &JsonMap,
+) -> anyhow::Result<Result<(), InstanceRefusal>> {
+    let definition = function.definition;
+    let mode = discount_mode_from_body(body, definition.first_mode());
     if get_mutations(definition, Some(mode)).update.is_none() {
-        return Ok(json_error(
-            StatusCode::BAD_REQUEST,
-            format!(
-                "Function type \"{}\" does not support update. Delete and recreate instead.",
-                definition.function_type.as_str()
-            ),
-        ));
+        return Ok(Err(InstanceRefusal::NoUpdate(definition.function_type)));
     }
 
     let function_config = match parse_provider_config(&definition.config, None, body.get("config"), &JsonMap::new()) {
         Ok(config) => config,
-        Err(error) => return Ok(json_error(StatusCode::BAD_REQUEST, error)),
+        Err(error) => return Ok(Err(InstanceRefusal::InvalidConfig(error))),
     };
-    let shopify = session.shopify_client(&app);
+    let shopify = session.shopify_client(app);
 
     let title = resolve_title(definition.owner.as_ref(), &function_config);
-    let request = build_update_mutation(definition, &handle, mode, &id, &title, &function_config, &body);
+    let request = build_update_mutation(definition, function.handle(), mode, id, &title, &function_config, body);
 
     let result = shopify.graphql(&request.mutation, Some(request.variables)).await?;
     let errors = extract_errors(&result);
     if !errors.is_empty() {
-        return Ok(user_errors_response(&errors, StatusCode::BAD_REQUEST));
+        return Ok(Err(InstanceRefusal::UserErrors(errors)));
     }
-    Ok(json_response(StatusCode::OK, json!({ "ok": true })))
+    Ok(Ok(()))
 }
 
 /// Delete a function instance
@@ -430,30 +558,43 @@ async fn delete_instance(
     Path((handle, id)): Path<(String, String)>,
     RawQuery(raw_query): RawQuery,
 ) -> ApiResult {
-    let Some((definition, _)) = find_function(app.config(), &handle) else {
+    let Some(function) = find_function(app.config(), &handle) else {
         return Ok(json_error(StatusCode::NOT_FOUND, "Function not found"));
     };
-
     let query = parse_query(raw_query.as_deref());
-    let requested_mode = query.get("mode").and_then(|mode| DiscountMode::parse(mode));
+    let mode = query.get("mode").map(String::as_str);
+    Ok(match delete_function_instance(&app, &session, &function, &id, mode).await? {
+        Ok(()) => json_response(StatusCode::OK, json!({ "ok": true })),
+        Err(refusal) => refusal.response(),
+    })
+}
+
+/// Deletes the instance `id` of `function` in the shop of the session. `mode`
+/// says which kind of discount it is, required of a discount that has several.
+pub(crate) async fn delete_function_instance(
+    app: &OpenShop,
+    session: &ShopSession,
+    function: &AppFunction<'_>,
+    id: &str,
+    mode: Option<&str>,
+) -> anyhow::Result<Result<(), InstanceRefusal>> {
+    let definition = function.definition;
+    let requested_mode = mode.and_then(DiscountMode::parse);
     let has_several_modes = definition.modes.as_ref().is_some_and(|modes| modes.len() > 1);
     if definition.function_type == FunctionType::Discount && has_several_modes && requested_mode.is_none() {
-        return Ok(json_error(
-            StatusCode::BAD_REQUEST,
-            "mode query parameter is required for discount functions with multiple modes",
-        ));
+        return Ok(Err(InstanceRefusal::ModeRequired));
     }
     let mode = requested_mode.unwrap_or_else(|| definition.first_mode());
     let mutations = get_mutations(definition, Some(mode));
 
-    let shopify = session.shopify_client(&app);
-    let request = build_delete_mutation(mutations.delete, &id);
+    let shopify = session.shopify_client(app);
+    let request = build_delete_mutation(mutations.delete, id);
     let result = shopify.graphql(&request.mutation, Some(request.variables)).await?;
     let errors = extract_errors(&result);
     if !errors.is_empty() {
-        return Ok(user_errors_response(&errors, StatusCode::BAD_REQUEST));
+        return Ok(Err(InstanceRefusal::UserErrors(errors)));
     }
-    Ok(json_response(StatusCode::OK, json!({ "ok": true })))
+    Ok(Ok(()))
 }
 
 pub fn create_function_routes() -> Router<OpenShop> {
