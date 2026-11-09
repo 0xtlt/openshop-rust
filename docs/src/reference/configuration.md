@@ -521,7 +521,7 @@ runtime defaults:
 | `poll_interval` | `Duration`, positive | 1 second | Initial polling interval of an empty queue, and interval between two sweeps of the runs past their deadline. |
 | `poll_max_interval` | `Duration`, positive | 5 seconds | Maximum empty-queue backoff. |
 | `poll_backoff_coefficient` | `f64`, positive | `1.5` | Multiplier applied after consecutive empty polls. |
-| `lease_duration` | `Duration`, positive | 30 seconds | Claim lease and graceful-stop deadline. Active runs refresh their lease every 15 seconds, or twice per lease period when that is shorter. The lease is dated by the clock of the database. A run still executing when the stop deadline passes is handed back to the queue. |
+| `lease_duration` | `Duration`, positive | 30 seconds | Claim lease and graceful-stop deadline. Active runs refresh their lease four times per lease period, every 15 seconds at most. The lease is dated by the clock of the database. A run still executing when the stop deadline passes is handed back to the queue. |
 
 Each field has a builder method of the same name on `WorkerConfig`:
 `WorkerConfig::new().concurrency(10).lease_duration(Duration::from_secs(60))`.

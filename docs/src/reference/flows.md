@@ -322,7 +322,7 @@ Canceling a run cancels `ctx.signal`. A step that is executing is interrupted
 at its next `.await` and recorded as `canceled`; `run`, `run_with`, and `sleep`
 fail with `FlowCanceledError` when they are called after cancellation. The run
 is marked `canceled`. Cancellation also reaches runs executing in another
-process: the worker notices on its next heartbeat, which runs every 15
+process: the worker notices on its next heartbeat, which runs every 7.5
 seconds with the default lease.
 
 Flow and step timeouts fail with `FlowTimeoutError` or `StepTimeoutError` and

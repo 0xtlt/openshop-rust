@@ -88,8 +88,8 @@ larger configurations easier to split:
 - Runs past their deadline are failed once per poll interval, including while
   every slot is taken, instead of before each claim. A claim skips them, so
   none starts late.
-- A worker extends its lease at least twice per lease period (every 15 seconds
-  at most). The TypeScript engine always waited 15 seconds, so a lease shorter
+- A worker extends its lease four times per lease period (every 15 seconds at
+  most). The TypeScript engine always waited 15 seconds, so a lease shorter
   than that let another worker take over a run that was still executing.
 - A worker only marks a run as failed while it still owns it.
 - The `worker` command uses `worker.concurrency` from the configuration when

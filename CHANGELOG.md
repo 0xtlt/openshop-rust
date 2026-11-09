@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- A worker extends the lease of a run four times per lease period, every 15
+  seconds at most, instead of twice. One late or failed extension no longer
+  stops a healthy flow: the next one now comes before the worker gives the
+  lease up, at 90% of it. With the default lease of 30 seconds, a worker
+  extends a lease every 7.5 seconds, and notices a cancellation made in
+  another process within that time.
 - An app moves from the TypeScript version on its database with no step of
   its own: the first migration `migrate generate` writes for a model takes
   over a table that Drizzle created. It adds the missing columns, converts
