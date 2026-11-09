@@ -112,7 +112,7 @@ app and shop:
 | A check does not pass (no plan, or not the one asked) | The Partner API is asked again, unless the answer is younger than ten seconds (`billing::MIN_REFRESH`). A merchant who just chose a plan gets it at once; a merchant without one costs at most one request every ten seconds. |
 | A verified launch of the app with `plan_handle` (or `charge_id`) | The answer is forgotten: it is the welcome link of a plan, which the admin opens signed. |
 | `app/uninstalled` | The answer is forgotten. |
-| `ctx.shopify.refresh_plans()` | The Partner API is asked again, whatever the age of the answer: for the welcome link of a plan that a server route serves. Not for every request: the Partner API takes four requests a second for the whole organization. |
+| `ctx.shopify.refresh_plans()` | The Partner API is asked again, whatever the age of the answer: for the welcome link of a plan that a server route serves, when Shopify signed it (see [The welcome link of a route](#the-welcome-link-of-a-route)). Not for every request: the Partner API takes four requests a second for the whole organization. |
 | Concurrent checks of a shop | One request; the others wait for it. |
 
 The trade-off: a plan that ends outside the app (a cancellation by Shopify, a
@@ -169,7 +169,21 @@ On the Partner API, the subscription is active by definition: Shopify answers
 
 `ctx.shopify.active_subscriptions()` reads
 `currentAppInstallation.activeSubscriptions` whatever the source: one request
-to the Admin API, which needs no access scope.
+to the Admin API, which needs no access scope. An app on manual pricing reads
+its plans there. An app on Shopify App Pricing does not: its subscriptions may
+have no Admin API subscription, and a paying merchant would look like one
+without a plan. Call `active_plans()` there.
+
+With the Partner API set, the first call of `active_subscriptions()` in the
+process logs a warning that says where it was called. The call still reads the
+Admin API and returns what it did before; the warning is not repeated:
+
+```text
+[openshop] active_subscriptions() at src/webhooks/orders.rs:12 reads the Admin API, but billing reads the plans from the Partner API. A subscription of Shopify App Pricing may not be in the Admin API, so a paying merchant can look like one without a plan. Call active_plans() instead, or keep active_subscriptions() only to read the Admin API on purpose. This warning is logged once per process.
+```
+
+An app enrolled before April 2026 that reads its legacy subscriptions on
+purpose keeps the call, and gets this line once per process.
 
 | `AppSubscription` field | Type | Shopify field |
 | --- | --- | --- |
@@ -268,6 +282,65 @@ In a view, the error of `use_loader` or `use_action` carries the details:
 `openshop::billing` is not compiled into the bundle). Open the link in the top
 window of the admin, as an App Bridge link: `window.open(link, "_top")`, or an
 `<a target="_top">` to it.
+
+## The welcome link of a route
+
+After the merchant approves a plan, Shopify sends them to the welcome link of
+the plan. The admin opens it in the app's frame, signed like any launch, with
+`plan_handle` (and `charge_id` for the apps enrolled before April 2026) in its
+query. When a page of the embedded app is the welcome link, its launch makes the
+next check read the plan again (see [The cache](#the-cache)). When a server
+route serves it, the route reads the plan with `refresh_plans()`:
+
+```rust,ignore
+use openshop::prelude::*;
+use openshop::response::{IntoResponse, Response, StatusCode, header};
+
+/// The welcome link of a plan, which the admin opens in the app's frame.
+#[route(GET, "/welcome")]
+pub async fn welcome(ctx: RouteContext) -> Result<Response> {
+    let Some(launch) = ctx.shopify_launch() else {
+        // Not signed by Shopify: the app's page in the admin, and no Partner API call.
+        let shop = ctx.request.query().get("shop").cloned().unwrap_or_default();
+        let location = ctx.admin_url(&shop, &format!("apps/{}", ctx.app_handle(&shop)?))?;
+        return Ok((StatusCode::FOUND, [(header::LOCATION, location)]).into_response());
+    };
+    // Only a launch Shopify signed reads the plan again: an open route must
+    // not spend the organization's rate limit of the Partner API.
+    if launch.is_plan_welcome() {
+        let refreshed = async { ctx.for_shop(&launch).await?.shopify.refresh_plans().await };
+        if let Err(error) = refreshed.await {
+            ctx.logger.warn(format!("The plan of {} was not read again: {error:#}", launch.shop));
+        }
+    }
+    // Still in the admin's frame: the app's home, with the signed query.
+    let location = format!("/?{}", launch.query);
+    Ok((StatusCode::FOUND, [(header::LOCATION, location)]).into_response())
+}
+```
+
+- **Only for a launch Shopify signed.** Anyone can call a route. An open
+  route must not spend the organization's rate limit: four requests a second
+  for every shop and every process. A delay per shop would not stop that: one
+  call per installed shop is enough. `ctx.shopify_launch()` is the launch when
+  its `hmac` verifies (see
+  [Server routes](server-routes.md#a-launch-shopify-signed)), and
+  `is_plan_welcome()` says that it carries `plan_handle` or `charge_id`.
+- **Without the signature, no Partner API call.** The app's next plan check
+  reads the plan anyway: the kept "no plan" answer is from when the merchant
+  was sent to the plans, more than ten seconds (`billing::MIN_REFRESH`)
+  earlier.
+- **A best effort.** Do not use `?` on `for_shop(…)` or `refresh_plans()`:
+  when the Partner API fails, a merchant who just paid would land on a `500`.
+  The route logs the failure and goes on.
+- **Into the app, in the frame.** The admin runs the route in the app's
+  frame, and Shopify's admin cannot be framed (`X-Frame-Options: DENY`). So a
+  signed launch goes to the app's home, `/?{launch.query}`, which verifies the
+  same query again within its 90 seconds. That home forgets the kept plan, as
+  any launch with `plan_handle` does, so its first check asks the Partner API
+  once more: two requests per plan change, both signed. A call without the
+  signature is not from the admin's frame: it goes to the app's page in the
+  admin.
 
 ## The pricing page and the pages of the admin
 

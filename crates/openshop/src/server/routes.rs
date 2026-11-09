@@ -16,6 +16,7 @@ use super::file_routes::mount_routes;
 use super::http::{catch_panic, json_error, report_failure};
 use crate::app::OpenShop;
 use crate::declare::InvalidInput;
+use crate::runtime::context_logger::ContextLogger;
 use crate::runtime::report;
 use crate::types::{
     Route, RouteAuth, RouteAuthContext, RouteAuthOutcome, RouteAuthValue, RouteContext, RouteMethod, RouteRequest,
@@ -59,6 +60,8 @@ async fn handle(
     report::describe(|request| {
         request.unit("route", format_args!("{method_name} {route_path}"));
     });
+    // The lines of the route carry it; those of a shop it resolves add the shop.
+    let logger = ContextLogger::with_category(json!({ "route": format!("{method_name} {route_path}") }), "route");
 
     let params: IndexMap<String, String> = params
         .iter()
@@ -78,6 +81,7 @@ async fn handle(
             request: request.clone(),
             params: params.clone(),
             db: app.db().clone(),
+            logger: logger.clone(),
             app: app.clone(),
         };
         match catch_panic("authentication", authenticate(context)).await {
@@ -99,6 +103,7 @@ async fn handle(
         params,
         auth,
         db: app.db().clone(),
+        logger,
         app,
     };
     match catch_panic("handler", handler(context)).await {

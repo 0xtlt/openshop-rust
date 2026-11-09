@@ -162,13 +162,63 @@ are how the app hears of it.
   signs its launch. OpenShop forgets the plan it kept for the shop when a
   verified launch has `plan_handle` (or `charge_id`), so the next check reads
   the new plan.
-- A welcome link served by a server route of the app calls
-  `ctx.for_shop(&shop).await?.shopify.refresh_plans().await?` to read it again.
+- A welcome link served by a server route of the app reads the plan again
+  with `refresh_plans()`, for a launch Shopify signed only, and as a best
+  effort, as below.
 - A plan that ends outside the app, a cancellation or a frozen shop, is seen
   within five minutes, when the kept plan expires.
 
+The admin opens the welcome link in the app's frame, with a query Shopify
+signs. But anyone can call a route, and the Partner API takes four requests a
+second for the whole organization: an open route must not spend that rate
+limit. So the route reads the plan again only for a launch Shopify signed,
+`ctx.shopify_launch()`, that carries `plan_handle` (or `charge_id`). A call
+without the signature asks the Partner API nothing: the app's next plan check
+reads the plan anyway, because the kept "no plan" answer is from when the
+merchant was sent to the plans, more than ten seconds earlier.
+
+Read it as a best effort. Do not use `?` on `for_shop` or `refresh_plans()`
+there: when the Partner API fails, a merchant who just paid would land on a
+`500`. The route logs the failure and sends the merchant into the app.
+
+```rust,ignore
+// src/routes/welcome.rs
+use openshop::prelude::*;
+use openshop::response::{IntoResponse, Response, StatusCode, header};
+
+/// The welcome link of a plan, which the admin opens in the app's frame.
+#[route(GET, "/welcome")]
+pub async fn welcome(ctx: RouteContext) -> Result<Response> {
+    let Some(launch) = ctx.shopify_launch() else {
+        // Not signed by Shopify: the app's page in the admin, and no Partner API call.
+        let shop = ctx.request.query().get("shop").cloned().unwrap_or_default();
+        let location = ctx.admin_url(&shop, &format!("apps/{}", ctx.app_handle(&shop)?))?;
+        return Ok((StatusCode::FOUND, [(header::LOCATION, location)]).into_response());
+    };
+    // Only a launch Shopify signed reads the plan again: an open route must
+    // not spend the organization's rate limit of the Partner API.
+    if launch.is_plan_welcome() {
+        let refreshed = async { ctx.for_shop(&launch).await?.shopify.refresh_plans().await };
+        if let Err(error) = refreshed.await {
+            ctx.logger.warn(format!("The plan of {} was not read again: {error:#}", launch.shop));
+        }
+    }
+    // Still in the admin's frame: the app's home, with the signed query.
+    let location = format!("/?{}", launch.query);
+    Ok((StatusCode::FOUND, [(header::LOCATION, location)]).into_response())
+}
+```
+
+A signed launch stays in the admin's frame: the route sends it to the app's
+home with the signed query, which the home verifies again. Shopify's admin
+cannot be opened in a frame. `ctx.logger` writes the warning with the route
+(see [Server routes](../reference/server-routes.md#logging)).
+
 A flow, a webhook or a route reads what the shop has now with
-`ctx.shopify.active_plans().await?`.
+`ctx.shopify.active_plans().await?`. Not with `active_subscriptions()`: it
+reads the Admin API, where a subscription of Shopify App Pricing may not be,
+so a paying merchant would look like one without a plan. With the Partner API
+set, its first call logs a warning that says where it was called.
 
 An app enrolled in Shopify App Pricing before April 2026, and an app of the
 Billing API, still get `app_subscriptions/update` until then. Its typed payload

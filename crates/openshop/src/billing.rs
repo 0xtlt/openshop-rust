@@ -20,7 +20,8 @@
 //! - [`ShopifyClient::active_plans`] reads the plans of the shop from the
 //!   source of the application, and [`ActivePlans::plan`] says whether one,
 //!   any or one of some names, is active. [`ShopifyClient::active_subscriptions`]
-//!   reads the Admin API whatever the source;
+//!   reads the Admin API whatever the source, and warns once per process when
+//!   the source is the Partner API;
 //! - [`require_plan`] guards a loader or an action of an admin page, and
 //!   [`any_plan`] is the same as an `authorize` rule: without the plan, the
 //!   page receives `402` with the code [`PLAN_REQUIRED`] and the pricing page;
@@ -555,9 +556,19 @@ impl ShopifyClient {
     /// `currentAppInstallation.activeSubscriptions` of the Admin API, with
     /// their status, their trial and their lines, whatever the
     /// [`BillingSource`] of the application. One request, which needs no
-    /// access scope; nothing is kept between two calls. Prefer
-    /// [`active_plans`](Self::active_plans), which reads the source of the
-    /// application.
+    /// access scope; nothing is kept between two calls.
+    ///
+    /// For an app on manual pricing, whose charges the Billing API creates,
+    /// this is the plan of the shop. For an app on Shopify App Pricing, it is
+    /// not: since April 2026 its subscriptions may have no Admin API
+    /// subscription, and a paying merchant looks like one without a plan.
+    /// Call [`active_plans`](Self::active_plans) instead, which reads the
+    /// source of the application.
+    ///
+    /// When the source is the Partner API, the first call of the process
+    /// logs a warning that names where it was called from. The call still
+    /// reads the Admin API, as before: an app enrolled before April 2026 can
+    /// read its legacy subscriptions on purpose.
     ///
     /// ```no_run
     /// # async fn example(ctx: openshop::FlowContext) -> openshop::Result<()> {
@@ -568,7 +579,21 @@ impl ShopifyClient {
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn active_subscriptions(&self) -> anyhow::Result<ActiveSubscriptions> {
+    #[track_caller]
+    pub fn active_subscriptions(&self) -> impl Future<Output = anyhow::Result<ActiveSubscriptions>> + Send + '_ {
+        if self.app().partner_api().is_some() && self.app().plans().first_admin_api_read() {
+            let caller = std::panic::Location::caller();
+            crate::runtime::logger::warn_with(
+                admin_api_warning(&format!("{}:{}", caller.file(), caller.line())),
+                json!({ "shop": self.shop, "shopifyApp": self.shopify_app }),
+            );
+        }
+        self.admin_api_subscriptions()
+    }
+
+    /// `currentAppInstallation.activeSubscriptions`, without the warning of
+    /// [`active_subscriptions`](Self::active_subscriptions).
+    async fn admin_api_subscriptions(&self) -> anyhow::Result<ActiveSubscriptions> {
         read_active_subscriptions(self.graphql(ACTIVE_SUBSCRIPTIONS, ()).await?)
     }
 
@@ -599,6 +624,41 @@ impl ShopifyClient {
     /// sent the merchant to the plans. Call it there, not at each request:
     /// the Partner API takes four requests a second for the whole
     /// organization. The Admin API is asked at each call anyway.
+    ///
+    /// On the welcome link of a plan that a route serves, read the plan only
+    /// for a launch Shopify signed ([`RouteContext::shopify_launch`](crate::RouteContext::shopify_launch)):
+    /// anyone can call a route, and an open route must not spend the
+    /// organization's rate limit. Read it as a best effort: when the Partner
+    /// API fails, log it and send the merchant into the app anyway. With `?`,
+    /// a merchant who just paid would get a `500`. A check that does not find
+    /// the plan asks again once the kept answer is [`MIN_REFRESH`] old.
+    ///
+    /// ```
+    /// use openshop::prelude::*;
+    /// use openshop::response::{IntoResponse, Response, StatusCode, header};
+    ///
+    /// /// The welcome link of a plan, which the admin opens in the app's frame.
+    /// #[route(GET, "/welcome")]
+    /// async fn welcome(ctx: RouteContext) -> Result<Response> {
+    ///     let Some(launch) = ctx.shopify_launch() else {
+    ///         // Not signed by Shopify: the app's page in the admin, and no Partner API call.
+    ///         let shop = ctx.request.query().get("shop").cloned().unwrap_or_default();
+    ///         let location = ctx.admin_url(&shop, &format!("apps/{}", ctx.app_handle(&shop)?))?;
+    ///         return Ok((StatusCode::FOUND, [(header::LOCATION, location)]).into_response());
+    ///     };
+    ///     // Only a launch Shopify signed reads the plan again: an open route must
+    ///     // not spend the organization's rate limit of the Partner API.
+    ///     if launch.is_plan_welcome() {
+    ///         let refreshed = async { ctx.for_shop(&launch).await?.shopify.refresh_plans().await };
+    ///         if let Err(error) = refreshed.await {
+    ///             ctx.logger.warn(format!("The plan of {} was not read again: {error:#}", launch.shop));
+    ///         }
+    ///     }
+    ///     // Still in the admin's frame: the app's home, with the signed query.
+    ///     let location = format!("/?{}", launch.query);
+    ///     Ok((StatusCode::FOUND, [(header::LOCATION, location)]).into_response())
+    /// }
+    /// ```
     pub async fn refresh_plans(&self) -> anyhow::Result<ActivePlans> {
         if self.app().partner_api().is_some() {
             self.app().plans().forget(&self.shopify_app, &self.domain()?).await;
@@ -611,7 +671,7 @@ impl ShopifyClient {
     /// `plan_ttl` old; one that does not, until it is [`MIN_REFRESH`] old.
     pub(crate) async fn plans_passing(&self, passes: impl Fn(&ActivePlans) -> bool) -> anyhow::Result<ActivePlans> {
         let Some(partner) = self.app().partner_api() else {
-            return Ok(ActivePlans::of_admin_api(self.active_subscriptions().await?));
+            return Ok(ActivePlans::of_admin_api(self.admin_api_subscriptions().await?));
         };
         let shop = self.domain()?;
         let entry = self.app().plans().entry(&self.shopify_app, &shop);
@@ -644,6 +704,17 @@ impl ShopifyClient {
         });
         Ok(ActivePlans::of_partner_api(subscription))
     }
+}
+
+/// What [`ShopifyClient::active_subscriptions`] logs once per process when
+/// the plans are read from the Partner API. `at` is where it was called.
+fn admin_api_warning(at: &str) -> String {
+    format!(
+        "[openshop] active_subscriptions() at {at} reads the Admin API, but billing reads the plans from the \
+         Partner API. A subscription of Shopify App Pricing may not be in the Admin API, so a paying merchant can \
+         look like one without a plan. Call active_plans() instead, or keep active_subscriptions() only to read \
+         the Admin API on purpose. This warning is logged once per process."
+    )
 }
 
 /// The plan selection page Shopify hosts for the app, for the shop of

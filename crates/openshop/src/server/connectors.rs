@@ -8,10 +8,11 @@ use futures::future::BoxFuture;
 use indexmap::IndexMap;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
-use serde_json::Value;
+use serde_json::{Value, json};
 use tokio::sync::OnceCell;
 
 use crate::app::OpenShop;
+use crate::runtime::context_logger::ContextLogger;
 use crate::runtime::logger;
 use crate::server::shop_domain::normalize_shop_domain;
 use crate::server::shopify_apps::ResolvedShopifyApp;
@@ -239,6 +240,7 @@ pub async fn resolve_shop_context(app: &OpenShop, input: RouteShopInput) -> Resu
         db: app.db().clone(),
         shopify: ShopifyClient::new(app, &shop, &shopify_app),
         connectors: Connectors::for_shop(app, &shop, &shopify_app),
+        logger: ContextLogger::with_category(json!({ "shop": shop, "shopifyApp": shopify_app }), "route"),
         app: app.clone(),
         shop,
         shopify_app,

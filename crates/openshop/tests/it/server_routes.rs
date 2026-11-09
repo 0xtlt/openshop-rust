@@ -3,12 +3,15 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use crate::common::{install, json_body, two_shopify_apps, vault_provider};
+use crate::common::{LogCapture, install, json_body, two_shopify_apps, vault_provider};
 use openshop::builder::{OpenShopBuilder, Route};
 use openshop::response::{self, IntoResponse, Response, StatusCode};
 use openshop::server::http::parse_query;
-use openshop::testing::{TestContext, TestOptions};
-use openshop::{IndexMap, OpenShopConfig, Result, RouteAuthOutcome, RouteContext, RouteShopInput, Value, anyhow, json};
+use openshop::testing::{TestContext, TestOptions, sign_query, to_query_string};
+use openshop::{
+    IndexMap, OpenShopConfig, Result, RouteAuthOutcome, RouteContext, RouteShopInput, ShopifyLaunch, Value, anyhow,
+    json,
+};
 use reqwest::{Method, RequestBuilder};
 
 const ENCRYPTION_KEY: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
@@ -106,6 +109,47 @@ fn admin_links_route() -> Route {
     })
 }
 
+/// Logs from its authentication, its handler, and the shop of `?shop=…&app=…`.
+fn logged_route() -> Route {
+    Route::authenticated(|ctx| async move {
+        ctx.logger.info("Route authenticated");
+        Ok(RouteAuthOutcome::Authenticated(json!({})))
+    })
+    .post(|ctx| async move {
+        ctx.logger.info_with("Route line", json!({ "id": ctx.params["id"] }));
+        let tenant = ctx.for_shop(shop_input(&parse_query(ctx.request.uri.query()))).await?;
+        tenant.logger.warn("Shop line");
+        // A key of the payload wins over a field of the logger.
+        tenant
+            .logger
+            .error_with("Shop line with a route", json!({ "route": "mine" }));
+        // The logger of the route is left as it was.
+        ctx.logger.info("Route line after the shop");
+        Ok(response::status(StatusCode::NO_CONTENT))
+    })
+}
+
+/// The launch Shopify signed that the handler, and its authentication, see:
+/// `null` for none.
+fn launch_route() -> Route {
+    let launch = |launch: Option<ShopifyLaunch>| match launch {
+        Some(launch) => json!({
+            "shop": launch.shop,
+            "shopifyApp": launch.shopify_app,
+            "plan": launch.plan_handle(),
+            "welcome": launch.is_plan_welcome(),
+            "query": launch.query,
+        }),
+        None => Value::Null,
+    };
+    Route::authenticated(move |ctx| async move { Ok(RouteAuthOutcome::Authenticated(launch(ctx.shopify_launch()))) })
+        .get(move |ctx| async move {
+            Ok(response::json(
+                json!({ "auth": ctx.auth, "handler": launch(ctx.shopify_launch()) }),
+            ))
+        })
+}
+
 fn config() -> OpenShopConfig {
     OpenShopConfig::builder()
         .shopify(two_shopify_apps())
@@ -115,6 +159,8 @@ fn config() -> OpenShopConfig {
         .route("/provider", provider_route())
         .route("/shop-context", shop_context_route())
         .route("/admin-links", admin_links_route())
+        .route("/logged/:id", logged_route())
+        .route("/launch", launch_route())
         .route("/orders/[id]", open_route())
         .route(
             "/orders/new",
@@ -535,6 +581,108 @@ async fn for_shop_requires_a_valid_and_actively_installed_shop(ctx: &TestContext
         let response = get(ctx, &format!("/shop-context?{query}")).send().await.unwrap();
         assert_eq!(response.status(), 400, "{query}");
         assert_eq!(json_body(response).await, json!({ "error": error }), "{query}");
+    }
+}
+
+#[openshop::test(TestContext::new(config()))]
+async fn a_route_logs_with_the_route_and_the_shop_it_resolves(ctx: &TestContext) {
+    install(&ctx.db, "clientB", "logged.myshopify.com", Some("token"), false).await;
+    let logs = LogCapture::start().await;
+    let response = post(ctx, "/logged/42?shop=logged.myshopify.com&app=clientB")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 204);
+
+    let line = |message: &str| {
+        let line = logs
+            .lines()
+            .into_iter()
+            .find(|line| line.message == message)
+            .unwrap_or_else(|| panic!("no line {message:?} in:\n{}", logs.text()));
+        (line.level, line.context)
+    };
+    let route = "POST /logged/:id";
+    // The authentication and the handler log with the route.
+    assert_eq!(line("Route authenticated"), ("info", Some(json!({ "route": route }))));
+    assert_eq!(
+        line("Route line"),
+        ("info", Some(json!({ "id": "42", "route": route })))
+    );
+    // The shop it resolves logs with the shop and its app too.
+    let shop = json!({ "route": route, "shop": "logged.myshopify.com", "shopifyApp": "clientB" });
+    assert_eq!(line("Shop line"), ("warn", Some(shop)));
+    assert_eq!(
+        line("Shop line with a route"),
+        (
+            "error",
+            Some(json!({ "route": "mine", "shop": "logged.myshopify.com", "shopifyApp": "clientB" }))
+        )
+    );
+    assert_eq!(
+        line("Route line after the shop"),
+        ("info", Some(json!({ "route": route })))
+    );
+    drop(logs);
+}
+
+#[openshop::test(TestContext::new(config()))]
+async fn a_route_knows_a_launch_shopify_signed_and_which_app_signed_it(ctx: &TestContext) {
+    let launch = |query: String| {
+        let request = get(ctx, &format!("/launch?{query}"));
+        async move { json_body(request.send().await.unwrap()).await }
+    };
+    let host = "YWRtaW4uc2hvcGlmeS5jb20vc3RvcmUvZGVtbw";
+
+    // Signed by the secret of clientB: its shop, normalized, and its app.
+    let signed = to_query_string(&sign_query(
+        &[("host", host), ("plan_handle", "pro"), ("shop", "Demo.myshopify.com")],
+        "client-b-secret",
+    ));
+    let seen = json!({
+        "shop": "demo.myshopify.com",
+        "shopifyApp": "clientB",
+        "plan": "pro",
+        "welcome": true,
+        "query": signed,
+    });
+    // The authentication function sees it too.
+    assert_eq!(launch(signed.clone()).await, json!({ "auth": seen, "handler": seen }));
+
+    // A launch that is not the welcome link of a plan.
+    let home = to_query_string(&sign_query(
+        &[("host", host), ("shop", "demo.myshopify.com")],
+        "client-a-secret",
+    ));
+    let seen = launch(home).await["handler"].clone();
+    assert_eq!(
+        (seen["shopifyApp"].as_str(), seen["welcome"].as_bool()),
+        (Some("clientA"), Some(false))
+    );
+    assert_eq!(seen["plan"], Value::Null);
+
+    let none = json!({ "auth": null, "handler": null });
+    let old = (chrono::Utc::now().timestamp() - 3600).to_string();
+    for query in [
+        // Not signed.
+        "shop=demo.myshopify.com&plan_handle=pro".to_string(),
+        // Signed with a secret no app of the application has.
+        to_query_string(&sign_query(
+            &[("plan_handle", "pro"), ("shop", "demo.myshopify.com")],
+            "forged",
+        )),
+        // Signed, then changed: another plan.
+        signed.replace("plan_handle=pro", "plan_handle=plus"),
+        // Signed an hour ago.
+        to_query_string(&sign_query(
+            &[("shop", "demo.myshopify.com"), ("timestamp", &old)],
+            "client-b-secret",
+        )),
+        // Signed, for a shop that is not a shop.
+        to_query_string(&sign_query(&[("shop", "demo.example.com")], "client-b-secret")),
+        String::new(),
+    ] {
+        assert_eq!(launch(query.clone()).await, none, "{query}");
     }
 }
 

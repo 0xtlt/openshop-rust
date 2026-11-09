@@ -155,9 +155,11 @@ access.
 `ctx.for_shop(..)` takes the domain of a shop, or
 `RouteShopInput::new(domain).shopify_app(handle)` when the application serves
 several Shopify apps, and fails when the shop is not actively installed. What
-it returns belongs to that shop: it carries `db`, `shopify` and `connectors`,
-and it is what `sync_orders::dispatch(&shop, ..)` and `Review::of(&shop)`
-take. The route context itself has `ctx.db`.
+it returns belongs to that shop: it carries `db`, `shopify`, `connectors` and
+`logger`, and it is what `sync_orders::dispatch(&shop, ..)` and
+`Review::of(&shop)` take. The route context itself has `ctx.db`, and
+`ctx.logger`, whose lines carry the route
+(see [Logging](../reference/server-routes.md#logging)).
 
 ```rust,ignore
 let shop = ctx.for_shop("example.myshopify.com").await?;

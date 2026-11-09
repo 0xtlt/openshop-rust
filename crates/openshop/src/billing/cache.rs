@@ -22,6 +22,7 @@
 //! its own.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -38,6 +39,9 @@ type Key = (String, String);
 #[derive(Default)]
 pub(crate) struct PlanCache {
     shops: Mutex<HashMap<Key, Arc<tokio::sync::Mutex<Entry>>>>,
+    /// Whether a read of the Admin API's subscriptions, with the Partner API
+    /// set, was warned about.
+    admin_api_warned: AtomicBool,
 }
 
 /// What is kept of a shop. Its lock is held while Shopify is asked, so that
@@ -72,6 +76,12 @@ impl PlanCache {
             .entry((shopify_app.to_string(), shop.to_string()))
             .or_default()
             .clone()
+    }
+
+    /// `true` the first time it is called, `false` after: the warning about
+    /// a read of the Admin API's subscriptions is logged once per process.
+    pub(crate) fn first_admin_api_read(&self) -> bool {
+        !self.admin_api_warned.swap(true, Ordering::Relaxed)
     }
 
     /// Forgets the plan of a shop, not its GIDs: the next check asks the
