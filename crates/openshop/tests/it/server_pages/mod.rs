@@ -34,7 +34,7 @@ struct Tab {
     tab: Option<String>,
 }
 
-/// What the home page shows, as shop-test's does. `Serialize`: the loader
+/// What the home page shows, as an app's does. `Serialize`: the loader
 /// also answers the RPC transport of the Leptos views.
 #[derive(serde::Serialize)]
 enum Home {
@@ -59,9 +59,9 @@ impl HomePage {
         }
         HIDDEN.store(input.hidden, Ordering::SeqCst);
         Ok(Outcome::toast(if input.hidden {
-            "PayPal Express hidden"
+            "Banner hidden"
         } else {
-            "PayPal Express shown"
+            "Banner shown"
         }))
     }
 
@@ -436,7 +436,7 @@ async fn a_form_runs_its_action_and_the_page_is_rendered_again() {
     // The script's request: the page again, with the toast the action asked for.
     let hidden = send(form(fetch(&ctx, Method::POST, "/"), "_action=setHidden&hidden=true")).await;
     assert_eq!(hidden.status, StatusCode::OK, "{}", hidden.body);
-    assert_eq!(hidden.header("x-openshop-toast"), Some("PayPal%20Express%20hidden"));
+    assert_eq!(hidden.header("x-openshop-toast"), Some("Banner%20hidden"));
     assert!(hidden.body.contains(r#"heading="Hidden""#), "{}", hidden.body);
 
     // A failure the action reports: its status and an error toast, the page stays.

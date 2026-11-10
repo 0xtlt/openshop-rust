@@ -111,7 +111,7 @@ the field `_action`:
 form method="post" {
     input type="hidden" name="_action" value=(Self::SET_HIDDEN);
     input type="hidden" name="hidden" value=(!hidden);
-    s-button type="submit" variant="primary" { "Hide PayPal Express" }
+    s-button type="submit" variant="primary" { "Hide the banner" }
 }
 ```
 
@@ -287,7 +287,7 @@ keeps of the Leptos admin before it starts it.
 page changes in three places: the view takes the loader's output, an action
 that toasts returns `Outcome`, and a button that ran an action is a form. See
 [Migrate to the server-rendered admin](../guides/migrate-to-server-rendered-ui.md),
-with shop-test's `home.rs` before and after. About 30 minutes per page.
+with an app's `home.rs` before and after. About 30 minutes per page.
 
 ## Order of the full migration
 
@@ -299,7 +299,7 @@ with shop-test's `home.rs` before and after. About 30 minutes per page.
 | 4 | `UiSource::Server` is the default | done; the Leptos UI did not stay one more release |
 | 5 | Templates (`custom`, `public`), `init-ui`, the guides and the references | done |
 | 6 | Remove `crates/openshop-ui`, `ui-dist/`, trunk, the `ui` and `embedded-ui` features, the RPC transport and `openshop::ui` | done |
-| 7 | Applications: shop-test and the others, about 30 minutes per page | per app |
+| 7 | Applications, about 30 minutes per page | per app |
 
 ## Decisions
 

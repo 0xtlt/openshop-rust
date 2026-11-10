@@ -884,7 +884,7 @@ async fn the_shell_is_titled_with_the_name_of_the_app() {
     std::fs::create_dir_all(&cwd).unwrap();
     std::fs::write(
         cwd.join("shopify.app.toml"),
-        "client_id = \"test-app\"\nname = \"Easy hide PayPal Express\"\nhandle = \"easy-hide-paypal-express\"\n",
+        "client_id = \"test-app\"\nname = \"My Demo App\"\nhandle = \"my-demo-app\"\n",
     )
     .unwrap();
     let ctx = TestContext::with_options(
@@ -904,7 +904,7 @@ async fn the_shell_is_titled_with_the_name_of_the_app() {
     // without a heading with, in the title bar of the admin, and the tab shows.
     let reply = get(&ctx, &signed_launch("/", SHOP, SECRET)).await;
     assert_shell(&reply, "test-app");
-    assert_eq!(title(&reply), "Easy hide PayPal Express");
+    assert_eq!(title(&reply), "My Demo App");
     ctx.shutdown().await.unwrap();
 
     // Without a file, an app of `shopify.apps` is named by its key, in development too.

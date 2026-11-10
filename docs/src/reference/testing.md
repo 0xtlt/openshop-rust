@@ -333,7 +333,7 @@ use openshop::prelude::*;
 use openshop::testing::{TestContext, subscription};
 
 #[openshop::test(APP)]
-async fn hides_paypal_for_a_paying_shop(ctx: &TestContext) {
+async fn customizes_the_checkout_of_a_paying_shop(ctx: &TestContext) {
     ctx.shopify
         // What `billing::require_plan` and `active_subscriptions()` ask.
         .active_subscriptions([subscription("Monthly")])
@@ -343,7 +343,7 @@ async fn hides_paypal_for_a_paying_shop(ctx: &TestContext) {
             Ok(json!({ "paymentCustomizationCreate": { "userErrors": [] } }))
         });
 
-    let outcome = ctx.run_flow("hidePaypal", json!({})).await.unwrap();
+    let outcome = ctx.run_flow("customizeCheckout", json!({})).await.unwrap();
 
     assert_eq!(outcome, RunOutcome::Completed);
     assert_eq!(

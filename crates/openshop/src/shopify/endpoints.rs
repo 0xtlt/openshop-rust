@@ -217,8 +217,8 @@ impl ShopifyEndpoints {
     /// use openshop::ShopifyEndpoints;
     ///
     /// assert_eq!(
-    ///     ShopifyEndpoints::new().pricing_plans_url("demo.myshopify.com", "hide-paypal"),
-    ///     "https://admin.shopify.com/store/demo/charges/hide-paypal/pricing_plans"
+    ///     ShopifyEndpoints::new().pricing_plans_url("demo.myshopify.com", "demo-app"),
+    ///     "https://admin.shopify.com/store/demo/charges/demo-app/pricing_plans"
     /// );
     /// ```
     pub fn pricing_plans_url(&self, shop: &str, app_handle: &str) -> String {
@@ -546,8 +546,8 @@ mod tests {
 
         assert_eq!(shopify.admin_url(shop, ""), "https://admin.shopify.com/store/demo-shop");
         assert_eq!(
-            shopify.admin_url(shop, "/apps/hide-paypal/"),
-            "https://admin.shopify.com/store/demo-shop/apps/hide-paypal"
+            shopify.admin_url(shop, "/apps/demo-app/"),
+            "https://admin.shopify.com/store/demo-shop/apps/demo-app"
         );
         assert_eq!(
             shopify.admin_url(shop, "orders?query=open#top"),
@@ -563,12 +563,12 @@ mod tests {
         );
 
         assert_eq!(
-            shopify.pricing_plans_url(shop, "hide-paypal"),
-            "https://admin.shopify.com/store/demo-shop/charges/hide-paypal/pricing_plans"
+            shopify.pricing_plans_url(shop, "demo-app"),
+            "https://admin.shopify.com/store/demo-shop/charges/demo-app/pricing_plans"
         );
         assert_eq!(
-            local.pricing_plans_url(shop, "hide-paypal"),
-            "http://localhost:9393/admin/charges/hide-paypal/pricing_plans?shop=demo-shop.myshopify.com"
+            local.pricing_plans_url(shop, "demo-app"),
+            "http://localhost:9393/admin/charges/demo-app/pricing_plans?shop=demo-shop.myshopify.com"
         );
     }
 
