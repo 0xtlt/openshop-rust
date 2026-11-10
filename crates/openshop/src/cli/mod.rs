@@ -3,6 +3,7 @@
 pub mod dev;
 pub mod env;
 pub mod migrate;
+pub mod run;
 pub mod start;
 pub mod worker;
 
@@ -23,6 +24,9 @@ pub const USAGE: &str = "
     migrate check               Check that ./migrations covers the current schema
     migrate status              Show client migration status
     start                       Start production server (API + UI + scheduler, no worker)
+    run <flow> [--shop=<domain> | --all-shops] [--input=<json>]
+                                Run a flow once, through the queue and a worker, and wait for it
+    cron run <name>             Run the flow of a cron once, for the shops of the cron
 
   Usage:
     cargo run -- dev
@@ -32,6 +36,8 @@ pub const USAGE: &str = "
     cargo run -- migrate check
     cargo run -- migrate status
     cargo run --release -- start
+    cargo run -- run syncOrders --shop=my-store.myshopify.com --input='{\"limit\":10}'
+    cargo run -- cron run \"Nightly sync\"
 ";
 
 /// Logs to stdout. `RUST_LOG` overrides the default filter (`info`, with SQL
@@ -96,6 +102,23 @@ fn parse_concurrency(args: &[String]) -> Result<Option<usize>> {
     }
 }
 
+/// The usage a command prints when its arguments ask for it with `--help`
+/// or `-h`, wherever they are: `run --help`, `cron run -h`. It is printed
+/// before the configuration is built or the database opened, and the
+/// command does not run.
+fn help(args: &[String]) -> Option<&'static str> {
+    let (command, rest) = args.split_first()?;
+    if !rest.iter().any(|arg| arg == "--help" || arg == "-h") {
+        return None;
+    }
+    Some(match command.as_str() {
+        "run" => run::RUN_USAGE,
+        "cron" => run::CRON_USAGE,
+        "migrate" => migrate::MIGRATE_USAGE,
+        _ => USAGE,
+    })
+}
+
 /// Runs the command given on the command line. `config` builds the
 /// configuration once the command is known: in `dev`, after the `.env` file
 /// is loaded, so that it can read the values of the file.
@@ -105,6 +128,10 @@ pub async fn run(config: impl FnOnce() -> Result<OpenShopConfig>) -> Result<()> 
 }
 
 pub async fn run_with_args(config: impl FnOnce() -> Result<OpenShopConfig>, args: &[String]) -> Result<()> {
+    if let Some(usage) = help(args) {
+        println!("{usage}");
+        return Ok(());
+    }
     let command = args.first().map(String::as_str);
     // Before logging and the configuration, so that both can read `.env` values.
     // `App::main` has done it before starting the runtime: this finds nothing
@@ -138,6 +165,18 @@ pub async fn run_with_args(config: impl FnOnce() -> Result<OpenShopConfig>, args
             outcome
         }
         Some("migrate") => migrate::run_migrate(&config()?, &args[1..]).await,
+        Some(command @ ("run" | "cron")) => {
+            let config = config()?;
+            let _reporting = report::start(&config, command);
+            let outcome = match command {
+                "run" => run::run_flow_command(config, &args[1..]).await,
+                _ => run::run_cron_command(config, &args[1..]).await,
+            };
+            if let Err(error) = &outcome {
+                report::error(error);
+            }
+            outcome
+        }
         _ => {
             println!("{USAGE}");
             Ok(())
@@ -151,6 +190,46 @@ mod tests {
 
     fn args(args: &[&str]) -> Vec<String> {
         args.iter().map(|arg| arg.to_string()).collect()
+    }
+
+    #[test]
+    fn help_after_a_command_is_its_usage() {
+        for (command, usage) in [
+            (&["run", "--help"][..], run::RUN_USAGE),
+            (&["run", "syncOrders", "--shop=a.myshopify.com", "-h"], run::RUN_USAGE),
+            (&["cron", "--help"], run::CRON_USAGE),
+            (&["cron", "run", "--help"], run::CRON_USAGE),
+            (&["cron", "run", "Nightly sync", "-h"], run::CRON_USAGE),
+            (&["migrate", "-h"], migrate::MIGRATE_USAGE),
+            (&["migrate", "generate", "--help"], migrate::MIGRATE_USAGE),
+            (&["worker", "--help"], USAGE),
+            (&["dev", "-h"], USAGE),
+            (&["start", "--help"], USAGE),
+        ] {
+            assert_eq!(help(&args(command)), Some(usage), "{command:?}");
+        }
+        for command in [
+            &[][..],
+            &["--help"],
+            &["run", "syncOrders"],
+            &["cron", "run", "--helpful"],
+            &["migrate", "status"],
+        ] {
+            assert_eq!(help(&args(command)), None, "{command:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn help_succeeds_without_running_the_command() {
+        for command in [
+            &["run", "--help"][..],
+            &["cron", "run", "--help"],
+            &["migrate", "generate", "-h"],
+        ] {
+            run_with_args(|| panic!("the configuration is built"), &args(command))
+                .await
+                .unwrap();
+        }
     }
 
     #[test]

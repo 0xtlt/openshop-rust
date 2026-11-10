@@ -12,11 +12,11 @@ use crate::admin::validate_admin_menu;
 use crate::app::OpenShopConfig;
 use crate::engine::scheduler::{parse_schedule, parse_timezone};
 use crate::runtime::time::millis;
+use crate::server::UiSource;
+use crate::server::api::pages::resolved_admin_pages;
 use crate::server::file_routes::resolve_route_paths;
 use crate::server::mcp::core::create_core_mcp_capabilities;
 use crate::server::mcp::registry::build_mcp_registry;
-use crate::server::UiSource;
-use crate::server::api::pages::resolved_admin_pages;
 use crate::server::routes::assert_route_definition;
 use crate::types::{
     AdminPageMode, Field, FieldType, FunctionType, RetryPolicy, ShopifyAppConfig, ShopifyConfig, WorkerConfig,
@@ -105,7 +105,11 @@ fn validate_field(field: &Field, path: &str) -> Result<()> {
     if field.label.trim().is_empty() {
         fail!("{path}.label must be a non-empty string");
     }
-    if field.description.as_deref().is_some_and(|description| description.trim().is_empty()) {
+    if field
+        .description
+        .as_deref()
+        .is_some_and(|description| description.trim().is_empty())
+    {
         fail!("{path}.description must be a non-empty string");
     }
 
@@ -126,6 +130,8 @@ fn validate_field(field: &Field, path: &str) -> Result<()> {
 
 pub fn validate_openshop_config(config: &OpenShopConfig) -> Result<()> {
     validate_shopify_config(config.shopify.as_ref())?;
+    config.shopify_endpoints.check()?;
+    config.partner_api.check()?;
     assert_positive_duration(config.request_timeout, "request_timeout")?;
     assert_positive_integer(
         config.max_concurrent_requests.map(|requests| requests as u64),

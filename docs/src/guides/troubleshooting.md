@@ -32,6 +32,17 @@ requests:
   the database is unreachable. Without `DATABASE_URL`, the process tries the
   local development database.
 
+### `Address already in use` in development
+
+Another process listens on the port of the app, often an app an earlier
+`openshop dev` left running, and it answers in place of the code you are
+editing. `openshop dev` says so before it starts the app
+(`Port 3000 is still taken, by …`). Find the process with
+`lsof -nP -iTCP:3000 -sTCP:LISTEN`, stop it by its PID, then save a file:
+`openshop dev` starts the app again. `openshop dev` itself stops every process
+of the app at a restart, a wrapper of `cargo` included; see
+[Stopping the app](../reference/cli.md#stopping-the-app).
+
 ## The app does not install
 
 1. Confirm the shop ends in `.myshopify.com`.

@@ -25,7 +25,13 @@ Install the `openshop` command once:
 
 ```bash
 cargo install --locked --git https://github.com/0xtlt/openshop-rust openshop-cli
+openshop --version
 ```
+
+`openshop --version` prints the version of the CLI and the commit it was
+built from, `openshop 0.0.12-beta.0 (1b8a53a4cac9)`. If it answers
+`Unknown command: --version`, an older CLI is installed: install it again with
+`--force`, which replaces it.
 
 Then create the project:
 
@@ -63,16 +69,15 @@ other files when you need them.
 The project includes a `docker-compose.yml` for PostgreSQL 17:
 
 ```bash
-docker compose up -d
+docker compose up -d --wait
 ```
 
-Wait until this command reports that PostgreSQL is accepting connections:
+`--wait` returns once the container is healthy: its healthcheck,
+`pg_isready -U openshop -d openshop`, says PostgreSQL accepts connections.
+Without it, the command returns at once, and `docker compose ps` shows the
+container `healthy` when it is ready.
 
-```bash
-docker compose exec postgres pg_isready -U openshop -d openshop
-```
-
-On later sessions, run `docker compose up -d` again; the data is kept in a
+On later sessions, run `docker compose up -d --wait` again; the data is kept in a
 Docker volume. The database name, username, and password are all `openshop`.
 They are local development values.
 
@@ -239,4 +244,4 @@ of your own and watch it resume after a pause.
 
 When you finish the session, stop Shopify CLI with `Ctrl+C`. You can stop the
 local database with `docker compose stop` and start it next time with
-`docker compose up -d` without losing its data.
+`docker compose up -d --wait` without losing its data.

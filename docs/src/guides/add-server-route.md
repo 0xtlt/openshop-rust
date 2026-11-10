@@ -87,6 +87,13 @@ anything that is an HTTP response: use the helpers of the `response` module
 `response::status`) or build any response with the custom status and headers
 you need.
 
+Every route is served under `/routes/`, so that it never collides with
+OpenShop's own paths (`/api`, `/auth`, `/webhooks`, `/proxy`, `/ext`,
+`/health`, `/ops`) and the pages of the admin UI. When you port an app whose
+URLs are set outside its code, point them at `/routes/…`: a managed pricing
+welcome link in the Partner Dashboard (`/newplan` becomes `/routes/newplan`), a
+link in an email, the App Store listing.
+
 Both functions read the request through `ctx.request`: `header(name)`,
 `query()`, `json()`, `text()`, and the raw `body`. A body larger than 2 MB is
 refused with HTTP 413 before your code runs; change the limit with the
@@ -148,9 +155,11 @@ access.
 `ctx.for_shop(..)` takes the domain of a shop, or
 `RouteShopInput::new(domain).shopify_app(handle)` when the application serves
 several Shopify apps, and fails when the shop is not actively installed. What
-it returns belongs to that shop: it carries `db`, `shopify` and `connectors`,
-and it is what `sync_orders::dispatch(&shop, ..)` and `Review::of(&shop)`
-take. The route context itself has `ctx.db`.
+it returns belongs to that shop: it carries `db`, `shopify`, `connectors` and
+`logger`, and it is what `sync_orders::dispatch(&shop, ..)` and
+`Review::of(&shop)` take. The route context itself has `ctx.db`, and
+`ctx.logger`, whose lines carry the route
+(see [Logging](../reference/server-routes.md#logging)).
 
 ```rust,ignore
 let shop = ctx.for_shop("example.myshopify.com").await?;

@@ -13,7 +13,9 @@ include_config_on_deploy = true
 api_version = "2026-10"
 
 [access_scopes]
-scopes = "read_products,read_orders"
+# The discounts: the instances of the volume discount Function, which the
+# Functions page of the admin lists, creates, updates and deletes.
+scopes = "read_products,read_orders,read_discounts,write_discounts"
 
 [auth]
 redirect_urls = [ "https://localhost:3000/auth/callback" ]

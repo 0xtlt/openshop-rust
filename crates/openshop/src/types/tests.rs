@@ -56,11 +56,14 @@ fn the_metadata_of_a_field_leaves_out_what_is_not_set_and_the_validator() {
     let plain = Field::password("Token").metadata();
     assert_eq!(Value::Object(plain), json!({ "type": "password", "label": "Token" }));
 
-    let select = Field::select("Mode", [FieldOption::new("Live", "live"), FieldOption::new("Test", "test")])
-        .placeholder("Pick one")
-        .description("Live charges real cards")
-        .optional()
-        .validate(|value| Ok(value.clone()));
+    let select = Field::select(
+        "Mode",
+        [FieldOption::new("Live", "live"), FieldOption::new("Test", "test")],
+    )
+    .placeholder("Pick one")
+    .description("Live charges real cards")
+    .optional()
+    .validate(|value| Ok(value.clone()));
     assert_eq!(
         Value::Object(select.metadata()),
         json!({
@@ -138,7 +141,10 @@ fn a_field_value_is_taken_out_of_the_configuration() {
     let error = provider_field_value::<u32>(&mut config, "count").unwrap_err();
     assert!(error.starts_with("field `count`: "), "{error}");
     // An optional field reads a missing value as `None`.
-    assert_eq!(provider_field_value::<Option<u32>>(&mut config, "absent").unwrap(), None);
+    assert_eq!(
+        provider_field_value::<Option<u32>>(&mut config, "absent").unwrap(),
+        None
+    );
 }
 
 #[derive(Deserialize)]
@@ -181,7 +187,10 @@ async fn a_handled_call_reads_the_configuration_and_the_arguments() {
         .await
         .unwrap_err()
         .to_string();
-    assert!(error.starts_with("Invalid arguments for \"warehouse.push\": "), "{error}");
+    assert!(
+        error.starts_with("Invalid arguments for \"warehouse.push\": "),
+        "{error}"
+    );
 }
 
 #[tokio::test]
@@ -432,7 +441,12 @@ fn the_title_of_a_function_owner_is_static_or_computed() {
 fn proxy_types_are_named_for_their_wire_form() {
     assert_eq!(ProxyResponseType::default(), ProxyResponseType::Json);
     assert_eq!(
-        [ProxyResponseType::Liquid, ProxyResponseType::Json, ProxyResponseType::Html].map(ProxyResponseType::as_str),
+        [
+            ProxyResponseType::Liquid,
+            ProxyResponseType::Json,
+            ProxyResponseType::Html
+        ]
+        .map(ProxyResponseType::as_str),
         ["liquid", "json", "html"]
     );
     assert_eq!(
@@ -568,9 +582,7 @@ fn routes_of_one_path_merge_when_they_do_not_overlap() {
 fn each_method_keeps_the_authentication_it_was_declared_under() {
     let authenticated: Route<String> = Route::authenticated(|_ctx| async { Ok(RouteAuthOutcome::Unauthorized) });
     let authenticated = authenticated
-        .get(|_ctx: RouteContext<String>| async {
-            Ok(axum::response::Response::new(axum::body::Body::empty()))
-        })
+        .get(|_ctx: RouteContext<String>| async { Ok(axum::response::Response::new(axum::body::Body::empty())) })
         .erased();
 
     let mut route = Route::public().get(ok_handler);

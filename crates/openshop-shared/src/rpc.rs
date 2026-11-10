@@ -1,4 +1,5 @@
-//! URL scheme for custom admin page loaders and actions.
+//! The kind of a function of a custom admin page, and the encoding of a
+//! segment of a URL, as JavaScript's `encodeURIComponent` writes it.
 
 /// A loader, a read, or an action, a write.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -53,36 +54,9 @@ pub fn decode_uri_component(value: &str) -> Option<String> {
     String::from_utf8(decoded).ok()
 }
 
-/// `kind` is `"loader"` or `"action"`: [`AdminFunctionKind::as_str`].
-pub fn build_admin_function_rpc_url(kind: &str, name: &str, pathname: &str) -> String {
-    // The home of the admin, `/`, has no segment of its own.
-    let page = pathname.strip_suffix('/').unwrap_or(pathname);
-    format!("/api/pages/custom{page}/_rpc/{kind}/{}", encode_uri_component(name))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn builds_rpc_urls_for_static_and_dynamic_pages() {
-        assert_eq!(
-            build_admin_function_rpc_url("loader", "listReviews", "/reviews"),
-            "/api/pages/custom/reviews/_rpc/loader/listReviews"
-        );
-        assert_eq!(
-            build_admin_function_rpc_url("action", "save review", "/reviews/42/"),
-            "/api/pages/custom/reviews/42/_rpc/action/save%20review"
-        );
-    }
-
-    #[test]
-    fn builds_the_rpc_url_of_the_home_page() {
-        assert_eq!(
-            build_admin_function_rpc_url("loader", "summary", "/"),
-            "/api/pages/custom/_rpc/loader/summary"
-        );
-    }
 
     #[test]
     fn decodes_like_decode_uri_component() {

@@ -33,7 +33,8 @@ a non-production environment before changing production.
    cargo update -p openshop
    ```
 
-   If the project has its own admin UI bundle, rebuild it.
+   Open each custom admin page and send each of its forms: their views and
+   `openshop.js` change with the framework.
 
 3. Compare the current project with the template it was made from,
    `templates/<name>/` and `templates/shared/` in the matching release. Generated
@@ -81,8 +82,15 @@ when you upgrade so that `openshop init` and `openshop dev` come from the same
 release:
 
 ```bash
-cargo install --locked --git https://github.com/0xtlt/openshop-rust openshop-cli
+cargo install --locked --force --git https://github.com/0xtlt/openshop-rust openshop-cli
+# or, from a checkout of the repository:
+cargo install --locked --force --path crates/openshop-cli
 ```
+
+`--force` replaces the CLI installed: without it, cargo keeps it when the
+version number has not changed. Then `openshop --version` prints the version
+and the commit of the CLI that runs; one that answers
+`Unknown command: --version` is older than this check.
 
 For migration steps, see [Manage migrations](manage-migrations.md). For the
 package compatibility policy, see [Versioning](../reference/versioning.md).

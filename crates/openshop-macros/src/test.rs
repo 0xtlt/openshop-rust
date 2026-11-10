@@ -38,19 +38,24 @@ pub fn test(arguments: TokenStream, item: ItemFn) -> syn::Result<TokenStream> {
     body.attrs.clear();
     body.vis = syn::Visibility::Inherited;
 
+    // The contexts the test starts read the Shopify TOML files of its crate:
+    // `env!` is expanded in the crate of the test, not in this one.
     Ok(quote! {
         #(#attributes)*
         #[#krate::testing::tokio::test(crate = "::openshop::testing::tokio")]
         #visibility async fn #name() {
             #body
 
-            let context = {
-                use #krate::testing::IntoTestContext as _;
-                (#subject).into_test_context().await.expect("the test context starts")
-            };
-            let outcome = #name(&context).await;
-            context.shutdown().await.expect("the test context shuts down");
-            #krate::testing::TestOutcome::check(outcome);
+            #krate::testing::in_crate(::core::env!("CARGO_MANIFEST_DIR"), async {
+                let context = {
+                    use #krate::testing::IntoTestContext as _;
+                    (#subject).into_test_context().await.expect("the test context starts")
+                };
+                let outcome = #name(&context).await;
+                context.shutdown().await.expect("the test context shuts down");
+                #krate::testing::TestOutcome::check(outcome);
+            })
+            .await
         }
     })
 }
@@ -85,6 +90,7 @@ mod tests {
         for expected in [
             "# [doc = r\" Runs the flow.\"] # [ignore = \"slow\"] # [:: openshop :: testing :: tokio :: test (crate = \"::openshop::testing::tokio\")] async fn runs_the_flow ()",
             "async fn runs_the_flow (ctx : & TestContext) -> Result < () >",
+            ":: openshop :: testing :: in_crate (:: core :: env ! (\"CARGO_MANIFEST_DIR\") , async {",
             "use :: openshop :: testing :: IntoTestContext as _ ; (crate :: APP) . into_test_context () . await",
             "let outcome = runs_the_flow (& context) . await ;",
             "context . shutdown () . await",

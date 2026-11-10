@@ -255,21 +255,31 @@ fn capture(hub: &Hub, error: &anyhow::Error, level: Level) {
     hub.capture_event(event);
 }
 
-/// Where the log lines of a run are left: the breadcrumbs of the events it
-/// reports.
+/// Where the log lines of a run, or of a handler, are left: the breadcrumbs
+/// of the events it reports.
 #[derive(Clone)]
 pub(crate) struct Trail {
     #[cfg(feature = "sentry")]
     hub: Option<Arc<Hub>>,
+    /// The category of the breadcrumbs: `flow`, `webhook`, `admin`…
+    #[cfg_attr(not(feature = "sentry"), allow(dead_code))]
+    category: &'static str,
 }
 
 impl Trail {
-    /// The trail of the unit of work that is running. A line logged from a
-    /// task the run spawned is still left on it.
+    /// The trail of the run that is running. A line logged from a task the
+    /// run spawned is still left on it.
     pub(crate) fn current() -> Self {
+        Self::current_as("flow")
+    }
+
+    /// The trail of the unit of work that is running, whose lines are
+    /// breadcrumbs of `category`.
+    pub(crate) fn current_as(category: &'static str) -> Self {
         Self {
             #[cfg(feature = "sentry")]
             hub: Hub::with_active(|hub| Some(hub.clone())),
+            category,
         }
     }
 
@@ -279,7 +289,7 @@ impl Trail {
         #[cfg(feature = "sentry")]
         if let Some(hub) = &self.hub {
             hub.add_breadcrumb(|| Breadcrumb {
-                category: Some("flow".to_string()),
+                category: Some(self.category.to_string()),
                 level: match level {
                     "warn" => Level::Warning,
                     "error" => Level::Error,
@@ -379,10 +389,19 @@ mod tests {
         // The thread kept the first client, closed since: it reports with the
         // one the process has. Other tests of this process may report too.
         let (first, second) = (messages(&first), messages(&second));
-        assert!(first.iter().any(|message| message == "with the first client"), "{first:?}");
-        assert!(second.iter().any(|message| message == "with the second client"), "{second:?}");
+        assert!(
+            first.iter().any(|message| message == "with the first client"),
+            "{first:?}"
+        );
+        assert!(
+            second.iter().any(|message| message == "with the second client"),
+            "{second:?}"
+        );
         let all: Vec<_> = first.iter().chain(&second).collect();
         assert!(!all.iter().any(|message| *message == "with no client"), "{all:?}");
-        assert!(!first.iter().any(|message| message == "with the second client"), "{first:?}");
+        assert!(
+            !first.iter().any(|message| message == "with the second client"),
+            "{first:?}"
+        );
     }
 }

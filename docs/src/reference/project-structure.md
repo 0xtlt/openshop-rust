@@ -45,10 +45,9 @@ lists it, in [`app!`](configuration.md).
 | `src/webhooks/` | Shopify event handlers | `webhooks` |
 | `src/functions/` | Shopify Function definitions | `functions` |
 | `src/models/` | Application-owned database tables | `models` |
-| `src/admin/` | Experimental custom admin screens: what the server runs, and their views | `admin_pages` |
+| `src/admin/` | Experimental custom admin screens: their loaders, actions, access rules and views, which the server renders | `admin_pages` |
 | `src/mcp.rs` | MCP tools, resources, and their permissions | `mcp_tools` and `mcp_resources` |
 | `tests/` | Integration tests using `openshop::testing` | — |
-| `dist/` | The admin UI bundle of the application, built by `openshop build` from the custom admin screens that have a view. Not committed | `admin_ui`, or `OPENSHOP_UI_DIR` |
 
 An application that uses every block is laid out like a project made from the
 `custom` template (`openshop init my-app --template=custom`):
@@ -160,9 +159,9 @@ authentication function with `auth = …`. See
 
 ## `src/admin/`
 
-Contains the server side of experimental custom admin pages: `#[admin_page]`
-blocks with their loaders, actions, and access rules. The page views are
-Rust components compiled into a separate WebAssembly UI bundle. See
+Contains the experimental custom admin pages: `#[admin_page]` blocks with
+their loaders, actions, access rules, and views, functions of what the loaders
+return that the server renders into HTML with `maud`. See
 [Custom admin pages](custom-admin-pages.md).
 
 ## `migrations/`
@@ -180,20 +179,20 @@ framework schema updates and your own tables. See
 - `shopify.web.toml` tells Shopify CLI how to start the app in development:
   `openshop dev`.
 
-The generated `.gitignore` excludes `target/`, `.env`, `.shopify/`, and `dist/`.
+The generated `.gitignore` excludes `target/`, `.env`, `.shopify/`, and `gitconfig`.
 
 ## Deployment files
 
 - `Dockerfile` builds the release binary and copies it, `migrations/`, and
   `shopify.app*.toml` into a slim image. It sets `OPENSHOP_ENV=production` and
-  `PORT=3000` and starts the web process with `app start`. With the `custom`
-  and `public` templates, it also builds the admin UI bundle with
-  `openshop build`, copies `dist` into the image and sets
-  `OPENSHOP_UI_DIR=/app/dist`.
+  `PORT=3000` and starts the web process with `app start`. The admin is part of
+  the binary: there is nothing else to build.
 - `Procfile` declares three processes: `release: app migrate`,
   `web: app start`, and `worker: app worker --concurrency=5`.
 - `docker-compose.yml` starts a local PostgreSQL 17 with the `openshop` role
-  and database expected by the default `DATABASE_URL`.
+  and database expected by the default `DATABASE_URL`. Its healthcheck
+  (`pg_isready`) makes the container `healthy` once it accepts connections:
+  `docker compose up -d --wait` returns then.
 - `.env.example` lists the variables to copy into `.env`. `ENCRYPTION_KEY` is
   commented out: `openshop dev` stores credentials in plaintext until you set
   it. `start` and `worker` refuse to run without it unless

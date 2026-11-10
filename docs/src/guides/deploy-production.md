@@ -56,20 +56,17 @@ cargo build --release --locked
 ```
 
 The output is a single binary, `target/release/<package-name>`. It contains the
-web server, the worker, the scheduler, the migration commands, and the admin UI.
+web server, the worker, the scheduler, the migration commands, and the admin.
 No Shopify credential is needed at build time. Deploy the binary together with
 `migrations/` and any referenced Shopify TOML files, and run it from the
-directory that contains them. An app with custom admin pages also ships its own
-UI bundle; see [Ship the bundle](add-admin-page.md#ship-the-bundle).
+directory that contains them.
 
 The generated `Dockerfile` is a starting point: it builds the binary, installs
 it as `app`, copies `migrations/` and `shopify.app*.toml`, sets
 `OPENSHOP_ENV=production` and `PORT=3000`, and starts the web process, as a
 user without privileges (`app`, uid 10001): the app only reads the files copied
-into the image. With the `custom` and `public` templates, it builds the admin UI
-bundle first and serves it from `/app/dist`. The base images are named by
-digest, and trunk is checked against the SHA-256 of its release; keep both when
-you edit the file.
+into the image. The base images are named by digest; keep that when you edit
+the file.
 
 ```bash
 docker build -t my-app .

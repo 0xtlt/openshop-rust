@@ -21,7 +21,7 @@ use futures::FutureExt;
 use serde_json::Value;
 use tokio::task::JoinHandle;
 
-use super::dispatch::{CronTick, DispatchOptions, queue_run};
+use super::dispatch::{CronTick, DispatchOptions, QueuedRun, queue_run};
 use super::errors::FlowConcurrencyError;
 use super::runner::panic_message;
 use super::step::error_message;
@@ -31,10 +31,11 @@ use crate::server::shopify_apps::DEFAULT_SHOPIFY_APP_HANDLE;
 use crate::shopify::client_credentials::Grant;
 use crate::types::{Cron, CronShops};
 
+/// A shop a cron runs for, and the Shopify app it runs under.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct CronTarget {
-    shopify_app: String,
-    shop: String,
+pub(crate) struct CronTarget {
+    pub(crate) shopify_app: String,
+    pub(crate) shop: String,
 }
 
 fn default_target(shop: &str) -> CronTarget {
@@ -127,7 +128,12 @@ async fn configured_targets(app: &OpenShop) -> Result<Vec<CronTarget>> {
 }
 
 async fn resolve_targets(app: &OpenShop, entry: &Cron) -> Result<Vec<CronTarget>> {
-    match entry.shops.clone() {
+    shop_targets(app, &entry.shops).await
+}
+
+/// The shops a cron of `shops` runs for, each under the app it is installed for.
+pub(crate) async fn shop_targets(app: &OpenShop, shops: &CronShops) -> Result<Vec<CronTarget>> {
+    match shops.clone() {
         CronShops::Global => Ok(vec![default_target("__global__")]),
         CronShops::All => {
             let rows: Vec<(String, String)> =
@@ -192,7 +198,9 @@ impl Schedule {
 
     /// The first occurrence after an instant.
     fn after(&self, instant: DateTime<Utc>) -> Option<DateTime<Utc>> {
-        let next = self.cron.find_next_occurrence(&instant.with_timezone(&self.zone), false);
+        let next = self
+            .cron
+            .find_next_occurrence(&instant.with_timezone(&self.zone), false);
         next.ok().map(|next| next.with_timezone(&Utc))
     }
 
@@ -275,7 +283,10 @@ fn tick_keys(crons: &[Cron]) -> Vec<String> {
         .iter()
         .map(|entry| {
             // The effective time zone: "UTC" and no time zone are the same cron.
-            let zone = parse_timezone(entry).map_or_else(|_| entry.timezone.clone().unwrap_or_default(), |zone| zone.name().to_string());
+            let zone = parse_timezone(entry).map_or_else(
+                |_| entry.timezone.clone().unwrap_or_default(),
+                |zone| zone.name().to_string(),
+            );
             let identity = serde_json::json!([entry.name, entry.shops_json(), entry.input, zone]).to_string();
             let digest = Sha256::digest(identity.as_bytes());
             let digest = hex::encode(digest);
@@ -289,10 +300,11 @@ fn tick_keys(crons: &[Cron]) -> Vec<String> {
 
 async fn prune_ticks(app: &OpenShop) {
     // The clock of the database, as the claim that reads these rows.
-    let result = sqlx::query("DELETE FROM cron_ticks WHERE scheduled_at < clock_timestamp() - make_interval(hours => $1)")
-        .bind(TICK_RETENTION_HOURS as i32)
-        .execute(app.db())
-        .await;
+    let result =
+        sqlx::query("DELETE FROM cron_ticks WHERE scheduled_at < clock_timestamp() - make_interval(hours => $1)")
+            .bind(TICK_RETENTION_HOURS as i32)
+            .execute(app.db())
+            .await;
     if let Err(error) = result {
         logger::warn(format!(
             "[openshop] Could not remove old cron ticks: {}",
@@ -338,14 +350,8 @@ async fn run_entry(app: &OpenShop, entry: &Cron, tick_key: &str, scheduled_at: D
         cron_key: tick_key,
         scheduled_at,
     };
-    // The shops that turned the cron off, in one query for all the targets.
-    let turned_off: sqlx::Result<Vec<(String, String)>> =
-        sqlx::query_as("SELECT app_handle, shop FROM cron_overrides WHERE cron_key = $1 AND enabled = false")
-            .bind(&cron_key)
-            .fetch_all(app.db())
-            .await;
-    let turned_off: HashSet<(String, String)> = match turned_off {
-        Ok(rows) => rows.into_iter().collect(),
+    let turned_off = match turned_off(app, &cron_key).await {
+        Ok(turned_off) => turned_off,
         Err(error) => {
             let error = anyhow::Error::from(error);
             logger::warn(format!(
@@ -358,35 +364,103 @@ async fn run_entry(app: &OpenShop, entry: &Cron, tick_key: &str, scheduled_at: D
     };
 
     let mut missed = Missed::default();
-    for CronTarget { shopify_app, shop } in targets {
+    for target in targets {
         let outcome: Result<()> = async {
-            if turned_off.contains(&(shopify_app.clone(), shop.clone())) {
-                logger::info(format!("[openshop] Cron \"{flow}\" disabled for {shop}, skipping"));
+            if turned_off.contains(&(target.shopify_app.clone(), target.shop.clone())) {
+                logger::info(format!(
+                    "[openshop] Cron \"{flow}\" disabled for {}, skipping",
+                    target.shop
+                ));
                 return Ok(());
             }
-
-            let mut params = DispatchOptions::new(flow.clone(), shop.clone()).shopify_app(shopify_app.clone());
-            if let Some(input @ Value::Object(_)) = &entry.input {
-                params = params.input(input.clone());
-            }
             // `None`: another process queued this occurrence.
-            queue_run(app.db(), app.config(), params, Some(&tick)).await?;
+            queue_for(app, flow, &target, entry.input.as_ref(), Some(&tick)).await?;
             Ok(())
         }
         .await;
 
         if let Err(error) = outcome {
             logger::error_with(
-                format!("[openshop] Cron flow \"{flow}\" failed for {shop}"),
+                format!("[openshop] Cron flow \"{flow}\" failed for {}", target.shop),
                 serde_json::json!({ "error": error_message(&error) }),
             );
             // A flow that refuses a second run while one is active does what it declares.
             if !error.is::<FlowConcurrencyError>() {
-                missed.add(CronTarget { shopify_app, shop }, error);
+                missed.add(target, error);
             }
         }
     }
     missed.report(flow);
+}
+
+/// The shops that turned the cron of `cron_key` off, as `(app, shop)`, in
+/// one query for all of them.
+async fn turned_off(app: &OpenShop, cron_key: &str) -> sqlx::Result<HashSet<(String, String)>> {
+    let rows: Vec<(String, String)> =
+        sqlx::query_as("SELECT app_handle, shop FROM cron_overrides WHERE cron_key = $1 AND enabled = false")
+            .bind(cron_key)
+            .fetch_all(app.db())
+            .await?;
+    Ok(rows.into_iter().collect())
+}
+
+/// Queues the run of `flow` for `target` with the `input` of a cron, when it
+/// is an object; with a `tick`, unless a process already queued that
+/// occurrence (`None`).
+async fn queue_for(
+    app: &OpenShop,
+    flow: &str,
+    target: &CronTarget,
+    input: Option<&Value>,
+    tick: Option<&CronTick<'_>>,
+) -> Result<Option<QueuedRun>> {
+    let mut params = DispatchOptions::new(flow, target.shop.clone()).shopify_app(target.shopify_app.clone());
+    if let Some(input @ Value::Object(_)) = input {
+        params = params.input(input.clone());
+    }
+    queue_run(app.db(), app.config(), params, tick).await
+}
+
+/// What queueing the run of a shop by hand gave.
+#[derive(Debug)]
+pub(crate) enum Queued {
+    Run(QueuedRun),
+    /// The shop turned the cron off.
+    TurnedOff,
+    /// The run could not be queued: an input the flow refuses, a run already
+    /// active for a flow that rejects a second one, the database.
+    Failed(anyhow::Error),
+}
+
+/// Queues a run of `flow` now for each of `targets`, with `input`, as a cron
+/// does it: through [`queue_run`], and with `cron_key`, for none of the
+/// shops that turned that cron off. No occurrence of a schedule is claimed,
+/// so the schedule fires as it would have. What `openshop run` and
+/// `openshop cron run` queue.
+pub(crate) async fn queue_now(
+    app: &OpenShop,
+    flow: &str,
+    targets: Vec<CronTarget>,
+    input: Option<&Value>,
+    cron_key: Option<&str>,
+) -> Result<Vec<(CronTarget, Queued)>> {
+    let turned_off = match cron_key {
+        Some(cron_key) => turned_off(app, cron_key).await?,
+        None => HashSet::new(),
+    };
+    let mut queued = Vec::with_capacity(targets.len());
+    for target in targets {
+        let outcome = if turned_off.contains(&(target.shopify_app.clone(), target.shop.clone())) {
+            Queued::TurnedOff
+        } else {
+            match queue_for(app, flow, &target, input, None).await {
+                Ok(run) => Queued::Run(run.expect("a run without a tick is always queued")),
+                Err(error) => Queued::Failed(error),
+            }
+        };
+        queued.push((target, outcome));
+    }
+    Ok(queued)
 }
 
 /// The wait before a cron that stopped is started again, doubled each time it
@@ -475,7 +549,11 @@ async fn warn_about_unregistered_flows(app: &OpenShop) {
         Ok(unknown) => logger::warn(format!(
             "[openshop] Runs are waiting for flows this application does not register: {}. \
              A worker fails them when it claims them. If a flow was renamed, give it its previous name with `#[flow(\"…\")]`.",
-            unknown.iter().map(|name| format!("\"{name}\"")).collect::<Vec<_>>().join(", ")
+            unknown
+                .iter()
+                .map(|name| format!("\"{name}\""))
+                .collect::<Vec<_>>()
+                .join(", ")
         )),
         Err(error) => logger::warn(format!(
             "[openshop] Could not check the flows of the waiting runs: {error}"
@@ -504,7 +582,11 @@ async fn warn_about_orphaned_overrides(app: &OpenShop) {
             "[openshop] Some shops disabled crons that no longer exist: {}. \
              A cron is known by `flow:schedule`: if one of them was changed, the shops that disabled it run it again. \
              Write its schedule as it was to keep them disabled.",
-            orphaned.iter().map(|key| format!("\"{key}\"")).collect::<Vec<_>>().join(", ")
+            orphaned
+                .iter()
+                .map(|key| format!("\"{key}\""))
+                .collect::<Vec<_>>()
+                .join(", ")
         )),
         Err(error) => logger::warn(format!("[openshop] Could not check the disabled crons: {error}")),
     }
@@ -679,7 +761,10 @@ mod tests {
         // Paris is an hour ahead of UTC in winter, two in summer.
         let paris = schedule("0 9 * * *", Some("Europe/Paris"));
         assert_eq!(paris.after(after), Some(utc("2026-01-15T08:00:00Z")));
-        assert_eq!(paris.after(utc("2026-07-15T00:00:00Z")), Some(utc("2026-07-15T07:00:00Z")));
+        assert_eq!(
+            paris.after(utc("2026-07-15T00:00:00Z")),
+            Some(utc("2026-07-15T07:00:00Z"))
+        );
     }
 
     #[test]

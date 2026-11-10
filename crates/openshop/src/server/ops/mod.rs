@@ -105,7 +105,11 @@ async fn login(
     match auth.login(client, &password) {
         Login::Granted(cookie) => {
             logger::info("[openshop] Operator dashboard: signed in");
-            (StatusCode::SEE_OTHER, [(LOCATION, HOME.to_string()), (SET_COOKIE, cookie)]).into_response()
+            (
+                StatusCode::SEE_OTHER,
+                [(LOCATION, HOME.to_string()), (SET_COOKIE, cookie)],
+            )
+                .into_response()
         }
         Login::Refused => {
             logger::warn_with(

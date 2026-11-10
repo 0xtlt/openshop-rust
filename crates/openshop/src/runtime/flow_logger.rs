@@ -7,10 +7,11 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use serde_json::Value;
+use serde_json::{Map, Value};
 use sqlx::PgPool;
 use tokio::sync::{mpsc, oneshot};
 
+use super::context_logger::with_fields;
 use super::logger::{self, logger};
 use super::report::Trail;
 
@@ -49,11 +50,18 @@ enum Message {
 /// logging never blocks or fails a flow. The queue is bounded: when it is full
 /// a line is dropped instead of waiting, and a line saying how many were
 /// dropped is written next to the others.
+///
+/// A line goes to the runtime logger with its payload and what the run is:
+/// its `runId`, and for a run of the engine its `shop`, `shopifyApp` and
+/// `flow`. A key of the payload wins over those. The `logs` table stores the
+/// payload alone, next to the run it belongs to.
 #[derive(Clone)]
 pub struct FlowLogger {
     sender: mpsc::Sender<Message>,
     dropped: Arc<AtomicUsize>,
     trail: Trail,
+    /// What the lines carry to the runtime logger, next to their payload.
+    fields: Arc<Map<String, Value>>,
 }
 
 impl FlowLogger {
@@ -61,6 +69,7 @@ impl FlowLogger {
         let (sender, mut receiver) = mpsc::channel(QUEUE_CAPACITY);
         let dropped = Arc::new(AtomicUsize::new(0));
         let lost = dropped.clone();
+        let fields = Map::from_iter([("runId".to_string(), Value::String(flow_run_id.clone()))]);
 
         tokio::spawn(async move {
             let mut lines: Vec<Line> = Vec::new();
@@ -121,16 +130,33 @@ impl FlowLogger {
             sender,
             dropped,
             trail: Trail::current(),
+            fields: Arc::new(fields),
         }
     }
 
+    /// The same logger, whose lines also carry `fields`, an object, to the
+    /// runtime logger: `json!({ "shop": "demo.myshopify.com" })`. They come
+    /// before the ones it had, which a field of the same name replaces.
+    pub fn with_fields(mut self, fields: Value) -> Self {
+        let Value::Object(mut fields) = fields else {
+            return self;
+        };
+        for (key, value) in self.fields.iter() {
+            fields.entry(key.clone()).or_insert_with(|| value.clone());
+        }
+        self.fields = Arc::new(fields);
+        self
+    }
+
+    /// The level is the method of the runtime logger, which writes it: the
+    /// message is not prefixed with it.
     fn log(&self, level: &'static str, mut payload: Value, message: &str) {
-        let line = format!("[{}] {message}", level.to_uppercase());
         let logger = logger();
+        let context = with_fields(payload.clone(), &self.fields);
         match level {
-            "warn" => logger.warn(&line, Some(&payload)),
-            "error" => logger.error(&line, Some(&payload)),
-            _ => logger.info(&line, Some(&payload)),
+            "warn" => logger.warn(message, Some(&context)),
+            "error" => logger.error(message, Some(&context)),
+            _ => logger.info(message, Some(&context)),
         }
         self.trail.leave(level, message);
 

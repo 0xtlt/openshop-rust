@@ -2,10 +2,10 @@
 
 ## Setup
 
-- Rust 1.94 or newer (`rustup`), plus the `wasm32-unknown-unknown` target and
-  [trunk](https://trunkrs.dev) if you work on the admin UI.
-- PostgreSQL 17. `docker compose up -d` starts one on `localhost:5432` with the
-  `openshop` role and database.
+- Rust 1.94 or newer (`rustup`).
+- PostgreSQL 17. `docker compose up -d --wait` starts one on `localhost:5432`
+  with the `openshop` role and database, and returns once it accepts
+  connections.
 
 ```bash
 export DATABASE_URL=postgresql://openshop:openshop@localhost:5432/openshop
@@ -34,6 +34,8 @@ macros are binaries of their own.
 ```bash
 cargo fmt --all --check
 cargo clippy --workspace --all-targets --locked -- -D warnings
+# `openshop` as an application builds it: without `testing`.
+cargo clippy -p openshop --locked -- -D warnings
 cargo test --workspace --locked
 ```
 
@@ -55,41 +57,9 @@ The `.stderr` files are the output of the compiler pinned in `mise.toml`; after
 a change of a macro or of the compiler, `TRYBUILD=overwrite cargo test -p
 openshop --test macros` rewrites them, and the diff is what to review.
 
-The admin UI is its own workspace:
-
-```bash
-cd crates/openshop-ui
-cargo fmt --check
-cargo clippy --target wasm32-unknown-unknown --locked -- -D warnings
-cargo test --locked
-```
-
-`crates/openshop/ui-dist` is committed so that applications depending on the
-framework get the admin UI without installing trunk. Rebuild and commit it when
-you change `crates/openshop-ui` (or `openshop-shared`, or update the
-dependencies of the admin UI):
-
-```bash
-mise run ui:build          # crates/openshop-ui/build-dist.sh
-```
-
-The script builds on a copy of the sources, in a fixed place, with the paths of
-your machine rewritten, so that the bundle does not carry them and a checkout
-anywhere builds the same bytes. It also writes `crates/openshop-ui/ui-dist.sha256`,
-the hash of the sources the bundle is built from. CI computes it again
-(`crates/openshop-ui/sources-hash.sh`) and fails when the sources moved without
-a new bundle. It does not compare the bytes of a bundle it builds itself: they
-depend on the platform (the compiler orders the functions differently on macOS
-and on Linux, on x86_64 and on aarch64), so a bundle built on a Mac is never the
-one built by CI.
-
-The custom and public templates have admin pages with a view, so each has an
-admin UI bundle of its own, compiled from its `admin` module. Build them into
-`templates/custom/dist` and `templates/public/dist`, which are not committed:
-
-```bash
-mise run templates:ui      # `openshop build-ui` in each of them
-```
+The admin is rendered by the server: its pages are in
+`crates/openshop/src/server/pages/`, a module each, with `openshop.js`, the
+script of every page. There is nothing to build besides the workspace.
 
 ## The templates
 
@@ -99,9 +69,7 @@ The CLI embeds them when it is built (`crates/openshop-cli/build.rs`). A
 project gets `src/`, `tests/`, `migrations/`, `README.md`, `shopify.app.toml`
 and its `Cargo.toml` with `workspace = true` replaced by the source of each
 dependency, plus the files of `templates/shared`: a dotfile is stored there as
-`_name`, and the lines between `# if views`, `# else` and `# end` are kept
-or dropped depending on whether the admin pages of the template have views,
-as in the `Dockerfile`, which builds their bundle. `templates/shared/rustfmt.toml`
+`_name`. `templates/shared/rustfmt.toml`
 is the repository's, so that a project is formatted as its template is. The rest, `examples/` among it, serves the repository only.
 
 | Template | What a project starts with |
@@ -141,13 +109,13 @@ mise run dev:custom        # or dev:public
 ```
 
 It needs the PostgreSQL of the tests: `mise run db:up`, or `DATABASE_URL`.
-It serves the admin UI of the template on `http://localhost:3999/`
-(`http://localhost:3998/` for the public one), as the staff of a fake shop,
-and the operator dashboard at `/ops` (password `preview`). It is the preview
-described below, as a shop and with the template's own bundle, run by
-`openshop dev`: the template is started again when a crate of the workspace
-changes, trunk builds its admin UI bundle again, and the page reloads by
-itself. The pages of `/ops` run no script: reload them by hand.
+It serves the admin of the template on
+`http://localhost:3999/?shop=preview.myshopify.com&embedded=1`
+(`3998` for the public one), as the staff of a fake shop, and the operator
+dashboard at `/ops` (password `preview`). It is the preview described below,
+as a shop, run by `openshop dev`: the template is started again when a crate of
+the workspace changes, and the page reloads by itself. The pages of `/ops` run
+no script: reload them by hand.
 
 To run a template in a development store, with the same loop:
 
@@ -158,8 +126,8 @@ mise run store:custom                     # `openshop dev` in templates/custom
 
 `templates/public` and `mise run store:public` do the same for the public one.
 
-The admin UI is an embedded Shopify app: it only starts inside the Shopify
-admin iframe. To exercise the backend without a store, call the API with an
+The admin is an embedded Shopify app: its pages need a session token, which
+App Bridge gives inside the Shopify admin iframe. To exercise the backend without a store, call the API with an
 HS256 session token signed with `SHOPIFY_API_SECRET` (`aud` = `SHOPIFY_API_KEY`,
 `iss` / `dest` = `https://<shop>.myshopify.com`), as the test harness does.
 
@@ -175,18 +143,18 @@ where the app opens from, and the
 cargo run -p openshop-template-custom --example preview-custom    # or openshop-template-public, preview-public
 ```
 
-To look at the admin UI itself, set `PREVIEW_AS_SHOP=1`: the preview then puts
-a stub in place of Shopify App Bridge, with a session for a fixed test shop:
+To look at the admin itself, set `PREVIEW_AS_SHOP=1`: the preview then puts a
+stub in place of Shopify App Bridge, which signs session tokens for a fixed
+test shop, adds them to the requests of the page and shows the toasts. Open the
+URL it prints, `http://localhost:3999/?shop=preview.myshopify.com&embedded=1`:
 
 ```bash
 PREVIEW_AS_SHOP=1 cargo run -p openshop-template-custom --example preview-custom
 ```
 
-Set `PREVIEW_UI_DIR=templates/custom/dist` to preview the template's own bundle
-after building it with `mise run templates:ui`. The public template needs its own, as
-its admin is made of its pages. The stub does not
-reproduce what Shopify admin renders itself (navigation menu, title bar,
-modals), so check those in a development store.
+The stub does not reproduce what Shopify admin renders itself (navigation
+menu, title bar, modals), so check those in a development store, or in the
+admin of [local-storefront](https://github.com/0xtlt/local-storefront).
 
 ## Publishing to crates.io
 
@@ -203,14 +171,9 @@ cannot be published as it is. What stands in the way, for whoever decides to:
 - `openshop init` has no source that exists on crates.io. A project depends on
   `openshop` by Git (`rev`, `tag`, `branch`) or by `path`, and a CLI built
   without git falls back to the tag `v<version>`. A published CLI would write
-  `openshop = "<version>"`, and `bundle.rs`, which builds the admin UI bundle
-  of a project, would have to accept that source too.
+  `openshop = "<version>"`.
 - The crates depend on each other by `path` with a `version`, so they publish in
-  order: `openshop-shared`, `openshop-macros`,
-  `openshop-ui`, `openshop`, then `openshop-cli`. `openshop-ui` is its own
-  workspace, built for wasm32, with its own lockfile, and has to be published
-  too since the `ui` feature of `openshop` depends on it. `openshop` embeds
-  `ui-dist`, which is committed, so rebuild it first.
+  order: `openshop-shared`, `openshop-macros`, `openshop`, then `openshop-cli`.
 
 None of this changes the install command: `cargo install --locked --git
 https://github.com/0xtlt/openshop-rust openshop-cli`.
@@ -220,4 +183,4 @@ https://github.com/0xtlt/openshop-rust openshop-cli`.
 - The TypeScript implementation is the reference for behavior. When the Rust
   version deliberately differs, document it in `docs/src/reference/differences.md`.
 - Database rows and encrypted values must stay readable by both runtimes.
-- Keep `openshop-shared` free of server-only dependencies: it compiles to WebAssembly.
+- Keep `openshop-shared` free of server-only dependencies: it is the pure logic of the paths and modes of the admin pages.

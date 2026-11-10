@@ -21,7 +21,10 @@ and `src/main.rs`.
 | Serve a storefront or Customer Account extension | [Add proxy routes](add-proxy-routes.md) |
 | Expose an endpoint to another service | [Add a server route](add-server-route.md) |
 | Add a screen inside Shopify admin | [Add a custom admin page](add-admin-page.md) |
+| Move admin pages with a Leptos view to views the server renders | [Migrate to the server-rendered admin](migrate-to-server-rendered-ui.md) |
+| Charge for the app with plans of the Partner Dashboard | [Charge with managed pricing](charge-with-managed-pricing.md) |
 | Verify behavior before shipping | [Test an app](test-app.md) |
+| Run against a simulator of Shopify, a proxy, or an API of your own | [Use custom Shopify endpoints](custom-shopify-endpoints.md) |
 
 ## Deploy and operate
 

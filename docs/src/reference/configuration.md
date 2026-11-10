@@ -48,6 +48,7 @@ a value: the binary runs it, a test reads its configuration.
 | --- | --- |
 | `APP.main()` | `Result<()>`. Starts the runtime and runs the command given on the command line: `dev`, `start`, `worker`, or `migrate`. See [CLI commands](cli.md#command-behavior). |
 | `APP.run().await` | `Result<()>`. Runs the command in a binary that has its own runtime. |
+| `APP.main_with(configure)`, `APP.run_with(configure).await` | The same, with settings decided at startup: `configure` takes the builder of the declaration once `.env` is loaded and returns it, with `.shopify_endpoints(…)` for instance. What it sets replaces what the declaration says. See [Builder methods](#builder-methods). |
 | `APP.config()` | `Result<OpenShopConfig>`: the configuration, after [validation](#runtime-validation). |
 | `APP.builder()` | `Result<OpenShopBuilder>`: the builder holding the blocks and settings of the declaration, to add to them. It fails when a setting does. See [Builder methods](#builder-methods). |
 
@@ -108,10 +109,12 @@ can fail with `?`: the error is the one `APP.config()` and `APP.run()` return.
 | `mcp` | `McpConfig`: `McpConfig::disabled()` to turn MCP off, or `McpConfig::new()` with a permission no tool or resource lists (`.permission(…)`) and tools or resources built without an attribute | MCP enabled, with the core capabilities and the permissions the tools and resources of the application list |
 | `admin_menu` | The entries of the admin menu for the pages of the application (`AdminMenuItem::new(label, path)`), as an array or any other iterator, to set another order or other labels than the pages declare | One entry per page that declares `nav = "…"`, in the order of `admin_pages`; see [Custom admin pages](custom-admin-pages.md) |
 | `shopify` | [`ShopifyConfig`](#shopify) | Single app resolved from env and Shopify TOML |
+| `shopify_endpoints` | [`ShopifyEndpoints`](#shopify-endpoints): where the Admin API and OAuth go, and the App Bridge and Polaris the admin UI loads, for a simulator, a proxy or an API of your own | Each field from its environment variable, then Shopify's |
 | `worker` | `WorkerConfig` | See [Worker defaults](#worker-defaults) |
 | `retry_policy` | `RetryPolicy` | See [Retry defaults](#retry-defaults) |
+| `shopify_retry` | `openshop::shopify::RetryPolicy`: how the Shopify client retries what Shopify did not run; see [Shopify client retries](#shopify-client-retries) | Four retries, from one second apart, doubling, up to thirty seconds |
 | `builtin_pages` | [`AdminPagesConfig`](#admin-pages), or `AdminPagesConfig::none()` for an admin made of the pages of the application | Every built-in page of the admin `visible` |
-| `admin_ui` | `UiSource` | The admin UI bundle built into the framework; see [Custom admin pages](custom-admin-pages.md#serve-the-bundle) |
+| `admin_ui` | `UiSource` | `UiSource::Server`, the admin the server renders; `UiSource::None` serves no admin (API only). See [Custom admin pages](custom-admin-pages.md#how-pages-are-served) |
 | `max_request_body_bytes` | `usize` | `2 * 1024 * 1024` (2 MB); larger request bodies are answered with `413` |
 | `request_timeout` | `Duration` | `60 s`; a request whose response has not begun by then is answered with `503` (`Request timed out`). The time to read the body counts; a response already streaming does not |
 | `max_concurrent_requests` | `usize` | `1024`; a request that comes while that many are being served is answered with `503` and `Retry-After: 1`, and `/health` is always answered |
@@ -150,7 +153,15 @@ fn minimal() -> Result<OpenShopConfig> {
 
 A binary runs such a configuration with `openshop::cli::run(extended)`, which
 takes a function returning `Result<OpenShopConfig>`: `dev` loads `.env` before
-it builds the configuration.
+it builds the configuration. To add to the declaration at startup, and have
+`.env` loaded before the runtime starts, `APP.main_with` takes the builder of
+the declaration instead:
+
+```rust,ignore
+fn main() -> Result<()> {
+    APP.main_with(|app| app.shopify_endpoints(ShopifyEndpoints::new().admin_origin("http://localhost:9393")))
+}
+```
 
 | Method | Argument | Default when not called |
 | --- | --- | --- |
@@ -159,6 +170,7 @@ it builds the configuration.
 | `.provider_as(key, provider)` | Key and `Provider` | — |
 | `.flow(flow)` | `Flow`, registered under `flow.name` | No flows |
 | `.shopify(config)` | `ShopifyConfig` | Single app resolved from env and Shopify TOML |
+| `.shopify_endpoints(endpoints)` | [`ShopifyEndpoints`](#shopify-endpoints) | Each field from its environment variable, then Shopify's |
 | `.function(key, definition)` | Key and `Function` | No functions |
 | `.mcp(config)` | `McpConfig` | MCP enabled, with the core capabilities; no custom capabilities |
 | `.mcp_tool(name, definition)` | Tool name and `McpTool` | No custom tools |
@@ -173,7 +185,7 @@ it builds the configuration.
 | `.builtin_pages(config)` | `AdminPagesConfig` | Every built-in page of the admin `visible` |
 | `.builtin_page(id, mode)` | `AdminPageId` and `AdminPageMode` | — |
 | `.model(table)` | `Table` | No app tables pushed in development |
-| `.admin_ui(ui)` | `UiSource` | The admin UI bundle built into the framework; see [Custom admin pages](custom-admin-pages.md#serve-the-bundle) |
+| `.admin_ui(ui)` | `UiSource` | `UiSource::Server`, the admin the server renders; see the setting of the same name |
 | `.max_request_body_bytes(bytes)` | `usize` | `2 * 1024 * 1024` (2 MB); larger request bodies are answered with `413` |
 | `.request_timeout(timeout)` | `Duration` | `60 s`; see the setting of the same name |
 | `.max_concurrent_requests(requests)` | `usize` | `1024`; see the setting of the same name |
@@ -183,6 +195,7 @@ it builds the configuration.
 | `.client_credentials_shop(shop)` | `Option<String>` or `String` | Background work asks no token for a shop without a row |
 | `.worker(config)` | `WorkerConfig` | See [Worker defaults](#worker-defaults) |
 | `.retry_policy(policy)` | `RetryPolicy` | See [Retry defaults](#retry-defaults) |
+| `.shopify_retry(policy)` | `openshop::shopify::RetryPolicy` | See [Shopify client retries](#shopify-client-retries) |
 | `.on_error(hook)` | `Fn(Arc<anyhow::Error>, ErrorContext) -> impl Future<Output = ()>` | No hook |
 | `.build()` | — | Returns `Result<OpenShopConfig>` after [validation](#runtime-validation) |
 
@@ -205,7 +218,9 @@ Calling the other methods again:
   earlier value.
 - `.cron(…)`, `.crons(…)`, and `.admin_page(…)` append.
 - `.builtin_pages(…)` and `.builtin_page(…)` merge with earlier calls; later values win.
-- The remaining settings (`.shopify(…)`, `.worker(…)`, `.retry_policy(…)`,
+- `.shopify_endpoints(…)` merges with earlier calls field by field: a field it
+  sets replaces the earlier one, a field it leaves `None` keeps it.
+- The remaining settings (`.shopify(…)`, `.worker(…)`, `.retry_policy(…)`, `.shopify_retry(…)`,
   `.on_error(…)`, `.admin_menu(…)`, `.admin_ui(…)`,
   `.max_request_body_bytes(…)`, `.request_timeout(…)`,
   `.max_concurrent_requests(…)`, `.ops_password(…)`, `.log_retention(…)`,
@@ -286,6 +301,57 @@ or a TOML file without `client_id` stops the process at startup.
 See [Multi-app configuration](environment-variables.md#multi-app-configuration)
 for how variables you read yourself interact with `.env`.
 
+### Shopify endpoints
+
+`ShopifyEndpoints` says where the application reaches Shopify. Each field is
+independent, and `None` is Shopify's:
+
+| Field | Builder method | Replaces |
+| --- | --- | --- |
+| `admin_origin` | `.admin_origin(origin)` | `https://{shop}`, for the Admin API, the token requests, the install link and the redirect after OAuth (`{origin}/admin/apps/{client_id}?shop={shop}`). The admin UI may also be framed by this origin. |
+| `app_bridge` | `.app_bridge(url)` | `https://cdn.shopify.com/shopifycloud/app-bridge.js` in the admin UI |
+| `polaris` | `.polaris(url)` | `https://cdn.shopify.com/shopifycloud/polaris.js` in the admin UI and the page that says where the app opens from |
+| `partner_origin` | `.partner_origin(origin)` | `https://partners.shopify.com`, for the Partner API that billing reads the plans from when a [Partner API](#partner-api) is set |
+
+`ShopifyEndpoints::new()` is Shopify for every field. Each field comes from a
+call at startup (`APP.main_with`), else from the `shopify_endpoints` of `app!`,
+else from `SHOPIFY_ADMIN_ORIGIN`, `SHOPIFY_APP_BRIDGE_URL`,
+`SHOPIFY_POLARIS_URL` or `SHOPIFY_PARTNER_ORIGIN`, else is Shopify's. `shopify_endpoints` is its own
+setting: it does not turn on multi-app mode, and every app of a multi-app setup
+uses the same endpoints. `build()` and startup refuse an origin that is not
+`https://host[:port]` or `http://` to `localhost`, `127.0.0.1` or `[::1]`, and
+a script URL that is not absolute `https://` or `http://` to the same hosts.
+See [Custom Shopify endpoints](../guides/custom-shopify-endpoints.md).
+
+### Partner API
+
+`PartnerApi` gives the credentials of the Partner API of the organization
+that owns the app. With them, `openshop::billing` reads the plans of the shops
+from the Partner API's `activeSubscription`, as Shopify App Pricing asks;
+without them, from the Admin API. See
+[Billing](billing.md#where-the-plan-is-read).
+
+| Field | Builder method | Environment variable | Meaning |
+| --- | --- | --- | --- |
+| `partner_id` | `.partner_id(id)` | `SHOPIFY_PARTNER_ID` | The number in the URL of the Partner Dashboard |
+| `token` | `.token(token)` | `SHOPIFY_PARTNER_API_TOKEN` | The access token of a Partner API client of the organization, with the "Manage apps" permission. A secret: never logged, never in an error |
+| `plan_ttl` | `.plan_ttl(duration)` | None | How long the plan of a shop is kept: five minutes by default, `Duration::ZERO` for none. See [The cache](billing.md#the-cache) |
+
+```rust,ignore
+static APP: App = app! {
+    admin_pages: [ReportsPage],
+    partner_api: PartnerApi::new().partner_id("1234567"),
+};
+```
+
+Each field comes from a call at startup
+(`APP.main_with(|app| app.partner_api(…))`), else from the `partner_api` of
+`app!`, else from its environment variable. Set both the Partner ID and the
+token, or neither: startup refuses one without the other, and a Partner ID that
+is not a number. `app.billing_source()` says where the plans are read, and
+`app.partner_api()` returns the client. The requests go to the
+`partner_origin` of the Shopify endpoints.
+
 ## Split the registration
 
 A declaration has nothing to split: each block is declared in the module that
@@ -351,6 +417,12 @@ overrides. Changing the schedule of a cron changes its key: the overrides of the
 old key are never read again, and `/api/crons/toggle` and the MCP tool answer
 `Cron not found` to a key the application does not declare. An `input` that is
 not a JSON object is ignored.
+
+To fire a cron now, without waiting for its schedule, run
+`openshop cron run <name>` (its name, its key, or its flow): one run per shop
+of the cron, with its input, executed and waited for. To run its flow for
+another shop or with another input, `openshop run <flow> --shop=<domain>
+--input=<json>`. See [Run a flow or a cron by hand](cli.md#run-a-flow-or-a-cron-by-hand).
 
 ## Admin pages
 
@@ -541,6 +613,46 @@ The app-level `retry_policy` setting supplies defaults for the flows of the
 application. Flow and dispatch settings override it field by field. See the
 [retry defaults and precedence](flows.md#retry-precedence-and-defaults)
 for the authoritative option table and deadline behavior.
+
+## Shopify client retries
+
+`shopify_retry` sets how the Shopify client of every handler (`ctx.shopify`,
+`app.shopify_client(…)`, the billing helpers, the built-in pages) retries a
+request Shopify did not run:
+
+- a query after a `5xx` or a network failure, with exponential backoff (a
+  mutation is not sent again: it may have run);
+- any request Shopify throttled: a `THROTTLED` answer waits for the cost it
+  reports, a `429` for its `Retry-After`.
+
+It is not the [retry policy of a flow](#retry-defaults), which runs an attempt
+of a flow again. The value is `shopify_api`'s `RetryPolicy`, re-exported as
+`openshop::shopify::RetryPolicy`:
+
+```rust,ignore
+use std::time::Duration;
+use openshop::prelude::*;
+use openshop::shopify;
+
+pub static APP: App = app! {
+    // Two retries, from 250 ms apart up to 2 s: a page answers sooner when Shopify fails.
+    shopify_retry: shopify::RetryPolicy::new(2)
+        .with_base_delay(Duration::from_millis(250))
+        .with_max_delay(Duration::from_secs(2)),
+};
+```
+
+| Method | Sets | Default |
+| --- | --- | --- |
+| `RetryPolicy::new(n)` | At most `n` retries | `RetryPolicy::default()` is `new(4)` |
+| `RetryPolicy::none()` | No retry | — |
+| `.with_base_delay(delay)` | The first backoff, doubled at each retry, with up to a quarter of jitter | 1 second |
+| `.with_max_delay(delay)` | The longest backoff, and the longest wait for a throttled cost | 30 seconds |
+| `.with_max_retry_after(wait)` | The longest `Retry-After` of a `429` waited for; a longer one fails at once with the wait Shopify asked for | 5 minutes |
+
+Without the setting, four retries wait about 1, 2, 4 and 8 seconds: a query
+Shopify keeps failing takes some 15 seconds to fail. A test does not wait: see
+[`TestOptions::shopify_retry`](testing.md#testoptions).
 
 ## Environment variables
 

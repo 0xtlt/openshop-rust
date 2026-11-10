@@ -9,6 +9,7 @@ use indexmap::IndexMap;
 use sqlx::PgPool;
 
 use crate::admin::{AdminPage, CustomAdminPage};
+use crate::billing::{BillingSource, PlanCache};
 use crate::config::validate::validate_openshop_config;
 use crate::db::Table;
 use crate::declare::Declared;
@@ -16,15 +17,17 @@ use crate::engine::dispatch::{DispatchOptions, QueuedRun, dispatch_flow};
 #[cfg(feature = "sentry")]
 use crate::runtime::SentryConfig;
 use crate::runtime::{ReqwestTransport, RuntimeEnv, Transport};
+use crate::server::UiSource;
 use crate::server::connectors::Connectors;
 use crate::server::crypto::Crypto;
 use crate::server::mcp::core::create_core_mcp_capabilities;
 use crate::server::mcp::registry::{McpRegistry, build_mcp_registry};
 use crate::server::shopify_apps::ShopifyApps;
-use crate::server::static_ui::UiSource;
-use crate::shopify::client::ShopifyClient;
 use crate::server::webhooks::WebhookDeliveries;
+use crate::shopify::client::ShopifyClient;
 use crate::shopify::client_credentials::ClientCredentials;
+use crate::shopify::endpoints::{Endpoints, ShopifyEndpoints};
+use crate::shopify::partner::{PartnerApi, PartnerApiClient};
 use crate::types::{
     AdminMenuItem, AdminPageId, AdminPageMode, AdminPagesConfig, Cron, ErrorContext, Flow, Function, McpConfig,
     McpResource, McpTool, OnErrorFn, Provider, Proxy, RetryPolicy, Route, ShopifyConfig, Webhook, WorkerConfig,
@@ -34,6 +37,13 @@ use crate::types::{
 #[derive(Clone, Default)]
 pub struct OpenShopConfig {
     pub shopify: Option<ShopifyConfig>,
+    /// Where the application reaches Shopify, field by field: a field that is
+    /// `None` is read from its environment variable, then is Shopify's.
+    pub shopify_endpoints: ShopifyEndpoints,
+    /// The Partner API billing reads the plans from, field by field: a field
+    /// that is `None` is read from its environment variable. Neither a
+    /// Partner ID nor a token: the plans are read from the Admin API.
+    pub partner_api: PartnerApi,
     pub providers: IndexMap<String, Provider>,
     pub flows: IndexMap<String, Flow>,
     pub functions: IndexMap<String, Function>,
@@ -48,6 +58,11 @@ pub struct OpenShopConfig {
     pub admin_menu: Option<Vec<AdminMenuItem>>,
     pub worker: WorkerConfig,
     pub retry_policy: RetryPolicy,
+    /// How the Shopify client retries a request Shopify did not run (a `5xx`,
+    /// a network failure, a throttled request). `None` is `shopify_api`'s
+    /// [`RetryPolicy::default`](shopify_api::RetryPolicy): four retries,
+    /// one second apart and doubling.
+    pub shopify_retry: Option<shopify_api::RetryPolicy>,
     pub on_error: Option<OnErrorFn>,
     /// App proxy handlers by route path (`/reviews`, `/api/reviews/:id`), served under `/proxy` and `/ext`.
     pub proxies: IndexMap<String, Proxy>,
@@ -57,8 +72,8 @@ pub struct OpenShopConfig {
     pub admin_pages: Vec<AdminPage>,
     /// Application tables created by the development schema push.
     pub models: Vec<Table>,
-    /// Admin UI bundle served by `dev` and `start` instead of the built-in one,
-    /// for applications with custom admin pages.
+    /// The admin `dev` and `start` serve: the one the server renders
+    /// (`UiSource::Server`) unless it is `UiSource::None`, an API-only server.
     pub admin_ui: Option<UiSource>,
     /// Maximum size of a request body. Defaults to 2 MB.
     pub max_request_body_bytes: Option<usize>,
@@ -146,6 +161,44 @@ impl OpenShopBuilder {
 
     pub fn shopify(mut self, shopify: ShopifyConfig) -> Self {
         self.config.shopify = Some(shopify);
+        self
+    }
+
+    /// Where the application reaches Shopify: the Admin API and OAuth, and
+    /// the App Bridge and Polaris of the admin UI, for a simulator, a proxy
+    /// or an API of one's own. Merges with earlier calls field by field: a
+    /// field set here replaces the earlier one, a field left `None` keeps it.
+    /// So a call at startup, on the builder of the declaration
+    /// ([`App::main_with`](crate::App::main_with)), wins over the
+    /// `shopify_endpoints` of `app!`. A field no call sets is read from its
+    /// environment variable when the application starts, then is Shopify's.
+    /// It does not change the Shopify app(s) served: see
+    /// [`shopify`](Self::shopify).
+    pub fn shopify_endpoints(mut self, endpoints: ShopifyEndpoints) -> Self {
+        self.config.shopify_endpoints = endpoints.or(std::mem::take(&mut self.config.shopify_endpoints));
+        self
+    }
+
+    /// The Partner API of the organization that owns the app: with it,
+    /// [`billing`](crate::billing) reads the plans of the shops from the
+    /// Partner API's `activeSubscription`, as Shopify App Pricing asks,
+    /// instead of the Admin API. Merges with earlier calls field by field, as
+    /// [`shopify_endpoints`](Self::shopify_endpoints) does; a field no call
+    /// sets is read from `SHOPIFY_PARTNER_ID` or `SHOPIFY_PARTNER_API_TOKEN`
+    /// when the application starts. The application refuses to start with a
+    /// Partner ID and no token, or a token and no Partner ID.
+    ///
+    /// ```
+    /// use openshop::PartnerApi;
+    ///
+    /// let config = openshop::OpenShopConfig::builder()
+    ///     .partner_api(PartnerApi::new().partner_id("1234567"))
+    ///     .build()
+    ///     .unwrap();
+    /// assert_eq!(config.partner_api.partner_id.as_deref(), Some("1234567"));
+    /// ```
+    pub fn partner_api(mut self, partner_api: PartnerApi) -> Self {
+        self.config.partner_api = partner_api.or(std::mem::take(&mut self.config.partner_api));
         self
     }
 
@@ -277,6 +330,28 @@ impl OpenShopBuilder {
         self
     }
 
+    /// How the Shopify client of every handler retries a request Shopify did
+    /// not run: a query after a `5xx` or a network failure, any request
+    /// Shopify throttled. Not the retries of a flow run, which
+    /// [`retry_policy`](Self::retry_policy) sets. Without it, `shopify_api`'s
+    /// default: four retries, from one second apart and doubling, up to
+    /// thirty seconds.
+    ///
+    /// ```
+    /// use std::time::Duration;
+    /// use openshop::shopify::RetryPolicy;
+    ///
+    /// let config = openshop::OpenShopConfig::builder()
+    ///     .shopify_retry(RetryPolicy::new(2).with_max_delay(Duration::from_secs(5)))
+    ///     .build()
+    ///     .unwrap();
+    /// assert_eq!(config.shopify_retry.unwrap().max_retries(), 2);
+    /// ```
+    pub fn shopify_retry(mut self, policy: shopify_api::RetryPolicy) -> Self {
+        self.config.shopify_retry = Some(policy);
+        self
+    }
+
     pub fn on_error<F, Fut>(mut self, on_error: F) -> Self
     where
         F: Fn(Arc<anyhow::Error>, ErrorContext) -> Fut + Send + Sync + 'static,
@@ -337,7 +412,7 @@ impl OpenShopBuilder {
         self
     }
 
-    /// Serves a custom admin UI bundle instead of the built-in one.
+    /// The admin to serve: `UiSource::None` for an API-only server.
     pub fn admin_ui(mut self, ui: UiSource) -> Self {
         self.config.admin_ui = Some(ui);
         self
@@ -437,6 +512,12 @@ struct Inner {
     crypto: Crypto,
     apps: ShopifyApps,
     transport: Arc<dyn Transport>,
+    /// Where Shopify is reached: the configuration's, else the environment's.
+    endpoints: Endpoints,
+    /// The Partner API billing reads the plans from, when it is set.
+    partner_api: Option<PartnerApiClient>,
+    /// The plans read from the Partner API, per shop.
+    plans: PlanCache,
     client_credentials: ClientCredentials,
     custom_pages: Vec<CustomAdminPage>,
     mcp_registry: McpRegistry,
@@ -465,7 +546,23 @@ impl OpenShop {
     ) -> Result<Self> {
         validate_openshop_config(&config)?;
         crate::server::ops::check_password(config.ops_password.as_deref(), env.production)?;
-        let apps = ShopifyApps::resolve(config.shopify.as_ref(), &env)?.with_transport(transport.clone());
+        let endpoints = Endpoints::resolve(&config.shopify_endpoints, &env.shopify_endpoints)?;
+        let apps = ShopifyApps::resolve(config.shopify.as_ref(), &env)?
+            .with_transport(transport.clone())
+            .with_admin_origin(endpoints.admin_origin.as_ref())?;
+        if let Some(line) = endpoints.startup_line() {
+            tracing::info!("{line}");
+        }
+        let partner_api = PartnerApiClient::resolve(
+            &config.partner_api,
+            &env.partner_api,
+            endpoints.partner_origin(),
+            transport.clone(),
+            config.shopify_retry.clone().unwrap_or_default(),
+        )?;
+        if let Some(partner_api) = &partner_api {
+            tracing::info!("{}", partner_api.startup_line());
+        }
         let crypto = Crypto::new(env.encryption_key.clone(), env.allows_plaintext_secrets());
         crypto.check_configured()?;
         let client_credentials = ClientCredentials::new(config.client_credentials_shop.as_deref())?;
@@ -479,6 +576,9 @@ impl OpenShop {
                 crypto,
                 apps,
                 transport,
+                endpoints,
+                partner_api,
+                plans: PlanCache::default(),
                 client_credentials,
                 custom_pages,
                 mcp_registry,
@@ -509,6 +609,39 @@ impl OpenShop {
 
     pub fn transport(&self) -> &Arc<dyn Transport> {
         &self.inner.transport
+    }
+
+    /// Where this application reaches Shopify: each field of the
+    /// configuration, else of its environment variable, written in full. A
+    /// field that is `None` is Shopify's.
+    pub fn shopify_endpoints(&self) -> &ShopifyEndpoints {
+        &self.inner.endpoints.shown
+    }
+
+    /// The same, checked.
+    pub(crate) fn endpoints(&self) -> &Endpoints {
+        &self.inner.endpoints
+    }
+
+    /// The Partner API of the application, when a Partner ID and a token
+    /// are set: what billing reads the plans from, and what sends any other
+    /// query of the Partner API.
+    pub fn partner_api(&self) -> Option<&PartnerApiClient> {
+        self.inner.partner_api.as_ref()
+    }
+
+    /// Where billing reads the plans of the shops: the Partner API when it
+    /// is set, the Admin API otherwise.
+    pub fn billing_source(&self) -> BillingSource {
+        match self.inner.partner_api {
+            Some(_) => BillingSource::PartnerApi,
+            None => BillingSource::AdminApi,
+        }
+    }
+
+    /// The plans read from the Partner API, per shop.
+    pub(crate) fn plans(&self) -> &PlanCache {
+        &self.inner.plans
     }
 
     /// The client credentials grant, and the shop of the

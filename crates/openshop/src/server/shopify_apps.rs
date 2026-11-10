@@ -7,6 +7,7 @@ use anyhow::{Result, anyhow, bail};
 use regex::Regex;
 
 use axum::http::HeaderMap;
+use shopify_api::AdminOrigin;
 use shopify_api::oauth::{ShopifyApp, SignedQuery};
 use shopify_api::webhooks::Webhook;
 
@@ -16,10 +17,28 @@ use crate::types::{ShopifyAppConfig, ShopifyConfig};
 
 pub const DEFAULT_SHOPIFY_APP_HANDLE: &str = "default";
 
+/// The name of an app that nothing names: no `name` in a `shopify.app*.toml`,
+/// and the app of the environment.
+pub const DEFAULT_APP_NAME: &str = "OpenShop";
+
 /// `Debug` does not show `api_secret`.
 #[derive(Clone)]
 pub struct ResolvedShopifyApp {
+    /// The name OpenShop gives the app: `default` for the app of the
+    /// environment, the key of `shopify.apps` otherwise. What `shopify_app`
+    /// of a context is.
     pub handle: String,
+    /// The handle of the app on Shopify, which the URLs of the Shopify admin
+    /// name it by (`/charges/{app_handle}/pricing_plans`): the `handle` of its
+    /// `shopify.app*.toml`. `None` without one: the client ID does not take
+    /// its place, Shopify refuses it there. [`app_handle()`](Self::app_handle)
+    /// says what to do.
+    pub app_handle: Option<String>,
+    /// The name of the app, which the admin shows: the `name` of the
+    /// `shopify.app*.toml` its `app_handle` is read from, else its
+    /// [`handle`](Self::handle) when it is one of `shopify.apps`, else
+    /// [`DEFAULT_APP_NAME`].
+    pub name: String,
     pub api_key: String,
     pub api_secret: String,
     pub app_url: String,
@@ -36,10 +55,25 @@ fn signing_secret(api_secret: &str) -> &str {
 }
 
 impl ResolvedShopifyApp {
-    fn new(handle: &str, api_key: String, api_secret: String, app_url: String, scopes: String) -> Self {
+    /// `toml` is the text of the `shopify.app*.toml` of the app, when it has one.
+    fn new(
+        handle: &str,
+        toml: Option<&str>,
+        api_key: String,
+        api_secret: String,
+        app_url: String,
+        scopes: String,
+    ) -> Self {
         let oauth = ShopifyApp::new(&api_key, signing_secret(&api_secret)).with_user_agent(USER_AGENT);
+        let app_handle = toml.and_then(|toml| read_top_level_value(toml, "handle"));
+        let name = toml
+            .and_then(|toml| read_top_level_value(toml, "name"))
+            .or_else(|| (handle != DEFAULT_SHOPIFY_APP_HANDLE).then(|| handle.to_string()))
+            .unwrap_or_else(|| DEFAULT_APP_NAME.to_string());
         Self {
             handle: handle.to_string(),
+            app_handle,
+            name,
             api_key,
             api_secret,
             app_url,
@@ -49,10 +83,35 @@ impl ResolvedShopifyApp {
     }
 }
 
+impl ResolvedShopifyApp {
+    /// The handle of the app on Shopify, which the pages of the Shopify admin
+    /// name it by, such as the plan selection page. Fails when its
+    /// `shopify.app*.toml` has no `handle`, saying to add it: Shopify does not
+    /// take the client ID there.
+    pub fn app_handle(&self) -> Result<&str> {
+        self.app_handle.as_deref().ok_or_else(|| {
+            let file = if self.api_key.trim().is_empty() {
+                "shopify.app.toml".to_string()
+            } else {
+                format!("the shopify.app*.toml whose client_id is \"{}\"", self.api_key)
+            };
+            anyhow!(
+                "[openshop] The Shopify app \"{}\" has no handle: add `handle = \"<your-app-handle>\"` at the \
+                 top of {file}, next to client_id (`shopify app config link` writes it). The pages of the Shopify \
+                 admin, such as the plan selection page, name the app by its handle, and Shopify does not take \
+                 the client ID there.",
+                self.handle
+            )
+        })
+    }
+}
+
 impl std::fmt::Debug for ResolvedShopifyApp {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ResolvedShopifyApp")
             .field("handle", &self.handle)
+            .field("app_handle", &self.app_handle)
+            .field("name", &self.name)
             .field("api_key", &self.api_key)
             .field("api_secret", &crate::runtime::redact::redacted(&self.api_secret))
             .field("app_url", &self.app_url)
@@ -74,6 +133,60 @@ fn read_toml_value(content: &str, key: &str) -> Option<String> {
 
 static TOML_CANDIDATE_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^shopify\.app(?:\..+)?\.toml$").expect("valid regex"));
+
+/// The text of a TOML file before its first table: its top-level keys.
+fn top_level(content: &str) -> &str {
+    let mut end = 0;
+    for line in content.split_inclusive('\n') {
+        if line.trim_start().starts_with('[') {
+            break;
+        }
+        end += line.len();
+    }
+    &content[..end]
+}
+
+/// A top-level key of a `shopify.app.toml`, not one of a table, that is not
+/// blank, trimmed: the `handle` and the `name` Shopify CLI writes when it
+/// links the app.
+fn read_top_level_value(content: &str, key: &str) -> Option<String> {
+    read_toml_value(top_level(content), key)
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+/// The text of the `shopify.app*.toml` of `cwd` of the app whose API key is
+/// `api_key`: the one whose `client_id` it is. Without an API key,
+/// `shopify.app.toml`.
+fn read_app_toml_of(cwd: &Path, api_key: &str) -> Option<String> {
+    let api_key = api_key.trim();
+    if api_key.is_empty() {
+        return std::fs::read_to_string(cwd.join("shopify.app.toml")).ok();
+    }
+    let mut files: Vec<String> = std::fs::read_dir(cwd)
+        .ok()?
+        .flatten()
+        .filter_map(|entry| entry.file_name().into_string().ok())
+        .filter(|name| TOML_CANDIDATE_RE.is_match(name))
+        .collect();
+    files.sort();
+    files
+        .iter()
+        .filter_map(|file| std::fs::read_to_string(cwd.join(file)).ok())
+        .find(|content| read_toml_value(top_level(content), "client_id").as_deref() == Some(api_key))
+}
+
+/// The `client_id` of the `shopify.app.toml` of `cwd`, when no
+/// `shopify.app*.toml` there has `api_key` for its own: the app a test runs
+/// as, when it gives the placeholder API key.
+#[cfg(feature = "testing")]
+pub(crate) fn client_id_in_place_of(cwd: &Path, api_key: &str) -> Option<String> {
+    if read_app_toml_of(cwd, api_key).is_some() {
+        return None;
+    }
+    let toml = std::fs::read_to_string(cwd.join("shopify.app.toml")).ok()?;
+    read_top_level_value(&toml, "client_id")
+}
 
 /// Reads OAuth scopes from `shopify.app.<name>.toml` files, then `shopify.app.toml`.
 fn read_scopes_from_toml(cwd: &Path) -> String {
@@ -118,6 +231,7 @@ fn normalize_app(
             };
             Ok(ResolvedShopifyApp::new(
                 handle,
+                Some(&content),
                 api_key,
                 api_secret.clone(),
                 app_url
@@ -137,6 +251,11 @@ fn normalize_app(
             app_url,
         } => Ok(ResolvedShopifyApp::new(
             handle,
+            // An app of several has a file of its own: one with its client id.
+            (!api_key.trim().is_empty())
+                .then(|| read_app_toml_of(&env.cwd, api_key))
+                .flatten()
+                .as_deref(),
             api_key.clone(),
             api_secret.clone(),
             app_url.clone().unwrap_or_else(|| env.fallback_app_url()),
@@ -146,9 +265,11 @@ fn normalize_app(
 }
 
 fn normalize_legacy_app(config: Option<&ShopifyConfig>, env: &RuntimeEnv) -> ResolvedShopifyApp {
+    let api_key = env.shopify_api_key.clone().unwrap_or_default();
     ResolvedShopifyApp::new(
         DEFAULT_SHOPIFY_APP_HANDLE,
-        env.shopify_api_key.clone().unwrap_or_default(),
+        read_app_toml_of(&env.cwd, &api_key).as_deref(),
+        api_key,
         env.shopify_api_secret.clone().unwrap_or_default(),
         env.fallback_app_url(),
         config
@@ -207,6 +328,19 @@ impl ShopifyApps {
             app.oauth = app.oauth.clone().with_transport(SharedTransport(transport.clone()));
         }
         self
+    }
+
+    /// The same apps, with the Admin API, OAuth and the token exchange of
+    /// every shop at `origin` instead of Shopify (the `admin_origin` of the
+    /// Shopify endpoints): the clients they build send their requests there
+    /// too.
+    pub(crate) fn with_admin_origin(mut self, origin: Option<&AdminOrigin>) -> Result<Self> {
+        if let Some(origin) = origin {
+            for app in &mut self.apps {
+                app.oauth = app.oauth.clone().with_admin_origin(origin)?;
+            }
+        }
+        Ok(self)
     }
 
     pub fn all(&self) -> &[ResolvedShopifyApp] {
@@ -430,6 +564,154 @@ scopes = "read_products,read_orders"
     }
 
     #[test]
+    fn reads_the_handle_of_the_app_on_shopify_from_its_toml() {
+        let dir = temp_dir("handle");
+        let env = |api_key: Option<&str>| RuntimeEnv {
+            shopify_api_key: api_key.map(str::to_string),
+            cwd: dir.clone(),
+            ..Default::default()
+        };
+        let app_handle = |api_key: Option<&str>| {
+            let apps = ShopifyApps::resolve(None, &env(api_key)).unwrap();
+            let app = &apps.all()[0];
+            app.app_handle()
+                .map(str::to_string)
+                .unwrap_or_else(|error| error.to_string())
+        };
+        // No file: no handle, and the error says where to write it.
+        assert_eq!(
+            app_handle(Some("prod-key")),
+            "[openshop] The Shopify app \"default\" has no handle: add `handle = \"<your-app-handle>\"` at the \
+             top of the shopify.app*.toml whose client_id is \"prod-key\", next to client_id (`shopify app config \
+             link` writes it). The pages of the Shopify admin, such as the plan selection page, name the app by \
+             its handle, and Shopify does not take the client ID there."
+        );
+        assert!(app_handle(None).contains("at the top of shopify.app.toml, next to client_id"));
+
+        std::fs::write(
+            dir.join("shopify.app.toml"),
+            "client_id = \"prod-key\"\nname = \"Demo App\"\nhandle = \"demo-app\"\n\n[webhooks]\napi_version = \"2026-10\"\n",
+        )
+        .unwrap();
+        // A handle of a table is not the app's.
+        std::fs::write(
+            dir.join("shopify.app.dev.toml"),
+            "client_id = 'dev-key'\n[[extensions]]\nhandle = \"not-the-app\"\n",
+        )
+        .unwrap();
+        assert_eq!(app_handle(Some("prod-key")), "demo-app");
+        assert_eq!(app_handle(None), "demo-app");
+        // The file of the app is the one of its client id.
+        assert!(app_handle(Some("dev-key")).contains("has no handle"));
+        std::fs::write(
+            dir.join("shopify.app.dev.toml"),
+            "client_id = 'dev-key'\nhandle = 'demo-app-dev' # linked\n",
+        )
+        .unwrap();
+        assert_eq!(app_handle(Some("dev-key")), "demo-app-dev");
+        assert!(app_handle(Some("other-key")).contains("whose client_id is \"other-key\""));
+
+        // An app of `shopify.apps`: the handle of its own file, else as above.
+        let config = ShopifyConfig {
+            scopes: None,
+            apps: Some(
+                [
+                    (
+                        "main".to_string(),
+                        ShopifyAppConfig::Toml {
+                            toml: "shopify.app.dev.toml".into(),
+                            api_secret: "secret".into(),
+                            app_url: None,
+                        },
+                    ),
+                    ("keys".to_string(), keys("prod-key", "secret", "https://a.example.com")),
+                    ("other".to_string(), keys("", "secret", "https://b.example.com")),
+                ]
+                .into(),
+            ),
+        };
+        let apps = ShopifyApps::resolve(Some(&config), &env(None)).unwrap();
+        let handle_of = |name: &str| apps.by_handle(Some(name)).unwrap().app_handle.clone();
+        assert_eq!(handle_of("main").as_deref(), Some("demo-app-dev"));
+        assert_eq!(handle_of("keys").as_deref(), Some("demo-app"));
+        assert_eq!(handle_of("other"), None);
+        assert!(
+            apps.by_handle(Some("other"))
+                .unwrap()
+                .app_handle()
+                .unwrap_err()
+                .to_string()
+                .starts_with("[openshop] The Shopify app \"other\" has no handle")
+        );
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn names_the_app_after_the_name_of_its_toml() {
+        let dir = temp_dir("name");
+        let env = |api_key: Option<&str>| RuntimeEnv {
+            shopify_api_key: api_key.map(str::to_string),
+            cwd: dir.clone(),
+            ..Default::default()
+        };
+        let name = |api_key: Option<&str>| ShopifyApps::resolve(None, &env(api_key)).unwrap().all()[0].name.clone();
+        // No file: nothing names the app of the environment.
+        assert_eq!(name(Some("prod-key")), DEFAULT_APP_NAME);
+        assert_eq!(name(None), DEFAULT_APP_NAME);
+
+        std::fs::write(
+            dir.join("shopify.app.toml"),
+            "client_id = \"prod-key\"\nname = \"My Demo App\"\nhandle = \"demo-app\"\n",
+        )
+        .unwrap();
+        // The name of a table is not the app's, and a blank one names nothing.
+        std::fs::write(
+            dir.join("shopify.app.dev.toml"),
+            "client_id = 'dev-key'\nname = '  '\n[[extensions]]\nname = \"Not the app\"\n",
+        )
+        .unwrap();
+        assert_eq!(name(Some("prod-key")), "My Demo App");
+        assert_eq!(name(None), "My Demo App");
+        assert_eq!(name(Some("dev-key")), DEFAULT_APP_NAME);
+        assert_eq!(name(Some("other-key")), DEFAULT_APP_NAME);
+        std::fs::write(
+            dir.join("shopify.app.dev.toml"),
+            "client_id = 'dev-key'\nname = 'Demo App (dev)' # linked\n",
+        )
+        .unwrap();
+        assert_eq!(name(Some("dev-key")), "Demo App (dev)");
+
+        // An app of `shopify.apps`: the name of its own file, else its key.
+        let config = ShopifyConfig {
+            scopes: None,
+            apps: Some(
+                [
+                    (
+                        "main".to_string(),
+                        ShopifyAppConfig::Toml {
+                            toml: "shopify.app.dev.toml".into(),
+                            api_secret: "secret".into(),
+                            app_url: None,
+                        },
+                    ),
+                    ("keys".to_string(), keys("prod-key", "secret", "https://a.example.com")),
+                    (
+                        "other".to_string(),
+                        keys("other-key", "secret", "https://b.example.com"),
+                    ),
+                ]
+                .into(),
+            ),
+        };
+        let apps = ShopifyApps::resolve(Some(&config), &env(None)).unwrap();
+        let name_of = |handle: &str| apps.by_handle(Some(handle)).unwrap().name.clone();
+        assert_eq!(name_of("main"), "Demo App (dev)");
+        assert_eq!(name_of("keys"), "My Demo App");
+        assert_eq!(name_of("other"), "other");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
     fn rejects_inconsistent_scopes_without_global_scopes() {
         let dir = temp_dir("inconsistent");
         std::fs::write(dir.join("a.toml"), "client_id = \"a\"\nscopes = \"read_products\"\n").unwrap();
@@ -483,7 +765,9 @@ scopes = "read_products,read_orders"
         assert_eq!(apps.by_signed_query(&query).unwrap().0.handle, "clientB");
 
         let body = r#"{"id":1}"#;
-        let (app, webhook) = apps.by_webhook(&webhook_headers(body, "secret-a"), body.as_bytes()).unwrap();
+        let (app, webhook) = apps
+            .by_webhook(&webhook_headers(body, "secret-a"), body.as_bytes())
+            .unwrap();
         assert_eq!(app.handle, "clientA");
         assert_eq!(webhook.topic(), "orders/create");
     }
@@ -507,6 +791,51 @@ scopes = "read_products,read_orders"
         assert!(error.contains("Missing Shopify app handle"));
         let error = apps.by_handle(Some("nope")).unwrap_err().to_string();
         assert!(error.contains("Unknown Shopify app \"nope\""));
+    }
+
+    #[test]
+    fn an_admin_origin_sends_every_app_and_client_there() {
+        let apps = two_apps("secret-a", "secret-b", "client-a-key", "client-b-key")
+            .with_transport(crate::testing::MockTransport::new());
+        let origin = AdminOrigin::new("http://localhost:9292").unwrap();
+        let shop = shopify_api::ShopDomain::new("local-supply-co.myshopify.com").unwrap();
+        let graphql_url = |apps: &ShopifyApps| -> Vec<String> {
+            apps.all()
+                .iter()
+                .map(|app| {
+                    app.oauth
+                        .builder(&shop)
+                        .access_token("shpat_x")
+                        .build()
+                        .unwrap()
+                        .graphql_url(shopify_api::ApiVersion::V2026_10)
+                })
+                .collect()
+        };
+
+        let unchanged = apps.clone().with_admin_origin(None).unwrap();
+        assert!(unchanged.all().iter().all(|app| app.oauth.admin_origin().is_none()));
+        assert_eq!(
+            graphql_url(&unchanged),
+            vec!["https://local-supply-co.myshopify.com/admin/api/2026-10/graphql.json"; 2]
+        );
+
+        let local = apps.with_admin_origin(Some(&origin)).unwrap();
+        assert!(local.all().iter().all(|app| app.oauth.admin_origin() == Some(&origin)));
+        assert_eq!(
+            graphql_url(&local),
+            vec!["http://localhost:9292/admin/api/2026-10/graphql.json"; 2]
+        );
+        // OAuth too, for the same shop.
+        let link = local.all()[0].oauth.authorization_url(
+            &shop,
+            &shopify_api::oauth::AuthorizationRequest::new("http://localhost:3000/auth/callback", "state"),
+        );
+        assert!(
+            link.starts_with("http://localhost:9292/admin/oauth/authorize?client_id=client-a-key&"),
+            "{link}"
+        );
+        assert!(link.ends_with("&shop=local-supply-co.myshopify.com"), "{link}");
     }
 
     #[test]

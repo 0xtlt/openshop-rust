@@ -3,6 +3,8 @@
 
 use std::path::PathBuf;
 
+use crate::shopify::{PartnerApi, ShopifyEndpoints};
+
 /// Database used when `DATABASE_URL` is not set.
 pub const DEFAULT_DATABASE_URL: &str = "postgresql://openshop:openshop@localhost:5432/openshop";
 
@@ -27,6 +29,14 @@ pub struct RuntimeEnv {
     pub development: bool,
     /// Project root used to resolve Shopify TOML files and migrations.
     pub cwd: PathBuf,
+    /// `SHOPIFY_ADMIN_ORIGIN`, `SHOPIFY_APP_BRIDGE_URL`,
+    /// `SHOPIFY_POLARIS_URL` and `SHOPIFY_PARTNER_ORIGIN`: the endpoints of
+    /// Shopify the configuration does not set, field by field. See
+    /// [`ShopifyEndpoints`].
+    pub shopify_endpoints: ShopifyEndpoints,
+    /// `SHOPIFY_PARTNER_ID` and `SHOPIFY_PARTNER_API_TOKEN`: the Partner API
+    /// the configuration does not set, field by field. See [`PartnerApi`].
+    pub partner_api: PartnerApi,
 }
 
 impl std::fmt::Debug for RuntimeEnv {
@@ -41,6 +51,8 @@ impl std::fmt::Debug for RuntimeEnv {
             .field("production", &self.production)
             .field("development", &self.development)
             .field("cwd", &self.cwd)
+            .field("shopify_endpoints", &self.shopify_endpoints)
+            .field("partner_api", &self.partner_api)
             .finish()
     }
 }
@@ -50,7 +62,10 @@ impl std::fmt::Debug for RuntimeEnv {
 /// development, since `NODE_ENV` is set by tooling that has nothing to do with
 /// where secrets may be stored in the clear.
 fn environment(openshop_env: Option<&str>, node_env: Option<&str>) -> (bool, bool) {
-    let production = [openshop_env, node_env].into_iter().flatten().any(|value| value == "production");
+    let production = [openshop_env, node_env]
+        .into_iter()
+        .flatten()
+        .any(|value| value == "production");
     (production, matches!(openshop_env, Some("development" | "test")))
 }
 
@@ -74,6 +89,8 @@ impl RuntimeEnv {
             production,
             development,
             cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+            shopify_endpoints: ShopifyEndpoints::from_env(),
+            partner_api: PartnerApi::from_env(),
         }
     }
 

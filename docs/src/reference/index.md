@@ -28,6 +28,7 @@ contract. For a complete procedure, start with the [how-to guides](../guides/ind
 - [Proxy routes](proxy-routes.md) — storefront and Customer Account endpoints, typed input, and Liquid templates.
 - [Public server routes](server-routes.md) — explicit authentication, typed input, and JSON or `Response` handlers.
 - [Webhooks](webhooks.md) — topic matching, context, and acknowledgment behavior.
+- [Billing](billing.md) — active subscriptions, the guard of a page that needs a plan, and the pricing page of managed pricing.
 - [Shopify Functions](shopify-functions.md) — Function definitions and configuration.
 - [Custom admin pages](custom-admin-pages.md) — experimental pages, loaders, actions, and policies.
 - [Operator dashboard](operator-dashboard.md) — every shop under `/ops`, read-only, behind a password.

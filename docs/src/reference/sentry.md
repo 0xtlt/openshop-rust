@@ -100,7 +100,9 @@ one of the first.
 - **The log lines of the run.** The lines a run logs with `ctx.logger`, and
   the ones the engine adds for its steps, are the breadcrumbs of what the run
   reports: the level and the message of the last 100 lines of the attempt.
-  The payload of a line is not sent.
+  The payload of a line is not sent. The lines a webhook handler or an admin
+  page logs with its `ctx.logger` are the breadcrumbs of what it reports, the
+  same way (categories `webhook` and `admin`, `flow` for a run).
 - **Nothing of the request.** No header, no query string, no body, and no
   input of a flow.
 - **The process.** The host name, the operating system, and the Rust version,

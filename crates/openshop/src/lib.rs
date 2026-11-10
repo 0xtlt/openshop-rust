@@ -39,128 +39,89 @@
 //! - [`server`]: the HTTP server and its parts;
 //! - [`db`]: the pool, models, tables and migrations;
 //! - [`admin`]: the server side of custom admin pages;
+//! - [`billing`]: the subscriptions of a shop to the app, with Shopify's
+//!   managed pricing, and the guard of an admin page that needs a plan;
 //! - [`runtime`]: the environment, the loggers, the reports to Sentry and the outbound transport;
 //! - [`shopify`]: the Admin API client and typed operations;
-//! - [`testing`] (feature `testing`): the test harness;
-//! - `ui` (feature `ui`): what the view of a custom admin page is written with.
+//! - [`testing`] (feature `testing`): the test harness.
 
-// The crate is also compiled to WebAssembly, into the admin UI bundle of an
-// application whose admin pages have a view (feature `ui`). The bundle is
-// made of the pages: the server is left out of it.
-macro_rules! not_wasm {
-    ($($item:item)*) => {
-        $(
-            #[cfg(not(target_arch = "wasm32"))]
-            $item
-        )*
-    };
-}
-
-not_wasm! {
-    pub mod admin;
-    mod app;
-    pub mod builder;
-    pub mod cli;
-    mod config;
-    pub mod db;
-    pub mod declare;
-    pub mod engine;
-    pub mod response;
-    pub mod runtime;
-    pub mod server;
-    pub mod shopify;
-    #[cfg(feature = "testing")]
-    pub mod testing;
-    mod types;
-    pub mod validators;
-}
-// Declared outside the macro: `liquid!`, which it exports, is named by its path.
-#[cfg(not(target_arch = "wasm32"))]
+pub mod admin;
+mod app;
+pub mod billing;
+pub mod builder;
+pub mod cli;
+mod config;
+pub mod db;
+pub mod declare;
+pub mod engine;
+pub mod response;
+pub mod runtime;
+pub mod server;
+pub mod shopify;
+#[cfg(feature = "testing")]
+pub mod testing;
+mod types;
+pub mod validators;
+// `liquid!`, which this module exports, is named by its path.
 mod template;
-#[cfg(feature = "ui")]
-pub mod ui;
 
-#[cfg(all(target_arch = "wasm32", not(feature = "ui")))]
-compile_error!(
-    "`openshop` compiles to WebAssembly for the views of admin pages: enable its `ui` feature, `openshop = { …, features = [\"ui\"] }`"
-);
-
-/// What `#[admin_page]` writes for a `#[view]`, which needs the feature `ui`.
-#[cfg(feature = "ui")]
-#[doc(hidden)]
-#[macro_export]
-macro_rules! __view {
-    ($($generated:tt)*) => {
-        $($generated)*
-    };
-}
-
-#[cfg(not(feature = "ui"))]
-#[doc(hidden)]
-#[macro_export]
-macro_rules! __view {
-    ($($generated:tt)*) => {
-        ::core::compile_error!(
-            "a `#[view]` needs the `ui` feature of `openshop`: `openshop = { …, features = [\"ui\"] }`"
-        );
-    };
-}
-
-not_wasm! {
-    /// Locks `mutex`, even when a thread panicked while holding it: what it
-    /// guards stays usable.
-    pub(crate) fn locked<T>(mutex: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-        mutex.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
-    }
+/// Locks `mutex`, even when a thread panicked while holding it: what it
+/// guards stays usable.
+pub(crate) fn locked<T>(mutex: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 // The crates whose types appear in the API of an application.
+/// The Sentry SDK the framework reports with. What an application
+/// captures itself goes through it: another version of the crate would
+/// have a client of its own, which nothing starts.
+#[cfg(feature = "sentry")]
+pub use ::sentry;
 pub use anyhow::{Context, Error, Result, anyhow, bail};
+pub use chrono;
+pub use indexmap::IndexMap;
+/// What a server-rendered `#[view]` returns, `maud::Markup`, written with
+/// `maud::html!` (the application depends on `maud`, which `html!` names).
+pub use maud::{self, Markup};
 pub use schemars::{self, JsonSchema};
 pub use serde;
 pub use serde_json::{self, Value, json};
-not_wasm! {
-    pub use chrono;
-    pub use indexmap::IndexMap;
-    pub use sqlx::{self, PgPool};
-    pub use tokio_util::sync::CancellationToken;
-    pub use uuid::Uuid;
-    /// The Sentry SDK the framework reports with. What an application
-    /// captures itself goes through it: another version of the crate would
-    /// have a client of its own, which nothing starts.
-    #[cfg(feature = "sentry")]
-    pub use ::sentry;
-}
+pub use sqlx::{self, PgPool};
+pub use tokio_util::sync::CancellationToken;
+/// The `tracing` crate the framework logs with, whose subscriber
+/// `APP.main()` installs: `tracing::info!(shop = %ctx.shop, "Synced")`
+/// without a dependency of the application's own. A flow, a webhook and
+/// an admin page log for their run or their shop with `ctx.logger`.
+pub use tracing;
+pub use uuid::Uuid;
 
 // The application, and what its handlers receive and return. What the engine
 // and the server are made of stays in their modules, and the definitions a
 // block is built from by hand are in `builder`.
-not_wasm! {
-    pub use admin::{AdminActor, AdminContext, AdminPublicError};
-    pub use app::{OpenShop, OpenShopConfig};
-    pub use db::{FlowRun, Installation, LogRow, Model, Record, StepResult};
-    pub use declare::{App, InvalidInput};
-    pub use engine::{
-        DispatchOptions, FlowCanceledError, FlowConcurrencyError, FlowTimeoutError, InvalidFlowInput, QueuedRun,
-        RunOutcome, StepTimeoutError, UnknownFlowError,
-    };
-    pub use runtime::logger::{logger, set_logger};
-    #[cfg(feature = "sentry")]
-    pub use runtime::SentryConfig;
-    pub use runtime::{FlowLogger, RuntimeLogger};
-    pub use server::UiSource;
-    pub use server::http::PublicError;
-    pub use server::connectors::Connectors;
-    pub use shopify::ShopifyClient;
-    pub use template::Liquid;
-    pub use types::{
-        AdminMenuItem, AdminPageId, AdminPageMode, AdminPagesConfig, Concurrency, Cron, CronShops, ErrorContext,
-        FlowContext, FunctionConfig, JsonMap, McpConfig, McpContext, McpPermission, McpResourceContent, McpRiskLevel,
-        ProviderConfig, ProxyAuthKind, ProxyContext, RetryPolicy, RouteAuthContext, RouteAuthOutcome, RouteContext,
-        RouteRequest, RouteShopContext, RouteShopInput, ShopScope, ShopifyAppConfig, ShopifyConfig, StepOptions,
-        WebhookContext, WorkerConfig,
-    };
-}
+pub use admin::{AdminActor, AdminContext, AdminPublicError, FormState, Outcome};
+pub use app::{OpenShop, OpenShopConfig};
+pub use db::{FlowRun, Installation, LogRow, Model, Record, StepResult};
+pub use declare::{App, InvalidInput};
+pub use engine::{
+    DispatchOptions, FlowCanceledError, FlowConcurrencyError, FlowTimeoutError, InvalidFlowInput, QueuedRun,
+    RunOutcome, StepTimeoutError, UnknownFlowError,
+};
+#[cfg(feature = "sentry")]
+pub use runtime::SentryConfig;
+pub use runtime::logger::{logger, set_logger};
+pub use runtime::{ContextLogger, FlowLogger, RuntimeLogger};
+pub use server::UiSource;
+pub use server::connectors::Connectors;
+pub use server::http::PublicError;
+pub use shopify::{PartnerApi, PartnerApiClient, ShopifyClient, ShopifyEndpoints};
+pub use template::Liquid;
+pub use types::{
+    AdminMenuItem, AdminPageId, AdminPageMode, AdminPagesConfig, Concurrency, Cron, CronShops, ErrorContext,
+    FlowContext, FunctionConfig, JsonMap, McpConfig, McpContext, McpPermission, McpResourceContent, McpRiskLevel,
+    ProviderConfig, ProxyAuthKind, ProxyContext, RetryPolicy, RouteAuthContext, RouteAuthOutcome, RouteContext,
+    RouteRequest, RouteShopContext, RouteShopInput, ShopScope, ShopifyAppConfig, ShopifyConfig, ShopifyLaunch,
+    StepOptions, WebhookContext, WorkerConfig,
+};
 
 /// What the code of an application uses, in one import.
 ///
@@ -181,22 +142,20 @@ not_wasm! {
 ///
 /// The attributes and derives that declare building blocks, [`app!`], the
 /// contexts of the handlers, and what their bodies reach for: [`Result`],
-/// [`json!`], [`bail!`], [`graphql!`], [`liquid!`]… The attribute of tests,
+/// [`json!`], [`bail!`], [`graphql!`], [`liquid!`], the [`tracing`] crate… The attribute of tests,
 /// `#[openshop::test]`, is not part of it: it would hide `#[test]`.
 pub mod prelude {
+    #[cfg(feature = "sentry")]
+    pub use crate::SentryConfig;
     pub use crate::input;
+    pub use crate::{
+        AdminContext, App, Cron, ErrorContext, FlowContext, FormState, FunctionConfig, InvalidInput, Liquid, Markup,
+        McpConfig, McpContext, McpPermission, McpRiskLevel, Model, Outcome, PartnerApi, ProviderConfig, ProxyContext,
+        PublicError, QueuedRun, RetryPolicy, RouteAuthContext, RouteAuthOutcome, RouteContext, RunOutcome, ShopScope,
+        ShopifyEndpoints, ShopifyLaunch, Uuid, WebhookContext, WorkerConfig, flow, graphql, liquid, mcp_resource,
+        mcp_tool, provider, proxy, response, route, tracing, validators, webhook,
+    };
     pub use crate::{Context, Result, Value, admin_page, anyhow, app, bail, json};
-    not_wasm! {
-        pub use crate::{
-            AdminContext, App, Cron, ErrorContext, FlowContext, FunctionConfig, InvalidInput, Liquid, McpConfig,
-            McpContext, McpPermission, McpRiskLevel, Model, ProviderConfig, ProxyContext, PublicError, QueuedRun, RetryPolicy,
-            RouteAuthContext, RouteAuthOutcome, RouteContext, RunOutcome, ShopScope, Uuid, WebhookContext,
-            WorkerConfig, flow, graphql, liquid, mcp_resource, mcp_tool, provider, proxy, response, route,
-            validators, webhook,
-        };
-        #[cfg(feature = "sentry")]
-        pub use crate::SentryConfig;
-    }
 }
 
 /// Maps a struct to an application table.
@@ -348,7 +307,6 @@ pub use openshop_macros::provider;
 /// `shopify_api`, the Shopify client OpenShop runs on: what `graphql!`
 /// generates names it here, so that an application depends on `openshop`
 /// alone.
-#[cfg(not(target_arch = "wasm32"))]
 pub use shopify_api;
 
 /// A Shopify Admin GraphQL operation, checked against Shopify's schema while
@@ -382,7 +340,6 @@ pub use shopify_api;
 /// names the crate `openshop` in its `Cargo.toml`, not another name. See the
 /// [documentation of `shopify_api`](https://docs.rs/shopify_api) for the
 /// module form, input objects, bulk operations and other versions.
-#[cfg(not(target_arch = "wasm32"))]
 #[macro_export]
 macro_rules! graphql {
     ($($input:tt)*) => {
@@ -392,7 +349,6 @@ macro_rules! graphql {
 
 /// [`shopify::input!`](crate::shopify::input), declared here: a module of
 /// the server cannot export a macro by its path.
-#[cfg(not(target_arch = "wasm32"))]
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __shopify_input {
@@ -634,6 +590,8 @@ pub use openshop_macros::proxy;
 ///
 /// A route does not belong to a shop. `ctx.for_shop("demo.myshopify.com")`
 /// resolves an installed one and gives its `db`, `shopify` and `connectors`.
+/// `ctx.app_handle(shop)`, `ctx.admin_url(shop, path)` and
+/// `ctx.pricing_url(shop)` link to the admin of a shop, installed or not.
 ///
 /// The functions of one path are declared separately, one per method, each
 /// with its own authentication. They are listed in the `routes` of [`app!`].
@@ -735,9 +693,10 @@ pub use openshop_macros::FunctionConfig;
 ///   Result<…>`, or `async fn(ctx, input: Input) -> Result<…>` where `Input`
 ///   is an [`#[input]`](macro@input) type, which validates what the page
 ///   sends. The result is anything that serializes;
-/// - `#[view]`, what the page shows: `fn() -> impl IntoView`, or
-///   `fn(params: RouteParams) -> impl IntoView` for a page with dynamic
-///   segments. It needs the feature `ui`: see the `ui` module.
+/// - `#[view]`, what the page shows, rendered by the server: `fn(loader:
+///   Output, …) -> Markup`, each parameter named after a loader of the page
+///   and given what it returns, and `form: FormState`, the form the page
+///   refused, when the view shows one again.
 ///
 /// A loader or an action is called by the name of its function in camel case
 /// (`listReviews`), or by the name given to the marker (`#[loader("list")]`).
@@ -745,9 +704,9 @@ pub use openshop_macros::FunctionConfig;
 /// ordinary helpers.
 ///
 /// With a view, the block gains a constant per loader and action, named after
-/// the function: `ReviewsPage::LIST_REVIEWS`. It carries what the function
-/// takes and what it returns, for `use_loader` and `use_action`; the function
-/// then states what it returns as `Result<Output>`.
+/// the function: `ReviewsPage::SAVE_REVIEW`, the name a form of the view
+/// sends in `_action`. The view, a function that returns `maud::Markup`,
+/// receives what each loader it names returns.
 ///
 /// The type is listed in the `admin_pages` of [`app!`], which is enough for
 /// the page to be served; its path is the constant `PATH`.

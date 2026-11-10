@@ -1,9 +1,8 @@
-//! The custom `/reviews` admin page: what the server answers, and the view that shows it.
+//! The custom `/reviews` admin page: what the server answers, and the view it
+//! renders with it.
 
-use leptos::prelude::*;
-use leptos::task::spawn_local;
+use maud::html;
 use openshop::prelude::*;
-use openshop::ui::{AdminActionOptions, shopify, use_action, use_loader};
 use serde::{Deserialize, Serialize};
 
 #[input]
@@ -13,6 +12,8 @@ pub struct SaveReview {
     pub title: String,
 }
 
+/// `Serialize` for the loader, `Deserialize` for a test that calls it with
+/// `ctx.call_loader`.
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct Review {
     pub id: String,
@@ -23,14 +24,6 @@ pub struct Review {
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct ReviewList {
     pub reviews: Vec<Review>,
-}
-
-#[derive(Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SavedReview {
-    pub ok: bool,
-    pub title: String,
-    pub saved_by: String,
 }
 
 pub struct ReviewsPage;
@@ -53,54 +46,40 @@ impl ReviewsPage {
         })
     }
 
+    /// The form of the page: the page is rendered again, with a toast. An
+    /// empty title is refused by the input schema, under its field.
     #[action(authorize = Self::signed_in)]
-    async fn save_review(ctx: AdminContext, input: SaveReview) -> Result<SavedReview> {
-        Ok(SavedReview {
-            ok: true,
-            title: input.title,
-            saved_by: ctx.actor.id,
-        })
+    async fn save_review(ctx: AdminContext, input: SaveReview) -> Result<Outcome> {
+        ctx.logger
+            .info_with("Review saved", json!({ "title": input.title, "savedBy": ctx.actor.id }));
+        Ok(Outcome::toast(format!("Saved {}", input.title)))
     }
 
+    /// Rendered by the server with what `list_reviews` returns, and the form
+    /// the page refused, if it refused one.
     #[view]
-    fn view() -> impl IntoView {
-        let reviews = use_loader(Self::LIST_REVIEWS, || ());
-        let save = use_action(Self::SAVE_REVIEW);
-        let save_example = move |_| {
-            spawn_local(async move {
-                let input = SaveReview {
-                    title: "Saved from custom admin".to_string(),
-                };
-                let options = AdminActionOptions::new().revalidate(Self::LIST_REVIEWS);
-                if let Ok(Some(saved)) = save.invoke(input, options).await {
-                    shopify::toast(&format!("Saved {}", saved.title));
+    fn view(list_reviews: ReviewList, form: FormState) -> Markup {
+        html! {
+            s-page heading="Reviews" {
+                @for review in &list_reviews.reviews {
+                    s-section heading=(review.title) {
+                        s-paragraph { (review.shop) }
+                    }
                 }
-            });
-        };
-
-        view! {
-            <s-page heading="Reviews">
-                {move || reviews.loading.get().then(|| view! { <s-spinner accessibilityLabel="Loading reviews" /> })}
-                {move || reviews.error.get().map(|error| view! { <s-banner tone="critical">{error.message}</s-banner> })}
-                {move || {
-                    reviews.data.get().map(|list| {
-                        list.reviews
-                            .into_iter()
-                            .map(|review| {
-                                view! {
-                                    <s-section heading=review.title>
-                                        <s-paragraph>{review.shop}</s-paragraph>
-                                    </s-section>
-                                }
-                            })
-                            .collect_view()
-                    })
-                }}
-                <s-button variant="primary" loading=move || save.pending.get() on:click=save_example>
-                    "Save example"
-                </s-button>
-                {move || save.error.get().map(|error| view! { <s-banner tone="critical">{error.message}</s-banner> })}
-            </s-page>
+                s-section heading="New review" {
+                    form method="post" {
+                        input type="hidden" name="_action" value=(Self::SAVE_REVIEW);
+                        s-stack gap="base" {
+                            s-text-field
+                                name="title"
+                                label="Title"
+                                value=(form.value_or("title", "Saved from custom admin"))
+                                error=[form.error("title")] {}
+                            s-button type="submit" variant="primary" { "Save" }
+                        }
+                    }
+                }
+            }
         }
     }
 }

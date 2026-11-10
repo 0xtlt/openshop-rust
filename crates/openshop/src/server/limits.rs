@@ -39,7 +39,9 @@ pub(crate) async fn shed_excess(State(slots): State<Arc<Semaphore>>, request: Re
     // Waiting would only move the queue into memory: the client is told to retry.
     let Ok(_slot) = slots.try_acquire_owned() else {
         let mut response = json_error(StatusCode::SERVICE_UNAVAILABLE, "Server is busy, try again");
-        response.headers_mut().insert(RETRY_AFTER, HeaderValue::from_static("1"));
+        response
+            .headers_mut()
+            .insert(RETRY_AFTER, HeaderValue::from_static("1"));
         return response;
     };
     next.run(request).await

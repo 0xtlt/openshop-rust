@@ -5,11 +5,10 @@
 //! ```
 //!
 //! The application runs on `http://localhost:3999`. `apps/preview` is what serves it:
-//! see there what a browser gets, and `PREVIEW_AS_SHOP` and `PREVIEW_UI_DIR`.
+//! see there what a browser gets, and `PREVIEW_AS_SHOP`.
 //!
 //! `mise run dev:custom` is the preview as a shop, run by `openshop dev`:
-//! started again when the workspace changes, with its own bundle built
-//! again by trunk, and a page that reloads by itself.
+//! started again when the workspace changes, and a page that reloads by itself.
 
 #[path = "../tests/common/mod.rs"]
 mod common;

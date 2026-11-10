@@ -21,10 +21,10 @@ use super::errors::{FlowCanceledError, FlowTimeoutError, LeaseLostError, SleepSi
 use super::step::{RunOwner, StepExecutor, error_message};
 use super::transient::retry;
 use crate::app::OpenShop;
+use crate::runtime::FlowLogger;
 use crate::runtime::logger;
 use crate::runtime::report::{self, Description, Panicked};
 use crate::runtime::time::to_iso;
-use crate::runtime::FlowLogger;
 use crate::server::connectors::Connectors;
 use crate::server::shopify_apps::DEFAULT_SHOPIFY_APP_HANDLE;
 use crate::shopify::client::ShopifyClient;
@@ -179,7 +179,7 @@ async fn finish_run(
 ) -> Result<bool> {
     retry(format!("recording the outcome of run {run_id}"), || async {
         let result = sqlx::query(
-        "UPDATE flow_runs SET \
+            "UPDATE flow_runs SET \
            status = $2, \
            error = CASE WHEN $2 = 'completed' THEN NULL ELSE COALESCE($3, error) END, \
            available_at = COALESCE($4, available_at), \
@@ -188,7 +188,7 @@ async fn finish_run(
            lease_id = NULL \
          WHERE id = $1 AND ($5::text IS NULL \
            OR (worker_id = $5 AND status = 'running' AND ($6::uuid IS NULL OR lease_id = $6)))",
-    )
+        )
         .bind(run_id)
         .bind(status)
         .bind(error)
@@ -334,12 +334,14 @@ async fn run_attempt(app: &OpenShop, opts: RunFlowOptions) -> Result<RunOutcome>
             }
         })
     });
-    let _guard = RunGuard {
-        abort,
-        heartbeat,
-    };
+    let _guard = RunGuard { abort, heartbeat };
 
-    let logger = FlowLogger::new(db.clone(), run_id_text.clone());
+    // The lines of the run say, in the console, what it runs for.
+    let logger = FlowLogger::new(db.clone(), run_id_text.clone()).with_fields(json!({
+        "shop": opts.shop,
+        "shopifyApp": shopify_app,
+        "flow": flow_name,
+    }));
     let attempt = match opts.attempt {
         Some(attempt) => attempt,
         None => resolve_run_attempt(db, run_id).await?,
@@ -369,14 +371,12 @@ async fn run_attempt(app: &OpenShop, opts: RunFlowOptions) -> Result<RunOutcome>
 
     let execution = async {
         let validated_input = match &flow.input {
-            Some(schema) => schema
-                .parse(input)
-                .map_err(|summary| {
-                    anyhow::Error::new(InvalidFlowInput {
-                        flow_name: flow_name.to_string(),
-                        summary,
-                    })
-                })?,
+            Some(schema) => schema.parse(input).map_err(|summary| {
+                anyhow::Error::new(InvalidFlowInput {
+                    flow_name: flow_name.to_string(),
+                    summary,
+                })
+            })?,
             None => input,
         };
 
@@ -413,7 +413,12 @@ async fn run_attempt(app: &OpenShop, opts: RunFlowOptions) -> Result<RunOutcome>
             },
             None => run.await,
         };
-        outcome.unwrap_or_else(|panic| Err(Panicked::of_attempt(format!("Flow panicked: {}", panic_message(&panic)))))
+        outcome.unwrap_or_else(|panic| {
+            Err(Panicked::of_attempt(format!(
+                "Flow panicked: {}",
+                panic_message(&panic)
+            )))
+        })
     };
 
     // The execution is raced against the halt, and dropped when it wins.

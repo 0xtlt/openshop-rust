@@ -9,11 +9,11 @@ use openshop::builder::{DiscountMode, Flow, FunctionTitle, FunctionType, Proxy, 
 use openshop::response::{Response, StatusCode};
 use openshop::testing::{AdminTestOptions, TestContext, admin_context, invoke_admin_function};
 use openshop::{
-    AdminContext, AdminMenuItem, App, CancellationToken, Concurrency, Cron, ErrorContext, FlowContext, FunctionConfig,
-    JsonMap, McpContext, McpPermission, McpResourceContent, McpRiskLevel, Model, OpenShopConfig, ProviderConfig,
-    ProxyContext, Result, RetryPolicy, RouteAuthContext, RouteAuthOutcome, RouteContext, RunOutcome, Uuid, Value,
-    WebhookContext, WorkerConfig, admin_page, app, flow, json, mcp_resource, mcp_tool, provider, proxy, response,
-    route, validators, webhook,
+    AdminContext, AdminMenuItem, App, CancellationToken, Concurrency, ContextLogger, Cron, ErrorContext, FlowContext,
+    FunctionConfig, JsonMap, McpContext, McpPermission, McpResourceContent, McpRiskLevel, Model, OpenShopConfig,
+    ProviderConfig, ProxyContext, Result, RetryPolicy, RouteAuthContext, RouteAuthOutcome, RouteContext, RunOutcome,
+    Uuid, Value, WebhookContext, WorkerConfig, admin_page, app, flow, json, mcp_resource, mcp_tool, provider, proxy,
+    response, route, validators, webhook,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -576,6 +576,7 @@ async fn a_webhook_handles_its_topics_with_a_typed_payload() {
         db: ctx.db.clone(),
         shopify: ctx.app.shopify_client("webhooks.myshopify.com", "default"),
         connectors: ctx.app.connectors("webhooks.myshopify.com", "default"),
+        logger: ContextLogger::new(json!({ "shop": "webhooks.myshopify.com" })),
         app: ctx.app.clone(),
     };
 

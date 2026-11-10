@@ -92,8 +92,13 @@ impl ShopifyClient {
         self
     }
 
+    /// The application this client belongs to.
+    pub(crate) fn app(&self) -> &OpenShop {
+        &self.app
+    }
+
     /// The shop, checked.
-    fn domain(&self) -> Result<String> {
+    pub(crate) fn domain(&self) -> Result<String> {
         strict_shop_domain(&self.shop).ok_or_else(|| {
             anyhow!(
                 "[openshop] Invalid shop domain for app \"{}\": expected <name>.myshopify.com",
@@ -136,8 +141,8 @@ impl ShopifyClient {
         Ok(resolved)
     }
 
-    /// The `shopify_api` client of `resolved`, pinned to the version of this
-    /// client if it has one.
+    /// The `shopify_api` client of `resolved`, with the `shopify_retry` of
+    /// the application, pinned to the version of this client if it has one.
     fn client_of(&self, resolved: &Resolved) -> Result<Shopify> {
         let client = match resolved {
             Resolved::None => bail!(
@@ -147,6 +152,10 @@ impl ShopifyClient {
             ),
             Resolved::Stored(client) => client.clone(),
             Resolved::Granted(granted, _) => granted.client.clone(),
+        };
+        let client = match &self.app.config().shopify_retry {
+            Some(retry) => client.with_retry(retry.clone()),
+            None => client,
         };
         Ok(match self.api_version {
             Some(version) => client.with_api_version(version),

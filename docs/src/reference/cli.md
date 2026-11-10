@@ -12,17 +12,27 @@ An OpenShop app has two command lines:
 | --- | --- | --- |
 | `openshop init [<dir>]` | — | Scaffold a new project from a template. |
 | `openshop init-ui` | — | Scaffold a custom admin page with its view. |
-| `openshop dev [cargo args]` | `cargo run [cargo args] -- dev`, restarted on changes | Start the development server. The admin UI reloads by itself. |
-| `openshop build [args]` | `openshop build-ui`, then `cargo build --release [args]` | Build the app for production. |
-| `openshop build-ui` | `trunk build --release` on the crate of the bundle | Build the admin UI bundle of an app whose admin pages have a view, into `dist/`. |
+| `openshop dev [cargo args]` | `cargo run [cargo args] -- dev`, restarted on changes | Start the development server. A page of the admin reloads by itself. |
+| `openshop build [args]` | `cargo build --release [args]` | Build the app for production. |
 | `openshop start [args]` | `cargo run --release -- start [args]` | Start the production web process. |
 | `openshop worker [args]` | `cargo run --release -- worker [args]` | Start the worker process. |
 | `openshop migrate [args]` | `cargo run -- migrate [args]` | Apply, generate, check, or inspect migrations. |
+| `openshop run <flow> [args]` | `cargo run -- run <flow> [args]` | [Run a flow once](#run-a-flow-or-a-cron-by-hand), for a shop or every shop, and wait for it. |
+| `openshop cron run <name>` | `cargo run -- cron run <name>` | [Run the flow of a cron once](#run-a-flow-or-a-cron-by-hand), for the shops of the cron. |
 | `openshop test [args]` | `cargo test [args]` | Run the app's tests. |
+| `openshop --version`, `-V` | — | Print the version of the CLI, and the commit it was built from. |
 
 An unknown command fails with status `2` and the usage text (see the end of
 this page). When `cargo` fails, `openshop` prints the error and exits with
 status `1`.
+
+`openshop`, `openshop help`, `--help` and `-h` print the usage text and exit
+with status `0`, and so do `--help` and `-h` after `init` or `init-ui`, which
+then do nothing else. A command forwarded to cargo passes
+them on with its arguments: `openshop run --help` is `cargo run -- run --help`,
+which the application binary answers with the usage of `run` (see
+[Command behavior](#command-behavior)); `openshop test --help` and
+`openshop build --help` print the help of cargo.
 
 Install the CLI from the repository. `--locked` builds it with the versions of
 the dependencies the repository tested:
@@ -31,8 +41,26 @@ the dependencies the repository tested:
 cargo install --locked --git https://github.com/0xtlt/openshop-rust openshop-cli
 ```
 
-The CLI is a convenience. Every command except `init`, `init-ui`,
-`build-ui`, and the file watcher of `dev` can be run with `cargo run -- <command>` or, in
+From a checkout of the repository, `cargo install --locked --path
+crates/openshop-cli --force`. `--force` replaces a CLI already installed:
+without it, cargo keeps the one there when the version number has not
+changed. Then check which one runs:
+
+```bash
+openshop --version
+```
+
+```text
+openshop 0.0.12-beta.0 (1b8a53a4cac9)
+```
+
+The version of the CLI, then the first 12 characters of the commit it was
+built from, which `openshop init` pins projects to; a CLI built without git
+prints the version alone. A CLI from before `--version` answers
+`Unknown command: --version`.
+
+The CLI is a convenience. Every command except `init`, `init-ui`, and the
+file watcher of `dev` can be run with `cargo run -- <command>` or, in
 production, by executing the compiled binary directly (`./my-app start`).
 
 ## Scaffold a project
@@ -76,15 +104,11 @@ tables of its models. It does not update an existing app. See the
 At most one of the four `--openshop-*` arguments; a second one fails with
 ``[openshop] Name one source for `openshop` ``. The commit the CLI was built from
 is the one `cargo install --git` took; for a CLI built from a local checkout,
-make sure it is pushed, or pass `--openshop-path`. The `Dockerfile` of a project
-with admin views installs the CLI of the `rev`, `tag` or `branch` of the
-manifest, so it follows any of them.
+make sure it is pushed, or pass `--openshop-path`.
 
 A non-empty target fails with
 `[openshop] Target directory is not empty: <path>`, before any question about
-the template. The `custom` and `public` templates have admin pages with a
-view, compiled to WebAssembly: install the toolchain once with
-`rustup target add wasm32-unknown-unknown` and `cargo install trunk`.
+the template.
 
 If `init` fails after it started writing, it removes the files it wrote and the
 directories it made, nothing else: a directory it shares with another `init`
@@ -99,41 +123,20 @@ openshop init-ui
 ```
 
 `init-ui` gives an app a first [custom admin page](custom-admin-pages.md) with
-a view, and what views are compiled with. Run it from the project root:
+a view, and `maud`, which views are written with. Run it from the project root:
 without a `Cargo.toml` in the current directory it fails with
 ``[openshop] No Cargo.toml here. Run `openshop init-ui` from the root of an OpenShop project.``
 
 The command writes `src/admin/hello.rs`, an example `/hello` page with a
-loader and its view, declares it in `src/admin/mod.rs`, and adds `dist/`,
-where the bundle is built, to `.gitignore`. When the page already exists it
-fails with `[openshop] src/admin/hello.rs already exists.`
+loader, an action and its view, and declares it in `src/admin/mod.rs`. When the
+page already exists it fails with
+`[openshop] src/admin/hello.rs already exists.`
 
-In `Cargo.toml`, it adds the `ui` feature to the `openshop` dependency and
-adds `leptos`. When `openshop` is not declared on one line of
-`[dependencies]`, the manifest is left as it is and the lines to add are
-printed.
+In `Cargo.toml`, it adds `maud` after `openshop`. When `[dependencies]` has
+no `openshop`, the manifest is left as it is and the line to add is printed.
 
-It then prints what to write in `src/main.rs`: `mod admin;`, the page in the
-`admin_pages` of `app!`, and the `admin_ui` setting.
-
-### Build the admin UI bundle
-
-```bash
-openshop build-ui
-```
-
-`build-ui` reads `src/` for the admin pages that have a `#[view]`. Without
-one, it prints
-`[openshop] No admin page has a view: the admin UI is the one built into openshop.`
-and builds nothing. Otherwise it writes the crate of the bundle under the
-`target` directory of the project, in `openshop-ui/<package>/`, and builds it
-with [trunk](https://trunkrs.dev) into `dist/`, optimized for size. The crate
-is made of the modules that declare the pages; see
-[What the bundle is made of](custom-admin-pages.md#what-the-bundle-is-made-of).
-
-A page with a view declared in `src/main.rs` or `src/lib.rs` is refused: the
-bundle is made of a module, such as `src/admin/`. `openshop build` runs the
-same build before `cargo build --release`.
+It then prints what to write in `src/main.rs`: `mod admin;` and the page in
+the `admin_pages` of `app!`.
 
 ## Command behavior
 
@@ -150,6 +153,8 @@ the current directory.
 | `migrate generate` | `--name=<name>`, `--allow-destructive`, `--allow-generate-in-production` | Writes the framework schema your project does not cover yet, and the statements that bring your tables in line with the registered models since the last generation; with `--name` and nothing else to write, writes an empty migration for your own changes. Updates `migrations/schema.snapshot.json`. Does not connect to the database. Refuses a migration that drops a table or a column, or converts a column in a way that can lose values, unless `--allow-destructive` is given. Blocked in production by default. See [Generated model migrations](database.md#generated-model-migrations). |
 | `migrate check` | `migrations/` directory | Fails when the committed migrations do not cover the framework schema, or when the models changed since the last generated migration. Does not connect to the database. |
 | `migrate status` | Database and `migrations/` directory | Prints the migrations folder and the applied and pending migrations. |
+| `run <flow>` | `--shop=<domain>` or `--all-shops`, `--input=<json>` | Queues a run of the flow for the shop, or for each shop, executes it with a worker of its own and waits until it is over. See [Run a flow or a cron by hand](#run-a-flow-or-a-cron-by-hand). |
+| `cron run <name>` | The name of a cron, its key `<flow>:<schedule>`, or its flow | Queues a run of the flow of the cron for each of its shops, with its input, then executes and waits as `run` does. |
 
 No command, `help`, `--help` and `-h` print the usage text and exit with status
 `0`. Any other first argument fails with `[openshop] Unknown command: <name>`
@@ -157,17 +162,28 @@ and the usage text on stderr, with status `2`. An unknown `migrate` subcommand
 fails with `[openshop] Unknown migrate command: <name>`. A failing command
 prints its error and exits with a non-zero status.
 
+`--help` or `-h` anywhere after a command prints its usage and exits with
+status `0`, and the command does not run: the configuration is not built and
+nothing connects to the database.
+
+| Command | `--help` prints |
+| --- | --- |
+| `run`, `run <flow> …` | `Usage: run <flow> [--shop=<domain> \| --all-shops] [--input=<json object>]` |
+| `cron`, `cron run`, `cron run <name>` | ``Usage: cron run <name>, the name of a cron, its key `<flow>:<schedule>`, or its flow`` |
+| `migrate`, `migrate generate`, `migrate check`, `migrate status` | `Usage: migrate [generate [--name=<name>] [--allow-destructive] [--allow-generate-in-production] \| check \| status]` |
+| `dev`, `start`, `worker` | The usage text. |
+
 Details:
 
-- Every command builds the configuration before it runs, including `migrate`.
-  Variables the configuration requires must be set for all of them.
+- Every command builds the configuration before it runs, including `migrate`
+  (but not its `--help`). Variables the configuration requires must be set for
+  all of them.
 - `dev` and `start` listen on `0.0.0.0` at `PORT` (default `3000`).
-- In `dev`, a page of the admin UI reloads by itself when the app has been
-  started again, or when the bundle it is served from disk has been built
-  again. The shell is served with a script that listens to
-  `GET /__openshop/reload`, a `text/event-stream` that names the version being
-  served, and reloads the page when it is no longer the one it was served.
-  `start` serves neither the script nor the route.
+- In `dev`, a page of the admin reloads by itself when the app has been
+  started again. A page is served with a script that listens to
+  `GET /__openshop/reload`, a `text/event-stream` that names the server being
+  served from, and reloads the page when it is no longer the one it was served
+  by. `start` serves neither the script nor the route.
 - `--concurrency=N` must be written with `=`. When the flag is absent, the
   worker uses `worker.concurrency` from the configuration, then the default of
   `5`. A value that is not a positive integer stops the command with
@@ -181,9 +197,9 @@ Details:
   [Database and migrations](database.md#client-owned-migrations) for the
   migration contract and [Deploy to production](../guides/deploy-production.md)
   for the sequence.
-- `dev`, `start`, `worker`, `migrate`, and `migrate status` connect to
-  `DATABASE_URL` and fall back to the local development database when it is
-  unset. See [Environment variables](environment-variables.md).
+- `dev`, `start`, `worker`, `migrate`, `migrate status`, `run` and `cron run`
+  connect to `DATABASE_URL` and fall back to the local development database
+  when it is unset. See [Environment variables](environment-variables.md).
 
 `dev`, `start`, and `worker` stop on `SIGINT` or `SIGTERM`. The HTTP server
 stops accepting connections and waits up to five seconds for requests in
@@ -192,6 +208,75 @@ lease duration (`30` seconds by default).
 
 `start` runs the cron scheduler and there is no leader election: run a single
 `start` process unless duplicate cron dispatches are acceptable.
+
+## Run a flow or a cron by hand
+
+```bash
+openshop run syncOrders                                   # the one shop installed
+openshop run syncOrders --shop=my-store.myshopify.com --input='{"limit":10}'
+openshop run syncOrders --all-shops
+openshop cron run "Nightly sync"                          # the name of the cron
+openshop cron run 'syncOrders:0 2 * * *'                  # its key, <flow>:<schedule>
+```
+
+`run` and `cron run` run a flow once, now, against the database of the app,
+whatever the admin shows: the built-in pages may be hidden
+(`AdminPagesConfig::none()`) and the operator dashboard is read-only. A run
+goes the way a run of the scheduler goes:
+
+1. The shops are the ones a cron finds: a shop of `shopify.apps` runs once per
+   app it is installed for, a shop without an installation runs under the app
+   `default`, and `--all-shops` is every installed shop plus the
+   [`client_credentials_shop`](configuration.md#settings) when it has a token.
+   `cron run` takes the shops of the cron and its input, and skips a shop that
+   turned the cron off, as its schedule would.
+2. A run is queued per shop, as `dispatch` and the scheduler queue one: the
+   input is checked against the schema of the flow, a flow that rejects a
+   second run refuses it while one is active for the shop, and the retry
+   policy is the one of the flow. No occurrence of a schedule is claimed: the
+   cron still fires at its next time.
+3. A worker of the command executes the runs it queued, and only them: the
+   claim, the lease, the heartbeat, the retries and the timeout of the
+   `worker` command. Another worker may take one first, such as the one of
+   `openshop dev` running beside it; the command waits for it the same way.
+
+The flow runs with its real providers and Shopify client, and its lines, its
+steps and its outcome are the ones of any run: in the console, in the admin
+and in `/ops`. The command prints the ID of each run, then how it ended:
+
+```text
+[openshop] Queued run 0b8f5c1e-… of "syncOrders" for my-store.myshopify.com
+INFO Flow "syncOrders" started context={"flowName":"syncOrders","shop":"my-store.myshopify.com",…}
+[openshop] Run 0b8f5c1e-… for my-store.myshopify.com: completed
+```
+
+It waits for the retries a flow declares, and says each failed attempt. A run
+that sleeps (`ctx.step.sleep`) is left asleep: the command says until when,
+and a worker of the application (`dev`, `worker`) wakes it. Ctrl-C stops the
+worker of the command, which hands back to the queue the runs it was
+executing, as a stopping `worker` does.
+
+| Argument of `run` | Behavior |
+| --- | --- |
+| `<flow>` | The name of the flow, as `#[flow]` gives it: `syncOrders` for `sync_orders`. An unknown name fails with `Flow "…" not found. Available: …`. |
+| `--shop=<domain>`, `--shop <domain>` | The shop: `my-store.myshopify.com`, or `my-store`. Anything else fails with `[openshop] --shop must be a *.myshopify.com domain, got "…"`. |
+| `--all-shops` | Every shop the app is installed for. Not with `--shop`. |
+| Neither | The one shop the app is installed for. With none, or several, the command fails and names them: `[openshop] Name the shop to run "syncOrders" for, with --shop=<domain> or --all-shops: 2 shops have installed it (a.myshopify.com, b.myshopify.com)`. |
+| `--input=<json>`, `--input <json>` | The input of the run, a JSON object. `{}` without it. |
+
+`cron run <name>` finds the cron by its name (`.name("Nightly sync")`), else
+by its key, `<flow>:<schedule>` as the admin shows it, else by its flow when
+one cron runs it. Two crons of one flow are named by their key: the error
+lists them. A cron of `CronShops::Global` runs once, for the shop
+`__global__`.
+
+The command fails, with status `1`, when a run could not be queued, failed
+for good or was canceled: `[openshop] 1 of 2 runs of "syncOrders" did not
+complete`. Like `dev`, it loads `.env` first, and stores secrets in plaintext
+without an `ENCRYPTION_KEY` unless the environment is a production one. Like
+`dev`, it pushes the schema first; in production it pushes nothing, and
+refuses to run against a database that is behind its migrations, as `worker`
+does.
 
 ## Development process
 
@@ -210,26 +295,70 @@ not start a second `dev` process alongside it.
   `-p <package>`, they are the crates of that package, itself included; in the
   root of a workspace that is not a package, the ones of its default members;
 - hidden files and directories and names ending in `~` are ignored;
-- changes are debounced for 500 ms, then the process receives `SIGTERM`, is
-  killed if it has not exited after 35 seconds, and is started again;
+- changes are debounced for 500 ms, then the app receives `SIGTERM`, is
+  killed if it has not exited after 35 seconds, and is started again once
+  every process of it is gone;
 - changes that arrive during a restart are coalesced into one more restart;
 - arguments after `dev` are passed to `cargo run`, for example
-  `openshop dev -p my-app` in a workspace;
-- when an admin page has a view, it also writes the crate of the admin UI
-  bundle, as `build-ui` does, runs `trunk watch` on it to rebuild the bundle
-  when a page changes, or a crate on disk the project is compiled with, and,
-  unless `OPENSHOP_UI_DIR` is already set, starts the app with
-  `OPENSHOP_UI_DIR` pointing at `dist`. A view added or removed while `dev`
-  runs is taken into account at the next change. If `trunk` cannot be started,
-  a warning is printed and the bundle is not rebuilt.
+  `openshop dev -p my-app` in a workspace.
 
-The page open in the browser follows: it reloads once the app is back, and
-again if the bundle is ready after it. A change that does not compile leaves
-the page as it is, and the error in the terminal.
+The page open in the browser follows: it reloads once the app is back. A
+change that does not compile leaves the page as it is, and the error in the
+terminal.
 
-Only `dev` loads the project-root `.env` file, before it builds the
-configuration. Set variables explicitly for build, migration, test, and
-production commands. Existing process variables take precedence over `.env`
+A project still on the Leptos admin, which the framework no longer has, is
+said first, with what is left of it, then started as it is:
+
+```text
+[openshop] This project is still on the Leptos admin, which this version of OpenShop no longer has:
+[openshop]   Cargo.toml: `openshop` with the feature `ui`, in [dependencies]
+[openshop]   Cargo.toml: the dependency `leptos`, in [dependencies]
+[openshop]   src/admin/home.rs:1: leptos::
+[openshop]   src/main.rs:12: UiSource::Dir
+[openshop] The admin is now rendered by the server, without trunk or a bundle. Move the project with the
+[openshop] guide "Migrate to the server-rendered admin" (docs/src/guides/migrate-to-server-rendered-ui.md
+[openshop] of the OpenShop repository), or keep the release it depends on and the CLI of that release.
+```
+
+It looks at `[dependencies]` and `[workspace.dependencies]` of `Cargo.toml`,
+and at the first line of each file of `src/` that names `UiSource::Dir`,
+`UiSource::Assets`, `UiSource::Embedded`, `openshop::ui` or `leptos::`. See
+[Migrate to the server-rendered admin](../guides/migrate-to-server-rendered-ui.md).
+
+### Stopping the app
+
+`cargo run` is not always the app: cargo replaces itself with the app on
+Unix, but the `cargo` on the `PATH` may be a wrapper that runs the real one as
+its child, such as the shim of a tool manager, and so may a `runner` of the
+cargo configuration. On Unix, `openshop dev` therefore starts `cargo run` in a
+process group of its own, which everything it starts joins, and stops the
+group: `SIGTERM` to every process of it, `SIGKILL` to those left after 35
+seconds, then it waits until none is left. The app does not read the
+terminal's input, and Ctrl-C, `SIGTERM` or `SIGHUP` (the terminal closing) to
+`openshop dev` stop it the same way. On Windows, cargo stops what it started.
+
+Before it starts the app, `openshop dev` checks that nothing answers on its
+port on this machine (`127.0.0.1` and `[::1]`): `PORT`, else the `PORT` of
+`.env`, else 3000. A port still taken after 5 seconds is said loudly, with the
+process that holds it when `lsof` can name it:
+
+```text
+[openshop] !!! Port 3000 is still taken, by another process, PID 31654 (my-app).
+[openshop] !!! The app starting now cannot listen on it: what answers on http://localhost:3000 is NOT this code.
+[openshop] !!! Stop that process (`lsof -nP -iTCP:3000 -sTCP:LISTEN` names it), then save a file to restart.
+```
+
+The app is started anyway, and fails with `Address already in use`. An app
+that exits by itself, because it does not build, does not start or cannot
+listen, is said too: nothing runs until the next change.
+
+```text
+[openshop] !!! The app exited (exit status: 1): nothing of the current code is serving. Fix what it printed, then save a file to restart it.
+```
+
+Only `dev`, `run` and `cron` load the project-root `.env` file, before they
+build the configuration. Set variables explicitly for build, migration, test,
+and production commands. Existing process variables take precedence over `.env`
 in development. See [Environment variables](environment-variables.md).
 
 ## Tests

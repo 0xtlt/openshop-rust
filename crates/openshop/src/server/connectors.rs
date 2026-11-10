@@ -8,12 +8,14 @@ use futures::future::BoxFuture;
 use indexmap::IndexMap;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
-use serde_json::Value;
+use serde_json::{Value, json};
 use tokio::sync::OnceCell;
 
 use crate::app::OpenShop;
+use crate::runtime::context_logger::ContextLogger;
 use crate::runtime::logger;
 use crate::server::shop_domain::normalize_shop_domain;
+use crate::server::shopify_apps::ResolvedShopifyApp;
 use crate::shopify::client::ShopifyClient;
 use crate::shopify::client_credentials::Grant;
 use crate::types::{ProviderCall, RouteShopContext, RouteShopInput};
@@ -213,14 +215,22 @@ pub(crate) async fn is_installed_shop(
     }
 }
 
+/// The shop a route names, as a shop domain, and the Shopify app that serves
+/// it: the one `input` names, or the only one. Whether the shop has the app
+/// installed is not asked.
+pub(crate) fn resolve_route_shop(app: &OpenShop, input: RouteShopInput) -> Result<(String, &ResolvedShopifyApp)> {
+    let Some(shop) = normalize_shop_domain(&input.shop) else {
+        bail!("[openshop] Invalid shop domain");
+    };
+    Ok((shop, app.apps().by_handle(input.shopify_app.as_deref())?))
+}
+
 /// Resolves an actively installed shop and its connectors. Nothing vouches
 /// for the shop of the input: only the shop of the `client_credentials_shop` setting
 /// may get a token with the client credentials grant here.
 pub async fn resolve_shop_context(app: &OpenShop, input: RouteShopInput) -> Result<RouteShopContext> {
-    let Some(shop) = normalize_shop_domain(&input.shop) else {
-        bail!("[openshop] Invalid shop domain");
-    };
-    let shopify_app = app.apps().by_handle(input.shopify_app.as_deref())?.handle.clone();
+    let (shop, shopify_app) = resolve_route_shop(app, input)?;
+    let shopify_app = shopify_app.handle.clone();
 
     if !is_installed_shop(app, &shopify_app, &shop, Some(&Grant::Background)).await? {
         bail!("[openshop] Shop is not actively installed");
@@ -230,6 +240,7 @@ pub async fn resolve_shop_context(app: &OpenShop, input: RouteShopInput) -> Resu
         db: app.db().clone(),
         shopify: ShopifyClient::new(app, &shop, &shopify_app),
         connectors: Connectors::for_shop(app, &shop, &shopify_app),
+        logger: ContextLogger::with_category(json!({ "shop": shop, "shopifyApp": shopify_app }), "route"),
         app: app.clone(),
         shop,
         shopify_app,

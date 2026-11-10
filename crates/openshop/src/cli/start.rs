@@ -9,13 +9,10 @@ use crate::engine::Scheduler;
 use crate::runtime::RuntimeEnv;
 use crate::server::{ServerOptions, UiSource, listen};
 
-/// The admin UI to serve: `OPENSHOP_UI_DIR`, then the bundle set on the
-/// configuration, then the one built into the framework.
+/// The admin to serve: the one the configuration sets, else the one the
+/// server renders.
 pub(crate) fn ui_source(config: &OpenShopConfig) -> UiSource {
-    match std::env::var_os("OPENSHOP_UI_DIR").filter(|directory| !directory.is_empty()) {
-        Some(directory) => UiSource::Dir(directory.into()),
-        None => config.admin_ui.clone().unwrap_or(UiSource::Embedded),
-    }
+    config.admin_ui.clone().unwrap_or_default()
 }
 
 /// Serves the API, the admin UI and the cron scheduler. Flows are executed by

@@ -1,9 +1,12 @@
 # Logging
 
-OpenShop has two logging surfaces:
+OpenShop has three logging surfaces:
 
 - flow logs written through `ctx.logger` and stored in PostgreSQL;
-- runtime logs written by the web process, worker, scheduler, and server.
+- the lines of a webhook handler or of an admin page, written through their
+  own `ctx.logger` and sent to the runtime logger with the shop they run for;
+- runtime logs written by the web process, worker, scheduler, and server, and
+  by the application through `tracing`, which `openshop` re-exports.
 
 ## Flow logger
 
@@ -39,9 +42,18 @@ payload is a JSON value (`serde_json::Value`), usually
 `json!({ "count": 3 })`; a line logged without one is stored with an empty
 object.
 
-Each line is sent to the runtime logger as `[LEVEL] message` and stored in the
-`logs` table with the time it was emitted. Lines are written in emission order
-by a background task:
+Each line is sent to the runtime logger at its level, the message as it is,
+with its payload and what the run is: `shop`, `shopifyApp`, `flow` and `runId`.
+A key of the payload wins over a field of the same name. The default logger
+writes:
+
+```text
+INFO Orders pushed context={"source":"shopify","shop":"demo.myshopify.com","shopifyApp":"default","flow":"syncOrders","runId":"3f1c…"}
+```
+
+The line is also stored in the `logs` table, with its payload alone (the run
+is the row it belongs to) and the time it was emitted. Lines are written in
+emission order by a background task:
 logging never blocks or fails a flow. A line waits up to 50 ms for the next
 ones, which are written with it in one statement, and the lines a flow logged
 are stored before the outcome of its run is. `flush().await` writes the lines
@@ -70,6 +82,62 @@ message, without their payload.
 
 Do not log access tokens, provider passwords, session tokens, OAuth state, or
 personal data that is not required for diagnosis.
+
+## Handler logger
+
+A webhook handler, the loaders, actions and access rules of an admin page, and
+a server route have a `ctx.logger` too, a `ContextLogger`, with the methods of
+the flow logger:
+
+```rust,ignore
+use openshop::prelude::*;
+
+#[webhook("orders/create")]
+pub async fn orders_create(ctx: WebhookContext) -> Result<()> {
+    ctx.logger.info_with("Order received", json!({ "id": ctx.payload["id"] }));
+    Ok(())
+}
+```
+
+A handler has no run: its lines are not stored in the database and the admin
+does not show them. Each one goes to the runtime logger at its level, as the
+lines of a flow do, with its payload and what the handler runs for:
+
+| Context | Fields added to the payload |
+| --- | --- |
+| `WebhookContext` | `shop`, `shopifyApp`, `topic` |
+| `AdminContext` | `shop`, `shopifyApp`, `requestId` (the one of the error response and of the line OpenShop logs for the call) |
+| `RouteContext`, `RouteAuthContext` | `route`, the method and the declared path: `GET /welcome` |
+| `RouteShopContext`, what `ctx.for_shop(…)` of a route returns | `route`, `shop`, `shopifyApp` |
+
+A key of the payload wins over a field of the same name, and a payload that is
+not an object is logged under `payload`. When the application reports to
+[Sentry](sentry.md), the lines are the breadcrumbs of a failure of the handler,
+without their payload, as the lines of a run are.
+
+A context built by hand, in a test, takes `ContextLogger::new(json!({ … }))`,
+whose fields are added to every line, or `ContextLogger::default()`. A
+`FlowLogger` built by hand, `FlowLogger::new(db, run_id)`, adds `runId`;
+`.with_fields(json!({ … }))` adds more.
+
+## `tracing`
+
+`openshop::tracing` is the [`tracing`](https://docs.rs/tracing) crate OpenShop
+logs with, and the prelude names it: an application logs to the runtime logger
+without a dependency of its own.
+
+```rust,ignore
+use openshop::prelude::*;
+
+pub fn report(shop: &str, synced: usize) {
+    tracing::info!(shop, synced, "Orders synced");
+}
+```
+
+Its lines go through the subscriber `APP.main()` installs (see
+[Runtime logger](#runtime-logger)), with the filter of `RUST_LOG`. Prefer
+`ctx.logger` in a flow, whose lines are kept with its run, and in a handler,
+whose lines say what they ran for.
 
 ## Log query syntax
 

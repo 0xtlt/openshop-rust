@@ -23,7 +23,7 @@ Before editing:
 
 ## Core Rules
 
-- Use `cargo` for workspace commands. `crates/openshop-ui` is a separate workspace built with `trunk`.
+- Use `cargo` for workspace commands. The admin is rendered by the server (`maud` and one hand-written script, `openshop.js`): there is no WebAssembly, no trunk and no JavaScript build.
 - Declare building blocks where they are written, with an attribute on the function or the struct itself, and list them in the `app!` declaration of the application: `#[flow]`, `#[webhook]`, `#[proxy]`, `#[route]`, `#[mcp_tool]` and `#[mcp_resource]` on `async` functions, `#[admin_page(..)]` on an `impl` block, `#[derive(ProviderConfig)]` with `#[provider]`, `#[derive(FunctionConfig)]` with `#[function(..)]`, and `#[derive(Model)]` with `#[model("table")]` on structs. Do not write functions that build a block or the configuration. Keep the builder (`OpenShopConfig::builder()`, `.add::<Block>()`, `Flow::new(..)`, `AdminPage::new(..)`…) for tests and for blocks only known at run time. See `references/architecture.md`.
 - Import application code with `use openshop::prelude::*;` and list explicitly only what the prelude lacks (`openshop::testing::TestContext`, `serde::Deserialize`, `std::time::Duration`). Run the application with `fn main() -> Result<()> { APP.main() }`. Do not add `schemars` or `tokio` to an application.
 - Mark the input of a flow, of an MCP tool and of an admin loader or action with `#[input]`, above its `#[derive(..)]`. Its fields are camel case outside Rust. The payload of a webhook is not an input: derive `Deserialize` on it.

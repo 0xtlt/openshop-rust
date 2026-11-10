@@ -118,7 +118,9 @@ async fn run_admin_graphql(ctx: McpContext, input: JsonMap) -> Result<Value> {
             return Err(public_error("shop must be a myshopify.com domain"));
         };
         if requested != shop {
-            return Err(public_error(format!("This token can only act on its own shop \"{shop}\"")));
+            return Err(public_error(format!(
+                "This token can only act on its own shop \"{shop}\""
+            )));
         }
     }
     let Some(query) = string_input(&input, "query") else {
@@ -127,10 +129,12 @@ async fn run_admin_graphql(ctx: McpContext, input: JsonMap) -> Result<Value> {
     let variables = object_input(&input, "variables");
     let api_version = api_version_input(&input)?;
 
-    let not_installed = || public_error(format!(
+    let not_installed = || {
+        public_error(format!(
             "Shop \"{shop}\" is not installed for app \"{}\"",
             ctx.shopify_app
-        ));
+        ))
+    };
     let uninstalled: bool = sqlx::query_scalar(
         "SELECT EXISTS (SELECT 1 FROM installations \
          WHERE app_handle = $1 AND shop = $2 AND uninstalled_at IS NOT NULL)",
@@ -249,9 +253,7 @@ async fn run_flow_tool(ctx: McpContext, input: JsonMap) -> Result<Value> {
     }
     let result = ctx
         .app
-        .dispatch_flow(
-            DispatchOptions::for_scope(flow, &ctx).input(object_input(&input, "input")),
-        )
+        .dispatch_flow(DispatchOptions::for_scope(flow, &ctx).input(object_input(&input, "input")))
         .await?;
     Ok(serde_json::to_value(result)?)
 }
@@ -618,7 +620,9 @@ mod tests {
     fn validates_api_version_input() {
         let input = |value: Value| value.as_object().cloned().unwrap();
         assert_eq!(
-            api_version_input(&input(json!({ "apiVersion": "2026-07" }))).unwrap().to_string(),
+            api_version_input(&input(json!({ "apiVersion": "2026-07" })))
+                .unwrap()
+                .to_string(),
             "2026-07"
         );
         // Older than the versions `shopify_api` calls.

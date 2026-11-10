@@ -1,40 +1,29 @@
-//! Response compression (gzip or Brotli) for bodies large enough to benefit from it.
+//! Response compression (gzip or Brotli) for bodies large enough to benefit
+//! from it, while they are sent: [`CompressLarge`].
 
 use std::convert::Infallible;
 use std::future::ready;
 use std::task::{Context, Poll};
 
 use axum::extract::Request;
-use axum::http::{HeaderMap, HeaderValue};
+use axum::http::HeaderValue;
 use axum::http::header::{ACCEPT_ENCODING, CONTENT_ENCODING, ETAG};
 use axum::response::{IntoResponse, Response};
 use futures::future::BoxFuture;
 use tower::{Service, ServiceExt, service_fn};
-use tower_http::compression::Compression;
 use tower_http::compression::predicate::{Predicate, SizeAbove};
+use tower_http::compression::{Compression, CompressionLevel};
 
 /// Smaller responses are sent as they are: compressing a body that fits in one
 /// packet costs far more CPU than it saves, and often makes it larger.
 const MIN_COMPRESSED_BODY_BYTES: u16 = 1024;
 
-/// Whether a body of this length is large enough to be compressed.
-pub(crate) fn is_compressible(body_len: usize) -> bool {
-    body_len > usize::from(MIN_COMPRESSED_BODY_BYTES)
-}
-
-/// Whether the request accepts an encoding this server compresses with.
-pub(crate) fn accepts_compression(headers: &HeaderMap) -> bool {
-    headers
-        .get_all(ACCEPT_ENCODING)
-        .iter()
-        .filter_map(|value| value.to_str().ok())
-        .flat_map(|value| value.split(','))
-        .map(|coding| coding.split(';').next().unwrap_or_default().trim())
-        .any(|coding| coding.eq_ignore_ascii_case("gzip") || coding.eq_ignore_ascii_case("br") || coding == "*")
-}
+/// The level of a body compressed while it is sent: tower-http's default,
+/// Brotli quality 4 and gzip level 6.
+const STREAMED_LEVEL: CompressionLevel = CompressionLevel::Default;
 
 /// The weak form of an ETag.
-pub(crate) fn weak_etag(etag: &HeaderValue) -> HeaderValue {
+fn weak_etag(etag: &HeaderValue) -> HeaderValue {
     if etag.as_bytes().starts_with(b"W/") {
         return etag.clone();
     }
@@ -85,9 +74,24 @@ where
                 return Ok(response);
             }
             let respond = service_fn(move |_: Request<()>| ready(Ok::<_, Infallible>(std::mem::take(&mut response))));
-            let mut compressed = Compression::new(respond).oneshot(accepted).await?.into_response();
+            let mut compressed = Compression::new(respond)
+                .quality(STREAMED_LEVEL)
+                .oneshot(accepted)
+                .await?
+                .into_response();
             weaken_etag(&mut compressed);
             Ok(compressed)
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_compressed_body_has_a_weak_etag() {
+        assert_eq!(weak_etag(&HeaderValue::from_static("\"a\"")), "W/\"a\"");
+        assert_eq!(weak_etag(&HeaderValue::from_static("W/\"a\"")), "W/\"a\"");
     }
 }

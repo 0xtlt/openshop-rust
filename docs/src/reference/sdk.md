@@ -39,18 +39,20 @@ framework and its tests and can change without notice.
 | `openshop::db` | `connect`, `connect_to`, `pool_options`, models, and the `migrate` functions | [Database](database.md) |
 | `openshop::engine` | `Worker`, `Scheduler`, `run_flow`, `cancel_run`, `StepExecutor`, default policies, `SleepSignal`, and `LeaseLostError` | [Flows](flows.md), [Errors](errors.md) |
 | `openshop::admin` | Server side of experimental custom admin pages | [Custom admin pages](custom-admin-pages.md) |
+| `openshop::billing` | The subscriptions of a shop to the app with Shopify's managed pricing, the plan guard of an admin page, the pricing page, and the `app_subscriptions/update` payload | [Billing](billing.md) |
 | `openshop::response` | Helpers and re-exports for building HTTP responses | [Public server routes](server-routes.md) |
 | `openshop::server` | `router`, `listen`, and `serve`, to embed the HTTP server | [Server, worker, and scheduler](#server-worker-and-scheduler) |
 | `openshop::validators` | Ready-made field validators | [Providers](providers.md#validators) |
 | `openshop::runtime` | `RuntimeEnv`, the runtime logger, and `Transport`, what Shopify requests go through | [Logging](logging.md) |
-| `openshop::shopify` | `ShopifyClient`, the `shopify_api` types it takes: `ApiVersion`, `Operation`, `IntoVariable`, `Page`, and `input!` | [Typed GraphQL](graphql.md) |
+| `openshop::shopify` | `ShopifyClient`, the `shopify_api` types it takes: `ApiVersion`, `Operation`, `IntoVariable`, `Page`, `RetryPolicy` (of the [`shopify_retry`](configuration.md#shopify-client-retries) setting), and `input!` | [Typed GraphQL](graphql.md) |
 | `openshop::shopify_api` | The `shopify_api` crate, which the code of `graphql!` names: `Error`, `Shopify`… | [Typed GraphQL](graphql.md) |
-| `openshop::testing` | Contexts, provider fakes, and signing helpers (cargo feature `testing`) | [Testing](testing.md) |
+| `openshop::testing` | Contexts, provider fakes, the Admin API answered by operation name (`FakeShopify`), and signing helpers (cargo feature `testing`) | [Testing](testing.md) |
 
-`openshop::ui` (cargo feature `ui`) is what the view of a custom admin page
-uses: `use_loader`, `use_action`, and the App Bridge helpers. The modules of
-such pages are also compiled to WebAssembly, into the admin UI bundle of the
-application. See [Custom admin pages](custom-admin-pages.md#views).
+`openshop::admin` is what a custom admin page uses beside its attribute:
+`Outcome`, what an action answers, `FormState`, the form a view shows again,
+and `PageRequest`, for a view made by hand. A view returns `maud::Markup`
+(re-exported as `openshop::Markup`), written with `maud::html!`. See
+[Custom admin pages](custom-admin-pages.md#views).
 
 ## The prelude
 
@@ -64,9 +66,9 @@ an application use:
 | Derives, with the trait of the same name | `Model`, `ProviderConfig`, `FunctionConfig` |
 | Contexts | `FlowContext`, `WebhookContext`, `ProxyContext`, `RouteContext`, `RouteAuthContext`, `AdminContext`, `McpContext`, and `ShopScope`, the trait of the contexts that belong to a shop |
 | Errors | `Result`, `Context`, `anyhow!`, `bail!`, and `InvalidInput`, which a proxy or a route answers with `422` |
-| Types | `Value`, `Uuid`, `Liquid`, `RouteAuthOutcome`, `McpPermission`, `McpRiskLevel`, `RunOutcome`, `QueuedRun` |
+| Types | `Value`, `Uuid`, `Liquid`, `RouteAuthOutcome`, `McpPermission`, `McpRiskLevel`, `RunOutcome`, `QueuedRun`, and for the pages of the admin `Markup`, `Outcome`, `FormState` |
 | Macros | `graphql!`, `liquid!`, `json!` |
-| Modules | `validators`, `response` |
+| Modules | `validators`, `response`, and the `tracing` crate |
 
 `#[openshop::test]` is not part of it:
 its name would hide `#[test]`, so it is written with its path. The samples of
@@ -77,7 +79,6 @@ this documentation import the prelude, then name what it lacks, such as
 
 | Feature | Default | Effect |
 | --- | --- | --- |
-| `embedded-ui` | Yes | Embeds the prebuilt admin UI bundle in the binary. Without it, `UiSource::Embedded` serves nothing. |
 | `sentry` | Yes | Compiles the [Sentry](sentry.md) integration: the `sentry` setting of `app!`, `SentryConfig`, and the SDK re-exported as `openshop::sentry`. Without it the Sentry SDK is not a dependency. |
 | `testing` | No | Compiles `openshop::testing` and `#[openshop::test]`. Enable it under `[dev-dependencies]`. |
 
@@ -96,6 +97,7 @@ app does not need to depend on them directly:
 | `Uuid` | `uuid` |
 | `CancellationToken` | `tokio_util` |
 | `chrono` | `chrono` |
+| `tracing` | `tracing`, which the runtime logger forwards to; see [Logging](logging.md#tracing) |
 | `serde` | `serde` |
 | `JsonSchema`, `schemars` | `schemars` |
 | `sentry` | The Sentry SDK (feature `sentry`); see [Report from your own code](sentry.md#report-from-your-own-code) |
@@ -255,10 +257,10 @@ carries one as `ctx.app`.
 | Constructor | Behavior |
 | --- | --- |
 | `OpenShop::new(config, db, env)` | Uses an existing `PgPool` and `RuntimeEnv`. |
-| `OpenShop::with_transport(config, db, env, transport)` | Same, with another `shopify_api` `Transport` for every exchange with Shopify, such as `testing::MockTransport`. It must not follow redirections: every call carries a secret, a token or a code, and a `3xx` is returned as the answer, as the default `ReqwestTransport` does. |
+| `OpenShop::with_transport(config, db, env, transport)` | Same, with another `shopify_api` `Transport` for every exchange with Shopify, such as `testing::MockTransport`, or an in-memory simulator of Shopify that answers at the addresses of the [Shopify endpoints](../guides/custom-shopify-endpoints.md). It must not follow redirections: every call carries a secret, a token or a code, and a `3xx` is returned as the answer, as the default `ReqwestTransport` does. |
 
-Both validate the configuration and resolve the Shopify apps, and fail
-when either is invalid. `APP.main()` and `APP.run()` create the handle for
+Both validate the configuration, resolve the Shopify apps and the Shopify
+endpoints, and fail when any is invalid. `APP.main()` and `APP.run()` create the handle for
 you.
 
 | Method | Returns |
@@ -270,6 +272,9 @@ you.
 | `connectors(shop, shopify_app)` | `Connectors`: the providers of the shop, bound to the configuration it saved. The configuration is read at the first call. |
 | `shopify_client(shop, shopify_app)` | `ShopifyClient` of the shop. The access token is read at the first request. |
 | `mcp_registry()` | Core and application MCP permissions, tools, and resources |
+| `shopify_endpoints()` | `&ShopifyEndpoints`: the [Shopify endpoints](../guides/custom-shopify-endpoints.md) in use, each field from the configuration, else from its environment variable, written in full. `None` is Shopify's. |
+| `billing_source()` | `BillingSource`: where billing reads the plans, `PartnerApi` when a Partner ID and a token are set, `AdminApi` otherwise. See [Billing](billing.md#where-the-plan-is-read). |
+| `partner_api()` | `Option<&PartnerApiClient>`: the Partner API, when it is set. `graphql(query, variables)` runs any query of it; `url()`, `partner_id()` and `plan_ttl()` say how it is set. |
 
 In a handler, use `ctx.shopify` and `ctx.connectors`: every context that
 belongs to a shop has them. `connectors` and `shopify_client` are for code
@@ -296,7 +301,11 @@ pub async fn orders_create(ctx: WebhookContext) -> Result<()> {
 `ctx` is any context that belongs to a shop: the context of a flow, of a
 webhook, of an app proxy, of an admin function, of an MCP tool or resource, or
 what `ctx.for_shop(…)` returns in a server route. These implement the
-`ShopScope` trait. The second argument is the input type of the flow, which
+`ShopScope` trait, which also gives `ctx.app_handle()?`, the handle of the app
+on Shopify (an error without a `handle` in `shopify.app.toml`), and `ctx.admin_url(path)`, a page of the admin of the shop (see
+[Billing](billing.md#the-pricing-page-and-the-pages-of-the-admin)); a
+`RouteContext` gives them for a shop it names, `ctx.app_handle(shop)` and
+`ctx.admin_url(shop, path)`, with no installation needed. The second argument is the input type of the flow, which
 implements `Serialize`; [`#[input]`](flows.md#input) derives it. A flow without
 input takes the context alone: `nightly_cleanup::dispatch(&ctx)`.
 
@@ -390,6 +399,10 @@ async fn product_title(ctx: &WebhookContext, id: &str) -> Result<Option<String>>
 | `client.graphql(query, variables)` | `variables`: anything that serializes to an object, or `()` for none. Returns Shopify's `data` object as a `Value`. |
 | `client.execute(graphql!(…))` | An operation checked against Shopify's schema at compile time, with typed variables and a typed result. See [Typed GraphQL](graphql.md). |
 | `client.api().await?` | The `shopify_api::Shopify` client of the shop: `paginate`, bulk operations, webhook subscriptions, `execute_response`. |
+| `client.active_plans().await?` | The plans of the shop, read from the Partner API when it is set, else from the Admin API. See [Billing](billing.md#the-plans-of-a-shop). |
+| `client.plan_among(&["pro", "plus"]).await?` | `Option<Plan>`: the plan among these the shop has, read as `billing::require_plan` reads it (a kept "no plan" is asked again after ten seconds). For a page with its own "no plan" state. See [Billing](billing.md#a-page-with-its-own-no-plan-state). |
+| `client.refresh_plans().await?` | The same, asking the Partner API again whatever the age of its answer. For a welcome link a route serves, when Shopify signed it, as a best effort: see [Billing](billing.md#the-welcome-link-of-a-route). |
+| `client.active_subscriptions().await?` | The active subscriptions of the shop to the app, `currentAppInstallation.activeSubscriptions` of the Admin API, whatever the source. With the Partner API set, its first call logs a warning: use `active_plans()`. See [Billing](billing.md#admin-api-appsubscription). |
 | `client.shop`, `client.shopify_app` | Public fields. |
 
 `graphql()`:
@@ -413,7 +426,9 @@ async fn product_title(ctx: &WebhookContext, id: &str) -> Result<Option<String>>
   `X-Shopify-Access-Token` header, `<version>` the one of the schema of the
   crate (`[package.metadata.shopify_api]`), or the one the client pins;
 - waits and retries when Shopify throttles the request, and retries a query
-  after a server error; a mutation never runs twice;
+  after a server error; a mutation never runs twice. The
+  [`shopify_retry`](configuration.md#shopify-client-retries) setting says how
+  many times and how long apart;
 - fails on non-2xx HTTP responses, and when the top-level GraphQL `errors`
   array is non-empty, with a `shopify_api::Error` (`Http`, `Graphql`) that
   `error.downcast_ref::<openshop::shopify_api::Error>()` reads;
@@ -523,8 +538,10 @@ fn install_logger() {
 ```
 
 This logger handles framework and process messages. Flow code should normally
-use `ctx.logger`, which persists records in the run log. See
-[Logging](logging.md).
+use `ctx.logger`, which persists records in the run log; a webhook handler and
+an admin page have a `ctx.logger` of their own, which logs here with the shop
+they run for. `openshop::tracing`, in the prelude, is the `tracing` crate this
+logger forwards to by default. See [Logging](logging.md).
 
 ## Server, worker, and scheduler
 
@@ -546,7 +563,7 @@ async fn serve(config: OpenShopConfig, shutdown: impl Future<Output = ()>) -> Re
     let db = openshop::db::connect_to(&std::env::var("DATABASE_URL")?).await?;
     let app = OpenShop::new(config, db, RuntimeEnv::from_env())?;
 
-    let server = listen(&app, 3000, ServerOptions { ui: UiSource::Embedded, dev: false }).await?;
+    let server = listen(&app, 3000, ServerOptions { ui: UiSource::Server, dev: false }).await?;
     let worker = Worker::new(app.clone(), WorkerConfig::new());
     worker.start().await;
     let mut scheduler = Scheduler::start(&app)?;
@@ -563,18 +580,18 @@ async fn serve(config: OpenShopConfig, shutdown: impl Future<Output = ()>) -> Re
 | --- | --- |
 | `openshop::server::router(&app, options)` | Builds the `axum::Router` without listening. |
 | `openshop::server::listen(&app, port, options)` | Binds `0.0.0.0:<port>` (`0` picks a free port) and returns a handle with `addr` and `shutdown()`. Keep the handle for as long as the server should run: dropping it stops accepting connections and lets requests in flight finish. `shutdown()` also waits for those requests, up to five seconds. After that it returns an error, and the requests still in flight keep running until they finish or the process exits. |
-| `ServerOptions { ui, dev }` | `ui` is the admin UI to serve: `UiSource::Embedded`, `UiSource::Dir(path)`, `UiSource::Assets(lookup)`, or `UiSource::None` (see [Serve the bundle](custom-admin-pages.md#serve-the-bundle)). It is served behind the signed-launch check, unless `dev` is set: then the shell reloads the page when the server is started again or its bundle rebuilt (see [Development process](cli.md#development-process)), and CORS is enabled on `/api`. |
-| `ServerOptions::default()` | API only: no UI is served, and CORS is enabled on `/api`. |
+| `ServerOptions { ui, dev }` | `ui` is the admin to serve: `UiSource::Server`, the pages the server renders (see [How pages are served](custom-admin-pages.md#how-pages-are-served)), or `UiSource::None`, API only, with CORS enabled on `/api`. With `dev`, a page of the admin reloads when the server is started again (see [Development process](cli.md#development-process)), and CORS is enabled on `/api`. |
+| `ServerOptions::default()` | `UiSource::Server`, not `dev`. |
 | `openshop::server::serve(listener, router)` | Serves a router built with `router` on an existing `tokio::net::TcpListener`. Returns the same handle as `listen`: keep it for as long as the server should run. |
 | `openshop::cli::shutdown_signal()` | Resolves when the process receives `SIGINT` or `SIGTERM`: the `shutdown` of the example above, for a process that stops as `dev` and `start` do. |
 | `Worker::new(app, overrides)` | Worker with `start()`, `stop()`, `is_running()`, `active_count()`, and `worker_id()`. `overrides` is a `WorkerConfig`: what it sets replaces the `worker` setting of the application. |
 | `Scheduler::start(&app)` | Registers every configured cron; `stop()` or dropping the value stops them. |
 
-`listen` and `serve` do not read `OPENSHOP_UI_DIR` or the
-configuration's `admin_ui`; pass the `UiSource` you want. None of these push
+`listen` and `serve` do not read the configuration's `admin_ui`; pass the
+`UiSource` you want. None of these push
 or migrate the database schema.
 
-In development, a page of the admin UI keeps a request to
+In development, a page of the admin keeps a request to
 `/__openshop/reload` open for as long as it is displayed. Dropping the handle
 or calling `shutdown()` ends those requests. A router you serve with a server
 of your own does not: stop that server without waiting for the requests in

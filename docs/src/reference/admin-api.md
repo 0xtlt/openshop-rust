@@ -1,6 +1,9 @@
 # Admin API
 
-The Admin API is mounted at `/api` and is intended for OpenShop's embedded admin UI.
+The Admin API is mounted at `/api`: the flows, the runs, the providers, the
+crons, the Shopify Functions and the MCP tokens of the shop, as JSON. The
+pages of the admin are rendered by the server and do not read it, except for
+what they download, such as the export of the logs of a run.
 
 > **Stability.** These HTTP routes are **internal and unversioned**. They are
 > documented to help with debugging and controlled integrations, but they are
@@ -18,8 +21,9 @@ Authorization: Bearer <shopify-session-token>
 ```
 
 In an embedded app, App Bridge issues the token (`shopify.idToken()`); obtain a
-fresh one for every request. The admin UI and the `openshop-ui` hooks do this
-for you. In tests, `TestContext::get("/api/runs?limit=20")` signs the request.
+fresh one for every request. App Bridge's `fetch` adds it to the requests of
+the app's frame. In tests, `TestContext::get("/api/runs?limit=20")` signs the
+request.
 
 OpenShop validates the HS256 signature, `aud`, `exp`, `nbf`, and matching `iss` /
 `dest` shop domains. The audience selects the Shopify app in multi-app deployments.
@@ -79,12 +83,12 @@ When a page is `disabled`, its admin API group returns `404` with `{ "error": "N
 `GET /api/pages/custom` lists only navigation entries the staff member may
 open. In `pages`, `allowed` is always `false` for pages with dynamic segments;
 use the `access` endpoint for a concrete path. A page declared at `/`, the
-home of the admin, has the `id` `""` and the `path` `/`, and its functions are
-called at `/api/pages/custom/_rpc/<kind>/<name>`.
+home of the admin, has the `id` `""` and the `path` `/`.
 
-Custom-page RPC paths are implementation details. Applications should
-use `use_loader` and `use_action`, not call them directly. Page and function
-authorization rules run independently for every request. See
+The loaders and the actions of a custom page are not endpoints of this API:
+the server runs them when it renders the page and when a form of the page is
+sent. Page and function authorization rules run independently for every
+request. See
 [Custom admin pages](custom-admin-pages.md#authorization-and-errors) for the
 error contract.
 
@@ -102,6 +106,11 @@ error contract.
 | `POST /api/runs/:id/cancel` | — | Cancels a pending, running, or sleeping run: `{ ok: true }`. |
 | `DELETE /api/runs/:id` | — | Deletes an inactive run, its steps, and logs: `{ ok: true }`. |
 | `POST /api/runs/bulk-delete` | `{ "ids": ["uuid"] }` | `{ deleted, skipped }`, maximum 100 IDs. |
+
+A flow is run by hand from the command line too, whatever the admin serves:
+[`openshop run <flow>` and `openshop cron run <name>`](cli.md#run-a-flow-or-a-cron-by-hand)
+queue and execute a run against the database of the app, for an app whose
+built-in pages are hidden as for any other.
 
 A run row has the keys `id`, `appHandle`, `shop`, `flowName`, `status`,
 `input`, `error`, `deadlineAt`, `parentRunId`, `attempts`, `availableAt`,

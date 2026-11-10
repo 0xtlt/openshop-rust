@@ -1,13 +1,11 @@
-//! Development: a page of the admin UI reloads when what it was served changes.
+//! Development: a page of the admin reloads when the server is started again.
 //!
-//! `openshop dev` starts the server again when the sources change, and trunk
-//! builds the bundle of the application again. The shell is served with the
-//! version it was read at and listens to [`PATH`], an event stream that names
-//! the version being served: a page that hears another one reloads.
+//! `openshop dev` starts the server again when the sources change. A page is
+//! served with the version of the server, the process that renders it, and
+//! listens to [`PATH`], an event stream that names the version being served:
+//! a page that hears another one reloads.
 
 use std::convert::Infallible;
-use std::hash::{DefaultHasher, Hash, Hasher};
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Duration;
@@ -22,13 +20,9 @@ use tokio_util::sync::CancellationToken;
 use tower::Service;
 use uuid::Uuid;
 
-use super::UiSource;
-
 /// The event stream a page of the admin UI listens to in development.
 pub(crate) const PATH: &str = "/__openshop/reload";
 
-/// How often a bundle served from disk is looked at.
-const POLL: Duration = Duration::from_millis(250);
 /// How long a page waits before it listens again to a server that went away.
 const RETRY: Duration = Duration::from_secs(1);
 
@@ -65,43 +59,28 @@ where
     }
 }
 
-/// What a development server serves, as a version a page can compare.
+/// What a development server serves, as a version a page can compare: the
+/// process, which another start replaces.
 pub(crate) struct Served {
-    /// Another process serves under another name.
     instance: String,
-    /// The shell of a bundle served from disk. It names the files of a build
-    /// by their content: another build is another shell.
-    index: Option<PathBuf>,
 }
 
 impl Served {
-    pub(crate) fn new(ui: &UiSource) -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             instance: Uuid::new_v4().simple().to_string(),
-            index: match ui {
-                UiSource::Dir(directory) => Some(directory.join("index.html")),
-                _ => None,
-            },
         }
     }
 
-    /// The version a page would load now. `None` while a build replaces the bundle.
-    fn version(&self) -> Option<String> {
-        let built = match &self.index {
-            Some(index) => {
-                let mut hasher = DefaultHasher::new();
-                std::fs::read(index).ok()?.hash(&mut hasher);
-                hasher.finish()
-            }
-            None => 0,
-        };
-        Some(format!("{}-{built:x}", self.instance))
+    /// The version a page loads now.
+    fn version(&self) -> &str {
+        &self.instance
     }
 
-    /// Adds to the shell the script that reloads the page when the version it
-    /// was served is no longer the one being served.
+    /// Adds to the page the script that reloads it when the version it was
+    /// served is no longer the one being served.
     pub(crate) fn inject(&self, html: &str) -> String {
-        let version = self.version().unwrap_or_default();
+        let version = self.version();
         let script = format!(
             r#"<script>
       (() => {{
@@ -128,43 +107,35 @@ impl Served {
     }
 }
 
-/// A page listening: what it was last told, until the server closes.
+/// A page listening: told the version once, then kept until the server closes.
 struct Listener {
     served: Arc<Served>,
-    told: Option<String>,
+    told: bool,
     closing: BoxFuture<'static, ()>,
 }
 
 impl Listener {
-    /// The next version to tell the page: the current one first, then each new one.
+    /// The version being served, then nothing until the server closes: the
+    /// next server is another version.
     async fn next(mut self) -> Option<(Result<Event, Infallible>, Self)> {
-        // trunk moves the files of a build into place one by one: a version is
-        // told once it has been seen twice.
-        let mut settling = None;
-        loop {
-            let version = self.served.version();
-            if version.is_some() && version != self.told && (self.told.is_none() || version == settling) {
-                self.told = version.clone();
-                let event = Event::default().retry(RETRY).data(version.unwrap_or_default());
-                return Some((Ok(event), self));
-            }
-            settling = version.filter(|version| Some(version) != self.told.as_ref());
-            tokio::select! {
-                _ = &mut self.closing => return None,
-                _ = tokio::time::sleep(POLL) => {}
-            }
+        if self.told {
+            self.closing.as_mut().await;
+            return None;
         }
+        self.told = true;
+        let event = Event::default().retry(RETRY).data(self.served.version());
+        Some((Ok(event), self))
     }
 }
 
-/// `GET` [`PATH`]: the version being served, then each one that replaces it.
+/// `GET` [`PATH`]: the version being served, until the server closes.
 pub(crate) async fn listen(
     served: Arc<Served>,
     closing: Option<Extension<Closing>>,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     let listener = Listener {
         served,
-        told: None,
+        told: false,
         closing: match closing {
             Some(Extension(Closing(closing))) => Box::pin(CancellationToken::clone(&closing).cancelled_owned()),
             // A router served by another server than `serve`: until the page goes away.
@@ -178,50 +149,26 @@ pub(crate) async fn listen(
 mod tests {
     use super::*;
 
-    fn served(index: Option<PathBuf>) -> Served {
+    fn served() -> Served {
         Served {
             instance: "server".to_string(),
-            index,
         }
     }
 
     #[test]
-    fn names_the_server_and_the_build_of_a_bundle_on_disk() {
-        assert_eq!(served(None).version().as_deref(), Some("server-0"));
-
-        let directory = std::env::temp_dir().join(format!("openshop-reload-{}", Uuid::new_v4()));
-        std::fs::create_dir_all(&directory).unwrap();
-        let on_disk = served(Some(directory.join("index.html")));
-        // A build is replacing the bundle: there is nothing to load yet.
-        assert_eq!(on_disk.version(), None);
-
-        let build = |script: &str| {
-            std::fs::write(directory.join("index.html"), format!("<script src={script}></script>")).unwrap();
-            on_disk.version().expect("a version")
-        };
-        let version = build("app-1a2b.js");
-        assert!(version.starts_with("server-") && version != "server-0", "{version}");
-        assert_ne!(build("app-3c4d.js"), version);
-        // A build that changes nothing is the same version: the page stays as it is.
-        assert_eq!(build("app-1a2b.js"), version);
-        std::fs::remove_dir_all(directory).unwrap();
-    }
-
-    #[test]
     fn two_servers_do_not_serve_the_same_version() {
-        let ui = UiSource::Embedded;
-        assert_ne!(Served::new(&ui).version(), Served::new(&ui).version());
+        assert_ne!(Served::new().version(), Served::new().version());
     }
 
     #[test]
     fn adds_the_script_at_the_end_of_the_head() {
-        let html = served(None).inject("<html><head><title>OpenShop</title></head><body></body></html>");
+        let html = served().inject("<html><head><title>OpenShop</title></head><body></body></html>");
         let script = html.find("<script>").expect("a script");
         assert!(html.find("</title>").unwrap() < script && script < html.find("</head>").unwrap());
         assert!(html.contains(r#"new EventSource("/__openshop/reload")"#), "{html}");
-        assert!(html.contains(r#"event.data !== "server-0""#), "{html}");
+        assert!(html.contains(r#"event.data !== "server""#), "{html}");
 
-        // A shell without a head is still given the script.
-        assert!(served(None).inject("<div></div>").starts_with("<div></div><script>"));
+        // A page without a head is still given the script.
+        assert!(served().inject("<div></div>").starts_with("<div></div><script>"));
     }
 }

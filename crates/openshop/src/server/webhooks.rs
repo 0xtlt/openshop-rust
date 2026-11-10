@@ -1,5 +1,9 @@
 //! Shopify webhooks: `POST /webhooks`, dispatched by the `X-Shopify-Topic` header.
 //!
+//! `app/uninstalled` is recorded by OpenShop before its handler, if the
+//! application has one, runs: the installation is marked uninstalled and its
+//! access token deleted, as `POST /auth/webhooks/app-uninstalled` does.
+//!
 //! Shopify delivers a webhook at least once: a delivery it believes failed is
 //! sent again, with the same `X-Shopify-Webhook-Id`. A delivery this process
 //! has already run is acknowledged and not run again, within [`REMEMBER`].
@@ -18,10 +22,12 @@ use axum::routing::post;
 use serde_json::{Value, json};
 use tokio::time::Instant;
 
+use super::auth::{is_app_uninstalled, record_uninstall};
 use super::http::{catch_panic, header, json_error, json_response, report_failure};
 use crate::app::OpenShop;
-use crate::runtime::report;
+use crate::runtime::context_logger::ContextLogger;
 use crate::runtime::logger;
+use crate::runtime::report;
 use crate::server::connectors::Connectors;
 use crate::server::shop_domain::strict_shop_domain;
 use crate::shopify::client::ShopifyClient;
@@ -86,7 +92,9 @@ impl Delivery<'_> {
     /// The handler completed: the repeats of this delivery are not run.
     pub(crate) fn complete(mut self) {
         self.completed = true;
-        self.deliveries.lock().insert(self.key.clone(), Known::Done(self.started));
+        self.deliveries
+            .lock()
+            .insert(self.key.clone(), Known::Done(self.started));
     }
 }
 
@@ -162,15 +170,17 @@ async fn handle(State(app): State<OpenShop>, headers: HeaderMap, body: Bytes) ->
 
     let ok = || json_response(StatusCode::OK, json!({ "ok": true }));
     // Shopify sends `orders/create`; handlers may also be registered as `ORDERS_CREATE`.
-    let Some(handler) = config
+    let handler = config
         .webhooks
         .get(&topic)
-        .or_else(|| config.webhooks.get(&webhook.topic_enum()))
-    else {
+        .or_else(|| config.webhooks.get(&webhook.topic_enum()));
+    // `app/uninstalled` is OpenShop's to record, with or without a handler.
+    let uninstalled = is_app_uninstalled(&topic);
+    if handler.is_none() && !uninstalled {
         logger::warn(format!("[openshop] No webhook handler for topic \"{topic}\""));
         // Always return 200 to Shopify
         return ok();
-    };
+    }
 
     let Ok(payload) = serde_json::from_slice::<Value>(&body) else {
         return json_error(StatusCode::BAD_REQUEST, "Invalid JSON body");
@@ -189,7 +199,12 @@ async fn handle(State(app): State<OpenShop>, headers: HeaderMap, body: Bytes) ->
         .webhook_id()
         .or_else(|| webhook.event_id())
         .filter(|id| !id.is_empty());
-    let claim = match delivery_id.map(|id| (id, app.webhook_deliveries().claim(&shopify_app.handle, &topic, id, &hmac))) {
+    let claim = match delivery_id.map(|id| {
+        (
+            id,
+            app.webhook_deliveries().claim(&shopify_app.handle, &topic, id, &hmac),
+        )
+    }) {
         Some((id, Claim::Done)) => {
             logger::info(format!(
                 "[openshop] Webhook \"{topic}\" delivery {id} was already handled: not run again"
@@ -200,11 +215,43 @@ async fn handle(State(app): State<OpenShop>, headers: HeaderMap, body: Bytes) ->
         // the delivery has not been handled. Shopify sends it again.
         Some((_, Claim::Running)) => {
             let mut response = json_error(StatusCode::SERVICE_UNAVAILABLE, "Delivery in progress");
-            response.headers_mut().insert(RETRY_AFTER, HeaderValue::from_static("5"));
+            response
+                .headers_mut()
+                .insert(RETRY_AFTER, HeaderValue::from_static("5"));
             return response;
         }
         Some((_, Claim::First(delivery))) => Some(delivery),
         None => None,
+    };
+
+    // The installation is marked uninstalled and its token deleted before the
+    // handler runs, when the signed payload names the shop of the header: the
+    // header is not signed, and a body signed for another shop or another
+    // topic proves nothing. A failure is the server's: Shopify sends the
+    // delivery again, and the claim is given up for it.
+    if uninstalled {
+        match record_uninstall(&app, &shopify_app.handle, &webhook).await {
+            Ok(true) => logger::info(format!(
+                "[openshop] {shop} uninstalled app \"{}\": its access token is deleted",
+                shopify_app.handle
+            )),
+            Ok(false) => logger::warn(format!(
+                "[openshop] app/uninstalled for {shop} not recorded: its payload does not name that shop"
+            )),
+            Err(error) => {
+                report_failure(
+                    format!("[openshop] Uninstallation of {shop} could not be recorded"),
+                    &error,
+                );
+                return json_error(StatusCode::INTERNAL_SERVER_ERROR, "Internal server error");
+            }
+        }
+    }
+    let Some(handler) = handler else {
+        if let Some(delivery) = claim {
+            delivery.complete();
+        }
+        return ok();
     };
 
     let context = WebhookContext {
@@ -219,6 +266,10 @@ async fn handle(State(app): State<OpenShop>, headers: HeaderMap, body: Bytes) ->
         // shop's row holds and asks for no other shop than the configured one.
         shopify: ShopifyClient::new(&app, &shop, &shopify_app.handle),
         connectors: Connectors::for_shop(&app, &shop, &shopify_app.handle),
+        logger: ContextLogger::with_category(
+            json!({ "shop": shop, "shopifyApp": shopify_app.handle, "topic": topic }),
+            "webhook",
+        ),
         app: app.clone(),
     };
     // Still return 200 on handler errors — don't let Shopify retry them.
@@ -290,16 +341,25 @@ mod tests {
         let start = Instant::now();
         let delivery = first(deliveries.claim_at(start, "app", "T", "id", "sig"));
         // While the handler runs, a repeat is neither run nor taken for handled.
-        assert!(matches!(deliveries.claim_at(start, "app", "T", "id", "sig"), Claim::Running));
+        assert!(matches!(
+            deliveries.claim_at(start, "app", "T", "id", "sig"),
+            Claim::Running
+        ));
         // The handler failed, or its request was cancelled: the claim is dropped.
         drop(delivery);
         let delivery = first(deliveries.claim_at(start, "app", "T", "id", "sig"));
         delivery.complete();
-        assert!(matches!(deliveries.claim_at(start, "app", "T", "id", "sig"), Claim::Done));
+        assert!(matches!(
+            deliveries.claim_at(start, "app", "T", "id", "sig"),
+            Claim::Done
+        ));
 
         // A handler that never ends does not hold the delivery for ever.
         let stuck = first(deliveries.claim_at(start, "app", "T", "stuck", "sig"));
-        assert!(matches!(deliveries.claim_at(start, "app", "T", "stuck", "sig"), Claim::Running));
+        assert!(matches!(
+            deliveries.claim_at(start, "app", "T", "stuck", "sig"),
+            Claim::Running
+        ));
         first(deliveries.claim_at(start + REMEMBER, "app", "T", "stuck", "sig")).complete();
         drop(stuck);
     }

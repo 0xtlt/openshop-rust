@@ -1,5 +1,5 @@
-//! Server side of application-defined admin pages: page access rules, loaders
-//! and actions called by the WebAssembly admin UI over RPC.
+//! Admin pages of the application: their access rules, their loaders, their
+//! actions, and their view, which the server renders.
 
 use std::future::Future;
 use std::sync::Arc;
@@ -13,6 +13,7 @@ use serde_json::Value;
 use sqlx::PgPool;
 
 use crate::app::OpenShop;
+use crate::runtime::context_logger::ContextLogger;
 use crate::server::connectors::Connectors;
 use crate::shopify::client::ShopifyClient;
 use crate::types::{AdminMenuItem, InputSchema};
@@ -22,7 +23,11 @@ use openshop_shared::{
 };
 
 pub use crate::types::{CustomAdminPageAccess, CustomAdminPagesResponse, ResolvedAdminPages};
+
+mod view;
 pub use openshop_shared::AdminFunctionKind;
+pub use view::{ACTION_FIELD, AdminView, FormState, Outcome, PageRequest, output};
+pub(crate) use view::{field_message, fields_to_json, parse_fields, with_outcome};
 
 /// The Shopify staff member behind the session token.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -44,6 +49,9 @@ pub struct AdminContext {
     pub connectors: Connectors,
     pub request_id: String,
     pub idempotency_key: Option<String>,
+    /// Logs for the shop and the request, as `ctx.logger` of a flow does for
+    /// its run: to the process logger, not to the database.
+    pub logger: ContextLogger,
     pub app: OpenShop,
 }
 
@@ -118,7 +126,7 @@ impl AdminFunction {
             let handler = handler.clone();
             async move {
                 let input: T = serde_json::from_value(input)?;
-                Ok(serde_json::to_value(handler(context, input).await?)?)
+                output(handler(context, input).await?)
             }
         })
         .input(InputSchema::of::<T>())
@@ -165,6 +173,12 @@ pub struct AdminPage {
     /// Gate for the page and every page nested under it.
     pub page_access: Option<AdminAuthorize>,
     pub functions: IndexMap<String, AdminFunction>,
+    /// The view the server renders the page with, when it has one: see
+    /// [`AdminPage::view`].
+    pub view: Option<AdminView>,
+    /// The view shows a refused form itself, from [`PageRequest::form`]: see
+    /// [`AdminPage::view_with_form`].
+    pub view_reads_form: bool,
 }
 
 impl AdminPage {
@@ -174,6 +188,37 @@ impl AdminPage {
             nav: None,
             page_access: None,
             functions: IndexMap::new(),
+            view: None,
+            view_reads_form: false,
+        }
+    }
+
+    /// Renders the page on the server: `view` runs the loaders it needs with
+    /// the [`PageRequest`] and returns the HTML of the page, its `<s-page>`.
+    /// The access rules of the page run first. What `#[view] fn(…) -> Markup`
+    /// declares.
+    pub fn view<F, Fut>(mut self, view: F) -> Self
+    where
+        F: Fn(PageRequest) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<maud::Markup>> + Send + 'static,
+    {
+        self.view = Some(Arc::new(move |request| Box::pin(view(request))));
+        self.view_reads_form = false;
+        self
+    }
+
+    /// [`AdminPage::view`] for a view that shows a refused form itself: it
+    /// reads [`PageRequest::form`], the values sent and the error of each
+    /// field, and the page is rendered again with them (`422`). What
+    /// `#[view] fn(…, form: FormState) -> Markup` declares.
+    pub fn view_with_form<F, Fut>(self, view: F) -> Self
+    where
+        F: Fn(PageRequest) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<maud::Markup>> + Send + 'static,
+    {
+        Self {
+            view_reads_form: true,
+            ..self.view(view)
         }
     }
 
@@ -226,6 +271,11 @@ pub struct AdminPublicError {
     pub message: String,
     pub status: u16,
     pub field_errors: Option<IndexMap<String, String>>,
+    /// What else the page receives with the error, by name: `details` of the
+    /// response, and of the `AdminRpcError` of a view. The error of
+    /// [`billing::require_plan`](crate::billing::require_plan) carries the
+    /// pricing page there.
+    pub details: Option<IndexMap<String, String>>,
 }
 
 impl AdminPublicError {
@@ -235,7 +285,17 @@ impl AdminPublicError {
             message: message.into(),
             status: 400,
             field_errors: None,
+            details: None,
         }
+    }
+
+    /// Adds a value the page receives with the error, under `name`:
+    /// `.detail("pricingUrl", url)`.
+    pub fn detail(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.details
+            .get_or_insert_with(IndexMap::new)
+            .insert(name.into(), value.into());
+        self
     }
 
     pub fn status(mut self, status: u16) -> Self {
@@ -479,5 +539,16 @@ mod tests {
         assert_eq!(error.status, 422);
         assert_eq!(error.field_errors.unwrap()["title"], "Required");
         assert_eq!(AdminPublicError::new("X", "y").status, 400);
+
+        let error = AdminPublicError::new("PLAN_REQUIRED", "Choose a plan")
+            .status(402)
+            .detail(
+                "pricingUrl",
+                "https://admin.shopify.com/store/demo/charges/app/pricing_plans",
+            )
+            .detail("pricingLink", "shopify:admin/charges/app/pricing_plans");
+        let details = error.details.unwrap();
+        assert_eq!(details.keys().collect::<Vec<_>>(), ["pricingUrl", "pricingLink"]);
+        assert!(AdminPublicError::new("X", "y").details.is_none());
     }
 }

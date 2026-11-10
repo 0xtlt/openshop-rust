@@ -1,9 +1,9 @@
 //! `openshop`: scaffold and develop OpenShop applications.
 #![forbid(unsafe_code)]
 
-mod bundle;
 mod dev;
 mod init;
+mod legacy;
 mod metadata;
 
 use std::process::ExitCode;
@@ -20,17 +20,21 @@ const USAGE: &str = "
                                 depends on the commit this CLI was built from; name another
                                 source with --openshop-rev=<commit>, --openshop-tag=<tag>,
                                 --openshop-branch=<name> or --openshop-path=<dir>
-    init-ui                     Scaffold a custom admin page with its view
+    init-ui                     Scaffold a custom admin page with its view, which the server renders
     dev                         Start the app in dev mode and restart it when sources change
     worker [--concurrency=N]    Start worker only (production, scalable)
     migrate                     Apply client-owned migrations from ./migrations
     migrate generate            Generate migrations for the schema ./migrations does not cover yet
     migrate check               Check that ./migrations covers the current schema
     migrate status              Show client migration status
-    build                       Build for production: the admin UI bundle, if any, then the app
-    build-ui                    Build the admin UI bundle alone, into dist/
+    build                       Build the app for production
     start                       Start production server (API + UI + scheduler, no worker)
+    run <flow> [--shop=<domain> | --all-shops] [--input=<json>]
+                                Run a flow once, through the queue and a worker, against the
+                                database of the app, and wait for it
+    cron run <name>             Run the flow of a cron once, for the shops of the cron
     test [args]                 Run tests
+    --version, -V               Print the version of this CLI, and the commit it was built from
 
   Usage:
     openshop init
@@ -41,12 +45,14 @@ const USAGE: &str = "
     openshop migrate
     openshop migrate check
     openshop migrate status
+    openshop run syncOrders --shop=my-store.myshopify.com --input='{\"limit\":10}'
+    openshop cron run \"Nightly sync\"
     openshop test
     openshop build && openshop start
 
-  `worker`, `migrate` and `start` run the application binary through
-  cargo in the current project; `test` and `build` run `cargo test` and
-  `cargo build --release` there.
+  `worker`, `migrate`, `start`, `run` and `cron` run the application binary
+  through cargo in the current project; `test` and `build` run `cargo test`
+  and `cargo build --release` there.
 ";
 
 /// Runs cargo in the current directory and forwards its exit status.
@@ -58,28 +64,46 @@ async fn cargo(args: &[&str], passthrough: &[String]) -> Result<()> {
     Ok(())
 }
 
+/// `openshop 0.0.12 (1b8a53a4cac9)`: the version of the CLI, and the commit
+/// of the repository it was built from, when it was built from a checkout
+/// (`cargo install --git`, `cargo install --path`).
+fn version() -> String {
+    let version = env!("CARGO_PKG_VERSION");
+    match option_env!("OPENSHOP_GIT_COMMIT") {
+        Some(commit) => format!("openshop {version} ({})", &commit[..12]),
+        None => format!("openshop {version}"),
+    }
+}
+
+/// Whether the arguments of a command ask for its usage.
+fn asks_for_help(args: &[String]) -> bool {
+    args.iter().any(|arg| arg == "--help" || arg == "-h")
+}
+
 async fn run(args: &[String]) -> Result<()> {
     let rest = args.get(1..).unwrap_or_default();
     match args.first().map(String::as_str) {
+        // `--help` after a command the CLI runs itself is the usage. The
+        // others pass their arguments on: to the application binary, which
+        // prints the usage of its commands (`run --help`), or to cargo.
+        Some("init" | "init-ui") if asks_for_help(rest) => {
+            println!("{USAGE}");
+            Ok(())
+        }
         Some("init") => {
             init::run_init(&std::env::current_dir()?, rest)?;
             Ok(())
         }
         Some("init-ui") => init::run_init_ui(&std::env::current_dir()?),
         Some("dev") => dev::start_dev(rest).await,
-        Some("build") => {
-            bundle::build(&std::env::current_dir()?).await?;
-            cargo(&["build", "--release"], rest).await
-        }
-        Some("build-ui") => {
-            if !bundle::build(&std::env::current_dir()?).await? {
-                println!("[openshop] No admin page has a view: the admin UI is the one built into openshop.");
-            }
+        Some("build") => cargo(&["build", "--release"], rest).await,
+        Some("test") => cargo(&["test"], rest).await,
+        Some(command @ ("migrate" | "run" | "cron")) => cargo(&["run", "--", command], rest).await,
+        Some(command @ ("start" | "worker")) => cargo(&["run", "--release", "--", command], rest).await,
+        Some("--version" | "-V") => {
+            println!("{}", version());
             Ok(())
         }
-        Some("test") => cargo(&["test"], rest).await,
-        Some("migrate") => cargo(&["run", "--", "migrate"], rest).await,
-        Some(command @ ("start" | "worker")) => cargo(&["run", "--release", "--", command], rest).await,
         None | Some("help" | "--help" | "-h") => {
             println!("{USAGE}");
             Ok(())

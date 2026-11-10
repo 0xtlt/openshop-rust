@@ -2,6 +2,432 @@
 
 ## Unreleased
 
+- `openshop --version` (and `-V`) prints the version of the CLI and the first
+  12 characters of the commit it was built from: `openshop 0.0.12-beta.0
+  (1b8a53a4cac9)`. `openshop dev` lists what a project keeps of the Leptos
+  admin (`openshop` with the feature `ui`, `leptos`, `UiSource::Dir`,
+  `openshop::ui`…) before it starts it, and names the migration guide, which
+  now begins with installing the CLI again (`--force`) and checking
+  `openshop --version`.
+- `openshop::testing::toast(&response)` and `toast_error(&response)` read the
+  toasts of the answer to `ctx.submit`, percent-decoded as the admin shows
+  them. `openshop::testing` re-exports `RequestBuilder`, `Response`, `Client`,
+  `Method` and `StatusCode` of `reqwest`, and `reqwest` itself, so that a helper
+  of the tests names what `ctx.page` and `ctx.submit` return without depending
+  on `reqwest`. The documentation of `ctx.page` says what it gives: the whole
+  document, the page in `<main id="openshop-page">`.
+- An application built without the `testing` feature no longer gets the
+  warning `function find_function is never used` from `openshop`. CI checks
+  the library as an application builds it, with `-D warnings`.
+
+- The `custom` template asks for `read_discounts` and `write_discounts`: its
+  volume discount Function has instances, which the Functions page of the
+  admin lists, creates, updates and deletes, and Shopify refused without them.
+- **Breaking.** The Leptos admin UI is removed: `crates/openshop-ui`, the
+  committed bundle `crates/openshop/ui-dist`, trunk and the WebAssembly target,
+  the `ui` and `embedded-ui` features, `openshop::ui`, `openshop build-ui`,
+  `OPENSHOP_UI_DIR`, and `UiSource::{Embedded, Dir, Assets}`: `UiSource` is
+  `Server` or `None`. A `#[view]` that does not return `Markup` is refused at
+  compile time. The internal RPC transport of the Leptos views,
+  `/api/pages/custom/…/_rpc/…`, is removed with them; `GET /api/pages/custom`
+  and its `access` stay, and `ctx.call_loader` and `ctx.call_action` call a
+  function of a page in a test. `openshop dev` no longer runs trunk, and the
+  preview of the templates (`mise run dev:custom`) serves the admin the server
+  renders, with a stub of App Bridge. The CI jobs `ui`, `templates-ui` and
+  `ui-dist` are gone, and the lockfile has 83 crates fewer. An application with
+  Leptos views follows [Migrate to the server-rendered
+  admin](docs/src/guides/migrate-to-server-rendered-ui.md).
+- A page of the admin is framed by the admin of the shop of its session only
+  (`frame-ancestors https://<shop> https://admin.shopify.com`), as the Leptos
+  shell was; any shop in development. The failure of a page or of a form is
+  reported to Sentry as `admin <route> view` or `admin <route> <action>`, with
+  the `request_id` tag.
+- The `custom` and `public` templates write their admin pages as views the
+  server renders: `maud` in place of `leptos` and the `ui` feature, forms in
+  place of `use_action`, and their tests call the pages with `ctx.page` and
+  `ctx.submit`. Their `Dockerfile` builds the app alone: no WebAssembly target,
+  trunk, `openshop build` or `dist/`. `openshop init-ui` writes a page with a
+  view, an action and its form, and adds `maud`. The guides and the references
+  describe the server-rendered admin; [Migrate to the server-rendered
+  admin](docs/src/guides/migrate-to-server-rendered-ui.md) is the guide of an
+  application that has Leptos views.
+- `ctx.page(path)` asks for a page of the admin as the admin does, and
+  `ctx.submit(path, fields)` sends one of its forms. `Outcome` is
+  `Deserialize`, for `ctx.call_action::<Outcome>`, and
+  `openshop::admin::output` is public, for an action made by hand. A field
+  refused by its schema says `Must be at least 1` rather than `must be >= 1`,
+  and an empty text that needs a character `Required`.
+- The admin is rendered by the server by default: `UiSource::Server` is the
+  default of `admin_ui`, of `ServerOptions` and of the test harness, and
+  `OPENSHOP_UI=server` is no longer needed. A test or a server that served no
+  UI by default names `UiSource::None`, which keeps CORS on `/api`.
+- Every page of the framework is rendered by the server with
+  `admin_ui: UiSource::Server`: the home, the providers, the flows and their
+  runs, the page of a run with its logs, the Shopify Functions and their
+  instances, the MCP tokens, and the crons. Each keeps what its Leptos page
+  had; a list, a filter or a selection is a URL, and what runs is followed by
+  fetching the page again (`data-openshop-refresh`). A page whose loader needs
+  a plan (`billing::require_plan`) shows its message with a link to the plans.
+  A form of the admin posts to `/mcp` as a form; MCP clients post JSON there,
+  as before. `openshop.js` submits a form with Enter in a Polaris field,
+  sends a `GET` form with `data-openshop-autosubmit` when it changes, and
+  copies or downloads the text of an element (`data-openshop-copy-from`,
+  `data-openshop-download-from`).
+- A form of the server-rendered admin that is refused field by field is
+  rendered again in place (`422`), with what was sent and the error of each
+  field, for a view that declares a `form: FormState` parameter: when the
+  input schema refuses it (each property it can tell, `Required`, `Must be at
+  least 3 characters`), when the action answers `Outcome::invalid([("title",
+  "Already taken")])`, and when it fails with an `AdminPublicError` that has
+  `field_errors`. `form.value_or("title", saved)` and
+  `error=[form.error("title")]` show them on a Polaris field. A view without
+  it keeps the page as it was, with an error toast, as before. A field left
+  empty is a missing number, not the text `""`. The `422` of the input schema
+  of an admin function also names each field in `fieldErrors` of the RPC
+  transport. A provider's configuration refused names every field it refuses,
+  not only the first.
+- Experimental: the admin rendered by the server, page by page, with no
+  WebAssembly bundle (`admin_ui: UiSource::Server`, or `OPENSHOP_UI=server`).
+  A `#[view]` that returns `maud::Markup` takes what the page's loaders return,
+  each parameter named after a loader, and is rendered by the server; its
+  forms post to the page with the action in `_action`, and an action returns
+  an `Outcome` for a toast or a redirect. A page loaded in the admin without a
+  session token goes through `/auth/session-token`, the bounce page of
+  Shopify's libraries. `/crons` is the first page of the framework rendered
+  this way. The Leptos admin UI stays the default; see
+  [Server-rendered admin](docs/src/reference/server-rendered-ui.md).
+- An asset of the admin UI is compressed once per encoding and kept in
+  memory; each request compressed it again. Under `openshop dev`, a debug
+  build of the UI has a `.wasm` of 40 MB or more: each load compressed it for
+  5 s on a fast machine (19 s seen in Chrome), and the frame of the app stayed
+  blank meanwhile. The first load of a new asset compresses it at Brotli
+  quality 1 or gzip level 3, fast enough in a debug build of the app: 1.3 s
+  for a 43 MB `.wasm`, then 0.4 s for each load after it. Up to 64 MB of
+  compressed assets are kept, the least recently requested dropped first, and
+  the requests that arrive while an asset is compressed wait for that
+  compression. A compressed asset now has a `Content-Length`. The other
+  responses are compressed while they are sent, as before, at Brotli quality 4
+  or gzip level 6.
+- An asset requested with `Accept-Encoding: br;q=0, gzip;q=0`, or with
+  `identity` preferred, is sent uncompressed with its strong `ETag`; it had
+  the weak one of a compressed asset.
+
+- A signed welcome link that a route serves costs one Partner API request,
+  not two. The route read the plan with `refresh_plans()`, then sent the
+  launch to the app's home, which forgot that answer because the query has
+  `plan_handle`, and its first check asked again. A verified launch with
+  `plan_handle` now keeps an answer younger than ten seconds that has that
+  plan. A "no plan" answer of the same age is still forgotten: it is the check
+  that sent the merchant to the plans, and a merchant who approves within ten
+  seconds still gets the plan at once. `charge_id` alone, `refresh_plans()`
+  and an uninstall forget the answer as before.
+- `ctx.shopify.plan_among(&["pro", "plus"])` returns `Result<Option<Plan>>`:
+  the plan among these the shop has, or `None`. It is the check of
+  `billing::require_plan` without the `402`, with the same rule: a kept "no
+  plan" answer is asked again once it is ten seconds old. A loader that shows
+  its own "no plan" state no longer has to call `require_plan` and look for
+  `PLAN_REQUIRED` in its error. `require_plan` uses it. The guide shows it
+  where a page renders the "no plan" state.
+- `RouteRequest::query_shop()` returns the `shop` of the query, normalized as
+  `for_shop` reads it, or `None` when it is missing or not a
+  `*.myshopify.com` domain. The welcome route and the link of an email, in the
+  guide, the billing and server routes references and the rustdoc, answer
+  `400` then. They took the shop with `unwrap_or_default()`, so an empty or
+  bad `shop` made `admin_url` fail with a `500`.
+
+- `ctx.shopify.active_subscriptions()` warns when the plans are read from the
+  Partner API. It reads the Admin API (`currentAppInstallation`), where a
+  subscription of Shopify App Pricing may not be: a paying merchant looked
+  like one without a plan, in silence. Its first call in the process now logs
+  one warning that names where it was called and says to call
+  `active_plans()`. The call still reads the Admin API and returns what it
+  did. Without the Partner API, nothing is logged: apps on manual pricing use
+  it rightly. `active_plans()`, `refresh_plans()`, `require_plan` and
+  `any_plan` do not warn.
+- A server route knows a launch Shopify signed: `ctx.shopify_launch()`
+  (also on `RouteAuthContext`) returns a `ShopifyLaunch`, with the `shop`,
+  the `shopify_app` whose secret signed it, the `params` and the signed
+  `query`, and `plan_handle()`, `charge_id()` and `is_plan_welcome()`. It
+  checks what the admin UI checks for its launches (`hmac`, a `timestamp` of
+  the last 90 seconds, one app). `None` for an unsigned, forged, changed or
+  old query. `ctx.for_shop(&launch)` resolves its shop for its app.
+- The welcome link that a server route serves reads the plan again only for a
+  launch Shopify signed with `plan_handle` (or `charge_id`), as a best effort,
+  in the guide Charge with managed pricing, the billing reference, the server
+  routes reference and the rustdoc of `refresh_plans()` (compiled).
+  - Anyone can call a route, and `refresh_plans()` asks the Partner API at
+    each call: an open route spent the organization's four requests a second.
+    Without the signature, nothing is asked: the next plan check reads the
+    plan, since the kept "no plan" answer is more than ten seconds old by
+    then.
+  - The guide used `?`, which gave a merchant who just paid a `500` when the
+    Partner API failed. The route now logs it and goes on.
+  - The route sent a signed launch to the app's page in the admin. The admin
+    runs it in the app's frame, and Shopify's admin refuses frames
+    (`X-Frame-Options: DENY`). It now sends it to the app's home in the frame,
+    `/?{launch.query}`, which verifies the launch again.
+  - The server routes and SDK references no longer say that `refresh_plans()`
+    asks at most once every ten seconds: it asks at each call.
+- Server routes have a `ctx.logger`, a `ContextLogger`, as webhooks and admin
+  pages do. `RouteContext` and `RouteAuthContext` log with `route`, the method
+  and the declared path (`POST /orders/:id`). The `RouteShopContext` of
+  `ctx.for_shop(…)` logs with `route`, `shop` and `shopifyApp`. The lines are
+  the breadcrumbs of a failure of the route in Sentry. Breaking:
+  `RouteContext`, `RouteAuthContext` and `RouteShopContext` have a `logger`
+  field: a context built by hand needs `logger: ContextLogger::default()`.
+
+- `openshop::billing` reads the plan from the Partner API when it is set, as
+  Shopify App Pricing asks: "Replace GraphQL Admin API checks, such as
+  billing.check() and currentAppInstallation, with Partner API queries." An app
+  enrolled since April 2026, and every app after April 28, 2026, gets no
+  `charge_id` and no `app_subscriptions/update`, and a subscription created in
+  Shopify App Pricing has no Admin API subscription (`legacySubscriptionId` is
+  null): with the Admin API, a paying merchant got `402`.
+  - `PartnerApi` (`partner_id`, `token`, `plan_ttl`), set at startup with
+    `.partner_api(…)`, in `app!` with `partner_api: …`, or by
+    `SHOPIFY_PARTNER_ID` and `SHOPIFY_PARTNER_API_TOKEN`, field by field in
+    that order. Both or neither: one without the other stops the app at
+    startup, naming the setting or the variable. The token is never logged
+    and never in an error; `Debug` hides it. With both, a startup line says
+    where the plans are read.
+  - The source is explicit: `app.billing_source()` is `BillingSource::PartnerApi`
+    with the Partner API, `AdminApi` without it, for apps on manual pricing,
+    whose Billing API subscriptions `activeSubscription` does not cover.
+  - `ctx.shopify.active_plans()` reads the plans of the shop from that source
+    (`ActivePlans` of `Plan`: `name`, `handle`, `subscription`, an
+    `AppSubscription` or an `AppPricingSubscription`), and
+    `ctx.shopify.refresh_plans()` reads them again from the Partner API at
+    once, for a welcome link a route serves. `active_subscriptions()`
+    still reads the Admin API whatever the source.
+  - The Partner API takes four requests a second per client: the GIDs of the
+    app and of the shop are read once per process from the Admin API
+    (`OpenShopPartnerIds`), and the answer of `activeSubscription`
+    (`OpenShopPartnerSubscription`) is kept per shop for `plan_ttl`, five
+    minutes by default. A check it fails asks again unless the answer is
+    younger than ten seconds (`billing::MIN_REFRESH`); a verified launch with
+    `plan_handle` or `charge_id` (the welcome link of a plan) and
+    `app/uninstalled` forget it; concurrent checks of a shop send one
+    request. A plan that ends outside the app is seen within `plan_ttl`. A
+    `429`, a `5xx` or a network failure is retried as `shopify_retry` says.
+  - `app.partner_api()` returns the `PartnerApiClient`, whose `graphql(query,
+    variables)` runs any other query of the Partner API, such as `events`.
+  - `ShopifyEndpoints` gains `partner_origin` (`SHOPIFY_PARTNER_ORIGIN`), in
+    place of `https://partners.shopify.com`, with the rules of `admin_origin`
+    and a part in the startup line: lsf serves the Partner API there.
+  - Tests: `TestOptions::partner_api`, whose missing Partner ID or token is
+    `TEST_PARTNER_ID` or `TEST_PARTNER_API_TOKEN`;
+    `ctx.shopify.active_subscription(app_pricing_subscription("pro"))` answers
+    the Partner API (and the GIDs, `TEST_APP_GID` and `TEST_SHOP_GID`). An
+    operation of the Partner API nothing answers is named as one.
+- The handle of the app no longer falls back to its client ID, which Shopify
+  refuses in `admin.shopify.com/store/{store}/charges/{handle}/pricing_plans`.
+  Without a `handle` in `shopify.app.toml`, `ShopScope::app_handle()`,
+  `billing::pricing_url`, `pricing_link`, `plan_required`, the `402` of
+  `require_plan`, and `RouteContext::app_handle` and `pricing_url` fail with
+  an error that says to add it. The redirect after OAuth still opens the app at
+  `/admin/apps/{client_id}`.
+- Breaking, for code written against the billing, the endpoints and the
+  handle of the unreleased entries below:
+  - `billing::require_plan` returns a `Plan`, not an `AppSubscription`:
+    `plan.name` is unchanged; read `plan.handle`, or `plan.subscription`, for
+    the rest.
+  - `ShopScope::app_handle()` returns `Result<&str>`;
+    `billing::pricing_url` and `pricing_link` return `Result<String>`;
+    `billing::plan_required` returns `Result<AdminPublicError>`.
+  - `ResolvedShopifyApp::app_handle` is an `Option<String>`, and
+    `app_handle()` gives it or the error.
+  - `ShopifyEndpoints`, `OpenShopConfig`, `RuntimeEnv` and `TestOptions`
+    have a new public field (`partner_origin`, `partner_api`): a struct
+    literal of them needs it, or `..Default::default()`.
+
+- A test calls a loader or an action of an admin page by the path of the
+  page and the name of the function, as the view of the page does:
+  `ctx.call_loader::<T>(path, name, input)` and
+  `ctx.call_action::<T>(path, name, input)`, for staff user `1` of the shop
+  of the test, and `call_loader_as` / `call_action_as(path, name, input,
+  shop, sub)` for another. They run the access rules of the page and of the
+  pages it is nested under, the `authorize` rule, the input schema, then the
+  function, and return its output as a `T`, or the `AdminPublicError` the
+  page receives: `402 PLAN_REQUIRED` of `billing::require_plan`, `403
+  FORBIDDEN`, `422 INVALID_INPUT`, and `500 INTERNAL_ERROR` with the message
+  of any other error. `/reviews/42` calls the page `/reviews/:id` with its
+  `id`. A page or a function that does not exist panics, naming the ones
+  there are.
+- A test delivers a webhook as Shopify does:
+  `ctx.webhook(topic, payload).send().await` posts `payload` to `/webhooks`,
+  signed with the secret of the test, with `X-Shopify-Topic`,
+  `X-Shopify-Shop-Domain`, `X-Shopify-Hmac-Sha256`, a new
+  `X-Shopify-Webhook-Id` and `X-Shopify-Event-Id`, `X-Shopify-API-Version`
+  and `X-Shopify-Triggered-At`, and no session token, and returns the
+  response. The `WebhookRequestBuilder` takes `path(…)` (another route,
+  such as `/auth/webhooks/app-uninstalled`), `shop(…)`, `secret(…)` (another
+  app), `signature(…)` (a forged one, which gets `401`), `webhook_id(…)` (a
+  delivery Shopify retries) and `header(…)`.
+- `--help` and `-h` after a command of the application binary print its
+  usage and exit with status `0`, without building the configuration or
+  touching the database: `run --help` answered
+  `Unknown argument of run: --help`, `cron run --help`
+  `Unknown cron "--help"`, `migrate generate --help` ran the generation,
+  and `worker --help` started a worker. `run`, `cron` and `migrate` print
+  their usage line, `dev`, `start` and `worker` the usage text; so does
+  `openshop run --help`, through cargo. `openshop init`, `init-ui` and
+  `build-ui` print the usage text on `--help` and do nothing else.
+- `openshop dev` stops the whole app at a restart. It sent `SIGTERM` to the
+  process it started and waited for that one: when the `cargo` on the `PATH`
+  is a wrapper that runs the real cargo as its child (a tool manager's shim,
+  a `runner` of the cargo configuration), the old app kept its port and
+  served the code it was built from, while the new one failed with
+  `Address already in use`, silently. On Unix the app now leads a process
+  group of its own: a restart sends `SIGTERM` to the group, `SIGKILL` to what
+  is left after 35 seconds, and waits until nothing of it is left. The app no
+  longer reads the terminal, and Ctrl-C, `SIGTERM` or `SIGHUP` to
+  `openshop dev` stop it the same way. Before it starts the app,
+  `openshop dev` checks its port (`PORT`, else the one of `.env`, else 3000)
+  and says loudly when it is still taken, naming the process when `lsof`
+  can; an app that exits by itself is said too.
+- `app/uninstalled` delivered to `POST /webhooks` is recorded: the
+  installation is marked uninstalled and its access token deleted, whether
+  the app has a handler for the topic or not, then its handler runs. Only
+  `/auth/webhooks/app-uninstalled` did it before, which keeps working.
+  As there, the shop is the one both the signed payload (`myshopify_domain`)
+  and `X-Shopify-Shop-Domain` name: a delivery where they differ, or whose
+  payload names no shop, uninstalls nothing, and its handler runs as before.
+  A database failure is a `500`, which Shopify retries.
+- `openshop::billing`, for Shopify's managed pricing:
+  `ctx.shopify.active_subscriptions()` reads
+  `currentAppInstallation.activeSubscriptions` (`ActiveSubscriptions`,
+  `AppSubscription`, `has_plan(&["Pro"])`), `billing::require_plan(&ctx,
+  &plans)` and `billing::any_plan` guard a loader or an action of an admin
+  page with `402 PLAN_REQUIRED` and the pricing page in the error,
+  `billing::pricing_url` / `pricing_link` give the plan selection page, and
+  `AppSubscriptionsUpdate` is the payload of `app_subscriptions/update`.
+  `ShopScope` gains `app_handle()`, the `handle` of `shopify.app.toml` that the
+  URLs of the admin name the app by (`shopify_app` keeps its meaning), and
+  `admin_url(path)`; `ShopifyEndpoints` gains `admin_url` and
+  `pricing_plans_url`. All of them follow `admin_origin`.
+  `ResolvedShopifyApp` has `app_handle`. See the new guide, Charge with
+  managed pricing.
+- A server route links to the admin of the shop it names, installed or not,
+  without `for_shop`: `RouteContext` (and `RouteAuthContext`) gain
+  `app_handle(shop) -> Result<&str>`, `admin_url(shop, path) ->
+  Result<String>` and `pricing_url(shop) -> Result<String>`, which take the
+  shop as `for_shop` does and fail as it does, but for the installation. A
+  link in an email redirects with
+  `ctx.admin_url(&shop, &format!("apps/{}", ctx.app_handle(&shop)?))?`.
+- `AdminPublicError::detail(name, value)` sends texts with the error, in
+  `details` of the response and of `AdminRpcError` (`error.detail(name)`).
+  Breaking: `AdminPublicError` and `AdminRpcError` have a `details` field.
+- `WebhookContext` and `AdminContext` have a `logger`, a `ContextLogger` with
+  the methods of the flow logger, whose lines go to the runtime logger with
+  the shop and the topic or the request, and are the breadcrumbs of the
+  handler's Sentry reports. `openshop::tracing` re-exports `tracing`, also in
+  the prelude. Breaking: a context built by hand needs
+  `logger: ContextLogger::new(json!({ … }))` or `ContextLogger::default()`.
+- The admin UI shares a session token between its requests until 15 seconds
+  before it expires, instead of asking App Bridge for one per request, and
+  the requests made while one is asked for wait for it. A `401` makes the
+  next request ask for another.
+- The admin UI is titled with the name of the app, not `OpenShop`: the server
+  writes into the `<title>` of the shell the `name` of the `shopify.app*.toml`
+  of the app, else its key in `shopify.apps`, else `OpenShop`. App Bridge and
+  local-storefront show it in the title bar of a page whose `s-page` has no
+  `heading`, and the browser in its tab. A bundle with a title of its own keeps
+  it. `ResolvedShopifyApp` has `name`.
+- The lines of `ctx.logger`, of a flow, a webhook or an admin page, reach the
+  runtime logger with their message alone, at their level: the default logger
+  wrote the level twice (`INFO [INFO] Order received`), and writes
+  `INFO Order received`. A `RuntimeLogger` of your own no longer finds
+  `[LEVEL]` before the message.
+- The lines of a flow say what they run for in the console: `shop`,
+  `shopifyApp`, `flow` and `runId` reach the runtime logger with the payload
+  (`context={"count":3,"shop":"demo.myshopify.com",…}` instead of
+  `context={}`). A key of the payload wins. The `logs` table still stores the
+  payload alone. `FlowLogger::with_fields(json!({ … }))` adds fields to a
+  logger built by hand, whose lines carry `runId`.
+- `shopify_retry` sets how the Shopify client retries what Shopify did not
+  run (a query after a `5xx` or a network failure, a throttled request):
+  `app! { shopify_retry: shopify::RetryPolicy::new(2).with_max_delay(…) }`,
+  or `OpenShopBuilder::shopify_retry`. `openshop::shopify::RetryPolicy` is
+  `shopify_api`'s. Without it, `shopify_api`'s four retries, as before.
+- Tests retry Shopify without waiting: `TestOptions::shopify_retry`, `None` by
+  default, is the policy of the application (or `shopify_api`'s) with the same
+  number of attempts and no wait between them, so a test that answers `503`
+  runs the code that retries in no time instead of ~15 seconds.
+  `Some(policy)` is that policy as it is, waits included. A `429`'s
+  `Retry-After` is still waited for.
+- `openshop run <flow> [--shop=<domain> | --all-shops] [--input=<json>]` and
+  `openshop cron run <name>` run a flow, or the flow of a cron, once, against
+  the database of the app, whatever the admin shows (`AdminPagesConfig::none()`
+  removes `/api/flows/*/run`, `/ops` is read-only). The runs are queued as the
+  scheduler queues them (the shops of the cron, its input, without the shops
+  that turned it off; the input checked, the concurrency and retry policy of
+  the flow), then executed by a worker of the command that takes these runs
+  only, with the claim, lease, retries and timeout of `worker`; the command
+  waits for them and fails when one did not complete. Without `--shop`, the
+  one shop installed. A cron is named by its name, its key `<flow>:<schedule>`
+  or its flow. No occurrence is claimed: the cron still fires on schedule.
+  Like `dev`, they load `.env`; outside production they push the schema, in
+  production they refuse a database behind its migrations. The application
+  binary has the same commands: `cargo run -- run …`, `cargo run -- cron run …`.
+- `ctx.shopify` in a test, a `FakeShopify`, answers the GraphQL operations the
+  application sends by their name (`query Name …`, or the `operationName`):
+  `on(operation, data)`, `on_variables(operation, variables, data)`,
+  `on_with(operation, |call| …)` and `respond(operation, response)`; `calls()`,
+  `calls_to(…)`, `operations()`, `unanswered()` and `assert_answered()` say what
+  was sent. An operation nothing answers, without a responder, gets a GraphQL
+  error that names it and the ones answered, and fails the call (it got a
+  `404` before; a request that is not GraphQL still does).
+  `ctx.shopify.active_subscriptions([subscription("Pro")])` answers what the
+  billing helpers ask, `OpenShopActiveSubscriptions`
+  (`billing::ACTIVE_SUBSCRIPTIONS_OPERATION`); `testing::subscription(name)`
+  is an active test subscription. `MockTransport::shopify()` is the same fake;
+  its responder answers what the fake does not. The testing reference lists
+  the operations OpenShop sends of its own. The templates' tests answer their
+  operations by name.
+- `#[openshop::test]` reads the Shopify TOML files of the crate of the test
+  (its `CARGO_MANIFEST_DIR`): the `handle`, the `name` and the scopes of
+  `shopify.app.toml`, so the pricing page and the links to the admin name the
+  app as Shopify does. When that file has a `client_id` and no
+  `shopify.app*.toml` is the one of `test-app`, the test's API key is that
+  `client_id`, unless the options give another (`TestOptions::api_key`, whose
+  default is now `TEST_API_KEY`). A `cwd` in `TestOptions` still wins. Behavior
+  change: a test of `#[openshop::test]` in a crate with a `shopify.app.toml`
+  now reads it, where it read none.
+- The `docker-compose.yml` of a new project, and of the repository, has a
+  healthcheck (`pg_isready`): `docker compose up -d --wait` returns once
+  PostgreSQL accepts connections. `openshop init`, the READMEs and the guides
+  say `docker compose up -d --wait`, and so does `mise run db:up`.
+- Breaking for code that builds these structs field by field, without
+  `..Default::default()`: `OpenShopConfig` (`shopify_retry`) and
+  `TestOptions` (`shopify_retry`). `TestContext` has a `shopify` field.
+
+- `ShopifyEndpoints` says where an app reaches Shopify, for a simulator of
+  Shopify such as [local-storefront](https://github.com/0xtlt/local-storefront),
+  a proxy or an API of your own. Each field is independent, and none set is
+  Shopify, as before:
+  - `admin_origin` sends the Admin API, the token exchange, the code exchange,
+    the client credentials grant and the refresh of every shop there, in place
+    of `https://{shop}`, through `shopify_api`'s `admin_origin`. The `/auth`
+    install link goes there too, `/auth/callback` sends the browser back to
+    `{admin_origin}/admin/apps/{client_id}?shop={shop}`, and the admin UI may
+    be framed by that origin.
+  - `app_bridge` replaces Shopify's App Bridge script in the admin UI. The tag
+    keeps its `data-api-key`.
+  - `polaris` replaces Shopify's Polaris script in the admin UI and in the page
+    that says where the app opens from. That page's policy allows the script's
+    origin where Polaris loads from.
+
+  They are set in `app!` (`shopify_endpoints: …`, a setting of its own that
+  does not turn on multi-app mode), at startup with the new `APP.main_with` /
+  `APP.run_with`, which hand the builder of the declaration to a closure, or by
+  `SHOPIFY_ADMIN_ORIGIN`, `SHOPIFY_APP_BRIDGE_URL` and `SHOPIFY_POLARIS_URL`
+  for a field the code does not set. `dev`, `start` and `worker` use them, and
+  log one line at startup that names the endpoints that are not Shopify's. An
+  origin or a script that is not `https://`, or `http://` to `localhost`,
+  `127.0.0.1` or `[::1]`, stops the app at startup. `TestOptions` has
+  `shopify_endpoints`, and `OpenShop::shopify_endpoints()` returns the ones in
+  use. See `docs/src/guides/custom-shopify-endpoints.md`.
+- `shopify_api` 1.0.0-rc.4, which has `admin_origin`.
 - A worker extends the lease of a run four times per lease period, every 15
   seconds at most, instead of twice. One late or failed extension no longer
   stops a healthy flow: the next one now comes before the worker gives the

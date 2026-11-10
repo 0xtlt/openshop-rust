@@ -1,7 +1,7 @@
 //! Shopify GraphQL answered by fixtures.
 #![allow(dead_code)]
 
-use openshop::testing::{MockTransport, TestContext};
+use openshop::testing::TestContext;
 use openshop::{Value, json};
 
 pub fn graphql_fixture(query: &str) -> Value {
@@ -61,10 +61,13 @@ pub fn graphql_fixture(query: &str) -> Value {
     json!({})
 }
 
-/// Answers the Shopify GraphQL requests of a test with the fixtures.
+/// The operations the flows send, by the name they give them in `graphql!`.
+const OPERATIONS: &[&str] = &["GetRecentOrders", "GetProductFull"];
+
+/// Answers the operations of the flows with their fixtures, by name: an
+/// operation a test does not answer fails with its name.
 pub fn answer_shopify(ctx: &TestContext) {
-    ctx.transport.respond_with(|request| {
-        let query = request.body["query"].as_str().unwrap_or_default();
-        Ok(MockTransport::json(200, json!({ "data": graphql_fixture(query) })))
-    });
+    for operation in OPERATIONS {
+        ctx.shopify.on(operation, graphql_fixture(operation));
+    }
 }

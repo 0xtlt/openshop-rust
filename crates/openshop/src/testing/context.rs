@@ -1,7 +1,8 @@
 //! A running application for tests.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Result;
 use indexmap::IndexMap;
@@ -13,6 +14,8 @@ use uuid::Uuid;
 
 use super::db::TestDb;
 use super::fake::FakeProviders;
+use super::proxy_signature;
+use super::shopify::FakeShopify;
 use super::transport::MockTransport;
 use super::{session_token, to_query_string};
 use crate::app::{OpenShop, OpenShopConfig};
@@ -20,9 +23,9 @@ use crate::declare::App;
 use crate::engine::dispatch::DispatchOptions;
 use crate::engine::runner::{RunFlowOptions, RunOutcome, run_flow};
 use crate::runtime::RuntimeEnv;
-use super::proxy_signature;
-use crate::server::shopify_apps::DEFAULT_SHOPIFY_APP_HANDLE;
+use crate::server::shopify_apps::{DEFAULT_SHOPIFY_APP_HANDLE, client_id_in_place_of};
 use crate::server::{ServerHandle, ServerOptions, create_router, serve};
+use crate::shopify::{PartnerApi, ShopifyEndpoints};
 use crate::types::ShopScope;
 
 #[derive(Debug, Clone)]
@@ -168,12 +171,47 @@ impl ProxyClient {
     }
 }
 
+/// The API key of the options of a test that sets none, [`TestOptions::api_key`].
+pub const TEST_API_KEY: &str = "test-app";
+
+/// The Partner ID of a test whose Partner API has a token and no Partner ID.
+pub const TEST_PARTNER_ID: &str = "1234567";
+
+/// The token of a test whose Partner API has a Partner ID and no token.
+pub const TEST_PARTNER_API_TOKEN: &str = "prtapi_test";
+
+tokio::task_local! {
+    /// The directory of the manifest of the crate whose test runs, which
+    /// `#[openshop::test]` sets.
+    static MANIFEST_DIR: PathBuf;
+}
+
+/// Runs `test` with `manifest_dir`, the `CARGO_MANIFEST_DIR` of the crate of
+/// the test, as the directory of the contexts it starts without a `cwd`:
+/// what `#[openshop::test]` wraps a test in.
+#[doc(hidden)]
+pub async fn in_crate<F: Future>(manifest_dir: &'static str, test: F) -> F::Output {
+    MANIFEST_DIR.scope(PathBuf::from(manifest_dir), test).await
+}
+
+/// The retries of `policy`, without waiting between them: the same number
+/// of attempts, so that a test still runs the code that retries.
+fn without_waits(policy: &shopify_api::RetryPolicy) -> shopify_api::RetryPolicy {
+    shopify_api::RetryPolicy::new(policy.max_retries())
+        .with_base_delay(Duration::ZERO)
+        .with_max_delay(Duration::ZERO)
+        .with_max_retry_after(policy.max_retry_after())
+}
+
 #[derive(Clone)]
 pub struct TestOptions {
     pub shop: String,
     /// `SHOPIFY_API_SECRET` of the single-app setup.
     pub secret: String,
-    /// `SHOPIFY_API_KEY` of the single-app setup.
+    /// `SHOPIFY_API_KEY` of the single-app setup. With [`TEST_API_KEY`], the
+    /// default, and a `shopify.app.toml` in [`cwd`](Self::cwd) whose
+    /// `client_id` is another, the test is that app: its `client_id` is the
+    /// API key.
     pub api_key: String,
     /// Marks the shop as installed with this access token.
     pub access_token: Option<String>,
@@ -188,10 +226,33 @@ pub struct TestOptions {
     /// an `encryption_key`. `true` by default; with `false` and no key the
     /// application refuses to start.
     pub development: bool,
-    /// Project root used to resolve Shopify TOML files. Defaults to a directory without any.
+    /// Project root used to resolve Shopify TOML files: the `handle` and the
+    /// `name` of the app, its scopes. Defaults, under `#[openshop::test]`, to
+    /// the directory of the crate of the test (its `CARGO_MANIFEST_DIR`), and
+    /// to a directory without any otherwise.
     pub cwd: Option<PathBuf>,
+    /// How the Shopify client retries what Shopify did not run. `None`, the
+    /// default: the policy of the application (its `shopify_retry`, else
+    /// `shopify_api`'s four retries) without waiting between the attempts,
+    /// whose number is the same. `Some(policy)` is that policy as it is,
+    /// waits included.
+    pub shopify_retry: Option<shopify_api::RetryPolicy>,
     pub server: ServerOptions,
     pub transport: Option<Arc<MockTransport>>,
+    /// The Shopify endpoints of the application, field by field over the ones
+    /// its configuration sets: the Admin API and OAuth at another origin, the
+    /// admin UI with another App Bridge or Polaris. The requests still go to
+    /// the mock transport. The environment variables of the endpoints are not
+    /// read in a test.
+    pub shopify_endpoints: ShopifyEndpoints,
+    /// The Partner API of the application, field by field over the one its
+    /// configuration sets: with a Partner ID or a token, billing reads the
+    /// plans from the Partner API, which the mock transport answers
+    /// (`ctx.shopify.active_subscription(…)`). The one that is missing is
+    /// [`TEST_PARTNER_ID`] or [`TEST_PARTNER_API_TOKEN`], so that a
+    /// configuration that names its Partner ID and reads its token from the
+    /// environment runs in a test. The environment variables are not read.
+    pub partner_api: PartnerApi,
 }
 
 impl Default for TestOptions {
@@ -199,7 +260,7 @@ impl Default for TestOptions {
         Self {
             shop: "test.myshopify.com".to_string(),
             secret: "test-secret".to_string(),
-            api_key: "test-app".to_string(),
+            api_key: TEST_API_KEY.to_string(),
             access_token: None,
             encryption_key: None,
             client_credentials_shop: None,
@@ -207,8 +268,11 @@ impl Default for TestOptions {
             production: false,
             development: true,
             cwd: None,
+            shopify_retry: None,
             server: ServerOptions::default(),
             transport: None,
+            shopify_endpoints: ShopifyEndpoints::new(),
+            partner_api: PartnerApi::new(),
         }
     }
 }
@@ -226,6 +290,10 @@ pub struct TestContext {
     pub fakes: FakeProviders,
     /// Scripted Shopify HTTP responses and the recorded requests.
     pub transport: Arc<MockTransport>,
+    /// The Admin API of the test: answers the GraphQL operations the
+    /// application sends by their name, `ctx.shopify.on("Name", data)`, and
+    /// records them. The one of [`transport`](Self::transport).
+    pub shopify: FakeShopify,
     /// HTTP client that does not follow redirects.
     pub http: reqwest::Client,
     test_db: TestDb,
@@ -292,6 +360,28 @@ impl ShopScope for TestContext {
     }
 }
 
+/// `partner_api` with the Partner ID or the token of a test in place of the
+/// one that is missing, when the other is set.
+fn with_test_credentials(partner_api: PartnerApi) -> PartnerApi {
+    if partner_api.partner_id.is_none() && partner_api.token.is_none() {
+        return partner_api;
+    }
+    partner_api.or(PartnerApi::new()
+        .partner_id(TEST_PARTNER_ID)
+        .token(TEST_PARTNER_API_TOKEN))
+}
+
+/// The API key a test runs with: the one of the options, or with
+/// [`TEST_API_KEY`] the `client_id` of the `shopify.app.toml` of `cwd` when
+/// no `shopify.app*.toml` there is the one of `test-app`, so that the file
+/// is the one of the app.
+fn api_key_of(api_key: &str, cwd: &Path) -> String {
+    match api_key {
+        TEST_API_KEY => client_id_in_place_of(cwd, api_key).unwrap_or_else(|| api_key.to_string()),
+        _ => api_key.to_string(),
+    }
+}
+
 impl TestOptions {
     /// The options of a test whose shop has installed the application: the
     /// flows, the proxies and the admin find an access token for it.
@@ -318,21 +408,32 @@ impl TestContext {
         if options.client_credentials_shop.is_some() {
             config.client_credentials_shop = options.client_credentials_shop.clone();
         }
+        config.shopify_endpoints = options.shopify_endpoints.clone().or(config.shopify_endpoints);
+        config.partner_api = with_test_credentials(options.partner_api.clone().or(config.partner_api));
+        config.shopify_retry = Some(match &options.shopify_retry {
+            Some(policy) => policy.clone(),
+            None => without_waits(&config.shopify_retry.clone().unwrap_or_default()),
+        });
+        let cwd = options
+            .cwd
+            .clone()
+            .or_else(|| MANIFEST_DIR.try_with(Clone::clone).ok())
+            .unwrap_or_else(|| std::env::temp_dir().join("openshop-test-no-toml"));
+        let api_key = api_key_of(&options.api_key, &cwd);
         let test_db = TestDb::create_with_models(&config.models).await?;
         let db = test_db.pool.clone();
         let transport = options.transport.clone().unwrap_or_default();
         let env = RuntimeEnv {
-            shopify_api_key: Some(options.api_key.clone()),
+            shopify_api_key: Some(api_key.clone()),
             shopify_api_secret: Some(options.secret.clone()),
             host: options.host.clone(),
             shopify_app_url: None,
             encryption_key: options.encryption_key.clone(),
             production: options.production,
             development: options.development,
-            cwd: options
-                .cwd
-                .clone()
-                .unwrap_or_else(|| std::env::temp_dir().join("openshop-test-no-toml")),
+            cwd,
+            shopify_endpoints: ShopifyEndpoints::new(),
+            partner_api: PartnerApi::new(),
         };
         let app = OpenShop::with_transport(config, db.clone(), env, transport.clone())?;
 
@@ -357,13 +458,14 @@ impl TestContext {
             url: format!("http://127.0.0.1:{port}"),
             port,
             fakes,
+            shopify: transport.shopify(),
             transport,
             http: reqwest::Client::builder()
                 .redirect(reqwest::redirect::Policy::none())
                 .build()?,
             shop: options.shop,
             secret: options.secret,
-            api_key: options.api_key,
+            api_key,
             app,
             db,
             test_db,
@@ -479,6 +581,52 @@ impl TestContext {
 
     pub fn delete(&self, path: &str) -> reqwest::RequestBuilder {
         self.request(reqwest::Method::DELETE, path)
+    }
+
+    /// The page of the admin at `path`, as staff user `1` opens it from the
+    /// menu: `ctx.page("/reviews").send().await?.text().await?` is its HTML,
+    /// the whole document the server renders: the `<ui-nav-menu>` of the
+    /// admin, then the page, rendered by its view, in
+    /// `<main id="openshop-page">`.
+    pub fn page(&self, path: &str) -> reqwest::RequestBuilder {
+        self.get(path).header("x-openshop-fetch", "1")
+    }
+
+    /// A form of the page of the admin at `path`, sent as the admin sends it:
+    /// `fields` with the name of its action in `_action`. The answer is:
+    ///
+    /// - `200` and the page rendered again (the whole document, as
+    ///   [`page`](Self::page) gives it), with the toast of the action in
+    ///   `x-openshop-toast`, or its error toast in `x-openshop-toast-error`;
+    /// - `204` with `x-openshop-location` when the action goes to another
+    ///   page, `Outcome::redirect(…)`;
+    /// - `422` (or the status of the `AdminPublicError` that refused it) and
+    ///   the page with the error of each field when the form is refused and
+    ///   the view reads `form`;
+    /// - the status of the error and `x-openshop-toast-error`, without a body,
+    ///   when the action fails, or when the form is refused and the view does
+    ///   not read `form`.
+    ///
+    /// The toast headers are percent-encoded (`Saved%20Great`):
+    /// [`toast`](super::toast) and [`toast_error`](super::toast_error) read
+    /// them decoded.
+    ///
+    /// ```no_run
+    /// # async fn example(ctx: &openshop::testing::TestContext) -> openshop::Result<()> {
+    /// use openshop::testing::{toast, toast_error};
+    ///
+    /// let saved = ctx.submit("/settings", &[("_action", "saveSettings"), ("threshold", "8")]).send().await?;
+    /// assert_eq!(saved.status(), 200);
+    /// assert_eq!(toast(&saved).as_deref(), Some("Threshold saved"));
+    /// assert_eq!(toast_error(&saved), None);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn submit(&self, path: &str, fields: &[(&str, &str)]) -> reqwest::RequestBuilder {
+        self.post(path)
+            .header("x-openshop-fetch", "1")
+            .header(reqwest::header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .body(serde_urlencoded::to_string(fields).unwrap_or_default())
     }
 
     /// Reset all fakes call history

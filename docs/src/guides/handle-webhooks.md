@@ -88,6 +88,18 @@ shopify app deploy --config shopify.app.toml
 
 For multiple apps, repeat this for each relevant TOML file.
 
+Subscribe to `app/uninstalled` on `/webhooks` too, even without a handler of
+your own: OpenShop marks the installation as uninstalled and deletes its access
+token when it arrives. A handler of the topic, if you write one, runs after
+that, for the cleanup of your app. See
+[Uninstallation](../reference/webhooks.md#uninstallation).
+
+```toml
+[[webhooks.subscriptions]]
+topics = ["app/uninstalled"]
+uri = "/webhooks"
+```
+
 ## 4. Verify delivery and failure handling
 
 Create a test order on the development store. Check the output of the OpenShop

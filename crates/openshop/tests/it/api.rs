@@ -3102,6 +3102,11 @@ async fn cors_allows_known_origins_on_the_api() {
         api_config(),
         TestOptions {
             host: Some("https://app.example.com/".to_string()),
+            // API only: the admin is not served from this origin.
+            server: ServerOptions {
+                ui: UiSource::None,
+                dev: false,
+            },
             ..Default::default()
         },
     )
@@ -3174,7 +3179,23 @@ async fn cors_omits_headers_for_unknown_origins(ctx: &TestContext) {
     assert_eq!(allowed_origin(&response), None);
 }
 
-#[openshop::test(api_context())]
+/// A server of the API alone, which answers other origins.
+async fn api_only_context() -> TestContext {
+    TestContext::with_options(
+        api_config(),
+        TestOptions {
+            server: ServerOptions {
+                ui: UiSource::None,
+                dev: false,
+            },
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap()
+}
+
+#[openshop::test(api_only_context())]
 async fn cors_answers_preflight_requests_without_a_session(ctx: &TestContext) {
     let preflight = |origin: &str| {
         anonymous(ctx, Method::OPTIONS, "/api/providers/warehouse")
@@ -3208,17 +3229,18 @@ async fn cors_answers_preflight_requests_without_a_session(ctx: &TestContext) {
 async fn cors_is_only_enabled_without_ui_or_in_dev_mode() {
     let origin = "https://admin.shopify.com";
     for (server, expected) in [
-        (ServerOptions::default(), Some(origin)),
         (
             ServerOptions {
-                ui: UiSource::Embedded,
+                ui: UiSource::None,
                 dev: false,
             },
-            None,
+            Some(origin),
         ),
+        // The admin is served from this origin, the default.
+        (ServerOptions::default(), None),
         (
             ServerOptions {
-                ui: UiSource::Embedded,
+                ui: UiSource::Server,
                 dev: true,
             },
             Some(origin),

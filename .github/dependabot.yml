@@ -11,15 +11,6 @@ updates:
       cargo:
         patterns: ["*"]
 
-  # The admin UI is a workspace of its own, with its own lockfile.
-  - package-ecosystem: cargo
-    directory: /crates/openshop-ui
-    schedule:
-      interval: weekly
-    groups:
-      cargo-ui:
-        patterns: ["*"]
-
   - package-ecosystem: github-actions
     directory: /
     schedule:

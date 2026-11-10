@@ -10,10 +10,10 @@ with one database test. This guide adds a second one.
 ## 1. Prepare a test database
 
 The test harness needs a reachable PostgreSQL server, nothing else. Start the
-container of the generated project:
+container of the generated project, and wait until it accepts connections:
 
 ```bash
-docker compose up -d
+docker compose up -d --wait
 ```
 
 Each test gets a `TestContext` with its own schema in that database: the
@@ -60,17 +60,18 @@ that are already there:
 #[cfg(test)]
 mod tests {
     use super::*;
-    use openshop::testing::{MockTransport, TestContext};
+    use openshop::testing::TestContext;
 
     // ... existing tests ...
 
     #[openshop::test(APP)]
     #[ignore = "requires PostgreSQL"]
     async fn syncs_an_order_and_lists_its_run(ctx: &TestContext) {
-        // Shopify Admin API responses.
-        ctx.transport.respond_json(json!({
-            "data": { "orders": { "nodes": [{ "id": "gid://shopify/Order/1", "name": "#1001" }] } },
-        }));
+        // Shopify answers the operation of the flow, `query GetRecentOrders`, by its name.
+        ctx.shopify.on(
+            "GetRecentOrders",
+            json!({ "orders": { "nodes": [{ "id": "gid://shopify/Order/1", "name": "#1001" }] } }),
+        );
 
         // The warehouse provider is replaced by a recording fake.
         let push = ctx.fakes.for_call(Warehouse::PUSH);
@@ -105,11 +106,24 @@ recorded call are the `Vec<Order>` the method would have received.
 `ctx.fakes.method("warehouse", "push")` is the same fake without the types,
 with arguments and results as JSON.
 
-The fixture answers the `nodes` query of the template and of the flow guide.
-Update it when your flow requests different fields.
+The fixture is the `data` of the `GetRecentOrders` query of the template and
+of the flow guide, which `ctx.shopify` answers by the name the query gives
+itself. Update it when your flow requests different fields.
 `run_flow()` executes immediately with fake provider methods; it does not need a
-worker. Shopify requests never leave the process: they are answered by
-`ctx.transport`, and a request without a configured response gets a 404.
+worker. Shopify requests never leave the process: `ctx.shopify` answers the
+GraphQL operations, and one it does not answer fails with an error that names
+it: ``The test does not answer the Admin API operation `GetRecentOrders` ``.
+`ctx.shopify.active_subscriptions([subscription("Pro")])` answers what the
+[billing](../reference/billing.md) helpers ask of the Admin API, and
+`ctx.shopify.active_subscription(app_pricing_subscription("pro"))` what they
+ask of the Partner API; see
+[Answer the Admin API](../reference/testing.md#answer-the-admin-api) for the
+rest, and for the operations OpenShop sends of its own.
+
+The test reads the `shopify.app.toml` of the project, as the app does: the
+pricing page and the links to the admin name the app by its `handle`. A
+Shopify request that fails with a `5xx` is retried as many times as in
+production, without waiting.
 `ctx.get(..)` and the other request helpers add a staff session token for the
 test shop; `ctx.request_as(method, path, shop, sub)` signs for another shop or
 user.
@@ -146,17 +160,30 @@ tests.
 
 - Use `ctx.dispatch_flow(name, input)` to assert queue insertion; the test
   context does not start a worker. See [Test a flow](../reference/testing.md).
+  To run a flow or a cron by hand against the development database, outside
+  the tests, use [`openshop run`](../reference/cli.md#run-a-flow-or-a-cron-by-hand).
 - Use the proxy test client, `ctx.proxy().get("/api/reviews").send()`, for
   signed storefront requests. `ctx.proxy_for(shop, secret)` signs for another
   shop or app secret.
+- Use `ctx.webhook(topic, payload).send()` to deliver a webhook signed as
+  Shopify signs it, with the headers it sends; `.signature("forged")` is one
+  the app refuses. See [Deliver a webhook](../reference/testing.md#deliver-a-webhook).
 - Use `ctx.http` with `ctx.url_for(path)` for requests without a session token,
-  such as a server route or an unsigned webhook.
+  such as a server route.
 - Start a context by hand with `TestContext::with_options(config, options)`
   for a configuration built in the test or for other options, such as another
   shop. `TestOptions::installed()` is the options of a shop that has installed
   the application. A test that starts its context ends with
   `ctx.shutdown().await`.
-- See [custom admin page testing](../reference/custom-admin-pages.md#testing) for
-  loader and action helpers.
+- Use `ctx.call_loader(path, name, input)` and `ctx.call_action(…)` to call a
+  loader or an action of an admin page, and assert on what it returns or on
+  the error the page receives, such as `402 PLAN_REQUIRED`; `ctx.page(path)`
+  and `ctx.submit(path, fields)` to render the page and send its forms, and
+  `toast(&response)` and `toast_error(&response)` to read the toast a form
+  got. See [Test admin functions](../reference/testing.md#test-admin-functions)
+  and [Test a page](../reference/testing.md#test-a-page).
+- Name the requests and the answers of the context in a helper as
+  `openshop::testing::RequestBuilder` and `openshop::testing::Response`: the
+  tests need no `reqwest` dependency.
 
 All helper options and lifecycle contracts are in the [testing reference](../reference/testing.md).

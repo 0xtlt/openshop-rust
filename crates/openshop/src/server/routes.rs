@@ -16,6 +16,7 @@ use super::file_routes::mount_routes;
 use super::http::{catch_panic, json_error, report_failure};
 use crate::app::OpenShop;
 use crate::declare::InvalidInput;
+use crate::runtime::context_logger::ContextLogger;
 use crate::runtime::report;
 use crate::types::{
     Route, RouteAuth, RouteAuthContext, RouteAuthOutcome, RouteAuthValue, RouteContext, RouteMethod, RouteRequest,
@@ -59,6 +60,8 @@ async fn handle(
     report::describe(|request| {
         request.unit("route", format_args!("{method_name} {route_path}"));
     });
+    // The lines of the route carry it; those of a shop it resolves add the shop.
+    let logger = ContextLogger::with_category(json!({ "route": format!("{method_name} {route_path}") }), "route");
 
     let params: IndexMap<String, String> = params
         .iter()
@@ -78,6 +81,7 @@ async fn handle(
             request: request.clone(),
             params: params.clone(),
             db: app.db().clone(),
+            logger: logger.clone(),
             app: app.clone(),
         };
         match catch_panic("authentication", authenticate(context)).await {
@@ -99,6 +103,7 @@ async fn handle(
         params,
         auth,
         db: app.db().clone(),
+        logger,
         app,
     };
     match catch_panic("handler", handler(context)).await {
@@ -106,7 +111,10 @@ async fn handle(
         // The handler refused its input.
         Err(error) if error.is::<InvalidInput>() => json_error(StatusCode::UNPROCESSABLE_ENTITY, error.to_string()),
         Err(error) => {
-            report_failure(format!("[openshop] Server route error for {method_name} {route_path}"), &error);
+            report_failure(
+                format!("[openshop] Server route error for {method_name} {route_path}"),
+                &error,
+            );
             internal_error()
         }
     }
@@ -123,21 +131,29 @@ pub fn assert_route_definition(route: &Route, route_path: &str) -> anyhow::Resul
 
 pub fn create_server_routes(app: &OpenShop, log: bool) -> anyhow::Result<Router<OpenShop>> {
     let definitions = &app.config().routes;
-    mount_routes("Server", "/routes", definitions.keys().map(String::as_str), log, |route_path, key| {
-        let route = definitions[key].clone();
-        let allowed = route.allowed_methods().join(", ");
-        let registered = Arc::new(RegisteredRoute {
-            path: route_path.to_string(),
-            definition: route,
-        });
-        let handler = any(
-            move |State(app): State<OpenShop>,
-                  method: Method,
-                  uri: Uri,
-                  params: RawPathParams,
-                  headers: HeaderMap,
-                  body: Bytes| { handle(registered.clone(), app, method, uri, params, headers, body) },
-        );
-        (handler, allowed)
-    })
+    mount_routes(
+        "Server",
+        "/routes",
+        definitions.keys().map(String::as_str),
+        log,
+        |route_path, key| {
+            let route = definitions[key].clone();
+            let allowed = route.allowed_methods().join(", ");
+            let registered = Arc::new(RegisteredRoute {
+                path: route_path.to_string(),
+                definition: route,
+            });
+            let handler = any(
+                move |State(app): State<OpenShop>,
+                      method: Method,
+                      uri: Uri,
+                      params: RawPathParams,
+                      headers: HeaderMap,
+                      body: Bytes| {
+                    handle(registered.clone(), app, method, uri, params, headers, body)
+                },
+            );
+            (handler, allowed)
+        },
+    )
 }

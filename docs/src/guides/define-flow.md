@@ -115,6 +115,15 @@ then trigger `syncOrders` in **Flows** with `{ "limit": 10 }`. Confirm that both
 steps complete and **Orders synced** appears in the logs. Development already
 starts a worker. Production needs a [separate worker service](deploy-production.md).
 
+From a terminal, `openshop run` runs it once and waits for it, also in an app
+whose admin hides the built-in pages:
+
+```bash
+openshop run syncOrders --shop=example.myshopify.com --input='{"limit":10}'
+```
+
+See [Run a flow or a cron by hand](../reference/cli.md#run-a-flow-or-a-cron-by-hand).
+
 ## 3. Schedule the flow for installed shops
 
 The generated application contains a sample cron entry named **Quick sync**
@@ -148,7 +157,8 @@ The app refuses to start with an invalid schedule, a cron that names a flow
 it does not list, or an `input` its flow does not accept: `{ "limit": 0 }`
 here stops it with
 `[openshop] Invalid config: crons[0].input is not an input of flow "syncOrders": …`.
-Verify a new run appears after the next five-minute boundary.
+Verify a new run appears after the next five-minute boundary, or fire the
+cron now, for its shops and with its input: `openshop cron run "Sync recent orders"`.
 The default concurrency policy rejects a second active run for the same app,
 shop, and flow.
 
