@@ -119,7 +119,7 @@ mod tests {
         std::fs::write(
             dir.join("Cargo.toml"),
             r#"[package]
-name = "shop-test"
+name = "my-app"
 
 [dependencies]
 openshop = { git = "https://github.com/0xtlt/openshop-rust", tag = "v0.0.11", features = ["ui"] }
@@ -158,7 +158,7 @@ leptos = "0.8"
         // Once migrated: nothing.
         std::fs::write(
             dir.join("Cargo.toml"),
-            "[package]\nname = \"shop-test\"\n\n[dependencies]\nopenshop = { path = \"../openshop\" }\nmaud = \"0.27\"\n",
+            "[package]\nname = \"my-app\"\n\n[dependencies]\nopenshop = { path = \"../openshop\" }\nmaud = \"0.27\"\n",
         )
         .unwrap();
         std::fs::write(dir.join("src/main.rs"), "fn main() {}\n").unwrap();

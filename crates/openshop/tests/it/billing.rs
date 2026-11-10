@@ -138,7 +138,7 @@ fn project(handle: Option<&str>) -> PathBuf {
         .unwrap_or_default();
     std::fs::write(
         cwd.join("shopify.app.toml"),
-        format!("client_id = \"test-app\"\nname = \"Hide PayPal\"\n{handle}"),
+        format!("client_id = \"test-app\"\nname = \"Demo App\"\n{handle}"),
     )
     .unwrap();
     cwd
@@ -361,7 +361,7 @@ async fn a_failure_of_shopify_is_not_a_missing_plan() {
 
 #[tokio::test]
 async fn the_pricing_page_is_at_the_admin_origin_and_names_the_app_by_its_handle() {
-    let cwd = project(Some("hide-paypal"));
+    let cwd = project(Some("demo-app"));
     let transport = MockTransport::new();
     transport.respond_json(subscriptions(&[]));
     let endpoints = ShopifyEndpoints::new().admin_origin("http://localhost:9393");
@@ -372,8 +372,8 @@ async fn the_pricing_page_is_at_the_admin_origin_and_names_the_app_by_its_handle
     assert_eq!(
         body["details"],
         json!({
-            "pricingUrl": "http://localhost:9393/admin/charges/hide-paypal/pricing_plans?shop=test-integration.myshopify.com",
-            "pricingLink": "shopify:admin/charges/hide-paypal/pricing_plans",
+            "pricingUrl": "http://localhost:9393/admin/charges/demo-app/pricing_plans?shop=test-integration.myshopify.com",
+            "pricingLink": "shopify:admin/charges/demo-app/pricing_plans",
         })
     );
     // The Admin API is at the admin origin too.
@@ -387,10 +387,10 @@ async fn the_pricing_page_is_at_the_admin_origin_and_names_the_app_by_its_handle
 
     // What a context gives for its shop, `shopify_app` unchanged.
     assert_eq!(ctx.shopify_app(), "default");
-    assert_eq!(ctx.app_handle().unwrap(), "hide-paypal");
+    assert_eq!(ctx.app_handle().unwrap(), "demo-app");
     assert_eq!(
         billing::pricing_url(&ctx).unwrap(),
-        "http://localhost:9393/admin/charges/hide-paypal/pricing_plans?shop=test-integration.myshopify.com"
+        "http://localhost:9393/admin/charges/demo-app/pricing_plans?shop=test-integration.myshopify.com"
     );
     assert_eq!(
         ctx.admin_url("settings/payments"),
@@ -407,9 +407,9 @@ async fn the_pricing_page_is_at_the_admin_origin_and_names_the_app_by_its_handle
     assert_eq!(
         json_body(links).await,
         json!({
-            "appHandle": "hide-paypal",
-            "pricingUrl": "http://localhost:9393/admin/charges/hide-paypal/pricing_plans?shop=not-installed.myshopify.com",
-            "welcome": "http://localhost:9393/admin/apps/hide-paypal?shop=not-installed.myshopify.com",
+            "appHandle": "demo-app",
+            "pricingUrl": "http://localhost:9393/admin/charges/demo-app/pricing_plans?shop=not-installed.myshopify.com",
+            "welcome": "http://localhost:9393/admin/apps/demo-app?shop=not-installed.myshopify.com",
         })
     );
 
@@ -430,7 +430,7 @@ async fn the_pricing_page_is_at_the_admin_origin_and_names_the_app_by_its_handle
 
 #[tokio::test]
 async fn with_the_partner_api_the_plan_is_read_there_and_kept() {
-    let cwd = project(Some("hide-paypal"));
+    let cwd = project(Some("demo-app"));
     let transport = MockTransport::new();
     let ctx = partner_context(transport.clone(), cwd.clone()).await;
     assert_eq!(ctx.app.billing_source(), BillingSource::PartnerApi);
@@ -483,7 +483,7 @@ async fn with_the_partner_api_the_plan_is_read_there_and_kept() {
     assert_eq!((status, body["code"].as_str()), (402, Some("PLAN_REQUIRED")));
     assert_eq!(
         body["details"]["pricingUrl"],
-        "https://admin.shopify.com/store/test-integration/charges/hide-paypal/pricing_plans"
+        "https://admin.shopify.com/store/test-integration/charges/demo-app/pricing_plans"
     );
     assert_eq!(ctx.shopify.calls_to(PARTNER_SUBSCRIPTION_OPERATION).len(), 2);
     // A launch without it does not; nor does a check that fails within ten
@@ -519,7 +519,7 @@ async fn with_the_partner_api_the_plan_is_read_there_and_kept() {
 
 #[tokio::test]
 async fn a_shop_the_partner_api_does_not_know_is_an_error_and_a_429_is_sent_again() {
-    let cwd = project(Some("hide-paypal"));
+    let cwd = project(Some("demo-app"));
     let transport = MockTransport::new();
     let ctx = partner_context(transport.clone(), cwd.clone()).await;
     ctx.shopify
@@ -581,7 +581,7 @@ fn admin_api_warnings(logs: &LogCapture) -> Vec<LoggedLine> {
 
 #[tokio::test]
 async fn with_the_partner_api_active_subscriptions_warns_once_where_it_is_called() {
-    let cwd = project(Some("hide-paypal"));
+    let cwd = project(Some("demo-app"));
     let transport = MockTransport::new();
     let ctx = partner_context(transport, cwd.clone()).await;
     ctx.shopify
@@ -663,7 +663,7 @@ async fn welcome(ctx: &TestContext, query: &str) -> (u16, String) {
 
 #[tokio::test]
 async fn a_welcome_route_reads_the_plan_again_only_for_a_launch_shopify_signed() {
-    let cwd = project(Some("hide-paypal"));
+    let cwd = project(Some("demo-app"));
     let ctx = partner_context(MockTransport::new(), cwd.clone()).await;
     let partner_calls = || ctx.shopify.calls_to(PARTNER_SUBSCRIPTION_OPERATION).len();
     // The check that sent the merchant to the plans: no plan, kept.
@@ -674,7 +674,7 @@ async fn a_welcome_route_reads_the_plan_again_only_for_a_launch_shopify_signed()
 
     // Anyone can call the route: without Shopify's signature, it sends to the
     // app in the admin and asks the Partner API nothing.
-    let admin = "https://admin.shopify.com/store/test-integration/apps/hide-paypal".to_string();
+    let admin = "https://admin.shopify.com/store/test-integration/apps/demo-app".to_string();
     let host = "YWRtaW4uc2hvcGlmeS5jb20vc3RvcmUvdGVzdA";
     let forged = to_query_string(&sign_query(
         &[("host", host), ("plan_handle", "pro"), ("shop", TEST_SHOP)],
@@ -741,7 +741,7 @@ async fn home(ctx: &TestContext, query: &str) -> u16 {
 
 #[tokio::test]
 async fn a_signed_welcome_through_the_route_then_the_home_asks_the_partner_api_once() {
-    let cwd = project(Some("hide-paypal"));
+    let cwd = project(Some("demo-app"));
     let ctx = partner_context(MockTransport::new(), cwd.clone()).await;
     let partner_calls = || ctx.shopify.calls_to(PARTNER_SUBSCRIPTION_OPERATION).len();
     // The check that sent the merchant to the plans.
@@ -774,7 +774,7 @@ async fn a_signed_welcome_through_the_route_then_the_home_asks_the_partner_api_o
 
 #[tokio::test]
 async fn a_welcome_launch_forgets_a_no_plan_answer_however_young() {
-    let cwd = project(Some("hide-paypal"));
+    let cwd = project(Some("demo-app"));
     let ctx = partner_context(MockTransport::new(), cwd.clone()).await;
     let partner_calls = || ctx.shopify.calls_to(PARTNER_SUBSCRIPTION_OPERATION).len();
     ctx.shopify.active_subscription(None);
@@ -791,13 +791,13 @@ async fn a_welcome_launch_forgets_a_no_plan_answer_however_young() {
 
 #[tokio::test]
 async fn plan_among_is_the_check_of_require_plan_without_the_402() {
-    let cwd = project(Some("hide-paypal"));
+    let cwd = project(Some("demo-app"));
     let ctx = partner_context(MockTransport::new(), cwd.clone()).await;
     let partner_calls = || ctx.shopify.calls_to(PARTNER_SUBSCRIPTION_OPERATION).len();
     ctx.shopify.active_subscription(None);
     let no_plan = (
         200,
-        json!({ "plan": null, "pricingLink": "shopify:admin/charges/hide-paypal/pricing_plans" }),
+        json!({ "plan": null, "pricingLink": "shopify:admin/charges/demo-app/pricing_plans" }),
     );
     assert_eq!(load(&ctx, "status").await, no_plan);
     assert_eq!(partner_calls(), 1);
@@ -853,7 +853,7 @@ async fn plan_among_reads_the_admin_api_without_the_partner_api() {
 
 #[tokio::test]
 async fn an_unsigned_welcome_without_a_shop_domain_is_a_400() {
-    let cwd = project(Some("hide-paypal"));
+    let cwd = project(Some("demo-app"));
     let ctx = partner_context(MockTransport::new(), cwd.clone()).await;
     for query in ["", "plan_handle=pro", "shop=", "shop=evil.example.com", "shop=%20"] {
         let response = ctx
@@ -874,7 +874,7 @@ async fn an_unsigned_welcome_without_a_shop_domain_is_a_400() {
         welcome(&ctx, "shop=https%3A%2F%2FTest-Integration.myshopify.com%2Fadmin").await,
         (
             302,
-            "https://admin.shopify.com/store/test-integration/apps/hide-paypal".to_string()
+            "https://admin.shopify.com/store/test-integration/apps/demo-app".to_string()
         )
     );
     assert!(ctx.shopify.calls_to(PARTNER_SUBSCRIPTION_OPERATION).is_empty());

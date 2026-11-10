@@ -590,7 +590,7 @@ scopes = "read_products,read_orders"
 
         std::fs::write(
             dir.join("shopify.app.toml"),
-            "client_id = \"prod-key\"\nname = \"Hide PayPal\"\nhandle = \"hide-paypal\"\n\n[webhooks]\napi_version = \"2026-10\"\n",
+            "client_id = \"prod-key\"\nname = \"Demo App\"\nhandle = \"demo-app\"\n\n[webhooks]\napi_version = \"2026-10\"\n",
         )
         .unwrap();
         // A handle of a table is not the app's.
@@ -599,16 +599,16 @@ scopes = "read_products,read_orders"
             "client_id = 'dev-key'\n[[extensions]]\nhandle = \"not-the-app\"\n",
         )
         .unwrap();
-        assert_eq!(app_handle(Some("prod-key")), "hide-paypal");
-        assert_eq!(app_handle(None), "hide-paypal");
+        assert_eq!(app_handle(Some("prod-key")), "demo-app");
+        assert_eq!(app_handle(None), "demo-app");
         // The file of the app is the one of its client id.
         assert!(app_handle(Some("dev-key")).contains("has no handle"));
         std::fs::write(
             dir.join("shopify.app.dev.toml"),
-            "client_id = 'dev-key'\nhandle = 'hide-paypal-dev' # linked\n",
+            "client_id = 'dev-key'\nhandle = 'demo-app-dev' # linked\n",
         )
         .unwrap();
-        assert_eq!(app_handle(Some("dev-key")), "hide-paypal-dev");
+        assert_eq!(app_handle(Some("dev-key")), "demo-app-dev");
         assert!(app_handle(Some("other-key")).contains("whose client_id is \"other-key\""));
 
         // An app of `shopify.apps`: the handle of its own file, else as above.
@@ -632,8 +632,8 @@ scopes = "read_products,read_orders"
         };
         let apps = ShopifyApps::resolve(Some(&config), &env(None)).unwrap();
         let handle_of = |name: &str| apps.by_handle(Some(name)).unwrap().app_handle.clone();
-        assert_eq!(handle_of("main").as_deref(), Some("hide-paypal-dev"));
-        assert_eq!(handle_of("keys").as_deref(), Some("hide-paypal"));
+        assert_eq!(handle_of("main").as_deref(), Some("demo-app-dev"));
+        assert_eq!(handle_of("keys").as_deref(), Some("demo-app"));
         assert_eq!(handle_of("other"), None);
         assert!(
             apps.by_handle(Some("other"))
@@ -661,7 +661,7 @@ scopes = "read_products,read_orders"
 
         std::fs::write(
             dir.join("shopify.app.toml"),
-            "client_id = \"prod-key\"\nname = \"Easy hide PayPal Express\"\nhandle = \"hide-paypal\"\n",
+            "client_id = \"prod-key\"\nname = \"My Demo App\"\nhandle = \"demo-app\"\n",
         )
         .unwrap();
         // The name of a table is not the app's, and a blank one names nothing.
@@ -670,16 +670,16 @@ scopes = "read_products,read_orders"
             "client_id = 'dev-key'\nname = '  '\n[[extensions]]\nname = \"Not the app\"\n",
         )
         .unwrap();
-        assert_eq!(name(Some("prod-key")), "Easy hide PayPal Express");
-        assert_eq!(name(None), "Easy hide PayPal Express");
+        assert_eq!(name(Some("prod-key")), "My Demo App");
+        assert_eq!(name(None), "My Demo App");
         assert_eq!(name(Some("dev-key")), DEFAULT_APP_NAME);
         assert_eq!(name(Some("other-key")), DEFAULT_APP_NAME);
         std::fs::write(
             dir.join("shopify.app.dev.toml"),
-            "client_id = 'dev-key'\nname = 'Hide PayPal (dev)' # linked\n",
+            "client_id = 'dev-key'\nname = 'Demo App (dev)' # linked\n",
         )
         .unwrap();
-        assert_eq!(name(Some("dev-key")), "Hide PayPal (dev)");
+        assert_eq!(name(Some("dev-key")), "Demo App (dev)");
 
         // An app of `shopify.apps`: the name of its own file, else its key.
         let config = ShopifyConfig {
@@ -705,8 +705,8 @@ scopes = "read_products,read_orders"
         };
         let apps = ShopifyApps::resolve(Some(&config), &env(None)).unwrap();
         let name_of = |handle: &str| apps.by_handle(Some(handle)).unwrap().name.clone();
-        assert_eq!(name_of("main"), "Hide PayPal (dev)");
-        assert_eq!(name_of("keys"), "Easy hide PayPal Express");
+        assert_eq!(name_of("main"), "Demo App (dev)");
+        assert_eq!(name_of("keys"), "My Demo App");
         assert_eq!(name_of("other"), "other");
         std::fs::remove_dir_all(dir).ok();
     }

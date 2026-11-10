@@ -20,12 +20,12 @@ links the app (`shopify app config link`):
 
 ```toml
 client_id = "…"
-name = "Hide PayPal"
-handle = "hide-paypal"
+name = "Demo App"
+handle = "demo-app"
 ```
 
 The handle names the app in the URL of its plan selection page,
-`https://admin.shopify.com/store/{store}/charges/hide-paypal/pricing_plans`.
+`https://admin.shopify.com/store/{store}/charges/demo-app/pricing_plans`.
 `ctx.app_handle()?` reads it. Without it, the pricing page is an error that
 says to add it: Shopify does not take the client ID in that URL.
 
@@ -113,7 +113,7 @@ Name the plans by their handles: the Admin API and the Partner API both give
 them. A shop with neither plan gets `402` with the code `PLAN_REQUIRED`, and
 the plan selection page in the `details` of the error: `pricingUrl`, the page
 itself, and `pricingLink`, its App Bridge link
-(`shopify:admin/charges/hide-paypal/pricing_plans`).
+(`shopify:admin/charges/demo-app/pricing_plans`).
 
 ## 4. Send the merchant to the plans
 

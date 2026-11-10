@@ -61,7 +61,7 @@ the page reloads.
 
 ## 2. A page
 
-shop-test's `src/admin/home.rs`, before:
+An app's `src/admin/home.rs`, before:
 
 ```rust,ignore
 use leptos::prelude::*;
@@ -104,7 +104,7 @@ impl HomePage {
                 let options = AdminActionOptions::new().revalidate(Self::HOME);
                 match set_hidden.invoke(SetHidden { hidden }, options).await {
                     Ok(Some(_)) => {
-                        shopify::toast(if hidden { "Paypal Express hidden" } else { "Paypal Express shown" });
+                        shopify::toast(if hidden { "Banner hidden" } else { "Banner shown" });
                     }
                     Err(error) => {
                         shopify::toast_error(&error.message);
@@ -130,9 +130,9 @@ impl HomePage {
                             <s-banner
                                 tone=if hidden { "success" } else { "warning" }
                                 heading=if hidden {
-                                    "Paypal Express is successfully hidden from checkout page"
+                                    "The banner is hidden from the checkout page"
                                 } else {
-                                    "Paypal Express is not hidden from checkout page"
+                                    "The banner shows on the checkout page"
                                 }
                             >
                                 <s-button
@@ -141,7 +141,7 @@ impl HomePage {
                                     loading=move || set_hidden.pending.get()
                                     on:click=move |_| toggle(!hidden)
                                 >
-                                    {if hidden { "Show Paypal Express" } else { "Hide Paypal Express" }}
+                                    {if hidden { "Show the banner" } else { "Hide the banner" }}
                                 </s-button>
                             </s-banner>
                         }
@@ -183,7 +183,7 @@ impl HomePage {
     #[action(authorize = openshop::billing::any_plan)]
     async fn set_hidden(ctx: AdminContext, input: SetHidden) -> Result<Outcome> {
         // … unchanged …
-        Ok(Outcome::toast(if input.hidden { "Paypal Express hidden" } else { "Paypal Express shown" }))
+        Ok(Outcome::toast(if input.hidden { "Banner hidden" } else { "Banner shown" }))
     }
 
     #[view]
@@ -200,16 +200,16 @@ impl HomePage {
                         s-banner
                             tone=(if hidden { "success" } else { "warning" })
                             heading=(if hidden {
-                                "Paypal Express is successfully hidden from checkout page"
+                                "The banner is hidden from the checkout page"
                             } else {
-                                "Paypal Express is not hidden from checkout page"
+                                "The banner shows on the checkout page"
                             })
                         {
                             form method="post" {
                                 input type="hidden" name="_action" value=(Self::SET_HIDDEN);
                                 input type="hidden" name="hidden" value=(!hidden);
                                 s-button type="submit" variant="primary" tone=(if hidden { "critical" } else { "auto" }) {
-                                    (if hidden { "Show Paypal Express" } else { "Hide Paypal Express" })
+                                    (if hidden { "Show the banner" } else { "Hide the banner" })
                                 }
                             }
                         }
@@ -275,16 +275,16 @@ A test that posted to it calls the function, or the page:
 use openshop::testing::{TestContext, toast};
 
 #[openshop::test(APP)]
-async fn hides_paypal_express(ctx: &TestContext) {
+async fn hides_the_banner(ctx: &TestContext) {
     let hidden = ctx
         .submit("/", &[("_action", HomePage::SET_HIDDEN), ("hidden", "true")])
         .send()
         .await
         .unwrap();
     assert_eq!(hidden.status(), 200);
-    assert_eq!(toast(&hidden).as_deref(), Some("Paypal Express hidden"));
+    assert_eq!(toast(&hidden).as_deref(), Some("Banner hidden"));
     let page = hidden.text().await.unwrap();
-    assert!(page.contains("Show Paypal Express"), "{page}");
+    assert!(page.contains("Show the banner"), "{page}");
 }
 ```
 

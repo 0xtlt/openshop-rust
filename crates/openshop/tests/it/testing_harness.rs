@@ -406,7 +406,7 @@ fn project(client_id: &str) -> PathBuf {
     std::fs::write(
         dir.join("shopify.app.toml"),
         format!(
-            "client_id = \"{client_id}\"\nname = \"Hide PayPal\"\nhandle = \"hide-paypal\"\n\n[access_scopes]\nscopes = \"write_payment_customizations\"\n"
+            "client_id = \"{client_id}\"\nname = \"Demo App\"\nhandle = \"demo-app\"\n\n[access_scopes]\nscopes = \"write_payment_customizations\"\n"
         ),
     )
     .unwrap();
@@ -428,15 +428,15 @@ async fn the_contexts_of_a_test_are_the_app_of_its_shopify_app_toml() {
         let ctx = installed(config()).await;
         // The app the file describes: its client id, its handle, its name, its scopes.
         assert_eq!(ctx.api_key, "0123456789abcdef0123456789abcdef");
-        assert_eq!(ctx.app_handle().unwrap(), "hide-paypal");
+        assert_eq!(ctx.app_handle().unwrap(), "demo-app");
         assert_eq!(
             billing::pricing_link(&ctx).unwrap(),
-            "shopify:admin/charges/hide-paypal/pricing_plans"
+            "shopify:admin/charges/demo-app/pricing_plans"
         );
         let app = ctx.app.apps().by_handle(Some("default")).unwrap();
         assert_eq!(
             (app.name.as_str(), app.scopes.as_str()),
-            ("Hide PayPal", "write_payment_customizations")
+            ("Demo App", "write_payment_customizations")
         );
         ctx.shutdown().await.unwrap();
 
@@ -473,7 +473,7 @@ async fn the_contexts_of_a_test_are_the_app_of_its_shopify_app_toml() {
     .unwrap();
     assert_eq!(
         (ctx.api_key.as_str(), ctx.app_handle().unwrap()),
-        (TEST_API_KEY, "hide-paypal")
+        (TEST_API_KEY, "demo-app")
     );
     ctx.shutdown().await.unwrap();
 
