@@ -1,6 +1,6 @@
 [package]
 name = "openshop-shared"
-description = "Types and pure logic shared by the OpenShop server and its WebAssembly admin UI."
+description = "Pure logic of the OpenShop server: the paths and modes of the admin pages."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
