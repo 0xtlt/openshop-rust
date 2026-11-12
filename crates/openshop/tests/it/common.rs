@@ -12,6 +12,15 @@ use openshop::{FlowContext, OpenShop, OpenShopConfig, PgPool, Result, ShopifyApp
 use reqwest::{RequestBuilder, Response};
 use uuid::Uuid;
 
+/// A header percent-encoded by the server, decoded as the admin's script does
+/// with `decodeURIComponent`.
+pub fn decode_uri_component(value: &str) -> String {
+    percent_encoding::percent_decode_str(value)
+        .decode_utf8()
+        .expect("UTF-8")
+        .into_owned()
+}
+
 pub const TEST_SHOP: &str = "test-integration.myshopify.com";
 pub const TEST_SECRET: &str = "test-secret";
 pub const TEST_API_KEY: &str = "test-app";

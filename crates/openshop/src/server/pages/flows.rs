@@ -16,10 +16,10 @@ use serde_json::Value;
 
 use super::{BuiltinPage, field};
 use crate::admin::{AdminPublicError, FormState, Outcome};
+use crate::admin_paths::rpc::{decode_uri_component, encode_uri_component};
 use crate::db::schema::FlowRun;
 use crate::server::api::runs::{NotStarted, delete_run_batch, query_runs, start_flow};
 use crate::server::mcp::core::flow_items;
-use openshop_shared::rpc::{decode_uri_component, encode_uri_component};
 use runs::{RunsQuery, delete_modal, runs_section};
 use schema_example::schema_to_example;
 

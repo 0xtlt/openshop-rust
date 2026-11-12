@@ -1,7 +1,7 @@
 //! What a test reads from the answer of a form of an admin page,
 //! [`TestContext::submit`](super::TestContext::submit): its toasts, decoded.
 
-use openshop_shared::rpc::decode_uri_component;
+use crate::admin_paths::rpc::decode_uri_component;
 use reqwest::Response;
 
 /// The header of the toast an action asked for, `Outcome::toast(…)`.

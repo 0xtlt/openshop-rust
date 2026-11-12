@@ -15,12 +15,12 @@ use super::html::{
 };
 use super::html_response;
 use super::queries::{self, Counts, Cursor, LogFilter, LogLine, Range, RunFilter, SHOP_STATES, Shop, Tally};
+use crate::admin_paths::rpc::encode_uri_component;
 use crate::app::OpenShop;
 use crate::db::{FlowRun, Installation, LogRow, StepResult};
 use crate::engine::scheduler::next_occurrence;
 use crate::server::http::{ApiResult, escape, parse_query};
 use crate::types::{ALL_RUN_STATUSES, CronShops};
-use openshop_shared::rpc::encode_uri_component;
 
 const LOG_LEVELS: [&str; 3] = ["error", "warn", "info"];
 /// Rows of a list of the overview, and of the page of a shop.

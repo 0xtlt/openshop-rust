@@ -46,6 +46,7 @@
 //! - [`testing`] (feature `testing`): the test harness.
 
 pub mod admin;
+mod admin_paths;
 mod app;
 pub mod billing;
 pub mod builder;

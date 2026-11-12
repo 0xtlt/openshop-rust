@@ -14,8 +14,8 @@ use chrono::{DateTime, Utc};
 use regex::{Captures, Regex, RegexBuilder};
 use serde_json::Value;
 
+use crate::admin_paths::json::js_string;
 use crate::runtime::time::parse_date;
-use openshop_shared::json::js_string;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LogFilterOp {

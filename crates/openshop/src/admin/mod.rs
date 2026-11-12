@@ -12,20 +12,20 @@ use serde::de::DeserializeOwned;
 use serde_json::Value;
 use sqlx::PgPool;
 
+use crate::admin_paths::{
+    is_custom_admin_page_pattern, is_safe_custom_admin_path, match_custom_admin_path, path_segments,
+    sort_custom_admin_routes,
+};
 use crate::app::OpenShop;
 use crate::runtime::context_logger::ContextLogger;
 use crate::server::connectors::Connectors;
 use crate::shopify::client::ShopifyClient;
 use crate::types::{AdminMenuItem, InputSchema};
-use openshop_shared::{
-    is_custom_admin_page_pattern, is_safe_custom_admin_path, match_custom_admin_path, path_segments,
-    sort_custom_admin_routes,
-};
 
 pub use crate::types::{CustomAdminPageAccess, CustomAdminPagesResponse, ResolvedAdminPages};
 
 mod view;
-pub use openshop_shared::AdminFunctionKind;
+pub use crate::admin_paths::AdminFunctionKind;
 pub use view::{ACTION_FIELD, AdminView, FormState, Outcome, PageRequest, output};
 pub(crate) use view::{field_message, fields_to_json, parse_fields, with_outcome};
 

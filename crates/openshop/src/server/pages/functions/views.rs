@@ -9,10 +9,10 @@ use super::{
     BLOCK_ON_FAILURE, CONFIG, CREATE, DELETE, DELETE_MODAL, MODE, UPDATE, instance_path, instances_path, new_path,
 };
 use crate::admin::FormState;
+use crate::admin_paths::json::js_string;
 use crate::server::functions::AppFunction;
 use crate::server::pages::ui;
 use crate::types::{DiscountMode, FieldType, Fields, FunctionType, JsonMap, is_missing};
-use openshop_shared::json::js_string;
 
 fn type_label(kind: FunctionType) -> &'static str {
     match kind {

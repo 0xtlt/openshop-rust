@@ -36,7 +36,6 @@ Before editing:
 - Do not add `unsafe`: the framework crate denies `unsafe_code` and the CLI forbids it.
 - The TypeScript implementation is the reference for behavior. When the Rust version deliberately differs, document it in `docs/src/reference/differences.md`.
 - Database rows and encrypted values must stay readable by both runtimes.
-- Keep `openshop-shared` free of server-only dependencies: it is the pure logic of the paths and modes of the admin pages.
 - Keep tests close to the behavior: a `#[cfg(test)] mod tests` next to pure helpers and integration tests under `crates/openshop/tests` for runtime contracts.
 
 ## Verification

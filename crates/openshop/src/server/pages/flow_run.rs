@@ -17,12 +17,12 @@ use maud::{Markup, html};
 use super::ui::{status_tone, to_fixed_1};
 use super::{BuiltinPage, field, ui};
 use crate::admin::{AdminPublicError, Outcome};
+use crate::admin_paths::rpc::encode_uri_component as encode;
 use crate::db::schema::{FlowRun, StepResult};
 use crate::runtime::time::to_iso;
 use crate::server::api::runs::{RunRefusal, delete_finished_run, find_run, retry_finished_run, run_steps};
 use crate::types::ACTIVE_RUN_STATUSES;
 use logs::{LogFilters, Logs, help_modal, load_logs, logs_section};
-use openshop_shared::rpc::encode_uri_component as encode;
 use steps::{output_modals, step_rows, steps_table};
 
 /// The forms of the retry modal: `mode` is `resume` or `reset`.

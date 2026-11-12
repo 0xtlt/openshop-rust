@@ -15,13 +15,13 @@ use super::BuiltinPage;
 use super::providers::connection_status;
 use super::ui::{status_tone, time_ago, to_fixed_1};
 use crate::admin::{AdminPublicError, Outcome};
+use crate::admin_paths::rpc::encode_uri_component as encode;
 use crate::db::schema::FlowRun;
 use crate::server::api::pages::resolved_admin_pages;
 use crate::server::api::providers::provider_items;
 use crate::server::api::runs::query_runs;
 use crate::server::mcp::core::{cron_items, flow_items};
 use crate::types::AdminPageMode;
-use openshop_shared::rpc::encode_uri_component as encode;
 
 /// How often the page is fetched again, in milliseconds.
 const REFRESH_MS: u32 = 10_000;

@@ -14,13 +14,13 @@ use serde_json::Value;
 
 use super::{BuiltinPage, field, ui};
 use crate::admin::{AdminPublicError, Outcome};
+use crate::admin_paths::rpc::{decode_uri_component, encode_uri_component as encode};
 use crate::server::functions::{
     AppFunction, InstanceRefusal, app_functions, create_function_instance, delete_function_instance, find_function,
     function_instances, update_function_instance,
 };
 use crate::server::http::report_failure;
 use crate::types::{FieldType, FunctionType, JsonMap, is_missing};
-use openshop_shared::rpc::{decode_uri_component, encode_uri_component as encode};
 use views::{Instance, form_view, instances_view, list_view, unloaded_view};
 
 /// The action of the form of `/functions/:handle/new`.

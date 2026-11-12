@@ -27,7 +27,6 @@ testing = ["shopify_api/testing"]
 
 [dependencies]
 openshop-macros.workspace = true
-openshop-shared.workspace = true
 
 anyhow.workspace = true
 schemars.workspace = true
@@ -72,6 +71,8 @@ sentry = { workspace = true, features = ["test"] }
 tokio = { workspace = true, features = ["io-util", "test-util"] }
 # The errors of the macros, `tests/macros.rs`.
 trybuild = "1"
+# Decodes the toasts of the admin pages, percent-encoded.
+percent-encoding = "2"
 
 [lints]
 workspace = true

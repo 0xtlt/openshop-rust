@@ -9,12 +9,11 @@ use openshop::builder::{DiscountMode, Field, Function, FunctionOwner, FunctionTy
 use openshop::server::ServerOptions;
 use openshop::testing::{MockTransport, OutboundRequest, TestContext, TestOptions};
 use openshop::{OpenShopConfig, UiSource, Value, json, validators};
-use openshop_shared::rpc::decode_uri_component;
 use reqwest::header::AUTHORIZATION;
 use reqwest::{Method, StatusCode};
 
 use super::{Reply, fetch, form, request, send};
-use crate::common::graphql_requests;
+use crate::common::{decode_uri_component, graphql_requests};
 
 const SHOP: &str = "functions-pages.myshopify.com";
 const DISCOUNT_1: &str = "/functions/volume-discount/gid%3A%2F%2Fshopify%2FDiscountNode%2F1";
@@ -178,7 +177,7 @@ fn stored_config(call: &OutboundRequest) -> Value {
 
 /// A toast, as the script reads it.
 fn toast(reply: &Reply, name: &str) -> Option<String> {
-    reply.header(name).map(|value| decode_uri_component(value).unwrap())
+    reply.header(name).map(decode_uri_component)
 }
 
 #[tokio::test]

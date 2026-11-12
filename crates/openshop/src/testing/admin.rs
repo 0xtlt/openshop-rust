@@ -8,13 +8,13 @@ use uuid::Uuid;
 
 use super::TestContext;
 use crate::admin::{AdminActor, AdminContext, AdminFunction, AdminFunctionKind, AdminPublicError, CustomAdminPage};
+use crate::admin_paths::custom_admin_route_params;
 use crate::app::OpenShop;
 use crate::runtime::context_logger::ContextLogger;
 use crate::server::admin_pages::{call_function, create_context, find_matching_page};
 use crate::server::shop::ShopSession;
 use crate::server::shopify_apps::DEFAULT_SHOPIFY_APP_HANDLE;
 use crate::shopify::client_credentials::Grant;
-use openshop_shared::custom_admin_route_params;
 
 #[derive(Debug, Clone)]
 pub struct AdminTestOptions {
@@ -206,7 +206,7 @@ fn no_such_function(pages: &[CustomAdminPage], path: &str, kind: AdminFunctionKi
     };
     let Some(page) = pages
         .iter()
-        .find(|page| openshop_shared::match_custom_admin_path(&page.route_pattern, path))
+        .find(|page| crate::admin_paths::match_custom_admin_path(&page.route_pattern, path))
     else {
         return format!(
             "[openshop] No admin page of the application is at `{path}`. Its pages: {}",

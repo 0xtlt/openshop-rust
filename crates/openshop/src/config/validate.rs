@@ -9,6 +9,7 @@ use regex::Regex;
 use serde_json::Value;
 
 use crate::admin::validate_admin_menu;
+use crate::admin_paths::{ADMIN_HOME_PATH, ADMIN_PAGE_IDS};
 use crate::app::OpenShopConfig;
 use crate::engine::scheduler::{parse_schedule, parse_timezone};
 use crate::runtime::time::millis;
@@ -21,7 +22,6 @@ use crate::server::routes::assert_route_definition;
 use crate::types::{
     AdminPageMode, Field, FieldType, FunctionType, RetryPolicy, ShopifyAppConfig, ShopifyConfig, WorkerConfig,
 };
-use openshop_shared::{ADMIN_HOME_PATH, ADMIN_PAGE_IDS};
 
 macro_rules! fail {
     ($($arg:tt)*) => {
