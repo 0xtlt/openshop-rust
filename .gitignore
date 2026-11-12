@@ -6,3 +6,4 @@ shopify.app.*.toml
 .DS_Store
 docs/book/
 templates/*/dist/
+crates/openshop-cli/bundle/

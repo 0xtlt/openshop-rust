@@ -104,7 +104,9 @@ tables of its models. It does not update an existing app. See the
 At most one of the four `--openshop-*` arguments; a second one fails with
 ``[openshop] Name one source for `openshop` ``. The commit the CLI was built from
 is the one `cargo install --git` took; for a CLI built from a local checkout,
-make sure it is pushed, or pass `--openshop-path`.
+make sure it is pushed, or pass `--openshop-path`. A CLI built from its
+crates.io package depends on `openshop` of its own version
+(`version = "…"`).
 
 A non-empty target fails with
 `[openshop] Target directory is not empty: <path>`, before any question about

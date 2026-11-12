@@ -33,6 +33,14 @@ description = "fmt check + clippy + tests"
 depends = ["lint", "test"]
 run = "cargo fmt --all -- --check"
 
+[tasks.package]
+description = "Package the crates as crates.io builds them, each from its package alone: openshop-macros, openshop, and openshop-cli with the copy of the templates `bundle.sh` makes"
+run = [
+  "sh crates/openshop-cli/bundle.sh",
+  # The bundle is not committed: cargo takes it for an uncommitted change.
+  "cargo package --locked --allow-dirty -p openshop-macros -p openshop -p openshop-cli",
+]
+
 [tasks."dev:custom"]
 description = "Work on the framework with the custom app template: its admin on http://localhost:3999/?shop=preview.myshopify.com&embedded=1 without a Shopify store, restarted and reloaded when the workspace changes (needs PostgreSQL: `mise run db:up`, or set DATABASE_URL)"
 dir = "templates/custom"

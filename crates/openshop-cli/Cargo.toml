@@ -11,8 +11,9 @@ license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 authors.workspace = true
-# The templates of `openshop init` are read from `templates/` at the root of the repository.
-include = ["src/**", "templates/**", "build.rs", "Cargo.toml"]
+# The templates of `openshop init` are read from `templates/` at the root of the
+# repository, and from `bundle/`, the copy `bundle.sh` makes of them, in the package.
+include = ["src/**", "templates/**", "bundle/**", "build.rs", "Cargo.toml"]
 
 [[bin]]
 name = "openshop"
