@@ -433,7 +433,7 @@ Views need `maud` in `Cargo.toml`, for `html!`:
 
 ```toml
 [dependencies]
-openshop = { git = "https://github.com/0xtlt/openshop-rust", tag = "v<version>" }
+openshop = { version = "<version>" }
 maud = "0.27"
 serde = { version = "1", features = ["derive"] }
 ```

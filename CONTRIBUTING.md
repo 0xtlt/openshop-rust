@@ -158,9 +158,9 @@ admin of [local-storefront](https://github.com/0xtlt/local-storefront).
 
 ## Publishing to crates.io
 
-Nothing is published yet: the CLI is installed from Git. The three crates can
-be published; `mise run package` (CI's `package` job) packages them and builds
-each from its package alone, as crates.io does.
+The three crates are published together, from the commit of the release, with
+the tag `v<version>` on it. `mise run package` (CI's `package` job) packages
+them and builds each from its package alone, as crates.io does.
 
 - The CLI embeds files outside its package: the templates, the manifest of the
   workspace (what the `workspace = true` of a template stands for) and the
@@ -176,10 +176,9 @@ each from its package alone, as crates.io does.
   in the projects of `openshop init`, the version of the CLI: publish the three
   crates together.
 - The crates depend on each other by `path` with a `version`, so they publish in
-  order: `openshop-macros`, `openshop`, then `openshop-cli`.
-
-Until then, the install command stays `cargo install --locked --git
-https://github.com/0xtlt/openshop-rust openshop-cli`.
+  order: `openshop-macros`, `openshop`, then `openshop-cli`. One command
+  publishes them in that order, after `bundle.sh`:
+  `cargo publish --locked --allow-dirty -p openshop-macros -p openshop -p openshop-cli`.
 
 ## Conventions
 

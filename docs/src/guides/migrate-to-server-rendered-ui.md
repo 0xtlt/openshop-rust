@@ -14,23 +14,22 @@ action is a form. Count about 30 minutes per page.
 ## 1. The project
 
 1. Install the `openshop` CLI of the release you move to: the one you have
-   runs trunk, and serves a bundle the server no longer has. From a checkout
-   of the repository at that release:
+   runs trunk, and serves a bundle the server no longer has. From crates.io:
 
    ```bash
-   cargo install --locked --path crates/openshop-cli --force
+   cargo install --locked --force openshop-cli --version <version>
    ```
 
-   or from GitHub, `cargo install --locked --force --git
-   https://github.com/0xtlt/openshop-rust --tag v<version> openshop-cli`.
+   or from a checkout of the repository at that release,
+   `cargo install --locked --path crates/openshop-cli --force`.
    Then check which one runs:
 
    ```bash
    openshop --version   # openshop <version> (<commit>)
    ```
 
-   It prints the version, and the first 12 characters of the commit it was
-   built from. A CLI that answers `Unknown command: --version` is the old
+   It prints the version, and, for a CLI built from the repository, the first
+   12 characters of the commit it was built from. A CLI that answers `Unknown command: --version` is the old
    one: `which openshop` says where it is, and the install did not replace
    it. Run in a project that still has the Leptos admin, `openshop dev`
    lists what is left of it (`features = ["ui"]`, `leptos`,
@@ -40,7 +39,7 @@ action is a form. Count about 30 minutes per page.
 
    ```toml
    [dependencies]
-   openshop = { git = "https://github.com/0xtlt/openshop-rust", tag = "v<version>" }
+   openshop = { version = "<version>" }
    maud = "0.27"
    ```
 

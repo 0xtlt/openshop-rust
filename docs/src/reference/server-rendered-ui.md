@@ -278,8 +278,9 @@ tests.
 
 ## Migrating an application
 
-The `openshop` CLI is installed again first (`cargo install --locked --path
-crates/openshop-cli --force` from a checkout), and `openshop --version` says
+The `openshop` CLI is installed again first (`cargo install --locked --force
+openshop-cli --version <version>`, or `--path crates/openshop-cli` from a
+checkout), and `openshop --version` says
 which one runs: the old one runs trunk. `openshop dev` lists what a project
 keeps of the Leptos admin before it starts it.
 
