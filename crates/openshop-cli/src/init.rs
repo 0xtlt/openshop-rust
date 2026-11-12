@@ -13,11 +13,12 @@ const OPENSHOP_REPOSITORY: &str = "https://github.com/0xtlt/openshop-rust";
 
 /// The manifest of the workspace the templates are members of: what their
 /// `workspace = true` stands for.
-const WORKSPACE_MANIFEST: &str = include_str!("../../../Cargo.toml");
+const WORKSPACE_MANIFEST: &str = files::WORKSPACE_MANIFEST;
 
 /// The files of the templates in `templates/`, as `(path in the project,
 /// content)`: `MINIMAL`, `CUSTOM` and `PUBLIC`, and `SHARED`, which every
-/// project gets.
+/// project gets. `WORKSPACE_MANIFEST`, and `PACKAGED`, whether the CLI is
+/// built from its package, as crates.io builds it.
 mod files {
     include!(concat!(env!("OUT_DIR"), "/templates.rs"));
 }
@@ -166,6 +167,9 @@ enum Source {
     Tag(String),
     /// A branch of the git repository, `--openshop-branch`.
     Branch(String),
+    /// The version of this CLI on crates.io, for the CLI of crates.io: the
+    /// crates publish together.
+    Version(String),
     /// The tag of the version of this CLI, for a CLI built without git: nothing
     /// says the tag exists.
     ReleaseTag(String),
@@ -173,17 +177,19 @@ enum Source {
 
 impl Source {
     /// What a project depends on when it is not told: the commit the CLI was
-    /// built from, which exists wherever the CLI was installed from, or else
-    /// the tag of its version.
-    fn default_for(commit: Option<&str>) -> Source {
+    /// built from, which exists wherever the CLI was installed from; the
+    /// version of the CLI for the one of crates.io, its package; or else the
+    /// tag of its version.
+    fn default_for(commit: Option<&str>, packaged: bool) -> Source {
         match commit {
             Some(commit) => Source::Rev(commit.to_string()),
+            None if packaged => Source::Version(OPENSHOP_VERSION.to_string()),
             None => Source::ReleaseTag(format!("v{OPENSHOP_VERSION}")),
         }
     }
 
     fn default() -> Source {
-        Source::default_for(option_env!("OPENSHOP_GIT_COMMIT"))
+        Source::default_for(option_env!("OPENSHOP_GIT_COMMIT"), files::PACKAGED)
     }
 
     /// How the manifest of the project names it.
@@ -200,6 +206,7 @@ impl Source {
             Source::Rev(rev) => git("rev", rev),
             Source::Tag(tag) | Source::ReleaseTag(tag) => git("tag", tag),
             Source::Branch(branch) => git("branch", branch),
+            Source::Version(version) => format!("version = {}", toml_string(version)),
         }
     }
 }
@@ -872,16 +879,26 @@ mod tests {
     #[test]
     fn depends_on_the_commit_the_cli_is_built_from() {
         assert_eq!(
-            Source::default_for(Some(COMMIT)).dependency(),
+            Source::default_for(Some(COMMIT), false).dependency(),
             format!("{GIT}, rev = \"{COMMIT}\"")
         );
-        assert_eq!(Source::default_for(Some(COMMIT)), Source::Rev(COMMIT.to_string()));
+        assert_eq!(
+            Source::default_for(Some(COMMIT), false),
+            Source::Rev(COMMIT.to_string())
+        );
+    }
+
+    #[test]
+    fn the_cli_of_crates_io_depends_on_its_version() {
+        let source = Source::default_for(None, true);
+        assert_eq!(source, Source::Version(OPENSHOP_VERSION.to_string()));
+        assert_eq!(source.dependency(), format!("version = \"{OPENSHOP_VERSION}\""));
     }
 
     #[test]
     fn falls_back_to_the_tag_of_its_version_without_a_commit() {
         let tag = format!("v{OPENSHOP_VERSION}");
-        let source = Source::default_for(None);
+        let source = Source::default_for(None, false);
         assert_eq!(source, Source::ReleaseTag(tag.clone()));
         assert_eq!(source.dependency(), format!("{GIT}, tag = \"{tag}\""));
     }

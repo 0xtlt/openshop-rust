@@ -1,8 +1,15 @@
-//! Embeds the templates of `openshop init`, from `templates/` at the root of
-//! the repository: `$OUT_DIR/templates.rs` lists the files a project gets from
-//! each, with their content, and the Admin schema of `graphql!` every project
-//! gets. It also sets `OPENSHOP_GIT_COMMIT`, the commit of
-//! the repository the CLI is built from, when there is one.
+//! Embeds the templates of `openshop init`: `$OUT_DIR/templates.rs` lists the
+//! files a project gets from each, with their content, the Admin schema of
+//! `graphql!` every project gets, and the manifest of the workspace, which the
+//! `workspace = true` of a template stands for. It also sets
+//! `OPENSHOP_GIT_COMMIT`, the commit of the repository the CLI is built from,
+//! when there is one.
+//!
+//! Built in the repository (`cargo install --git`, `--path`, the workspace), it
+//! reads them where they are: `templates/`, `Cargo.toml` and
+//! `crates/openshop/graphql` at its root. Built from its package, as crates.io
+//! builds it, it reads them in `bundle/`, the copy `bundle.sh` makes of them:
+//! `cargo package` takes nothing outside `crates/openshop-cli`.
 
 use std::fmt::Write;
 use std::path::{Path, PathBuf};
@@ -14,38 +21,93 @@ const TEMPLATES: &[&str] = &["minimal", "custom", "public"];
 /// `examples/` and `shopify.web.toml`, serves the repository.
 const TEMPLATE_DIRS: &[&str] = &["src", "tests", "migrations"];
 const TEMPLATE_FILES: &[&str] = &["Cargo.toml", "README.md", "shopify.app.toml"];
+/// The name of the manifest of a template in `bundle/`: cargo leaves out of a
+/// package every directory with a `Cargo.toml`, the root of another package.
+const BUNDLED_MANIFEST: &str = "Cargo.toml.template";
 
-/// The files of `directory` and below, sorted.
-fn files_in(directory: &Path, found: &mut Vec<PathBuf>) {
+/// Where the files the CLI embeds are read from.
+struct Sources {
+    /// `templates/` of the repository, or of `bundle/`.
+    templates: PathBuf,
+    /// The manifest of the workspace.
+    workspace_manifest: PathBuf,
+    /// The Admin schema of `graphql!`.
+    schema: PathBuf,
+    /// The root of the repository, `None` for the package.
+    repository: Option<PathBuf>,
+}
+
+impl Sources {
+    fn find(package: &Path) -> Sources {
+        let root = package.join("../..");
+        // In the repository, `crates/openshop-cli` of its root is this package.
+        if let (Ok(this), Ok(member)) = (package.canonicalize(), root.join("crates/openshop-cli").canonicalize())
+            && this == member
+        {
+            let root = root.canonicalize().unwrap();
+            return Sources {
+                templates: root.join("templates"),
+                workspace_manifest: root.join("Cargo.toml"),
+                schema: root.join("crates/openshop/graphql/admin.schema.json"),
+                repository: Some(root),
+            };
+        }
+        let bundle = package.join("bundle");
+        assert!(
+            bundle.is_dir(),
+            "openshop-cli embeds the templates of `templates/` at the root of the OpenShop repository, \
+             or the copy `crates/openshop-cli/bundle.sh` makes of them in {}, and neither exists: build it \
+             from a checkout, as `cargo install --git https://github.com/0xtlt/openshop-rust openshop-cli` \
+             does, or run `bundle.sh` before `cargo package`",
+            bundle.display()
+        );
+        Sources {
+            templates: bundle.join("templates"),
+            workspace_manifest: bundle.join("workspace.toml"),
+            schema: bundle.join("admin.schema.json"),
+            repository: None,
+        }
+    }
+
+    /// The file `name` of the template in `root`, renamed in the bundle if it
+    /// is its manifest.
+    fn template_file(&self, root: &Path, name: &str) -> PathBuf {
+        match name {
+            "Cargo.toml" if self.repository.is_none() => root.join(BUNDLED_MANIFEST),
+            _ => root.join(name),
+        }
+    }
+}
+
+/// A file a project gets: its path in the project, and the file it is read from.
+type File = (String, PathBuf);
+
+/// The files of `directory` and below, by their path from `root`. A dotfile
+/// is stored as `_name`, so that it does not apply to the repository.
+fn files_in(root: &Path, directory: &Path, found: &mut Vec<File>) {
     let Ok(entries) = std::fs::read_dir(directory) else {
         return;
     };
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_dir() {
-            files_in(&path, found);
+            files_in(root, &path, found);
         } else if entry.file_name() != ".DS_Store" {
-            found.push(path);
+            let relative = path.strip_prefix(root).unwrap().to_string_lossy().replace('\\', "/");
+            let relative = match relative.strip_prefix('_') {
+                Some(dotfile) => format!(".{dotfile}"),
+                None => relative,
+            };
+            found.push((relative, path));
         }
     }
 }
 
 /// `files` as a Rust slice of `(path in the project, content)`.
-fn slice(name: &str, root: &Path, files: &[PathBuf]) -> String {
+fn slice(name: &str, files: &[File]) -> String {
     let mut code = format!("pub const {name}: &[(&str, &str)] = &[\n");
-    for file in files {
-        let relative = file.strip_prefix(root).unwrap().to_string_lossy().replace('\\', "/");
-        // A dotfile is stored as `_name`, so that it does not apply to the repository.
-        let relative = match relative.strip_prefix('_') {
-            Some(dotfile) => format!(".{dotfile}"),
-            None => relative,
-        };
-        writeln!(
-            code,
-            "    ({relative:?}, include_str!({:?})),",
-            file.display().to_string()
-        )
-        .unwrap();
+    for (path, file) in files {
+        writeln!(code, "    ({path:?}, include_str!({:?})),", file.display().to_string()).unwrap();
     }
     code + "];\n"
 }
@@ -83,51 +145,49 @@ fn commit(workspace: &Path) -> Option<String> {
 }
 
 fn main() {
-    let templates = Path::new(&std::env::var("CARGO_MANIFEST_DIR").unwrap()).join("../../templates");
-    // The templates are crates of the workspace: the CLI is built from a checkout
-    // of the repository, as `cargo install --git` does, never from its package alone.
-    let Ok(templates) = templates.canonicalize() else {
-        panic!(
-            "openshop-cli embeds the templates of `templates/` at the root of the OpenShop repository, \
-             and {} does not exist: build it from a checkout, as \
-             `cargo install --git https://github.com/0xtlt/openshop-rust openshop-cli` does",
-            templates.display()
-        );
-    };
+    let sources = Sources::find(Path::new(&std::env::var("CARGO_MANIFEST_DIR").unwrap()));
     let mut code = String::new();
 
     for template in TEMPLATES {
-        let root = templates.join(template);
+        let root = sources.templates.join(template);
         let mut files = Vec::new();
         for directory in TEMPLATE_DIRS {
             println!("cargo::rerun-if-changed={}", root.join(directory).display());
-            files_in(&root.join(directory), &mut files);
+            files_in(&root, &root.join(directory), &mut files);
         }
         for file in TEMPLATE_FILES {
-            println!("cargo::rerun-if-changed={}", root.join(file).display());
-            files.push(root.join(file));
+            let path = sources.template_file(&root, file);
+            println!("cargo::rerun-if-changed={}", path.display());
+            files.push((file.to_string(), path));
         }
         files.sort();
-        code += &slice(&template.to_uppercase(), &root, &files);
+        code += &slice(&template.to_uppercase(), &files);
     }
 
-    let shared = templates.join("shared");
+    let shared = sources.templates.join("shared");
     println!("cargo::rerun-if-changed={}", shared.display());
     let mut files = Vec::new();
-    files_in(&shared, &mut files);
+    files_in(&shared, &shared, &mut files);
     files.sort();
     // The schema `graphql!` checks the operations of a project against: the
     // one of the version the framework and every template pin, which the
     // templates link to.
-    let schema = templates.join("../crates/openshop/graphql/admin.schema.json");
-    println!("cargo::rerun-if-changed={}", schema.display());
-    let entry = format!(
-        "    (\"graphql/admin.schema.json\", include_str!({:?})),\n];\n",
-        schema.display().to_string()
-    );
-    code += &slice("SHARED", &shared, &files).replace("];\n", &entry);
+    println!("cargo::rerun-if-changed={}", sources.schema.display());
+    files.push(("graphql/admin.schema.json".to_string(), sources.schema.clone()));
+    code += &slice("SHARED", &files);
 
-    if let Some(commit) = templates.parent().and_then(commit) {
+    println!("cargo::rerun-if-changed={}", sources.workspace_manifest.display());
+    writeln!(
+        code,
+        "pub const WORKSPACE_MANIFEST: &str = include_str!({:?});",
+        sources.workspace_manifest.display().to_string()
+    )
+    .unwrap();
+    // Built from its package, the CLI is the one of crates.io, which has
+    // `openshop` of its version.
+    writeln!(code, "pub const PACKAGED: bool = {};", sources.repository.is_none()).unwrap();
+
+    if let Some(commit) = sources.repository.as_deref().and_then(commit) {
         println!("cargo::rustc-env=OPENSHOP_GIT_COMMIT={commit}");
     }
 

@@ -1457,6 +1457,12 @@
   still exports the same types (`AdminPageId`, `AdminMenuItem`,
   `AdminFunctionKind`…). The crates are `openshop`, `openshop-macros` and
   `openshop-cli`.
+- `openshop-cli` can be packaged for crates.io: `crates/openshop-cli/bundle.sh`
+  copies the templates, the manifest of the workspace and the Admin schema
+  into the package, and the CLI built from it writes
+  `openshop = { version = "<version>" }` in the projects of `openshop init`.
+  `mise run package`, and the CI job `package`, build the three crates from
+  their packages. Nothing is published.
 
 ## 0.0.12-beta.0
 
