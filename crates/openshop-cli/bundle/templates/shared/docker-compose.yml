@@ -1,0 +1,20 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_DB: openshop
+      POSTGRES_USER: openshop
+      POSTGRES_PASSWORD: openshop
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    # Ready once it accepts connections: `docker compose up -d --wait` returns then.
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U openshop -d openshop"]
+      interval: 2s
+      timeout: 5s
+      retries: 15
+
+volumes:
+  pgdata:

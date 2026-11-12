@@ -29,7 +29,7 @@ openshop --version
 ```
 
 `openshop --version` prints the version of the CLI and the commit it was
-built from, `openshop 0.0.12-beta.0 (1b8a53a4cac9)`. If it answers
+built from, `openshop 0.1.0-rc.1 (1b8a53a4cac9)`. If it answers
 `Unknown command: --version`, an older CLI is installed: install it again with
 `--force`, which replaces it.
 

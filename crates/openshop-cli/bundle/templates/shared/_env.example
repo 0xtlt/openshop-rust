@@ -1,0 +1,41 @@
+DATABASE_URL=postgresql://openshop:openshop@localhost:5432/openshop
+
+# Shopify app credentials (Partner dashboard, or `shopify app env show`).
+SHOPIFY_API_KEY=
+SHOPIFY_API_SECRET=
+
+# A development store of the organization that owns the app, for example one
+# used by automated tests, for which flows, crons, routes, webhook handlers,
+# proxies and the MCP tool may get an access token with Shopify's client
+# credentials grant when none is stored (after the database was emptied, for
+# example). A launch from Shopify admin, or a session token whose exchange
+# Shopify refused, already asks for any shop without a token; Shopify
+# only grants it to the stores of the app's organization, never to a merchant's
+# store.
+# SHOPIFY_CLIENT_CREDENTIALS_SHOP=dev-store-1.myshopify.com
+
+# Public URL of the app, used for OAuth redirects when the Shopify TOML has none.
+# HOST=https://my-app.example.com
+
+# Credential encryption (64 hex chars = 32 bytes). Generate with: openssl rand -hex 32
+# Required unless OPENSHOP_ENV is development or test: without it, `start` and
+# `worker` do not start. `dev` stores secrets in plaintext when it is unset.
+# ENCRYPTION_KEY=
+
+# Password of the operator dashboard at /ops: every shop, read-only, outside
+# Shopify admin. Without it the dashboard does not exist. At least 16
+# characters in production.
+# OPS_PASSWORD=
+
+# DSN of the Sentry project the failures are reported to: runs that fail,
+# handlers that fail, panics. Without it nothing is reported.
+# SENTRY_DSN=
+
+# Where the app reaches Shopify, for a field `shopify_endpoints` does not set
+# in the code: a simulator of Shopify (local-storefront here, started with
+# `lsf app dev --app . --app-url http://localhost:3000 --port 9393`), a proxy
+# or an API of your own. Unset, Shopify. See "Custom Shopify endpoints" in the
+# documentation.
+# SHOPIFY_ADMIN_ORIGIN=http://localhost:9393
+# SHOPIFY_APP_BRIDGE_URL=http://localhost:9393/__lsf/admin/app-bridge.js
+# SHOPIFY_POLARIS_URL=http://localhost:9393/__lsf/cdn/shopifycloud/polaris.js
