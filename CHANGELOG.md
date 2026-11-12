@@ -19,7 +19,6 @@
 - An application built without the `testing` feature no longer gets the
   warning `function find_function is never used` from `openshop`. CI checks
   the library as an application builds it, with `-D warnings`.
-
 - The `custom` template asks for `read_discounts` and `write_discounts`: its
   volume discount Function has instances, which the Functions page of the
   admin lists, creates, updates and deletes, and Shopify refused without them.
