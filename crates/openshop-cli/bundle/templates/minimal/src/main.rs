@@ -1,0 +1,80 @@
+mod flows;
+mod providers;
+
+use openshop::prelude::*;
+
+use flows::sync_orders::sync_orders;
+use providers::warehouse::Warehouse;
+
+/// The application: what it is made of, and how it is set up.
+///
+/// Shopify credentials come from the environment and `shopify.app.toml`. Add
+/// `shopify: …` only when one OpenShop instance must serve several Shopify apps.
+static APP: App = app! {
+    providers: [Warehouse],
+    flows: [sync_orders],
+    crons: [
+        Cron::new("*/5 * * * *", sync_orders::NAME)
+            .name("Quick sync")
+            .input(json!({ "limit": 10 })),
+    ],
+    // MCP is off: `POST /mcp` is refused and the admin has no MCP page.
+    // Remove this line to turn it on.
+    mcp: McpConfig::disabled(),
+    // The operator dashboard, under `/ops`, when `OPS_PASSWORD` is set: what
+    // happens in every shop, read from outside Shopify admin.
+    ops_password: std::env::var("OPS_PASSWORD").ok(),
+    // Sentry, when `SENTRY_DSN` is set: the runs that fail, the handlers that
+    // fail and the panics, each with its flow and its shop.
+    sentry: std::env::var("SENTRY_DSN").ok(),
+    // The development store whose token background work may get with the
+    // client credentials grant, when `SHOPIFY_CLIENT_CREDENTIALS_SHOP` is set.
+    client_credentials_shop: std::env::var("SHOPIFY_CLIENT_CREDENTIALS_SHOP").ok(),
+};
+
+fn main() -> Result<()> {
+    APP.main()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use openshop::db::migrate::check_migrations;
+    use openshop::testing::TestContext;
+
+    #[test]
+    fn the_application_is_valid() {
+        let config = APP.config().unwrap();
+        assert!(config.flows.contains_key(sync_orders::NAME));
+        assert!(config.providers.contains_key(Warehouse::NAME));
+    }
+
+    /// `./migrations` creates the framework schema and the tables of the models.
+    /// After a change to a model, or an upgrade of OpenShop: `cargo run -- migrate generate`.
+    #[test]
+    fn migrations_cover_the_schema() {
+        let config = APP.config().unwrap();
+        check_migrations(std::path::Path::new(env!("CARGO_MANIFEST_DIR")), &config.models).unwrap();
+    }
+
+    // Needs PostgreSQL: `docker compose up -d --wait`, then `cargo test -- --ignored`.
+    #[openshop::test(APP)]
+    #[ignore = "requires PostgreSQL"]
+    async fn sync_orders_pushes_orders_to_the_warehouse(ctx: &TestContext) {
+        // Shopify answers the operation of the flow, by its name: `query GetRecentOrders`.
+        ctx.shopify.on(
+            "GetRecentOrders",
+            json!({ "orders": { "nodes": [{ "id": "gid://shopify/Order/1", "name": "#1001" }] } }),
+        );
+        // The fake of a method takes what the method returns, and gives back what it received.
+        let push = ctx.fakes.for_call(Warehouse::PUSH);
+        push.returns(1);
+
+        let outcome = ctx.run_flow(sync_orders::NAME, json!({ "limit": 5 })).await.unwrap();
+
+        assert_eq!(outcome, RunOutcome::Completed);
+        assert_eq!(ctx.shopify.operations(), ["GetRecentOrders"]);
+        assert_eq!(push.call_count(), 1);
+        assert_eq!(push.last_call().unwrap().args[0].name, "#1001");
+    }
+}

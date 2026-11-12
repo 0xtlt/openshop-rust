@@ -1,9 +1,9 @@
 # Changelog
 
-## Unreleased
+## 0.1.0-rc.1
 
 - `openshop --version` (and `-V`) prints the version of the CLI and the first
-  12 characters of the commit it was built from: `openshop 0.0.12-beta.0
+  12 characters of the commit it was built from: `openshop 0.1.0-rc.1
   (1b8a53a4cac9)`. `openshop dev` lists what a project keeps of the Leptos
   admin (`openshop` with the feature `ui`, `leptos`, `UiSource::Dir`,
   `openshop::ui`…) before it starts it, and names the migration guide, which

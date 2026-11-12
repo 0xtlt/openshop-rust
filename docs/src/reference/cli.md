@@ -51,7 +51,7 @@ openshop --version
 ```
 
 ```text
-openshop 0.0.12-beta.0 (1b8a53a4cac9)
+openshop 0.1.0-rc.1 (1b8a53a4cac9)
 ```
 
 The version of the CLI, then the first 12 characters of the commit it was

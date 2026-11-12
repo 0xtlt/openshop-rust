@@ -1,0 +1,28 @@
+[package]
+name = "openshop-template-custom"
+description = "Template of `openshop init --template=custom`, a custom app: every OpenShop building block, with the built-in admin open to the merchant."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+# The Admin API version `graphql!` checks the operations against and sends
+# them to. Its schema is `graphql/admin.schema.json`: after a change, run
+# `shopify-api schema download` here (`cargo install shopify_api --features cli`).
+[package.metadata.shopify_api]
+api-version = "2026-10"
+
+[dependencies]
+openshop.workspace = true
+serde.workspace = true
+# The HTML of the views of the admin pages, which the server renders: `html!`.
+maud.workspace = true
+
+[dev-dependencies]
+openshop = { workspace = true, features = ["testing"] }
+# What `examples/preview-custom.rs` runs.
+openshop-preview = { path = "../../apps/preview" }
+
+[lints]
+workspace = true
