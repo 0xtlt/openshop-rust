@@ -23,7 +23,7 @@ use crate::runtime::flow_logger::FlowLogger;
 use crate::server::connectors::Connectors;
 use crate::shopify::client::ShopifyClient;
 
-pub use openshop_shared::{
+pub use crate::admin_paths::{
     AdminMenuItem, AdminPageId, AdminPageMode, AdminPagesConfig, CustomAdminPageAccess, CustomAdminPagesResponse,
     ResolvedAdminPages,
 };

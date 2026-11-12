@@ -84,7 +84,7 @@ impl Menu {
                 let page = app
                     .custom_pages()
                     .iter()
-                    .find(|page| openshop_shared::match_custom_admin_path(&page.route_pattern, &item.path));
+                    .find(|page| crate::admin_paths::match_custom_admin_path(&page.route_pattern, &item.path));
                 if let Some(page) = page
                     && page_is_allowed(app, session, page, &item.path).await
                 {

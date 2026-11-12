@@ -51,11 +51,11 @@ use tower_http::set_header::SetResponseHeaderLayer;
 
 use self::http::{json_error, json_response, not_found};
 use self::proxy::{EXTENSION_AUTH_MODES, PROXY_AUTH_MODES};
+use crate::admin_paths::admin_page_from_api_path;
 use crate::app::OpenShop;
 use crate::runtime::logger;
 use crate::runtime::time::to_iso;
 use crate::types::AdminPageMode;
-use openshop_shared::admin_page_from_api_path;
 
 pub use self::limits::{DEFAULT_MAX_CONCURRENT_REQUESTS, DEFAULT_REQUEST_TIMEOUT};
 

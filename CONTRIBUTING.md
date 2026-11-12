@@ -173,7 +173,7 @@ cannot be published as it is. What stands in the way, for whoever decides to:
   without git falls back to the tag `v<version>`. A published CLI would write
   `openshop = "<version>"`.
 - The crates depend on each other by `path` with a `version`, so they publish in
-  order: `openshop-shared`, `openshop-macros`, `openshop`, then `openshop-cli`.
+  order: `openshop-macros`, `openshop`, then `openshop-cli`.
 
 None of this changes the install command: `cargo install --locked --git
 https://github.com/0xtlt/openshop-rust openshop-cli`.
@@ -183,4 +183,3 @@ https://github.com/0xtlt/openshop-rust openshop-cli`.
 - The TypeScript implementation is the reference for behavior. When the Rust
   version deliberately differs, document it in `docs/src/reference/differences.md`.
 - Database rows and encrypted values must stay readable by both runtimes.
-- Keep `openshop-shared` free of server-only dependencies: it is the pure logic of the paths and modes of the admin pages.

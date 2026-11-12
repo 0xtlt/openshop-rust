@@ -51,12 +51,12 @@ use crate::admin::{
     ACTION_FIELD, AdminFunctionKind, AdminPublicError, CustomAdminPage, FormState, Outcome, PageRequest,
     fields_to_json, parse_fields, with_outcome,
 };
+use crate::admin_paths::rpc::encode_uri_component as encode;
+use crate::admin_paths::{ADMIN_HOME_PATH, AdminPageId, custom_admin_route_params, match_custom_admin_path};
 use crate::app::OpenShop;
 use crate::engine::step::error_message;
 use crate::runtime::{logger, report};
 use crate::types::{AdminPageMode, JsonMap};
-use openshop_shared::rpc::encode_uri_component as encode;
-use openshop_shared::{ADMIN_HOME_PATH, AdminPageId, custom_admin_route_params, match_custom_admin_path};
 
 pub(crate) use shell::{SCRIPT_PATH, script};
 
@@ -103,7 +103,7 @@ fn target<'a>(app: &'a OpenShop, pathname: &str) -> Option<Target<'a>> {
     if pathname == ADMIN_HOME_PATH {
         return Some(Target::Home);
     }
-    openshop_shared::admin_page_from_ui_path(pathname).map(Target::Builtin)
+    crate::admin_paths::admin_page_from_ui_path(pathname).map(Target::Builtin)
 }
 
 pub(crate) async fn serve(

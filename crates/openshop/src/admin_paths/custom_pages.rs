@@ -5,7 +5,7 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::rpc::decode_uri_component;
+use super::rpc::decode_uri_component;
 
 /// The path of the home of the admin. A page of the application can take it.
 pub const ADMIN_HOME_PATH: &str = "/";

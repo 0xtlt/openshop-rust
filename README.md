@@ -182,7 +182,6 @@ robust; they are listed in [Differences](docs/src/reference/differences.md).
 | Path | Contents |
 | --- | --- |
 | `crates/openshop` | The framework: engine, server, admin pages, MCP, testing harness |
-| `crates/openshop-shared` | Types and rules of the paths and modes of the admin pages |
 | `crates/openshop-macros` | The macros: `app!`, and the attributes and derives that declare building blocks |
 | `crates/openshop-cli` | The `openshop` command: `init`, `init-ui`, `dev` and `build` |
 | `templates/minimal` | The template of `openshop init --template=minimal`: one provider and one flow |

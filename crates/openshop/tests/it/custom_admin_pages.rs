@@ -4,7 +4,9 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use crate::common::{LogCapture, TEST_SHOP, install, json_body, two_shopify_apps, vault_provider};
+use crate::common::{
+    LogCapture, TEST_SHOP, decode_uri_component, install, json_body, two_shopify_apps, vault_provider,
+};
 use futures::FutureExt;
 use maud::html;
 use openshop::admin::{AdminFunctionKind, PageRequest, output};
@@ -17,7 +19,6 @@ use openshop::testing::{
 use openshop::{
     AdminActor, AdminContext, AdminMenuItem, AdminPublicError, OpenShopConfig, Outcome, Result, Value, anyhow, json,
 };
-use openshop_shared::rpc::decode_uri_component;
 use reqwest::header::{CONTENT_TYPE, HeaderMap};
 use reqwest::{Method, RequestBuilder, Response};
 use schemars::JsonSchema;
@@ -160,14 +161,12 @@ impl Answer {
 
     /// The toast the action of a form asked for.
     fn toast(&self) -> Option<String> {
-        self.header("x-openshop-toast")
-            .map(|toast| decode_uri_component(toast).unwrap())
+        self.header("x-openshop-toast").map(decode_uri_component)
     }
 
     /// The error toast of a form that failed.
     fn error_toast(&self) -> Option<String> {
-        self.header("x-openshop-toast-error")
-            .map(|toast| decode_uri_component(toast).unwrap())
+        self.header("x-openshop-toast-error").map(decode_uri_component)
     }
 }
 

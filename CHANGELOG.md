@@ -1452,6 +1452,11 @@
   again, but a process that dies before the result is stored, or a lease that
   expires while the step runs, makes the next attempt run it again, side
   effects included.
+- The crate `openshop-shared` is merged into `openshop`. It held the paths and
+  modes of the admin pages for the Leptos admin, which is gone; `openshop`
+  still exports the same types (`AdminPageId`, `AdminMenuItem`,
+  `AdminFunctionKind`…). The crates are `openshop`, `openshop-macros` and
+  `openshop-cli`.
 
 ## 0.0.12-beta.0
 

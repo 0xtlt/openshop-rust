@@ -17,12 +17,12 @@ use super::shop::ShopSession;
 use crate::admin::{
     AdminAuthorize, AdminContext, AdminFunction, AdminFunctionKind, AdminPublicError, CustomAdminPage, field_message,
 };
+use crate::admin_paths::{custom_admin_route_params, match_custom_admin_path};
 use crate::app::OpenShop;
 use crate::engine::step::error_message;
 use crate::runtime::context_logger::ContextLogger;
 use crate::runtime::logger;
 use crate::types::{CustomAdminPageAccess, CustomAdminPagesResponse};
-use openshop_shared::{custom_admin_route_params, match_custom_admin_path};
 
 /// The most specific page matching a path. Pages are sorted with static
 /// segments first, so `/reviews/new` wins over `/reviews/:id`.

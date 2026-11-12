@@ -320,11 +320,10 @@ async fn a_flow_is_started_from_its_form() {
     ))
     .await;
     assert_eq!(again.status, StatusCode::CONFLICT);
-    let conflict = format!("Flow \"syncOrders\" is already running for shop \"{SHOP}\" (run #{run_id})");
-    assert_eq!(
-        again.header("x-openshop-toast-error"),
-        Some(openshop_shared::rpc::encode_uri_component(&conflict).as_str())
-    );
+    // `Flow "syncOrders" is already running for shop "…" (run #…)`, as `encodeURIComponent` writes it.
+    let conflict =
+        format!("Flow%20%22syncOrders%22%20is%20already%20running%20for%20shop%20%22{SHOP}%22%20(run%20%23{run_id})");
+    assert_eq!(again.header("x-openshop-toast-error"), Some(conflict.as_str()));
     assert!(again.body.is_empty());
     let unknown = send(form(
         fetch(&ctx, Method::POST, "/flows"),

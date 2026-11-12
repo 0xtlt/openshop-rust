@@ -51,7 +51,7 @@ Use targeted tests when the change is narrow:
 - What a context of a shop gives and what takes one (`dispatch`, `Model::of`), the typed inputs of proxies and routes, Liquid templates, and the input of a cron: `crates/openshop/tests/it/contexts.rs`.
 - Migrations: `crates/openshop/tests/it/migrations.rs` and the unit tests in `crates/openshop/src/db/migrate.rs`.
 - CLI behavior (`init`, `dev` watcher, restarts): unit tests in `crates/openshop-cli/src`.
-- Shared rules: unit tests in `crates/openshop-shared/src`.
+- The paths and modes of the admin pages: unit tests in `crates/openshop/src/admin_paths`.
 
 ## Admin UI
 
