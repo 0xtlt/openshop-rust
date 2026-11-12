@@ -14,20 +14,23 @@ number and require Rust 1.94 or newer.
 - Deploy web and worker from the same binary.
 - Do not assume `openshop init` updates an existing project.
 
-`openshop init` pins the `openshop` dependency of a new project to the Git
-commit the CLI that generated it was built from, which the CLI records when it
-is built from a checkout of the repository, as `cargo install --git` does:
+The crates are published on crates.io, each version with a tag `v<version>`
+of the repository. `openshop init` of the CLI of crates.io makes a new project
+depend on `openshop` of the CLI's own version:
 
 ```toml
 [dependencies]
-openshop = { git = "https://github.com/0xtlt/openshop-rust", rev = "<commit>" }
+openshop = { version = "<version>" }
 
 [dev-dependencies]
-openshop = { git = "https://github.com/0xtlt/openshop-rust", rev = "<commit>", features = ["testing"] }
+openshop = { version = "<version>", features = ["testing"] }
 ```
 
-A CLI built without git, from a package say, pins the tag `v<version>` of its
-own version instead, and says so: the tag has to exist in the repository.
+A CLI built from a checkout of the repository, as `cargo install --git` builds
+it, pins the Git commit it was built from instead
+(`git = "https://github.com/0xtlt/openshop-rust", rev = "<commit>"`). One built
+without git outside its package pins the tag `v<version>` of its own version,
+and says so: the tag has to exist in the repository.
 `--openshop-tag=<tag>`, `--openshop-rev=<commit>` and `--openshop-branch=<name>`
 name another source; see the [CLI reference](cli.md#scaffold-a-project).
 

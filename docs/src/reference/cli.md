@@ -34,17 +34,20 @@ which the application binary answers with the usage of `run` (see
 [Command behavior](#command-behavior)); `openshop test --help` and
 `openshop build --help` print the help of cargo.
 
-Install the CLI from the repository. `--locked` builds it with the versions of
-the dependencies the repository tested:
+Install the CLI from crates.io. `--locked` builds it with the versions of the
+dependencies it was published with, and a release candidate is installed only
+when its version is named:
 
 ```bash
-cargo install --locked --git https://github.com/0xtlt/openshop-rust openshop-cli
+cargo install --locked openshop-cli --version 0.1.0-rc.1
 ```
 
-From a checkout of the repository, `cargo install --locked --path
-crates/openshop-cli --force`. `--force` replaces a CLI already installed:
-without it, cargo keeps the one there when the version number has not
-changed. Then check which one runs:
+The CLI of `main`, before a release, installs from the repository:
+`cargo install --locked --git https://github.com/0xtlt/openshop-rust openshop-cli`,
+or `cargo install --locked --path crates/openshop-cli --force` from a
+checkout. `--force` replaces a CLI already installed: without it, cargo keeps
+the one there when the version number has not changed. Then check which one
+runs:
 
 ```bash
 openshop --version
@@ -54,9 +57,9 @@ openshop --version
 openshop 0.1.0-rc.1 (1b8a53a4cac9)
 ```
 
-The version of the CLI, then the first 12 characters of the commit it was
-built from, which `openshop init` pins projects to; a CLI built without git
-prints the version alone. A CLI from before `--version` answers
+The version of the CLI, then, for a CLI built from the repository, the first
+12 characters of the commit it was built from, which `openshop init` pins
+projects to; the CLI of crates.io prints the version alone. A CLI from before `--version` answers
 `Unknown command: --version`.
 
 The CLI is a convenience. Every command except `init`, `init-ui`, and the
@@ -96,17 +99,17 @@ tables of its models. It does not update an existing app. See the
 | --- | --- |
 | `<dir>` | Target directory, relative to the current directory. Asked for in a terminal; elsewhere the command fails with `Usage: openshop init [<dir>] [--template=<name>]`. |
 | `--template=<name>`, `--template <name>`, `-t <name>` | `minimal`, `custom` or `public`. Asked for in a terminal; elsewhere the command fails with ``[openshop] Name a template: openshop init <dir> --template=<name>`` and the list. An unknown name fails with `[openshop] Unknown template: <name>`. |
-| `--openshop-rev=<commit>` | Make the generated `Cargo.toml` depend on this commit of the Git repository (`rev = "…"`) instead of the commit the CLI was built from. |
+| `--openshop-rev=<commit>` | Make the generated `Cargo.toml` depend on this commit of the Git repository (`rev = "…"`) instead of the default source. |
 | `--openshop-tag=<tag>` | Depend on this tag of the Git repository (`tag = "…"`). |
 | `--openshop-branch=<name>` | Depend on this branch of the Git repository (`branch = "…"`). |
 | `--openshop-path=<dir>` | Depend on a local checkout of the `openshop` crate (`path = "…"`). The directory must exist. |
 
 At most one of the four `--openshop-*` arguments; a second one fails with
-``[openshop] Name one source for `openshop` ``. The commit the CLI was built from
-is the one `cargo install --git` took; for a CLI built from a local checkout,
-make sure it is pushed, or pass `--openshop-path`. A CLI built from its
-crates.io package depends on `openshop` of its own version
-(`version = "…"`).
+``[openshop] Name one source for `openshop` ``. Without one, the CLI of
+crates.io makes the project depend on `openshop` of its own version
+(`version = "…"`), and a CLI built from the repository on the commit it was
+built from: the one `cargo install --git` took, or for a local checkout, the
+commit checked out, which has to be pushed (or pass `--openshop-path`).
 
 A non-empty target fails with
 `[openshop] Target directory is not empty: <path>`, before any question about

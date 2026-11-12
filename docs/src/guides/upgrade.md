@@ -13,18 +13,20 @@ a non-production environment before changing production.
    ```
 
 2. Update to an explicit version first. The generated `Cargo.toml` pins the
-   commit of the CLI that created the project (`rev`), unless the project was
-   created with `--openshop-tag`, or by a CLI built without git, which pins
-   the tag `v` followed by its version. Point both `openshop` entries at the
-   release, here a tag:
+   version of the CLI of crates.io that created the project, or the commit
+   (`rev`) of a CLI built from the repository, or a tag given with
+   `--openshop-tag`. Point both `openshop` entries at the release:
 
    ```toml
    [dependencies]
-   openshop = { git = "https://github.com/0xtlt/openshop-rust", tag = "v<version>" }
+   openshop = { version = "<version>" }
 
    [dev-dependencies]
-   openshop = { git = "https://github.com/0xtlt/openshop-rust", tag = "v<version>", features = ["testing"] }
+   openshop = { version = "<version>", features = ["testing"] }
    ```
+
+   A project that stays on Git names the tag of the release instead:
+   `git = "https://github.com/0xtlt/openshop-rust", tag = "v<version>"`.
 
    Then update the lockfile for that package only. Avoid an unreviewed
    `cargo update` of every dependency in the same deployment.
@@ -82,7 +84,7 @@ when you upgrade so that `openshop init` and `openshop dev` come from the same
 release:
 
 ```bash
-cargo install --locked --force --git https://github.com/0xtlt/openshop-rust openshop-cli
+cargo install --locked --force openshop-cli --version <version>
 # or, from a checkout of the repository:
 cargo install --locked --force --path crates/openshop-cli
 ```

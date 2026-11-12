@@ -72,10 +72,10 @@ the file.
 docker build -t my-app .
 ```
 
-While the `openshop` repository is private, cargo needs a token to fetch it.
-Give it to the build as a secret, which stays out of the image. Write the file
-outside the project: whatever is in the directory is in the build context, and
-`COPY . .` would put the token in a layer.
+A dependency fetched with git from a private repository, one of the app say,
+needs a token. Give it to the build as a secret, which stays out of the image.
+Write the file outside the project: whatever is in the directory is in the
+build context, and `COPY . .` would put the token in a layer.
 
 ```bash
 secret=$(mktemp)

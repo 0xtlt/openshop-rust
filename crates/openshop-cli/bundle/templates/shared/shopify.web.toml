@@ -1,4 +1,0 @@
-roles = ["frontend", "backend"]
-
-[commands]
-dev = "openshop dev"

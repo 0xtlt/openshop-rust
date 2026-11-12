@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- The README and the guide install the CLI from crates.io
+  (`cargo install --locked openshop-cli --version 0.1.0-rc.1`), and show
+  `openshop = { version = "…" }` where they showed a git tag. The deployment
+  guide no longer says the repository is private: the optional `gitconfig`
+  secret of the `Dockerfile` is for a private git dependency of the app.
+
 ## 0.1.0-rc.1
 
 - `openshop --version` (and `-V`) prints the version of the CLI and the first

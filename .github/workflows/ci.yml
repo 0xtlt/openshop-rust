@@ -100,10 +100,6 @@ jobs:
     runs-on: ubuntu-latest
     env:
       CARGO_PROFILE_DEV_DEBUG: 0
-      # The repository is private: cargo fetches it with git, which is given
-      # the token of the job.
-      CARGO_NET_GIT_FETCH_WITH_CLI: true
-      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       # The head of a pull request, which GitHub serves, not its merge commit.
       COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
     steps:
@@ -114,7 +110,6 @@ jobs:
         with:
           toolchain: "1.99.1"
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-      - run: git config --global url."https://x-access-token:${GH_TOKEN}@github.com/".insteadOf "https://github.com/"
       - run: cargo build -p openshop-cli --locked
       - name: Depend on the commit the CLI is built from
         run: |
@@ -182,10 +177,8 @@ jobs:
 
   # The `Dockerfile` of a generated project is what a deployment builds: one
   # project of a template with admin pages of its own (`custom`) and one
-  # without (`minimal`), built into an image. The repository is private,
-  # so the build gets the token the way `init-git` does, as a BuildKit secret: a
-  # `gitconfig` that is never written to a layer. It lives in the runner temp
-  # directory, outside the project, which is the build context.
+  # without (`minimal`), built into an image, without the optional secret
+  # `gitconfig`: the repository is public.
   docker:
     runs-on: ubuntu-latest
     strategy:
@@ -194,7 +187,6 @@ jobs:
         template: [minimal, custom]
     env:
       CARGO_PROFILE_DEV_DEBUG: 0
-      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       # The head of a pull request, which GitHub serves, not its merge commit.
       COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
       TEMPLATE: ${{ matrix.template }}
@@ -211,11 +203,7 @@ jobs:
       - name: Make a project of the template
         run: target/debug/openshop init "$RUNNER_TEMP/app" --template="$TEMPLATE" --openshop-rev="$COMMIT"
       - name: Build its image
-        run: |
-          umask 077
-          printf '[url "https://x-access-token:%s@github.com/"]\n\tinsteadOf = https://github.com/\n' "$GH_TOKEN" > "$RUNNER_TEMP/gitconfig"
-          docker build --secret id=gitconfig,src="$RUNNER_TEMP/gitconfig" --tag "app-$TEMPLATE" "$RUNNER_TEMP/app"
-          rm "$RUNNER_TEMP/gitconfig"
+        run: docker build --tag "app-$TEMPLATE" "$RUNNER_TEMP/app"
       - name: The app does not run as root
         run: |
           uid=$(docker run --rm "app-$TEMPLATE" id -u)

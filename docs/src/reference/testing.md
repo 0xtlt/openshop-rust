@@ -7,7 +7,7 @@ cargo feature:
 
 ```toml
 [dev-dependencies]
-openshop = { git = "https://github.com/0xtlt/openshop-rust", tag = "v<version>", features = ["testing"] }
+openshop = { version = "<version>", features = ["testing"] }
 ```
 
 A `TestContext` starts the application on a real local HTTP server against an

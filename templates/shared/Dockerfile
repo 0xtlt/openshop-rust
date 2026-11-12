@@ -1,8 +1,8 @@
 # The base images are named by digest, the tag only says what it is: a build
 # does not move with the tag. Dependabot proposes the next digest.
 FROM rust:1-bookworm@sha256:48b7f435b8fc6378ce43b44f15e3a47fd8919b2825f835c39bd4bd3da50af5b8 AS build
-# Cargo fetches the `openshop` dependency with git, which reads the optional
-# build secret `gitconfig`: a `url.<base>.insteadOf` that adds a token, for a
+# Cargo fetches a git dependency with git, which reads the optional build
+# secret `gitconfig`: a `url.<base>.insteadOf` that adds a token, for a
 # repository that is private. Without the secret git reads no configuration,
 # and the repository has to be public.
 #   docker build --secret id=gitconfig,src=/path/outside/the/project/gitconfig .

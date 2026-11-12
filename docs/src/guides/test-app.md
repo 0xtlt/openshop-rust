@@ -39,7 +39,7 @@ generated `Cargo.toml` enables it for tests only:
 
 ```toml
 [dev-dependencies]
-openshop = { git = "https://github.com/0xtlt/openshop-rust", tag = "v<version>", features = ["testing"] }
+openshop = { version = "<version>", features = ["testing"] }
 ```
 
 No runner file is needed: `cargo test` discovers `#[test]` functions and those

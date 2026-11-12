@@ -24,12 +24,13 @@ dedicated database there, and substitute its connection URL in step 3.
 Install the `openshop` command once:
 
 ```bash
-cargo install --locked --git https://github.com/0xtlt/openshop-rust openshop-cli
+cargo install --locked openshop-cli --version 0.1.0-rc.1
 openshop --version
 ```
 
-`openshop --version` prints the version of the CLI and the commit it was
-built from, `openshop 0.1.0-rc.1 (1b8a53a4cac9)`. If it answers
+`openshop --version` prints the version of the CLI, `openshop 0.1.0-rc.1`
+(followed by the commit it was built from, for a CLI installed from the
+repository). If it answers
 `Unknown command: --version`, an older CLI is installed: install it again with
 `--force`, which replaces it.
 
