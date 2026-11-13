@@ -26,8 +26,10 @@ use crate::types::{FieldType, JsonMap, Provider, ProviderConfig, ShopScope};
 
 /// The configuration of the provider `P` for one shop: `Warehouse::config_of(&ctx)`.
 ///
-/// Fields are named as in the struct (`api_url`), whatever key they are
-/// saved under.
+/// [`status`](Self::status) names fields as in the struct (`api_url`), whatever
+/// key they are saved under. A form names them by that key (`apiUrl`), as an
+/// `#[input]` does: [`save_form`](Self::save_form) takes either, and
+/// [`Saved::Refused`] names them by their key.
 pub struct ProviderStore<P> {
     app: OpenShop,
     shop: String,
@@ -44,11 +46,13 @@ pub struct ProviderStore<P> {
 #[must_use]
 pub enum Saved {
     Saved,
-    /// Nothing is saved. `fields` holds each field refused, by its name in the
-    /// struct, with what a form shows under it: what
+    /// Nothing is saved. `fields` holds each field refused, by the key it is
+    /// saved under (`apiKey`, the name an `#[input]` gives it), with what a
+    /// form shows under it: what
     /// [`Outcome::invalid`](crate::admin::Outcome::invalid) takes.
     Refused {
-        /// The first refusal, as a sentence.
+        /// The first refusal, as a sentence, which names the field as `fields`
+        /// does.
         message: String,
         fields: Vec<(String, String)>,
     },
@@ -167,10 +171,10 @@ impl<P: ProviderConfig> ProviderStore<P> {
         self.save_raw(&config, BlankPassword::IsBlank).await
     }
 
-    /// Saves the values of a form, each under the name of its field in the
-    /// struct (`api_url`), as the built-in page does: a password left blank
-    /// keeps the one saved. `values` is any struct or map that serializes to
-    /// them, such as the `#[input]` of an action.
+    /// Saves the values of a form, as the built-in page does: a password left
+    /// blank keeps the one saved. `values` is any struct or map that serializes
+    /// to them, such as the `#[input]` of an action, each under the key of its
+    /// field (`apiKey`) or its name in the struct (`api_key`).
     pub async fn save_form(&self, values: &impl Serialize) -> Result<Saved> {
         let Value::Object(values) = serde_json::to_value(values)? else {
             bail!("[openshop] The values of a provider form are a struct or a map");
@@ -190,7 +194,8 @@ impl<P: ProviderConfig> ProviderStore<P> {
         {
             SaveOutcome::Saved => Saved::Saved,
             SaveOutcome::NotFound => unreachable!("the provider is registered"),
-            SaveOutcome::Refused(error) => refused::<P>(error),
+            // The pipeline names a field by its key, in the message too.
+            SaveOutcome::Refused(ConfigError { message, fields }) => Saved::Refused { message, fields },
         };
         if saved == Saved::Saved {
             self.forget_loaded();
@@ -246,21 +251,11 @@ fn field_name<P: ProviderConfig>(key: &str) -> &str {
         .map_or(key, |(name, _)| name)
 }
 
-/// The key the field `name` of the struct is saved under.
+/// The key of the field named `name`, by that key or by its name in the
+/// struct: the derive refuses a key that is the name of another field.
 fn field_key<P: ProviderConfig>(name: &str) -> Option<&'static str> {
     P::FIELD_KEYS
         .iter()
-        .find(|(field, _)| *field == name)
+        .find(|(field, key)| *key == name || *field == name)
         .map(|(_, key)| *key)
-}
-
-fn refused<P: ProviderConfig>(error: ConfigError) -> Saved {
-    Saved::Refused {
-        message: error.message,
-        fields: error
-            .fields
-            .into_iter()
-            .map(|(key, shown)| (field_name::<P>(&key).to_string(), shown))
-            .collect(),
-    }
 }

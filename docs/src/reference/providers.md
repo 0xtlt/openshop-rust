@@ -280,7 +280,8 @@ use openshop::prelude::*;
 use openshop::providers::{Check, ProviderStatus, Saved};
 use openshop::{AdminPageId, AdminPageMode, AdminPagesConfig};
 
-/// The fields of the form, named as the fields of `Warehouse`.
+/// The fields of the form: `#[input]` names them `apiUrl` and `apiKey`, the
+/// keys the fields of `Warehouse` are saved under.
 #[input]
 pub struct ConnectWarehouse {
     pub api_url: String,
@@ -342,16 +343,20 @@ removes the page and `/api/providers`.
 | --- | --- |
 | `.status()` | A `ProviderStatus`: `saved`, `configured`, `values` (passwords left out), `saved_secrets` (the password fields that have a value), `last_checked_at`, `last_check_ok`. `status.value("api_url")` and `status.has_secret("api_key")` read it. |
 | `.save(Warehouse { … })` | Saves the struct as a whole: an empty password is no password. |
-| `.save_form(&values)` | Saves the values of a form, any struct or map that serializes to them: a password left blank keeps the one saved, as on the page. |
+| `.save_form(&values)` | Saves the values of a form, any struct or map that serializes to them, such as the `#[input]` of an action: a password left blank keeps the one saved, as on the page. |
 | `.check()` | Runs the [checker](#checker) and keeps its answer: `Check::Ok`, `Check::Refused` when it answers `false`, `Check::Failed(message)` when it fails, panics or takes longer than 10 seconds. Fails when the provider has no checker. |
 | `.remove()` | Removes what the shop saved; whether there was a configuration. |
 
-Fields are named as in the struct (`api_url`), not by the key they are saved
-under (`apiUrl`): in the values given to `save_form`, in `status`, and in the
-fields of `Saved::Refused { message, fields }`, which `Outcome::invalid(fields)`
-shows under each field of the form. A name the struct does not have is an
-error. A password is never given back: the code of the application reads it
-only through the methods of the provider.
+A form names a field by the key it is saved under (`apiUrl`, or the
+`name = "…"` of its `#[field]`), as an `#[input]` names its own fields.
+`save_form` takes a value under that key or under the name of the field in the
+struct (`api_url`); any other name is an error, and the derive refuses a key
+that is the name of another field. `Saved::Refused { message, fields }` names
+each field by its key, the message too, so `Outcome::invalid(fields)` shows
+each refusal under its control and `form.error("apiUrl")` reads it. `status`
+names fields as in the struct: `status.value("api_url")`. A password is never
+given back: the code of the application reads it only through the methods of
+the provider.
 
 The connectors of the context that saves or removes a configuration read it
 again at their next call. Other contexts read it at their first call.

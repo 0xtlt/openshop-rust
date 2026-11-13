@@ -160,6 +160,12 @@ pub fn form(input: &DeriveInput, derive: &str, what: &str) -> syn::Result<Form> 
         Fields::Unnamed(_) => return Err(syn::Error::new(name.span(), not_a_struct)),
     };
 
+    // A form gives a field under its key or under its name in the struct, so
+    // no key is the name of another field.
+    let names: Vec<String> = named
+        .iter()
+        .map(|field| plain_name(field.ident.as_ref().expect("a named field")))
+        .collect();
     let mut keys: Vec<String> = Vec::new();
     let mut definitions = Vec::new();
     let mut readers = Vec::new();
@@ -188,6 +194,12 @@ pub fn form(input: &DeriveInput, derive: &str, what: &str) -> syn::Result<Form> 
             return Err(syn::Error::new(
                 ident.span(),
                 format!("two fields are saved as `{key}`"),
+            ));
+        }
+        if key != plain_name(ident) && names.contains(&key) {
+            return Err(syn::Error::new(
+                ident.span(),
+                format!("`{key}` is the name of another field"),
             ));
         }
 
@@ -721,6 +733,12 @@ mod tests {
                 parse_quote! { struct W { #[field(label = "A")] api_url: String, #[field(label = "B", name = "apiUrl")] other: String } }
             ),
             "two fields are saved as `apiUrl`"
+        );
+        assert_eq!(
+            config_refusal(
+                parse_quote! { struct W { #[field(label = "A")] api_url: String, #[field(label = "B", name = "api_url")] other: String } }
+            ),
+            "`api_url` is the name of another field"
         );
         assert_eq!(
             config_refusal(parse_quote! { struct W { #[field(label = "A", secret)] a: String } }),
