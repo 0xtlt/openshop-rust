@@ -14,7 +14,8 @@
  *   `X-OpenShop-Toast-Error` are shown with `shopify.toast.show`.
  *
  * - What only a browser knows: a `<time datetime>` is written in its language and time zone; a
- *   modal with `data-openshop-open` is opened (its form was refused); an element with
+ *   modal with `data-openshop-open` is opened (its form was refused), and the modals of a page
+ *   are hidden before another replaces it; an element with
  *   `data-openshop-refresh="3000"` has the page fetched again after that many milliseconds (a run
  *   in progress), unless a field of the page has the focus or was changed, or a modal is open; a
  *   button with `data-openshop-copy` copies that text, or with `data-openshop-copy-from="<id>"`
@@ -60,10 +61,20 @@
     return url && url.origin === location.origin && !SERVER.test(url.pathname) ? url : null
   }
 
+  // The modals of the page shown are hidden before it goes: one removed while open stays open
+  // for the admin around the app, which can no longer be clicked. A form refused field by field
+  // comes back with `data-openshop-open`, and `ready` opens its modal again.
+  function hideModals() {
+    for (const modal of document.querySelectorAll('s-modal')) {
+      if (typeof modal.hideOverlay === 'function') attempt(() => modal.hideOverlay())
+    }
+  }
+
   // The page the server rendered, in place of the one shown.
   function present(html, url, push) {
     const next = new DOMParser().parseFromString(html, 'text/html')
     const root = next.getElementById(ROOT)
+    hideModals()
     if (!root) return location.assign(url)
     document.title = next.title
     const menu = next.querySelector('ui-nav-menu')
