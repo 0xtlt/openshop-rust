@@ -17,8 +17,8 @@ afterwards has no effect on a running process.
 | `DATABASE_URL` | Yes | `postgresql://openshop:openshop@localhost:5432/openshop` for CLI commands | API, worker, migration commands, tests |
 | `SHOPIFY_API_KEY` | Single-app mode | Empty | Shopify session-token audience and embedded App Bridge key |
 | `SHOPIFY_API_SECRET` | Single-app mode | Empty | OAuth, session-token, webhook, and proxy signature verification |
-| `HOST` | Production | Falls back to `SHOPIFY_APP_URL` | Public application URL and allowed CORS origin |
-| `SHOPIFY_APP_URL` | When `HOST` is absent | Empty | Legacy public application URL and allowed CORS origin |
+| `HOST` | Production | Falls back to `SHOPIFY_APP_URL` | Public application URL and allowed CORS origin, when it is an `http(s)` URL |
+| `SHOPIFY_APP_URL` | When `HOST` is absent | Empty | Legacy public application URL and allowed CORS origin, when it is an `http(s)` URL |
 | `ENCRYPTION_KEY` | Yes, unless the environment is `development` or `test` | None: the application does not start without it, except in development, where secrets are stored in plaintext | Provider configuration and Shopify access-token encryption |
 | `OPENSHOP_ENV` | Production | Unset: neither production nor development | `production` enables production safety checks. `development` or `test` allows plaintext secrets without `ENCRYPTION_KEY` (`openshop dev` does so itself) |
 | `NODE_ENV` | No | — | `production` is honored like `OPENSHOP_ENV=production`. It never allows plaintext secrets: only `OPENSHOP_ENV` does |
@@ -72,6 +72,10 @@ Notes:
   [operator dashboard](operator-dashboard.md) its password
   (`ops_password: std::env::var("OPS_PASSWORD").ok()`). `.env` is loaded
   before the settings of `app!` are evaluated.
+- `CORS_ALLOWED_ORIGINS` is not in this table either: the `custom` template
+  reads it to give `cors_origins` its comma-separated origins
+  (`cors_origins: std::env::var("CORS_ALLOWED_ORIGINS").unwrap_or_default().split(',')`).
+  See [Browser origins](authentication.md#browser-origins).
 - `SENTRY_DSN` is not in this table either, for the same reason: the
   template reads it to turn [Sentry](sentry.md) on
   (`sentry: std::env::var("SENTRY_DSN").ok()`). OpenShop does not read

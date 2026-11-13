@@ -951,6 +951,83 @@ async fn cors_headers_are_limited_to_allowed_origins() {
     ctx.shutdown().await.unwrap();
 }
 
+fn cors_origins_config(origins: &[&str]) -> OpenShopConfig {
+    OpenShopConfig::builder()
+        .proxy("/ping", Proxy::default().get(ping))
+        .cors_origins(origins)
+        .build()
+        .expect("valid config")
+}
+
+async fn preflight_origin(ctx: &TestContext, path: &str, origin: &str) -> Option<String> {
+    let preflight = request(ctx, Method::OPTIONS, path)
+        .header("Origin", origin)
+        .header("Access-Control-Request-Method", "GET")
+        .header("Access-Control-Request-Headers", "authorization")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(preflight.status(), 204, "{path} {origin}");
+    header(&preflight, "access-control-allow-origin").map(str::to_string)
+}
+
+#[tokio::test]
+async fn cors_origins_of_the_application_are_allowed() {
+    // A headless storefront, and the opaque origin of a frame a local simulator sandboxes.
+    let config = cors_origins_config(&["https://shop.example/", "", "null"]);
+    assert_eq!(config.cors_origins, ["https://shop.example", "null"]);
+    let ctx = TestContext::with_options(config, TestOptions::default()).await.unwrap();
+    for path in ["/proxy/ping", "/ext/ping"] {
+        for origin in ["https://shop.example", "null", EXTENSION_ORIGIN] {
+            assert_eq!(
+                preflight_origin(&ctx, path, origin).await.as_deref(),
+                Some(origin),
+                "{path}"
+            );
+        }
+        assert_eq!(
+            preflight_origin(&ctx, path, "https://evil.example").await,
+            None,
+            "{path}"
+        );
+    }
+    ctx.shutdown().await.unwrap();
+
+    let error = match OpenShopConfig::builder()
+        .cors_origins(["https://shop.example/path"])
+        .build()
+    {
+        Ok(_) => panic!("accepted a URL with a path"),
+        Err(error) => error.to_string(),
+    };
+    assert!(
+        error.contains("cors_origins: `https://shop.example/path` is not an origin"),
+        "{error}"
+    );
+}
+
+#[tokio::test]
+async fn null_is_an_origin_only_when_listed_and_never_in_production() {
+    // `HOST=null` is not a URL: it allows no origin, `null` included.
+    let options = TestOptions {
+        host: Some("null".to_string()),
+        ..Default::default()
+    };
+    let ctx = TestContext::with_options(ping_config(), options).await.unwrap();
+    assert_eq!(preflight_origin(&ctx, "/ext/ping", "null").await, None);
+    ctx.shutdown().await.unwrap();
+
+    let options = TestOptions {
+        production: true,
+        ..Default::default()
+    };
+    let error = match TestContext::with_options(cors_origins_config(&["null"]), options).await {
+        Ok(_) => panic!("a production server allowed `Origin: null`"),
+        Err(error) => error.to_string(),
+    };
+    assert!(error.contains("`null` is refused in production"), "{error}");
+}
+
 #[tokio::test]
 async fn missing_shopify_api_secret_fails_closed() {
     let options = TestOptions {

@@ -51,6 +51,9 @@ pub static APP: App = app! {
             .input(json!({ "limit": 1000 }))
             .all_shops(),
     ],
+    // Origins besides Shopify's and the app's that may call `/proxy` and `/ext`,
+    // when `CORS_ALLOWED_ORIGINS` lists them: a headless storefront.
+    cors_origins: std::env::var("CORS_ALLOWED_ORIGINS").unwrap_or_default().split(','),
     // The operator dashboard, under `/ops`, when `OPS_PASSWORD` is set: what
     // happens in every shop, read from outside Shopify admin.
     ops_password: std::env::var("OPS_PASSWORD").ok(),

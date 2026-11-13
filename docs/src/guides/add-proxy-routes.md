@@ -209,8 +209,8 @@ verifies the JWT audience and signature.
 Trust `ctx.shop`, `ctx.shopify_app`, and `ctx.customer_id`; do not accept identity
 from unsanitized client fields. A missing/invalid credential returns HTTP 401.
 
-Shopify extension, admin, storefront, local, `HOST`, and `SHOPIFY_APP_URL`
-origins receive CORS headers. Arbitrary origins do not.
+Shopify extension, admin, storefront, local, `HOST`, `SHOPIFY_APP_URL`, and
+`cors_origins` origins receive CORS headers. Arbitrary origins do not.
 
 Handler errors and panics are logged and return
 `{ "error": "Internal proxy error" }` with HTTP 500. A request that does not

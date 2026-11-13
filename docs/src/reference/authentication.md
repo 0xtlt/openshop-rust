@@ -374,6 +374,13 @@ visitor's own machine, not on an origin of the application, unless `HOST` or
 | Shop domains | `https://example.myshopify.com` |
 | Shopify's extension CDN | `https://extensions.shopifycdn.com` |
 | Origins of `HOST` and `SHOPIFY_APP_URL` | `https://your-app.example.com` |
+| The `cors_origins` of [`app!`](configuration.md#settings) | `https://shop.example`, or `null` outside production |
+
+A `HOST` or `SHOPIFY_APP_URL` that is not an `http(s)` URL allows no origin,
+and the server logs a warning when it starts. `null`, the origin of a sandboxed
+frame or a local file, is allowed only when `cors_origins` lists it, and a
+production server with `null` in `cors_origins` does not start: any site can
+send it.
 
 CORS applies to `/proxy/*` and `/ext/*` always, and to `/api/*` in `dev` and
 when the server runs without an admin UI. In production the admin UI and the

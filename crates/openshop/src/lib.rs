@@ -403,7 +403,7 @@ macro_rules! __shopify_input {
 /// Every other entry is a setting, written `name: value` and passed to the
 /// method of that name of [`OpenShopBuilder`](builder::OpenShopBuilder): `crons`, `on_error`, `mcp`,
 /// `shopify`, `worker`, `retry_policy`, `builtin_pages`, `admin_menu`, `admin_ui`,
-/// `max_request_body_bytes`, `request_timeout`, `max_concurrent_requests`,
+/// `max_request_body_bytes`, `request_timeout`, `max_concurrent_requests`, `cors_origins`,
 /// `ops_password`, `log_retention`, `sentry`… The application reads a secret
 /// from the environment itself: `ops_password: std::env::var("OPS_PASSWORD").ok()`.
 /// A value can fail with `?`: the error is the one `APP.config()` and
