@@ -50,7 +50,7 @@ A `shop` filter alone cannot distinguish those installations.
 use openshop::prelude::*;
 
 #[derive(Debug, Clone, Model)]
-#[model("reviews", unique(app_handle, shop, product_id))]
+#[model("reviews", unique([app_handle, shop, product_id]))]
 pub struct Review {
     pub id: Uuid,
     pub shop: String,

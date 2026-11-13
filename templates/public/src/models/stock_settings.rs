@@ -3,7 +3,7 @@ use openshop::prelude::*;
 
 /// What a merchant chose for their shop: one row per shop, once they saved.
 #[derive(Debug, Clone, PartialEq, Model)]
-#[model("stock_settings", unique(shop))]
+#[model("stock_settings", unique([shop]))]
 pub struct StockSettings {
     pub id: Uuid,
     pub shop: String,

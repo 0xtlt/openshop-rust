@@ -18,7 +18,7 @@ impl Warehouse {
 }
 
 #[derive(Debug, Clone, Model)]
-#[model("reviews", index(shop, product_id))]
+#[model("reviews", index([shop, product_id]))]
 struct Review {
     id: Uuid,
     shop: String,

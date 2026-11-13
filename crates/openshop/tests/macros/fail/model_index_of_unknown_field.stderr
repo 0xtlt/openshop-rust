@@ -1,5 +1,5 @@
 error: `Review` has no field `product`
- --> tests/macros/fail/model_index_of_unknown_field.rs:4:32
+ --> tests/macros/fail/model_index_of_unknown_field.rs:4:33
   |
-4 | #[model("reviews", index(shop, product))]
-  |                                ^^^^^^^
+4 | #[model("reviews", index([shop, product]))]
+  |                                 ^^^^^^^
