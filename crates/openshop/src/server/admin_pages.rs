@@ -14,9 +14,7 @@ use uuid::Uuid;
 use super::http::{catch_panic, json_response, parse_query};
 use super::mcp::schema::property_errors;
 use super::shop::ShopSession;
-use crate::admin::{
-    AdminAuthorize, AdminContext, AdminFunction, AdminFunctionKind, AdminPublicError, CustomAdminPage, field_message,
-};
+use crate::admin::{AdminAuthorize, AdminContext, AdminFunction, AdminFunctionKind, AdminPublicError, CustomAdminPage};
 use crate::admin_paths::{custom_admin_route_params, match_custom_admin_path};
 use crate::app::OpenShop;
 use crate::engine::step::error_message;
@@ -196,7 +194,7 @@ pub(crate) async fn call_function(
                 refusal.field_errors(
                     fields
                         .iter()
-                        .map(|(field, error)| (field.as_str(), field_message(error))),
+                        .map(|(field, error)| (field.as_str(), field_text(&context, error))),
                 )
             }
         })?,
@@ -206,6 +204,13 @@ pub(crate) async fn call_function(
         None => input,
     };
     (function.handler)(context, input).await
+}
+
+/// The error of a field the input schema refused, as the form shows it, in
+/// the language of the admin: `is required` is `Required`.
+fn field_text(context: &AdminContext, error: &str) -> String {
+    let field = crate::admin::FieldError::from_schema(error);
+    context.app.config().admin_text(&crate::admin::AdminText::Field(field))
 }
 
 pub fn create_custom_admin_page_routes() -> Router<OpenShop> {

@@ -30,7 +30,9 @@
 ;(() => {
   if (window.openshop) return
   const ROOT = 'openshop-page'
-  const GENERIC_ERROR = 'Something went wrong. Try again.'
+  // The texts of the toasts, in the language of the admin: the server writes them on `<html>`.
+  const TEXTS = JSON.parse(document.documentElement.getAttribute('data-openshop-texts') || '{}')
+  const GENERIC_ERROR = TEXTS.error
   const LINKS = 's-link[href], a[href], s-button[href], s-clickable[href]'
   // Paths of the server that are not pages.
   const SERVER = /^\/(api|auth|webhooks|proxy|ext|routes|health|ops|__openshop)(\/|$)/
@@ -113,9 +115,9 @@
   async function copy(text) {
     try {
       await navigator.clipboard.writeText(text)
-      toast('Copied')
+      toast(TEXTS.copied)
     } catch {
-      toast('Could not copy', true)
+      toast(TEXTS.copyFailed, true)
     }
   }
 

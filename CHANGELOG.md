@@ -19,6 +19,21 @@
   modals of a page are now hidden before another page replaces it, after a
   form, a link, back and forward or `X-OpenShop-Location`; a form refused
   field by field opens its modal again, as before (#77).
+- `admin_locale` in `app!`: the language of the admin pages, a language tag
+  (`"fr"`, `"fr-CA"`). It is their `<html lang>`, `en` before, and the
+  language of the texts openshop writes on them: the errors of the fields an
+  input schema refuses (`Required`, `Must be at least 1`…), the page of a
+  loader that failed (`Page unavailable`), the page an access rule refuses
+  (`This page is disabled.`), the error toast of an action that failed
+  (`Internal server error`), and the toasts of `openshop.js`, which the server
+  now writes on `<html data-openshop-texts>`. English and French are built in;
+  `admin_texts`, a function from an `openshop::admin::AdminText` to its
+  message, gives another language. A value that is not a language tag is a
+  configuration error. The pages of the framework stay in English (#76).
+- A form the input schema refuses, on a view that does not read `form`, has
+  the first field and its error as its toast, `hidden: Must be true or
+  false`, as the guide said, rather than the schema's summary,
+  `input.hidden must be boolean`.
 
 ## 0.1.0-rc.3
 

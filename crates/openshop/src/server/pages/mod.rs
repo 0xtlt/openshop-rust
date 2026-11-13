@@ -48,7 +48,7 @@ use super::reload::Served;
 use super::shop::{ShopSession, session_of};
 use super::shop_domain::normalize_shop_domain;
 use crate::admin::{
-    ACTION_FIELD, AdminFunctionKind, AdminPublicError, CustomAdminPage, FormState, Outcome, PageRequest,
+    ACTION_FIELD, AdminFunctionKind, AdminPublicError, AdminText, CustomAdminPage, FormState, Outcome, PageRequest,
     fields_to_json, parse_fields, with_outcome,
 };
 use crate::admin_paths::rpc::encode_uri_component as encode;
@@ -272,7 +272,7 @@ pub(crate) async fn bounce_page(State(app): State<OpenShop>, request: Request) -
         .ok()
         .or_else(|| app.apps().all().first());
     let api_key = shopify_app.map_or("", |shopify_app| shopify_app.api_key.as_str());
-    let markup = shell::bounce(api_key, app.endpoints());
+    let markup = shell::bounce(app.config().admin_lang(), api_key, app.endpoints());
     (
         [
             (CONTENT_TYPE, "text/html; charset=utf-8"),
@@ -310,8 +310,8 @@ async fn render(
     let (status, page) = match content {
         Ok(Shown::Page(page)) => (status, page),
         Ok(Shown::Refused(refused, page)) => (refused, page),
-        Err(StatusCode::FORBIDDEN | StatusCode::NOT_FOUND) => (StatusCode::NOT_FOUND, disabled()),
-        Err(failed) => (failed, unavailable()),
+        Err(StatusCode::FORBIDDEN | StatusCode::NOT_FOUND) => (StatusCode::NOT_FOUND, disabled(app)),
+        Err(failed) => (failed, unavailable(app)),
     };
     let menu = shell::Menu::of(app, &call.session).await;
     let document = shell::document(app, &call.session, &menu, notice, page, call.reload);
@@ -577,7 +577,7 @@ async fn submit(call: &PageCall<'_>, body: &[u8]) -> Response {
                     report_failure("[openshop] Admin page action failed", &error);
                     (
                         StatusCode::INTERNAL_SERVER_ERROR,
-                        "Internal server error".to_string(),
+                        call.app.config().admin_text(&AdminText::ActionFailed),
                         IndexMap::new(),
                     )
                 }
@@ -585,12 +585,14 @@ async fn submit(call: &PageCall<'_>, body: &[u8]) -> Response {
             if errors.is_empty() {
                 return fail(call, status, &message).await;
             }
-            // The schema's summary is for the fields; the action's message is the action's to say.
-            let said = (error
+            // The schema's summary is for the fields, and in English: its toast is the
+            // first field and its error. The action's message is the action's to say.
+            let schema_refused = error
                 .downcast_ref::<AdminPublicError>()
                 .map(|public| public.code.as_str())
-                != Some("INVALID_INPUT"))
-            .then(|| message.clone());
+                == Some("INVALID_INPUT");
+            let message = if schema_refused { first_error(&errors) } else { message };
+            let said = (!schema_refused).then(|| message.clone());
             let form = refused(errors, said);
             refuse(call, reads_form, &form, status, &message, None).await
         }
@@ -756,18 +758,19 @@ fn without_view(name: &str) -> Markup {
     }
 }
 
-fn disabled() -> Markup {
+fn disabled(app: &OpenShop) -> Markup {
     html! {
         s-page {
-            s-section { s-paragraph { "This page is disabled." } }
+            s-section { s-paragraph { (app.config().admin_text(&AdminText::PageDisabled)) } }
         }
     }
 }
 
-fn unavailable() -> Markup {
+fn unavailable(app: &OpenShop) -> Markup {
+    let config = app.config();
     html! {
-        s-page heading="Page unavailable" {
-            s-banner tone="critical" { "This page could not be displayed." }
+        s-page heading=(config.admin_text(&AdminText::PageUnavailable)) {
+            s-banner tone="critical" { (config.admin_text(&AdminText::PageUnavailableMessage)) }
         }
     }
 }

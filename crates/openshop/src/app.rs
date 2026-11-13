@@ -8,7 +8,7 @@ use anyhow::Result;
 use indexmap::IndexMap;
 use sqlx::PgPool;
 
-use crate::admin::{AdminPage, CustomAdminPage};
+use crate::admin::{AdminPage, AdminText, AdminTextsFn, CustomAdminPage};
 use crate::billing::{BillingSource, PlanCache};
 use crate::config::validate::validate_openshop_config;
 use crate::db::Table;
@@ -87,6 +87,13 @@ pub struct OpenShopConfig {
     /// the app's URL and, in development, the local hosts: `https://shop.example`,
     /// or `null` in development. Normalized by [`OpenShopBuilder::cors_origins`].
     pub cors_origins: Vec<String>,
+    /// The language of the admin pages, a language tag (`fr`, `fr-CA`): their
+    /// `<html lang>`, and the texts openshop writes on them. `None` is
+    /// English. Set by [`OpenShopBuilder::admin_locale`].
+    pub admin_locale: Option<String>,
+    /// The application's own texts for what openshop writes on the admin
+    /// pages, before the built-in table of `admin_locale`.
+    pub admin_texts: Option<AdminTextsFn>,
     /// The password of the operator dashboard, served under `/ops` when set.
     pub ops_password: Option<String>,
     /// The development store whose token work no Shopify request vouches for
@@ -122,6 +129,19 @@ impl OpenShopConfig {
                 .filter_map(|page| Some(AdminMenuItem::new(page.nav.clone()?, page.path.clone())))
                 .collect(),
         }
+    }
+
+    /// The language of the admin pages, as `<html lang>` says it: the
+    /// `admin_locale`, `en` without one.
+    pub fn admin_lang(&self) -> &str {
+        self.admin_locale.as_deref().unwrap_or("en")
+    }
+
+    /// A text openshop writes on the admin pages, in their language: the
+    /// application's `admin_texts`, then the built-in table of `admin_locale`
+    /// (English and French), then English.
+    pub fn admin_text(&self, text: &AdminText) -> String {
+        crate::admin::admin_text(self.admin_lang(), self.admin_texts.as_ref(), text)
     }
 
     /// Custom admin pages sorted by specificity. Fails on reserved or ambiguous routes.
@@ -475,6 +495,51 @@ impl OpenShopBuilder {
                 Err(problem) => self.problems.push(format!("cors_origins: {problem}")),
             }
         }
+        self
+    }
+
+    /// The language of the admin pages: `fr`, `fr-CA`, a language tag. It is
+    /// their `<html lang>`, and the language of the texts openshop writes on
+    /// them: the errors of the fields an input schema refuses (`Required`,
+    /// `Must be at least 1`), the page of a loader that failed, the error
+    /// toast of an action that failed, and the toasts of `openshop.js`.
+    /// Built in: English, the default, and French; another language is
+    /// English, unless [`admin_texts`](Self::admin_texts) gives its texts.
+    /// The pages of the framework (flows, runs, providers…) stay in English.
+    ///
+    /// An empty value is ignored; a value that is not a language tag, such as
+    /// `fr_FR`, is a configuration error.
+    pub fn admin_locale(mut self, locale: impl AsRef<str>) -> Self {
+        let locale = locale.as_ref().trim();
+        if locale.is_empty() {
+            self.config.admin_locale = None;
+        } else if crate::admin::is_language_tag(locale) {
+            self.config.admin_locale = Some(locale.to_string());
+        } else {
+            self.problems.push(format!(
+                "admin_locale: `{locale}` is not a language tag: expected `fr` or `fr-CA`"
+            ));
+        }
+        self
+    }
+
+    /// The application's texts for what openshop writes on the admin pages,
+    /// for a language openshop has no table of, or other words than its own:
+    /// a function from the [`AdminText`] to its message, `None` for one it
+    /// leaves to the table of [`admin_locale`](Self::admin_locale), then to
+    /// English.
+    ///
+    /// ```ignore
+    /// admin_texts: |text: &AdminText| match text {
+    ///     AdminText::Field(FieldError::Required) => Some("Pflichtfeld".to_string()),
+    ///     _ => None,
+    /// },
+    /// ```
+    pub fn admin_texts<F>(mut self, texts: F) -> Self
+    where
+        F: Fn(&AdminText) -> Option<String> + Send + Sync + 'static,
+    {
+        self.config.admin_texts = Some(std::sync::Arc::new(texts));
         self
     }
 
