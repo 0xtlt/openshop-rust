@@ -22,17 +22,51 @@ use crate::server::provider_config::{
 use crate::server::shop::ShopSession;
 use crate::types::{JsonMap, Provider};
 
-async fn stored_config(
+/// The shop a provider configuration belongs to, and the Shopify app that
+/// serves it: a session of the admin, or any context of a shop.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ProviderOwner<'a> {
+    pub(crate) shop: &'a str,
+    pub(crate) shopify_app: &'a str,
+}
+
+impl<'a> From<&'a ShopSession> for ProviderOwner<'a> {
+    fn from(session: &'a ShopSession) -> Self {
+        Self {
+            shop: &session.shop,
+            shopify_app: &session.shopify_app,
+        }
+    }
+}
+
+pub(crate) async fn stored_config(
     app: &OpenShop,
-    session: &ShopSession,
+    owner: ProviderOwner<'_>,
     provider_name: &str,
 ) -> Result<Option<ProviderConfigRow>, sqlx::Error> {
     sqlx::query_as("SELECT * FROM provider_configs WHERE app_handle = $1 AND shop = $2 AND provider_name = $3 LIMIT 1")
-        .bind(&session.shopify_app)
-        .bind(&session.shop)
+        .bind(owner.shopify_app)
+        .bind(owner.shop)
         .bind(provider_name)
         .fetch_optional(app.db())
         .await
+}
+
+/// Removes what the shop saved for the provider `name`: whether there was a
+/// configuration.
+pub(crate) async fn remove_provider_config(
+    app: &OpenShop,
+    owner: ProviderOwner<'_>,
+    name: &str,
+) -> anyhow::Result<bool> {
+    let removed =
+        sqlx::query("DELETE FROM provider_configs WHERE app_handle = $1 AND shop = $2 AND provider_name = $3")
+            .bind(owner.shopify_app)
+            .bind(owner.shop)
+            .bind(name)
+            .execute(app.db())
+            .await?;
+    Ok(removed.rows_affected() > 0)
 }
 
 /// A provider of the application and what the session's shop saved for it,
@@ -124,23 +158,37 @@ pub(crate) enum SaveOutcome {
     Refused(ConfigError),
 }
 
-/// Saves the configuration `raw_config` of the provider `name` for the
-/// session's shop, validated against the one saved: a blank password keeps
-/// the saved one. Encrypted at rest when the application has a key.
+/// What a blank password of a configuration sent for a provider means.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BlankPassword {
+    /// The saved one is kept, as the form of a page sends it.
+    KeepsSaved,
+    /// No password: the configuration replaces the saved one as a whole.
+    IsBlank,
+}
+
+/// Saves the configuration `raw_config` of the provider `name` for the shop
+/// of `owner`, validated against the one saved. Encrypted at rest when the
+/// application has a key.
 pub(crate) async fn save_provider_config(
     app: &OpenShop,
-    session: &ShopSession,
+    owner: ProviderOwner<'_>,
     name: &str,
     raw_config: Option<&Value>,
+    blank_password: BlankPassword,
 ) -> anyhow::Result<SaveOutcome> {
     let Some(provider) = app.config().providers.get(name) else {
         return Ok(SaveOutcome::NotFound);
     };
 
-    let existing = stored_config(app, session, name).await?;
-    let existing_config = app
-        .crypto()
-        .decrypt_config(existing.as_ref().and_then(|row| row.config.as_ref()))?;
+    let existing_config = match blank_password {
+        BlankPassword::KeepsSaved => {
+            let existing = stored_config(app, owner, name).await?;
+            app.crypto()
+                .decrypt_config(existing.as_ref().and_then(|row| row.config.as_ref()))?
+        }
+        BlankPassword::IsBlank => JsonMap::new(),
+    };
     let parsed = match parse_provider_config(
         &provider.fields,
         provider.transformer.as_ref(),
@@ -156,8 +204,8 @@ pub(crate) async fn save_provider_config(
         "INSERT INTO provider_configs (app_handle, shop, provider_name, config) VALUES ($1, $2, $3, $4::json) \
          ON CONFLICT (app_handle, shop, provider_name) DO UPDATE SET config = EXCLUDED.config, updated_at = now()",
     )
-    .bind(&session.shopify_app)
-    .bind(&session.shop)
+    .bind(owner.shopify_app)
+    .bind(owner.shop)
     .bind(name)
     .bind(encrypted.to_string())
     .execute(app.db())
@@ -173,7 +221,15 @@ async fn save_provider(
 ) -> ApiResult {
     let body = json_object_body(&body);
     Ok(
-        match save_provider_config(&app, &session, &name, body.get("config")).await? {
+        match save_provider_config(
+            &app,
+            (&session).into(),
+            &name,
+            body.get("config"),
+            BlankPassword::KeepsSaved,
+        )
+        .await?
+        {
             SaveOutcome::Saved => json_response(StatusCode::OK, json!({ "ok": true })),
             SaveOutcome::NotFound => json_error(StatusCode::NOT_FOUND, "Provider not found"),
             SaveOutcome::Refused(error) => json_error(StatusCode::BAD_REQUEST, error),
@@ -210,13 +266,13 @@ impl CheckOutcome {
     }
 }
 
-/// Runs the checker of the provider `name` with the configuration the
-/// session's shop saved, for [`CHECK_TIMEOUT`] at most, and stores what it
+/// Runs the checker of the provider `name` with the configuration the shop
+/// of `owner` saved, for [`CHECK_TIMEOUT`] at most, and stores what it
 /// answered when a configuration is saved. A failure of the checker is
 /// logged under an id unless it was written for the client.
 pub(crate) async fn check_provider_connection(
     app: &OpenShop,
-    session: &ShopSession,
+    owner: ProviderOwner<'_>,
     name: &str,
 ) -> anyhow::Result<CheckOutcome> {
     let Some(provider) = app.config().providers.get(name) else {
@@ -225,7 +281,7 @@ pub(crate) async fn check_provider_connection(
     let Some(checker) = &provider.checker else {
         return Ok(CheckOutcome::NoChecker);
     };
-    let stored = stored_config(app, session, name).await?;
+    let stored = stored_config(app, owner, name).await?;
 
     let check = async {
         let config = app
@@ -258,7 +314,7 @@ async fn check_provider(
     Extension(session): Extension<ShopSession>,
     Path(name): Path<String>,
 ) -> ApiResult {
-    let outcome = check_provider_connection(&app, &session, &name).await?;
+    let outcome = check_provider_connection(&app, (&session).into(), &name).await?;
     let error = outcome.error();
     Ok(match outcome {
         CheckOutcome::NotFound => json_error(StatusCode::NOT_FOUND, "Provider not found"),
@@ -276,7 +332,7 @@ async fn check_provider(
 }
 
 /// The longest a connection check may take: the admin waits for the answer.
-const CHECK_TIMEOUT: Duration = Duration::from_secs(10);
+pub(crate) const CHECK_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub fn routes() -> Router<OpenShop> {
     Router::new()

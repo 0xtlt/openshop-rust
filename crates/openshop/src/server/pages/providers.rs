@@ -11,7 +11,8 @@ use maud::{Markup, html};
 use super::{BuiltinPage, field, ui};
 use crate::admin::{AdminPublicError, FormState, Outcome};
 use crate::server::api::providers::{
-    CheckOutcome, ProviderItem, SaveOutcome, check_provider_connection, provider_items, save_provider_config,
+    BlankPassword, CheckOutcome, ProviderItem, SaveOutcome, check_provider_connection, provider_items,
+    save_provider_config,
 };
 
 /// The form of the configuration.
@@ -140,7 +141,15 @@ pub(super) async fn submit(page: &BuiltinPage<'_>, action: &str, fields: &[(Stri
                 return Err(not_found());
             };
             let config = ui::config_from_form(&provider.fields, fields, CONFIG);
-            match save_provider_config(page.app, page.session, name, Some(&config)).await? {
+            match save_provider_config(
+                page.app,
+                page.session.into(),
+                name,
+                Some(&config),
+                BlankPassword::KeepsSaved,
+            )
+            .await?
+            {
                 SaveOutcome::Saved => Ok(Outcome::toast("Saved.")),
                 SaveOutcome::NotFound => Err(not_found()),
                 SaveOutcome::Refused(error) => Err(ui::config_refusal(error, CONFIG)),
@@ -152,7 +161,7 @@ pub(super) async fn submit(page: &BuiltinPage<'_>, action: &str, fields: &[(Stri
 }
 
 async fn check(page: &BuiltinPage<'_>, name: &str) -> Result<Outcome> {
-    let outcome = check_provider_connection(page.app, page.session, name).await?;
+    let outcome = check_provider_connection(page.app, page.session.into(), name).await?;
     match (&outcome, outcome.error()) {
         (CheckOutcome::NotFound, _) => Err(not_found()),
         (CheckOutcome::NoChecker, _) => Err(AdminPublicError::new("NO_CHECKER", "No checker defined")

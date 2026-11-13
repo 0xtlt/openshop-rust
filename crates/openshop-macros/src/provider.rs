@@ -134,6 +134,10 @@ pub struct Form {
     pub definitions: Vec<TokenStream>,
     /// The struct, read from `config`, a mutable `JsonMap`.
     pub construct: TokenStream,
+    /// `("api_url", "apiUrl")`: the name of each field and its key.
+    pub keys: Vec<TokenStream>,
+    /// Statements inserting each field of `self` in `config`, a mutable `JsonMap`.
+    pub writers: Vec<TokenStream>,
 }
 
 /// Reads the form of a struct. `derive` and `what` name the derive and what
@@ -159,6 +163,8 @@ pub fn form(input: &DeriveInput, derive: &str, what: &str) -> syn::Result<Form> 
     let mut keys: Vec<String> = Vec::new();
     let mut definitions = Vec::new();
     let mut readers = Vec::new();
+    let mut named_keys = Vec::new();
+    let mut writers = Vec::new();
     for field in named {
         let ident = field.ident.as_ref().expect("a named field");
         let ty = &field.ty;
@@ -215,6 +221,14 @@ pub fn form(input: &DeriveInput, derive: &str, what: &str) -> syn::Result<Form> 
             fields.insert(::std::string::String::from(#key), #base #placeholder #description #(#constraints)* #validate);
         });
         readers.push(quote!(#ident: ::openshop::builder::provider_field_value::<#ty>(&mut config, #key)?));
+        let field_name = plain_name(ident);
+        named_keys.push(quote!((#field_name, #key)));
+        writers.push(quote! {
+            config.insert(
+                ::std::string::String::from(#key),
+                ::openshop::serde_json::to_value(&self.#ident).unwrap_or(::openshop::Value::Null),
+            );
+        });
         keys.push(key);
     }
 
@@ -225,15 +239,27 @@ pub fn form(input: &DeriveInput, derive: &str, what: &str) -> syn::Result<Form> 
         }),
         _ => quote!(Self { #(#readers,)* }),
     };
-    Ok(Form { definitions, construct })
+    Ok(Form {
+        definitions,
+        construct,
+        keys: named_keys,
+        writers,
+    })
 }
 
 pub fn derive_config(input: DeriveInput) -> syn::Result<TokenStream> {
     let name = &input.ident;
-    let Form { definitions, construct } = form(&input, "ProviderConfig", "provider configuration")?;
+    let Form {
+        definitions,
+        construct,
+        keys,
+        writers,
+    } = form(&input, "ProviderConfig", "provider configuration")?;
 
     Ok(quote! {
         impl ::openshop::ProviderConfig for #name {
+            const FIELD_KEYS: &'static [(&'static str, &'static str)] = &[#(#keys),*];
+
             fn fields() -> ::openshop::builder::Fields {
                 let mut fields = ::openshop::builder::Fields::new();
                 #(#definitions)*
@@ -242,6 +268,13 @@ pub fn derive_config(input: DeriveInput) -> syn::Result<TokenStream> {
 
             fn from_config(mut config: ::openshop::JsonMap) -> ::core::result::Result<Self, ::std::string::String> {
                 ::core::result::Result::Ok(#construct)
+            }
+
+            #[allow(unused_mut)]
+            fn to_config(&self) -> ::openshop::JsonMap {
+                let mut config = ::openshop::JsonMap::new();
+                #(#writers)*
+                config
             }
         }
 
@@ -331,7 +364,7 @@ fn docs(function: &ImplItemFn) -> Vec<&Attribute> {
 
 /// What the block declares next to the items of the user: the name of the
 /// provider, its definition, and its connectors.
-const DECLARED: [&str; 3] = ["NAME", "provider", "on"];
+const DECLARED: [&str; 4] = ["NAME", "provider", "on", "config_of"];
 
 /// Refuses an item of the block, or the constant of a method, that would be
 /// declared twice by the expansion. Rustc would point at the attribute.
@@ -343,7 +376,7 @@ fn check_names(item: &ItemImpl, methods: &[Method]) -> syn::Result<()> {
             return Err(syn::Error::new(
                 ident.span(),
                 format!(
-                    "`{name}` is declared by `#[provider]` (the name, the definition and the connectors of the provider): give this item another name"
+                    "`{name}` is declared by `#[provider]` (the name, the definition, the connectors and the configuration of the provider): give this item another name"
                 ),
             ));
         }
@@ -551,6 +584,16 @@ pub fn provider(name: Option<LitStr>, mut item: ItemImpl) -> syn::Result<TokenSt
             pub fn on(connectors: &::openshop::Connectors) -> #connector<'_> {
                 #connector { connectors }
             }
+
+            /// The configuration the shop of a context saved for the provider:
+            /// read, saved, checked and removed by the code of the
+            /// application, with the validation and the encryption of the
+            /// built-in providers page.
+            pub fn config_of(
+                scope: &(impl ::openshop::ShopScope + ?::core::marker::Sized),
+            ) -> ::openshop::providers::ProviderStore<Self> {
+                ::openshop::providers::ProviderStore::new(scope, #name)
+            }
         }
 
         #declared
@@ -617,6 +660,8 @@ mod tests {
             "String :: from (\"batch\") , < u32 as :: openshop :: builder :: ProviderField > :: field (\"Batch size\")",
             "batch_size : :: openshop :: builder :: provider_field_value :: < u32 > (& mut config , \"batch\") ?",
             "impl < 'de > :: openshop :: serde :: Deserialize < 'de > for Warehouse",
+            "const FIELD_KEYS : & 'static [(& 'static str , & 'static str)] = & [(\"api_url\" , \"apiUrl\") , (\"api_key\" , \"apiKey\") , (\"region\" , \"region\") , (\"batch_size\" , \"batch\")] ;",
+            "config . insert (:: std :: string :: String :: from (\"batch\") , :: openshop :: serde_json :: to_value (& self . batch_size)",
         ] {
             assert!(generated.contains(expected), "missing `{expected}` in:\n{generated}");
         }
@@ -741,6 +786,7 @@ mod tests {
             ". handle (Self :: MOVE_STOCK , | config : Self , (sku , quantity ,) : (String , i64 ,) | async move",
             ". handle (Self :: PING , | config : Self , () : () | async move",
             "pub fn on (connectors : & :: openshop :: Connectors) -> WarehouseConnector < '_ >",
+            "pub fn config_of (scope : & (impl :: openshop :: ShopScope + ? :: core :: marker :: Sized) ,) -> :: openshop :: providers :: ProviderStore < Self > { :: openshop :: providers :: ProviderStore :: new (scope , \"warehouse\") }",
             "pub struct WarehouseConnector < 'a >",
             "# [doc = r\" Sends orders.\"] pub async fn push (& self , orders : impl :: core :: borrow :: Borrow < Vec < Order > >)",
             "call_as (\"warehouse\" , \"move_stock\" , (< _ as :: core :: borrow :: Borrow < String >> :: borrow (& sku) , < _ as :: core :: borrow :: Borrow < i64 >> :: borrow (& quantity) ,))",
@@ -760,9 +806,13 @@ mod tests {
     fn refuses_what_the_expansion_would_declare_twice() {
         let declared = |name: &str| {
             format!(
-                "`{name}` is declared by `#[provider]` (the name, the definition and the connectors of the provider): give this item another name"
+                "`{name}` is declared by `#[provider]` (the name, the definition, the connectors and the configuration of the provider): give this item another name"
             )
         };
+        assert_eq!(
+            provider_refusal(parse_quote! { impl W { pub fn config_of() -> Self { W } } }),
+            declared("config_of")
+        );
         assert_eq!(
             provider_refusal(parse_quote! { impl W { pub fn on() -> Self { W } } }),
             declared("on")

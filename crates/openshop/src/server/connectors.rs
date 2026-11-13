@@ -1,7 +1,7 @@
 //! Provider connectors: provider methods bound to a shop's stored configuration.
 
 use std::borrow::Borrow;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use anyhow::{Result, anyhow, bail};
 use futures::future::BoxFuture;
@@ -9,7 +9,6 @@ use indexmap::IndexMap;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
-use tokio::sync::OnceCell;
 
 use crate::app::OpenShop;
 use crate::runtime::context_logger::ContextLogger;
@@ -48,19 +47,22 @@ impl Connector {
 enum Source {
     /// Given as they are, such as the fakes of a test.
     Ready(IndexMap<String, Connector>),
-    /// Built from the configuration a shop saved, at the first call.
+    /// Built from the configuration a shop saved, at the first call, and
+    /// again after [`Connectors::forget_loaded`].
     Shop {
         app: OpenShop,
         shop: String,
         shopify_app: String,
-        loaded: OnceCell<IndexMap<String, Connector>>,
+        loaded: Mutex<Option<Arc<IndexMap<String, Connector>>>>,
     },
 }
 
 /// The providers of an application for one shop, keyed by provider name.
 ///
 /// The connectors of a context read nothing until a method is called: the
-/// configuration the shop saved is then loaded once and kept.
+/// configuration the shop saved is then loaded once and kept, until the
+/// context saves or removes one with
+/// [`config_of`](crate::providers::ProviderStore).
 #[derive(Clone)]
 pub struct Connectors {
     source: Arc<Source>,
@@ -81,28 +83,46 @@ impl Connectors {
                 app: app.clone(),
                 shop: shop.into(),
                 shopify_app: shopify_app.into(),
-                loaded: OnceCell::new(),
+                loaded: Mutex::new(None),
             }),
         }
     }
 
-    async fn loaded(&self) -> Result<&IndexMap<String, Connector>> {
+    async fn connector(&self, provider: &str) -> Result<Option<Connector>> {
         match &*self.source {
-            Source::Ready(connectors) => Ok(connectors),
+            Source::Ready(connectors) => Ok(connectors.get(provider).cloned()),
             Source::Shop {
                 app,
                 shop,
                 shopify_app,
                 loaded,
-            } => loaded.get_or_try_init(|| load_connectors(app, shop, shopify_app)).await,
+            } => {
+                let cached = loaded.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone();
+                let connectors = match cached {
+                    Some(connectors) => connectors,
+                    None => {
+                        let connectors = Arc::new(load_connectors(app, shop, shopify_app).await?);
+                        *loaded.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(connectors.clone());
+                        connectors
+                    }
+                };
+                Ok(connectors.get(provider).cloned())
+            }
+        }
+    }
+
+    /// Forgets the configuration loaded for the shop: the next call reads the
+    /// one saved since. Connectors given as they are keep them.
+    pub(crate) fn forget_loaded(&self) {
+        if let Source::Shop { loaded, .. } = &*self.source {
+            *loaded.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
         }
     }
 
     /// The connector of a provider.
-    pub async fn get(&self, provider: &str) -> Result<&Connector> {
-        self.loaded()
+    pub async fn get(&self, provider: &str) -> Result<Connector> {
+        self.connector(provider)
             .await?
-            .get(provider)
             .ok_or_else(|| anyhow!("Unknown provider \"{provider}\""))
     }
 

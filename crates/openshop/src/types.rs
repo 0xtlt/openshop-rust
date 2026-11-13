@@ -273,11 +273,18 @@ impl<A, R> fmt::Debug for ProviderCall<A, R> {
 /// The saved configuration of a provider as a struct: its fields are the
 /// fields of the configuration form. Implemented by `#[derive(ProviderConfig)]`.
 pub trait ProviderConfig: Sized {
+    /// The name of each field of the struct and the key it is saved under,
+    /// in the order of the struct: `("api_url", "apiUrl")`.
+    const FIELD_KEYS: &'static [(&'static str, &'static str)];
+
     /// The fields of the form, in the order of the struct.
     fn fields() -> Fields;
 
     /// Reads a saved configuration. The error names the field that does not fit.
     fn from_config(config: JsonMap) -> std::result::Result<Self, String>;
+
+    /// The configuration as it is saved: each field under its key.
+    fn to_config(&self) -> JsonMap;
 }
 
 /// A Rust type a field of a provider configuration can have.
@@ -292,7 +299,7 @@ pub trait ProviderConfig: Sized {
     message = "`{Self}` is not a type a provider field can have",
     note = "use `String`, `bool`, a number type, or an `Option` of them"
 )]
-pub trait ProviderField: DeserializeOwned {
+pub trait ProviderField: DeserializeOwned + Serialize {
     /// Whether the form accepts the field left blank.
     const OPTIONAL: bool = false;
 
@@ -524,6 +531,13 @@ pub trait ShopScope {
 
     fn app(&self) -> &OpenShop;
 
+    /// The connectors of the context, which forget the configuration they
+    /// loaded when the context saves or removes one with `config_of`.
+    #[doc(hidden)]
+    fn scope_connectors(&self) -> Option<&Connectors> {
+        None
+    }
+
     /// The handle of the app on Shopify, which the URLs of the Shopify admin
     /// name it by (`charges/{app_handle}/pricing_plans`): the `handle` of its
     /// `shopify.app*.toml` (the one whose `client_id` is its API key). Not
@@ -556,6 +570,10 @@ macro_rules! shop_scope {
 
             fn app(&self) -> &OpenShop {
                 &self.app
+            }
+
+            fn scope_connectors(&self) -> Option<&Connectors> {
+                Some(&self.connectors)
             }
         }
     )+};
