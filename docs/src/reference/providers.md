@@ -4,7 +4,9 @@ To add a service, see [Connect an external service](../guides/define-provider.md
 
 Providers describe external services used by flows. A provider is a struct:
 its fields are the configuration a merchant saves for a shop, and its methods
-are what flows do with that configuration.
+are what flows do with that configuration. The configuration is saved on the
+built-in providers page, or by the pages of the application through
+[`config_of`](#configuration-from-the-code).
 
 ```rust,ignore
 use openshop::prelude::*;
@@ -265,6 +267,94 @@ fn fields() -> Vec<(&'static str, Field)> {
     ]
 }
 ```
+
+## Configuration from the code
+
+The built-in providers page and its API (`/api/providers`) save a
+configuration without code: a convenience for development and for apps used
+by their own team. An app installed by merchants usually disables them and
+manages its providers from its own pages, with its own words and steps:
+
+```rust,ignore
+use openshop::prelude::*;
+use openshop::providers::{Check, ProviderStatus, Saved};
+use openshop::{AdminPageId, AdminPageMode, AdminPagesConfig};
+
+/// The fields of the form, named as the fields of `Warehouse`.
+#[input]
+pub struct ConnectWarehouse {
+    pub api_url: String,
+    /// Left blank: the key saved is kept.
+    #[serde(default)]
+    pub api_key: String,
+}
+
+pub struct IntegrationsPage;
+
+#[admin_page("/integrations", nav = "Integrations")]
+impl IntegrationsPage {
+    #[loader]
+    async fn status(ctx: AdminContext) -> Result<ProviderStatus> {
+        Warehouse::config_of(&ctx).status().await
+    }
+
+    #[action]
+    async fn connect(ctx: AdminContext, input: ConnectWarehouse) -> Result<Outcome> {
+        Ok(match Warehouse::config_of(&ctx).save_form(&input).await? {
+            Saved::Saved => Outcome::toast("Warehouse connected"),
+            Saved::Refused { fields, .. } => Outcome::invalid(fields),
+        })
+    }
+
+    #[action]
+    async fn test(ctx: AdminContext) -> Result<Outcome> {
+        Ok(match Warehouse::config_of(&ctx).check().await? {
+            Check::Ok => Outcome::toast("Connection works"),
+            Check::Refused => Outcome::error("The API key was refused"),
+            Check::Failed(message) => Outcome::error(message),
+        })
+    }
+
+    #[action]
+    async fn disconnect(ctx: AdminContext) -> Result<Outcome> {
+        Warehouse::config_of(&ctx).remove().await?;
+        Ok(Outcome::toast("Warehouse disconnected"))
+    }
+
+    // #[view] …
+}
+
+fn builtin_pages() -> AdminPagesConfig {
+    let mut pages = AdminPagesConfig::default();
+    pages.set(AdminPageId::Providers, AdminPageMode::Disabled);
+    pages
+}
+```
+
+`#[provider]` generates `config_of(&ctx)` for every context of a shop (an
+action or a loader, a flow, a webhook, a proxy, a route, an MCP tool, a test).
+Its configuration goes through the [save pipeline](#save-pipeline) of the
+page, and is stored and encrypted the same way: `Warehouse::on(&ctx.connectors)`
+reads it, whichever side saved it. Disabling the page (`builtin_pages`) only
+removes the page and `/api/providers`.
+
+| Call | Does |
+| --- | --- |
+| `.status()` | A `ProviderStatus`: `saved`, `configured`, `values` (passwords left out), `saved_secrets` (the password fields that have a value), `last_checked_at`, `last_check_ok`. `status.value("api_url")` and `status.has_secret("api_key")` read it. |
+| `.save(Warehouse { … })` | Saves the struct as a whole: an empty password is no password. |
+| `.save_form(&values)` | Saves the values of a form, any struct or map that serializes to them: a password left blank keeps the one saved, as on the page. |
+| `.check()` | Runs the [checker](#checker) and keeps its answer: `Check::Ok`, `Check::Refused` when it answers `false`, `Check::Failed(message)` when it fails, panics or takes longer than 10 seconds. Fails when the provider has no checker. |
+| `.remove()` | Removes what the shop saved; whether there was a configuration. |
+
+Fields are named as in the struct (`api_url`), not by the key they are saved
+under (`apiUrl`): in the values given to `save_form`, in `status`, and in the
+fields of `Saved::Refused { message, fields }`, which `Outcome::invalid(fields)`
+shows under each field of the form. A name the struct does not have is an
+error. A password is never given back: the code of the application reads it
+only through the methods of the provider.
+
+The connectors of the context that saves or removes a configuration read it
+again at their next call. Other contexts read it at their first call.
 
 ## Save pipeline
 

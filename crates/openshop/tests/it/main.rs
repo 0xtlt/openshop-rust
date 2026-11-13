@@ -32,6 +32,7 @@ mod models;
 mod ops;
 mod pages;
 mod pool;
+mod provider_store;
 mod provider_structs;
 mod proxy_routes;
 mod records;

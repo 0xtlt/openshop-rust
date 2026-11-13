@@ -78,6 +78,10 @@ When a page is `disabled`, its admin API group returns `404` with `{ "error": "N
 - `functions` covers `/api/functions`
 - `mcp` covers `/api/mcp`
 
+A provider configuration stays reachable from the code of the application
+when `providers` is `disabled`: see
+[Configuration from the code](providers.md#configuration-from-the-code).
+
 `hidden` only removes the Shopify sidebar link; the URL and admin API still work. It is not an access-control boundary. Use `disabled` when shop staff must not be able to open a page or call its admin API. Runtime endpoints such as `POST /mcp`, webhooks, and the worker are not gated by page modes.
 
 `GET /api/pages/custom` lists only navigation entries the staff member may

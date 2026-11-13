@@ -55,6 +55,7 @@ mod config;
 pub mod db;
 pub mod declare;
 pub mod engine;
+pub mod providers;
 pub mod response;
 pub mod runtime;
 pub mod server;

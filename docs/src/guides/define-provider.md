@@ -116,6 +116,11 @@ Open the embedded provider page, save the config, then run its check. Password
 fields are write-only: the API returns `hasValue`, and submitting an empty
 password preserves the stored secret.
 
+The built-in page is one way to save a configuration, without code. An app
+installed by merchants usually disables it and lets its own pages do the
+same with `Warehouse::config_of(&ctx)`: see
+[Configuration from the code](../reference/providers.md#configuration-from-the-code).
+
 The checker is manual. OpenShop does not call it before every flow method.
 Saving a complete config marks the provider as configured. A successful check
 then shows it as connected, and a failed check shows an error. Returning

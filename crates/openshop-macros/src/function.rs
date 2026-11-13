@@ -67,7 +67,9 @@ fn combines_with(list: TokenStream) -> syn::Result<TokenStream> {
 
 pub fn derive(input: DeriveInput) -> syn::Result<TokenStream> {
     let name = &input.ident;
-    let Form { definitions, construct } = form(&input, "FunctionConfig", "function configuration")?;
+    let Form {
+        definitions, construct, ..
+    } = form(&input, "FunctionConfig", "function configuration")?;
 
     let mut key: Option<LitStr> = None;
     let mut function: Option<(Ident, LitStr)> = None;
