@@ -162,3 +162,37 @@ pub(crate) fn bounce(api_key: &str, endpoints: &Endpoints) -> Markup {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::SCRIPT;
+
+    /// A modal removed while open stays open for the admin around the app,
+    /// which can no longer be clicked (#77): the script hides the modals of
+    /// the page before it replaces it, and before it leaves for an answer
+    /// that is not a page. The repository has no JavaScript runner: this
+    /// reads the script.
+    #[test]
+    fn the_script_hides_the_modals_before_it_replaces_the_page() {
+        let hide = SCRIPT
+            .split("function hideModals() {")
+            .nth(1)
+            .and_then(|rest| rest.split("\n  }\n").next())
+            .expect("hideModals in openshop.js");
+        assert!(hide.contains("querySelectorAll('s-modal')"), "{hide}");
+        assert!(hide.contains("modal.hideOverlay()"), "{hide}");
+
+        let present = SCRIPT
+            .split("function present(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n  }\n").next())
+            .expect("present in openshop.js");
+        let hidden = present.find("hideModals()").expect("present hides the modals");
+        for swap in ["location.assign(", ".replaceChildren(", "ready()"] {
+            let at = present.find(swap).unwrap_or_else(|| panic!("{swap} in present"));
+            assert!(hidden < at, "the modals are hidden before {swap}: {present}");
+        }
+        // Every page that comes back goes through `present`.
+        assert_eq!(SCRIPT.matches(".replaceChildren(").count(), 1, "{SCRIPT}");
+    }
+}

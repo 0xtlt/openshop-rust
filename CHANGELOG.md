@@ -12,6 +12,13 @@
   It named it as in the struct (`api_key`), which no control of an `#[input]`
   matched. `status()` still names fields as in the struct. `ProviderConfig`
   refuses a `name = "…"` that is the name of another field (#75).
+- A form sent from a modal (`s-modal`), such as those of the MCP page, no
+  longer leaves the admin around the app unclickable. `openshop.js` replaced
+  the page with the modal still open, and the admin kept it open over the app
+  (in local-storefront, the frame stayed lifted) until a full reload. The
+  modals of a page are now hidden before another page replaces it, after a
+  form, a link, back and forward or `X-OpenShop-Location`; a form refused
+  field by field opens its modal again, as before (#77).
 
 ## 0.1.0-rc.3
 
