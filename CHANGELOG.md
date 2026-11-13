@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.0-rc.2
 
 - Breaking: the fields of an index on a model are in brackets,
   `#[model("members", unique([shop, customer_id]), unique([shop, referral_code]))]`,
@@ -20,7 +20,7 @@
   value allows no origin, and the server warns when it starts (#68).
 
 - The README and the guide install the CLI from crates.io
-  (`cargo install --locked openshop-cli --version 0.1.0-rc.1`), and show
+  (`cargo install --locked openshop-cli --version 0.1.0-rc.2`), and show
   `openshop = { version = "…" }` where they showed a git tag. The deployment
   guide no longer says the repository is private: the optional `gitconfig`
   secret of the `Dockerfile` is for a private git dependency of the app.
