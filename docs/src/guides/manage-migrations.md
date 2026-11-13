@@ -69,7 +69,7 @@ use openshop::chrono::{DateTime, Utc};
 use openshop::prelude::*;
 
 #[derive(Debug, Clone, Model)]
-#[model("reviews", index(shop, product_id))]
+#[model("reviews", index([shop, product_id]))]
 pub struct Review {
     pub id: Uuid,
     pub shop: String,

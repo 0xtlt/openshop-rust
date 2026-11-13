@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Breaking: the fields of an index on a model are in brackets,
+  `#[model("members", unique([shop, customer_id]), unique([shop, referral_code]))]`,
+  and `name = "…"` follows them: `unique([shop, title], name = "one_title")`.
+  Two indexes that both started with `shop`, `unique(shop, a), unique(shop, b)`,
+  failed `cargo clippy -- -D warnings` with `duplicated_attributes`. The old
+  form is refused with the new one in the error (#67).
+
 - The README and the guide install the CLI from crates.io
   (`cargo install --locked openshop-cli --version 0.1.0-rc.1`), and show
   `openshop = { version = "…" }` where they showed a git tag. The deployment

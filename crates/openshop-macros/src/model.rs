@@ -2,6 +2,7 @@
 
 use proc_macro2::{Span, TokenStream};
 use quote::{format_ident, quote};
+use syn::parse::Parse;
 use syn::spanned::Spanned;
 use syn::{Data, DataStruct, DeriveInput, Fields, Ident, LitStr, Type, Visibility};
 
@@ -78,29 +79,59 @@ fn quote_identifier(name: &str) -> String {
     format!("\"{}\"", name.replace('"', "\"\""))
 }
 
+/// `index([shop, product_id])`, `unique([shop, title])`, each with an optional
+/// `name = "…"`.
+///
+/// The fields are in brackets: clippy's `duplicated_attributes` reads
+/// `unique(shop, a), unique(shop, b)` as `shop` given twice, and does not read
+/// an attribute that holds a bracketed list.
 fn parse_index(meta: &syn::meta::ParseNestedMeta, unique: bool) -> syn::Result<IndexSpec> {
-    let mut spec = IndexSpec {
-        fields: Vec::new(),
-        name: None,
+    let expected = if unique {
+        "expected the fields of the index in brackets: `unique([shop, title])`"
+    } else {
+        "expected the fields of the index in brackets: `index([shop, product_id])`"
+    };
+    if !meta.input.peek(syn::token::Paren) {
+        return Err(meta.error(expected));
+    }
+    let content;
+    syn::parenthesized!(content in meta.input);
+    if !content.peek(syn::token::Bracket) {
+        return Err(content.error(expected));
+    }
+    let fields;
+    syn::bracketed!(fields in content);
+    let fields: Vec<Ident> = fields
+        .parse_terminated(Ident::parse, syn::Token![,])
+        .map_err(|error| syn::Error::new(error.span(), "expected a field name"))?
+        .into_iter()
+        .collect();
+    if fields.is_empty() {
+        return Err(meta.error(expected));
+    }
+    let mut name = None;
+    if content.parse::<Option<syn::Token![,]>>()?.is_some() && !content.is_empty() {
+        let option: Ident = content.parse()?;
+        if option != "name" {
+            return Err(syn::Error::new(option.span(), "expected `name = \"…\"`"));
+        }
+        content.parse::<syn::Token![=]>()?;
+        name = Some(content.parse::<LitStr>()?);
+        content.parse::<Option<syn::Token![,]>>()?;
+    }
+    if !content.is_empty() {
+        return Err(content.error(if unique {
+            "expected the end of `unique(…)`"
+        } else {
+            "expected the end of `index(…)`"
+        }));
+    }
+    Ok(IndexSpec {
+        fields,
+        name,
         unique,
         span: meta.path.span(),
-    };
-    meta.parse_nested_meta(|inner| {
-        if inner.path.is_ident("name") {
-            return set_value(&mut spec.name, &inner);
-        }
-        match inner.path.get_ident() {
-            Some(field) => {
-                spec.fields.push(field.clone());
-                Ok(())
-            }
-            None => Err(inner.error("expected a field name")),
-        }
-    })?;
-    if spec.fields.is_empty() {
-        return Err(meta.error("expected the fields of the index: `index(shop, product_id)`"));
-    }
-    Ok(spec)
+    })
 }
 
 /// `references(Review)`, `references("reviews")`, each with an optional `column = "…"`.
@@ -141,7 +172,7 @@ fn struct_options(input: &DeriveInput) -> syn::Result<StructOptions> {
         .filter(|attribute| attribute.path().is_ident("model"))
     {
         // The table comes first, as the name of a flow or of a provider does:
-        // `#[model("reviews", index(shop, product_id))]`.
+        // `#[model("reviews", index([shop, product_id]))]`.
         attribute.parse_args_with(|input: syn::parse::ParseStream| {
             if input.peek(LitStr) {
                 let table: LitStr = input.parse()?;
@@ -660,7 +691,7 @@ mod tests {
     #[test]
     fn accepts_a_struct_with_every_option() {
         let generated = expand(parse_quote! {
-            #[model("reviews", renamed_from = "ratings", index(shop, product_id), unique(shop, title, name = "one_title"))]
+            #[model("reviews", renamed_from = "ratings", index([shop, product_id]), unique([shop, title], name = "one_title"))]
             pub struct Review {
                 pub id: Uuid,
                 pub shop: String,
@@ -833,7 +864,7 @@ mod tests {
         );
         assert_eq!(
             refusal(
-                parse_quote! { #[model("reviews", index(shop, product))] struct Review { id: Uuid, shop: String } }
+                parse_quote! { #[model("reviews", index([shop, product]))] struct Review { id: Uuid, shop: String } }
             ),
             "`Review` has no field `product`"
         );
@@ -849,8 +880,26 @@ mod tests {
             ),
             "two fields are stored in the column `a`"
         );
+        assert_eq!(
+            refusal(parse_quote! { #[model("reviews", unique(shop, title))] struct Review { id: Uuid, shop: String } }),
+            "expected the fields of the index in brackets: `unique([shop, title])`"
+        );
+        assert_eq!(
+            refusal(parse_quote! { #[model("reviews", index)] struct Review { id: Uuid, shop: String } }),
+            "expected the fields of the index in brackets: `index([shop, product_id])`"
+        );
+        assert_eq!(
+            refusal(parse_quote! { #[model("reviews", index([]))] struct Review { id: Uuid, shop: String } }),
+            "expected the fields of the index in brackets: `index([shop, product_id])`"
+        );
+        assert_eq!(
+            refusal(
+                parse_quote! { #[model("reviews", index([shop], nom = "x"))] struct Review { id: Uuid, shop: String } }
+            ),
+            "expected `name = \"…\"`"
+        );
         let long = refusal(parse_quote! {
-            #[model("a_table_with_a_rather_long_name", index(a_first_long_column_name, a_second_long_column_name))]
+            #[model("a_table_with_a_rather_long_name", index([a_first_long_column_name, a_second_long_column_name]))]
             struct Review { id: Uuid, a_first_long_column_name: i32, a_second_long_column_name: i32 }
         });
         assert!(

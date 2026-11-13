@@ -170,7 +170,7 @@ pub mod prelude {
 /// use openshop::{Model, Uuid};
 ///
 /// #[derive(Debug, Clone, Model)]
-/// #[model("reviews", index(shop, product_id))]
+/// #[model("reviews", index([shop, product_id]))]
 /// pub struct Review {
 ///     pub id: Uuid,
 ///     pub shop: String,
@@ -213,7 +213,7 @@ pub mod prelude {
 /// `rows(&db)`. List the model in the `models` of [`app!`].
 ///
 /// The table comes first in `#[model(…)]`, then the options of the struct:
-/// `index(field, …)`, `unique(field, …)`, each with an optional `name = "…"`,
+/// `index([field, …])`, `unique([field, …])`, each with an optional `name = "…"`,
 /// and `renamed_from = "…"`. Field options: `default = "<SQL>"`,
 /// `sql_type = "…"`, `column = "…"`, `renamed_from = "…"`, `index`, `unique`,
 /// and `references(OtherModel)` with an optional `on_delete = "cascade"` for a

@@ -14,8 +14,8 @@ const OTHER_SHOP: &str = "two.myshopify.com";
 #[derive(Debug, Clone, PartialEq, Model)]
 #[model(
     "reviews",
-    index(shop, product_id),
-    unique(shop, product_id, author, name = "reviews_one_per_author")
+    index([shop, product_id]),
+    unique([shop, product_id, author], name = "reviews_one_per_author")
 )]
 struct Review {
     id: Uuid,
@@ -31,6 +31,17 @@ struct Review {
     #[model(default = "'{}'::jsonb")]
     meta: Value,
     tags: Vec<String>,
+}
+
+/// Two indexes of the same kind that both start with `shop`: the fields in
+/// brackets keep clippy's `duplicated_attributes` quiet (#67).
+#[derive(Debug, Clone, PartialEq, Model)]
+#[model("members", unique([shop, customer_id]), unique([shop, referral_code]))]
+struct Member {
+    id: Uuid,
+    shop: String,
+    customer_id: String,
+    referral_code: String,
 }
 
 /// A table without shop or timestamps, with a renamed column and a keyword field.
@@ -117,6 +128,15 @@ fn the_struct_describes_the_table() {
     assert_eq!(
         (Review::RATING.name(), Setting::VALUE.name(), Setting::TYPE.name()),
         ("rating", "val", "type")
+    );
+
+    assert!(
+        Member::table().create_sql().ends_with(
+            "CREATE UNIQUE INDEX IF NOT EXISTS \"members_shop_customer_id_unique\" ON \"members\" (\"shop\", \"customer_id\");\n\
+             CREATE UNIQUE INDEX IF NOT EXISTS \"members_shop_referral_code_unique\" ON \"members\" (\"shop\", \"referral_code\");"
+        ),
+        "{}",
+        Member::table().create_sql()
     );
 
     // A registered model is what the configuration pushes and migrates.
@@ -378,7 +398,7 @@ async fn a_model_without_shop_has_plain_rows() {
 /// The same table one release later: a column renamed and retyped, one
 /// added with a default, one added nullable, one dropped, an index replaced.
 #[derive(Debug, Clone, PartialEq, Model)]
-#[model("reviews", index(shop, score))]
+#[model("reviews", index([shop, score]))]
 struct ReviewV2 {
     id: Uuid,
     shop: String,
@@ -575,7 +595,7 @@ async fn the_development_push_adds_the_columns_a_model_gained() {
 /// A vote on a review. Deleting the review deletes its votes; a vote can
 /// answer another vote, and survives it.
 #[derive(Debug, Clone, PartialEq, Model)]
-#[model("review_votes", index(review_id))]
+#[model("review_votes", index([review_id]))]
 struct ReviewVote {
     id: Uuid,
     shop: String,

@@ -67,7 +67,7 @@ use openshop::chrono::{DateTime, Utc};
 use openshop::prelude::*;
 
 #[derive(Debug, Clone, Model)]
-#[model("reviews", index(shop, product_id))]
+#[model("reviews", index([shop, product_id]))]
 pub struct Review {
     pub id: Uuid,
     pub shop: String,
@@ -116,15 +116,19 @@ Another type is a compile error, unless you implement
 `openshop::db::ColumnType` for it; `sqlx` must be able to encode and decode it.
 
 Options are written in `#[model(…)]`. On the struct, the table comes first:
-`#[model("reviews", index(shop, product_id))]`.
+`#[model("reviews", index([shop, product_id]))]`.
 
 | On the struct | |
 | --- | --- |
 | `"reviews"` | The table. Required, and the first argument. |
-| `index(shop, product_id)` | An index on those fields, named `<table>_<columns>_idx`. |
-| `unique(shop, title)` | A unique index, named `<table>_<columns>_unique`. |
-| `index(…, name = "…")`, `unique(…, name = "…")` | The same with a name of your choice. Required when the generated name exceeds 63 characters. |
+| `index([shop, product_id])` | An index on those fields, named `<table>_<columns>_idx`. |
+| `unique([shop, title])` | A unique index, named `<table>_<columns>_unique`. |
+| `index([…], name = "…")`, `unique([…], name = "…")` | The same with a name of your choice. Required when the generated name exceeds 63 characters. |
 | `renamed_from = "ratings"` | The previous name of the table. See [Renames](#renames). |
+
+The fields of an index are in brackets. Without them, two indexes that both
+start with `shop`, `unique(shop, a), unique(shop, b)`, would fail clippy's
+`duplicated_attributes` lint, which reads them as one field given twice.
 
 | On a field | |
 | --- | --- |
@@ -228,7 +232,7 @@ A field can hold the key of a row of another model:
 use openshop::prelude::*;
 
 #[derive(Debug, Clone, Model)]
-#[model("review_votes", index(review_id))]
+#[model("review_votes", index([review_id]))]
 pub struct ReviewVote {
     pub id: Uuid,
     pub shop: String,
@@ -253,7 +257,7 @@ The constraint is named `<table>_<column>_fkey`. Models can be listed in
 any order: `dev` and the generated migrations create every table first, then
 the constraints.
 
-PostgreSQL does not index the referencing column. Add `index(review_id)` when
+PostgreSQL does not index the referencing column. Add `index([review_id])` when
 you filter on it or when deletions cascade through it.
 
 A reference is a fact of the schema, enforced by the database. The typed rows
