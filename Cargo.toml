@@ -11,7 +11,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.0-rc.3"
+version = "0.1.0-rc.4"
 edition = "2024"
 rust-version = "1.94"
 license = "MIT"
@@ -20,8 +20,8 @@ homepage = "https://openshop.run/"
 authors = ["Thomas Tastet"]
 
 [workspace.dependencies]
-openshop = { path = "crates/openshop", version = "0.1.0-rc.3" }
-openshop-macros = { path = "crates/openshop-macros", version = "0.1.0-rc.3" }
+openshop = { path = "crates/openshop", version = "0.1.0-rc.4" }
+openshop-macros = { path = "crates/openshop-macros", version = "0.1.0-rc.4" }
 
 aes-gcm = "0.11"
 anyhow = "1"
