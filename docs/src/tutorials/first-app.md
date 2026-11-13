@@ -24,11 +24,11 @@ dedicated database there, and substitute its connection URL in step 3.
 Install the `openshop` command once:
 
 ```bash
-cargo install --locked openshop-cli --version 0.1.0-rc.1
+cargo install --locked openshop-cli --version 0.1.0-rc.2
 openshop --version
 ```
 
-`openshop --version` prints the version of the CLI, `openshop 0.1.0-rc.1`
+`openshop --version` prints the version of the CLI, `openshop 0.1.0-rc.2`
 (followed by the commit it was built from, for a CLI installed from the
 repository). If it answers
 `Unknown command: --version`, an older CLI is installed: install it again with
