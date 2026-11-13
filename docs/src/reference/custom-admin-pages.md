@@ -427,6 +427,60 @@ page, and a link loads the page. Inside Shopify admin, where App Bridge
 already needs JavaScript, that costs a reload per click, and the toast of a
 plain post is lost.
 
+### Language
+
+The texts openshop writes on the pages are in English, unless the application
+names the language of its admin with `admin_locale`, a language tag:
+
+```rust,ignore
+pub static APP: App = app! {
+    admin_pages: [ReviewsPage],
+    admin_locale: "fr",
+};
+```
+
+It is the `<html lang>` of every page, and the language of:
+
+- the errors of the fields the input schema refuses: `Obligatoire` for
+  `Required`, `Doit être supérieur ou égal à 1` for `Must be at least 1`;
+- the page of a loader or a view that failed (`Page unavailable`, `This page
+  could not be displayed.`), and of a page whose access rule said no (`This
+  page is disabled.`);
+- the error toast of an action that failed with an error the merchant may not
+  read (`Internal server error`);
+- the toasts of `openshop.js` (`Something went wrong. Try again.`, `Copied`,
+  `Could not copy`), which the server writes on `<html data-openshop-texts>`.
+
+openshop has the texts of English and French; `fr-CA` is French. For another
+language, or other words, `admin_texts` is a function from the text, an
+`openshop::admin::AdminText`, to its message; `None` leaves it to the table of
+`admin_locale`, then to English:
+
+```rust,ignore
+use openshop::admin::{AdminText, FieldError};
+
+pub static APP: App = app! {
+    admin_pages: [ReviewsPage],
+    admin_locale: "de",
+    admin_texts: |text: &AdminText| match text {
+        AdminText::Field(FieldError::Required) => Some("Pflichtfeld".to_string()),
+        AdminText::Field(FieldError::AtLeast(minimum)) => Some(format!("Mindestens {minimum}")),
+        AdminText::PageUnavailable => Some("Seite nicht verfügbar".to_string()),
+        _ => None,
+    },
+};
+```
+
+What the application writes stays as it writes it: its views, its toasts, the
+errors of `Outcome::invalid` and of an `AdminPublicError`. The pages of the
+framework (flows, runs, providers, MCP, crons, functions) stay in English.
+
+The language is the application's, not the merchant's: the pages of an app
+are written in one language, and an error in another would sit in them.
+Shopify gives an embedded app the language of the staff member (the `locale`
+parameter of the URL, `shopify.config.locale`), which `admin_locale` does not
+follow.
+
 ### Set up the application
 
 Views need `maud` in `Cargo.toml`, for `html!`:

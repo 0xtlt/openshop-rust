@@ -145,7 +145,7 @@ A form refused field by field is rendered again in place (`422`, or the
 status of the error), with what was sent and the error of each field, in the
 `form: FormState` of a view that declares it: when the input schema refuses
 the form (each property it can tell: `Required`, `Must be at least 3
-characters`, `Must be a whole number`), when the action answers
+characters`, `Must be a whole number`, in the language of `admin_locale`), when the action answers
 `Outcome::invalid(…)`, and when it fails with an `AdminPublicError` that has
 `field_errors`. The view shows them with `error=[form.error("title")]` on a
 Polaris field and `value=(form.value_or("title", saved))`; `form.of(ACTION)`
@@ -196,7 +196,7 @@ https://admin.shopify.com` (any shop and `localhost` in development).
 
 ## `openshop.js`
 
-231 lines, 4.1 KB with Brotli, served at `/__openshop/openshop.js?v=<hash>`
+233 lines, 4.1 KB with Brotli, served at `/__openshop/openshop.js?v=<hash>`
 with `immutable`. Its whole job:
 
 1. **Forms.** `submit` of a same-origin form is sent with `fetch` (App
@@ -212,7 +212,9 @@ with `immutable`. Its whole job:
    `shopify.toast.show`. `X-OpenShop-Location` is fetched next. An HTML body,
    `ok` or not (a refused form, a page that is not there), replaces the
    content of `#openshop-page`, the title, and the `ui-nav-menu` when it
-   changed. Anything else is a generic error toast.
+   changed. Anything else is a generic error toast. The script writes no
+   text of its own: its toasts are on `<html data-openshop-texts>`, in the
+   language of `admin_locale`.
 3. **Navigation.** A click on a same-origin `<a>`, a `shopify:navigate` event
    (Polaris's `s-link`, `s-button href`; App Bridge clicks the `<a>` of the
    menu), and back and forward are fetched the same way, then `pushState`. The
@@ -315,3 +317,8 @@ with an app's `home.rs` before and after. About 30 minutes per page.
    bounces with the first app's key. Known, not fixed.
 5. **`maud` in the application**: the application depends on it; `init-ui`
    adds it. No wrapper macro.
+6. **The language of the admin**: the application's, `admin_locale`, one
+   for every page, not the `locale` Shopify gives for the staff member. The
+   texts openshop writes sit in the pages of the application, written in one
+   language; and the `locale` parameter is only on the URL Shopify loads
+   first, not on the requests of the script.

@@ -862,7 +862,10 @@ async fn function_authorize_rejects_with_403() {
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     let refused = publish_as(REVIEWER, "yes").await;
     assert_eq!(refused.status, 422);
-    assert_eq!(refused.error_toast().as_deref(), Some("published must be a boolean"));
+    assert_eq!(
+        refused.error_toast().as_deref(),
+        Some("published: Must be true or false")
+    );
     let output: Value = ctx
         .call_action_as("/tools", "publish", json!({ "published": true }), TEST_SHOP, REVIEWER)
         .await

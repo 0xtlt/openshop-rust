@@ -6,6 +6,7 @@ mod flow_run;
 mod flows;
 mod functions;
 mod home;
+mod locale;
 mod mcp;
 mod providers;
 
@@ -608,7 +609,7 @@ async fn a_refused_form_is_rendered_again_with_the_error_of_each_field() {
     assert_eq!(home.status, StatusCode::UNPROCESSABLE_ENTITY);
     assert_eq!(
         home.header("x-openshop-toast-error"),
-        Some("input.hidden%20must%20be%20boolean")
+        Some("hidden%3A%20Must%20be%20true%20or%20false")
     );
     assert!(home.body.is_empty());
 }

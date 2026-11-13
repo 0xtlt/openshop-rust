@@ -70,7 +70,8 @@ pub struct FormState {
     /// The fields that were sent, in order, a name sent several times kept
     /// each time.
     pub values: Vec<(String, String)>,
-    /// The error of each field, by name: `Required`, `Must be at least 3 characters`.
+    /// The error of each field, by name: `Required`, `Must be at least 3 characters`,
+    /// in the language of `admin_locale` for what the input schema refused.
     pub errors: IndexMap<String, String>,
     /// What the action said of the form as a whole, when it said something.
     pub message: Option<String>,
@@ -254,40 +255,6 @@ impl Outcome {
     }
 }
 
-/// The error of a field as a form shows it, from what the input schema says
-/// of its value: `is required` is `Required`, `must be integer` is `Must be a
-/// whole number`, `must be >= 1` is `Must be at least 1`.
-pub(crate) fn field_message(error: &str) -> String {
-    let error = error.strip_suffix(" or null").unwrap_or(error);
-    let bound = |prefix: &str| error.strip_prefix(prefix).filter(|bound| bound.parse::<f64>().is_ok());
-    if let Some(minimum) = bound("must be >= ") {
-        return format!("Must be at least {minimum}");
-    }
-    if let Some(maximum) = bound("must be <= ") {
-        return format!("Must be at most {maximum}");
-    }
-    if let Some(minimum) = bound("must be > ") {
-        return format!("Must be more than {minimum}");
-    }
-    if let Some(maximum) = bound("must be < ") {
-        return format!("Must be less than {maximum}");
-    }
-    match error {
-        "is required" | "must be at least 1 characters" => "Required".to_string(),
-        "must be at most 1 characters" => "Must be at most 1 character".to_string(),
-        "must be integer" => "Must be a whole number".to_string(),
-        "must be number" => "Must be a number".to_string(),
-        "must be boolean" => "Must be true or false".to_string(),
-        _ => {
-            let mut letters = error.chars();
-            letters
-                .next()
-                .map(|first| first.to_uppercase().chain(letters).collect())
-                .unwrap_or_default()
-        }
-    }
-}
-
 tokio::task_local! {
     /// The outcome of the action a form runs, kept while it runs.
     static OUTCOME: RefCell<Option<Outcome>>;
@@ -441,6 +408,7 @@ pub type AdminView =
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::admin::FieldError;
     use serde_json::json;
 
     #[derive(serde::Deserialize, schemars::JsonSchema)]
@@ -501,24 +469,13 @@ mod tests {
         let input = fields_to_json(&schema, &parse_fields(b"title=ok&rating=&mode="));
         assert_eq!(input, json!({ "title": "ok", "mode": null }));
         let refused = crate::server::mcp::schema::property_errors(&input, &schema);
-        let shown: Vec<(&str, String)> = refused
+        let shown: Vec<(&str, FieldError)> = refused
             .iter()
-            .map(|(field, error)| (field.as_str(), field_message(error)))
+            .map(|(field, error)| (field.as_str(), FieldError::from_schema(error)))
             .collect();
         assert_eq!(
             shown,
-            [
-                ("title", "Must be at least 3 characters".to_string()),
-                ("rating", "Required".to_string()),
-            ]
-        );
-        assert_eq!(field_message("must be integer or null"), "Must be a whole number");
-        assert_eq!(field_message("must be >= 1"), "Must be at least 1");
-        assert_eq!(field_message("must be < 2.5"), "Must be less than 2.5");
-        assert_eq!(field_message("must be at least 1 characters"), "Required");
-        assert_eq!(
-            field_message("must be one of \"a\", \"b\""),
-            "Must be one of \"a\", \"b\""
+            [("title", FieldError::MinLength(3)), ("rating", FieldError::Required)]
         );
         let typed = fields_to_json(&schema, &parse_fields(b"title=Great&rating=4&mode=slow"));
         assert_eq!(typed, json!({ "title": "Great", "rating": 4, "mode": "slow" }));

@@ -14,7 +14,8 @@ use super::super::api::pages::resolved_admin_pages;
 use super::super::reload::Served;
 use super::super::shop::ShopSession;
 use super::super::shopify_apps::DEFAULT_APP_NAME;
-use crate::app::OpenShop;
+use crate::admin::AdminText;
+use crate::app::{OpenShop, OpenShopConfig};
 use crate::shopify::endpoints::{Endpoints, SHOPIFY_APP_BRIDGE, SHOPIFY_POLARIS, ScriptUrl};
 use crate::types::{AdminMenuItem, AdminPageMode};
 
@@ -96,6 +97,17 @@ impl Menu {
     }
 }
 
+/// The texts of the toasts of `openshop.js`, in the language of the admin:
+/// JSON, which the script reads from `data-openshop-texts` on `<html>`.
+fn script_texts(config: &OpenShopConfig) -> String {
+    serde_json::json!({
+        "error": config.admin_text(&AdminText::RequestFailed),
+        "copied": config.admin_text(&AdminText::Copied),
+        "copyFailed": config.admin_text(&AdminText::CopyFailed),
+    })
+    .to_string()
+}
+
 /// The page: the document the browser loads, whose `#openshop-page` the
 /// script also takes from it. `notice` is a failure shown above the page.
 pub(crate) fn document(
@@ -110,9 +122,10 @@ pub(crate) fn document(
     let api_key = shopify_app.map_or("", |shopify_app| shopify_app.api_key.as_str());
     let name = shopify_app.map_or(DEFAULT_APP_NAME, |shopify_app| shopify_app.name.as_str());
     let endpoints = app.endpoints();
+    let config = app.config();
     let document = html! {
         (DOCTYPE)
-        html lang="en" {
+        html lang=(config.admin_lang()) data-openshop-texts=(script_texts(config)) {
             head {
                 meta charset="utf-8";
                 meta name="viewport" content="width=device-width, initial-scale=1";
@@ -149,10 +162,10 @@ pub(crate) fn document(
 
 /// The bounce page: App Bridge alone, which loads `shopify-reload` again
 /// with a fresh session token.
-pub(crate) fn bounce(api_key: &str, endpoints: &Endpoints) -> Markup {
+pub(crate) fn bounce(lang: &str, api_key: &str, endpoints: &Endpoints) -> Markup {
     html! {
         (DOCTYPE)
-        html lang="en" {
+        html lang=(lang) {
             head {
                 meta charset="utf-8";
                 meta name="shopify-api-key" content=(api_key);
