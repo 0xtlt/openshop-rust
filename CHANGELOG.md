@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.0-rc.4
 
 - `ProviderStore::save_form` takes the `#[input]` of an action, as its
   documentation says: a value is under the key of its field (`apiKey`, what an
