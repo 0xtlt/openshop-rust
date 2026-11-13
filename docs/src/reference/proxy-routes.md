@@ -270,8 +270,8 @@ network_access = true
 ```
 
 Send the session token as `Authorization: Bearer ...`. CORS allows Shopify
-admin, Shopify storefront domains, Shopify's extension CDN, and configured
-`HOST` / `SHOPIFY_APP_URL` origins, and in development local origins. Other origins receive no
+admin, Shopify storefront domains, Shopify's extension CDN, configured
+`HOST` / `SHOPIFY_APP_URL` origins, the `cors_origins` of `app!`, and in development local origins. Other origins receive no
 `Access-Control-Allow-Origin` header. Preflight `OPTIONS` requests are answered
 with `204`.
 

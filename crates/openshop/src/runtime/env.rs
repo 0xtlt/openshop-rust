@@ -109,17 +109,33 @@ impl RuntimeEnv {
             .unwrap_or_default()
     }
 
-    /// Origins of the configured public URLs, used by CORS.
+    /// Origins of the configured public URLs, used by CORS. A value that is
+    /// not an `http(s)` URL has no origin a page could send: it allows none,
+    /// and never `null`, the origin of a sandboxed page.
     pub fn configured_origins(&self) -> Vec<String> {
         [&self.host, &self.shopify_app_url]
             .into_iter()
             .flatten()
-            .map(|value| match url::Url::parse(value) {
-                Ok(url) => url.origin().ascii_serialization(),
-                Err(_) => value.trim_end_matches('/').to_string(),
-            })
+            .filter_map(|value| web_origin(value))
             .collect()
     }
+
+    /// `HOST` and `SHOPIFY_APP_URL` when they are set to something that is
+    /// not an `http(s)` URL, with their value.
+    pub fn invalid_app_urls(&self) -> Vec<(&'static str, &str)> {
+        [("HOST", &self.host), ("SHOPIFY_APP_URL", &self.shopify_app_url)]
+            .into_iter()
+            .filter_map(|(name, value)| Some((name, value.as_deref()?)))
+            .filter(|(_, value)| web_origin(value).is_none())
+            .collect()
+    }
+}
+
+/// The origin a browser sends for a page at this URL, `https://app.example.com`,
+/// when it is an `http(s)` URL with a host.
+pub(crate) fn web_origin(value: &str) -> Option<String> {
+    let url = url::Url::parse(value).ok()?;
+    (matches!(url.scheme(), "http" | "https") && url.has_host()).then(|| url.origin().ascii_serialization())
 }
 
 #[cfg(test)]
@@ -174,9 +190,33 @@ mod tests {
             shopify_app_url: Some("not a url/".into()),
             ..Default::default()
         };
-        assert_eq!(
-            env.configured_origins(),
-            vec!["https://app.example.com".to_string(), "not a url".to_string()]
-        );
+        assert_eq!(env.configured_origins(), vec!["https://app.example.com".to_string()]);
+        assert_eq!(env.invalid_app_urls(), vec![("SHOPIFY_APP_URL", "not a url/")]);
+    }
+
+    #[test]
+    fn a_value_that_is_not_a_web_url_allows_no_origin() {
+        // `null` is what a sandboxed page sends: it must not become an allowed origin.
+        for value in [
+            "null",
+            "0.0.0.0",
+            "app.example.com",
+            "data:text/html,x",
+            "file:///tmp/a",
+            "foo:bar",
+        ] {
+            let env = RuntimeEnv {
+                host: Some(value.into()),
+                ..Default::default()
+            };
+            assert_eq!(env.configured_origins(), Vec::<String>::new(), "{value}");
+            assert_eq!(env.invalid_app_urls(), vec![("HOST", value)], "{value}");
+        }
+        let env = RuntimeEnv {
+            host: Some("http://localhost:3000/".into()),
+            ..Default::default()
+        };
+        assert_eq!(env.configured_origins(), vec!["http://localhost:3000".to_string()]);
+        assert!(env.invalid_app_urls().is_empty());
     }
 }

@@ -100,8 +100,8 @@ static SHOP_ORIGIN: LazyLock<Regex> =
 const SHOPIFY_EXTENSION_ORIGIN: &str = "https://extensions.shopifycdn.com";
 
 /// Origins allowed to call the API cross-origin: Shopify admin and
-/// storefronts, checkout extensions and the app's own URL, and in development
-/// the local hosts. In production a page on `localhost` is on the visitor's
+/// storefronts, checkout extensions, the app's own URL and its
+/// `cors_origins`, and in development the local hosts. In production a page on `localhost` is on the visitor's
 /// own machine, not an origin of the application: it is not allowed unless
 /// the application's URL is one.
 pub fn is_allowed_cors_origin(origin: &str, configured_origins: &[String], production: bool) -> bool {
@@ -114,8 +114,48 @@ pub fn is_allowed_cors_origin(origin: &str, configured_origins: &[String], produ
             || configured_origins.iter().any(|configured| configured == origin))
 }
 
+/// The opaque origin a browser sends for a sandboxed frame, a local file or a
+/// `data:` page.
+pub(crate) const OPAQUE_ORIGIN: &str = "null";
+
+/// An entry of `cors_origins` as a browser sends it: `https://shop.example`,
+/// `http://localhost:3000`, or `null`. A URL with a path, a query or
+/// credentials is not an origin.
+pub(crate) fn parse_cors_origin(value: &str) -> std::result::Result<String, String> {
+    let value = value.trim();
+    if value == OPAQUE_ORIGIN {
+        return Ok(OPAQUE_ORIGIN.to_string());
+    }
+    let refused = || format!("`{value}` is not an origin: expected `https://shop.example` or `null`");
+    let url = url::Url::parse(value).map_err(|_| refused())?;
+    let origin_only = matches!(url.scheme(), "http" | "https")
+        && url.has_host()
+        && url.path() == "/"
+        && url.query().is_none()
+        && url.fragment().is_none()
+        && url.username().is_empty()
+        && url.password().is_none();
+    if !origin_only {
+        return Err(refused());
+    }
+    Ok(url.origin().ascii_serialization())
+}
+
+/// Refuses `null` among the `cors_origins` of a production server: every
+/// sandboxed frame and every local file sends it, whatever site it comes from.
+pub(crate) fn check_cors_origins(origins: &[String], production: bool) -> Result<()> {
+    if production && origins.iter().any(|origin| origin == OPAQUE_ORIGIN) {
+        anyhow::bail!(
+            "[openshop] Invalid config: cors_origins: `null` is refused in production, where any sandboxed page \
+             or local file could send it; allow it in development only"
+        );
+    }
+    Ok(())
+}
+
 fn cors_layer(app: &OpenShop) -> CorsLayer {
-    let configured_origins = app.env().configured_origins();
+    let mut configured_origins = app.env().configured_origins();
+    configured_origins.extend(app.config().cors_origins.iter().cloned());
     let production = app.env().production;
     CorsLayer::new()
         .allow_origin(AllowOrigin::predicate(move |origin: &HeaderValue, _| {
@@ -431,10 +471,48 @@ mod tests {
             "http://shop.myshopify.com",
             "https://localhost.evil.com",
             "https://app.example.com.evil.com",
+            "null",
         ] {
             for production in [false, true] {
                 assert!(!is_allowed_cors_origin(origin, &configured, production), "{origin}");
             }
         }
+        // `null` only when the application lists it.
+        assert!(is_allowed_cors_origin("null", &["null".to_string()], false));
+    }
+
+    #[test]
+    fn a_cors_origin_is_an_origin_or_null() {
+        for (value, origin) in [
+            ("https://shop.example", "https://shop.example"),
+            (" https://Shop.Example/ ", "https://shop.example"),
+            ("http://localhost:9000", "http://localhost:9000"),
+            ("https://shop.example:443", "https://shop.example"),
+            ("null", "null"),
+        ] {
+            assert_eq!(parse_cors_origin(value).as_deref(), Ok(origin), "{value}");
+        }
+        for value in [
+            "shop.example",
+            "https://shop.example/path",
+            "https://shop.example/?a=1",
+            "https://shop.example/#a",
+            "https://user@shop.example",
+            "ftp://shop.example",
+            "file:///tmp",
+            "*",
+            "Null",
+        ] {
+            assert!(parse_cors_origin(value).is_err(), "{value}");
+        }
+    }
+
+    #[test]
+    fn null_is_refused_in_production() {
+        let null = ["https://shop.example".to_string(), "null".to_string()];
+        assert!(check_cors_origins(&null, false).is_ok());
+        assert!(check_cors_origins(&null[..1], true).is_ok());
+        let error = check_cors_origins(&null, true).unwrap_err().to_string();
+        assert!(error.contains("`null` is refused in production"), "{error}");
     }
 }

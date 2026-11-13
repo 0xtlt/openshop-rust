@@ -83,6 +83,10 @@ pub struct OpenShopConfig {
     /// How many requests are served at once; the ones above are answered with
     /// `503`. Defaults to 1024.
     pub max_concurrent_requests: Option<usize>,
+    /// Origins allowed to call the server cross-origin besides Shopify's,
+    /// the app's URL and, in development, the local hosts: `https://shop.example`,
+    /// or `null` in development. Normalized by [`OpenShopBuilder::cors_origins`].
+    pub cors_origins: Vec<String>,
     /// The password of the operator dashboard, served under `/ops` when set.
     pub ops_password: Option<String>,
     /// The development store whose token work no Shopify request vouches for
@@ -438,6 +442,42 @@ impl OpenShopBuilder {
         self
     }
 
+    /// Origins allowed to call `/proxy` and `/ext` cross-origin, and `/api`
+    /// where the server enables CORS on it (in development, and on an API-only
+    /// server), besides Shopify admin and storefronts,
+    /// `https://extensions.shopifycdn.com`, the app's URL (`HOST`,
+    /// `SHOPIFY_APP_URL`) and, in development, the local hosts. A headless
+    /// storefront on its own domain is one: `https://shop.example`.
+    ///
+    /// Each value is an origin, a scheme, a host and an optional port, or
+    /// `null`, the origin of a sandboxed frame, such as an extension run by a
+    /// local simulator. `null` is refused in production, where any sandboxed
+    /// page or local file could send it. An empty value is ignored, another
+    /// value that is not an origin is a configuration error. A second call
+    /// replaces the first.
+    ///
+    /// The application gives them, from wherever it keeps its settings:
+    /// `cors_origins: std::env::var("CORS_ALLOWED_ORIGINS").unwrap_or_default().split(',')`.
+    pub fn cors_origins<I>(mut self, origins: I) -> Self
+    where
+        I: IntoIterator,
+        I::Item: AsRef<str>,
+    {
+        self.config.cors_origins.clear();
+        for origin in origins {
+            let origin = origin.as_ref();
+            if origin.trim().is_empty() {
+                continue;
+            }
+            match crate::server::parse_cors_origin(origin) {
+                Ok(origin) if self.config.cors_origins.contains(&origin) => {}
+                Ok(origin) => self.config.cors_origins.push(origin),
+                Err(problem) => self.problems.push(format!("cors_origins: {problem}")),
+            }
+        }
+        self
+    }
+
     /// Serves the operator dashboard under `/ops`, behind this password: what
     /// happens in every shop, read-only, outside Shopify admin. Without a
     /// password, or with an empty one, `/ops` does not exist.
@@ -546,6 +586,10 @@ impl OpenShop {
     ) -> Result<Self> {
         validate_openshop_config(&config)?;
         crate::server::ops::check_password(config.ops_password.as_deref(), env.production)?;
+        crate::server::check_cors_origins(&config.cors_origins, env.production)?;
+        for (name, value) in env.invalid_app_urls() {
+            tracing::warn!("[openshop] {name}={value:?} is not an http(s) URL: it allows no CORS origin");
+        }
         let endpoints = Endpoints::resolve(&config.shopify_endpoints, &env.shopify_endpoints)?;
         let apps = ShopifyApps::resolve(config.shopify.as_ref(), &env)?
             .with_transport(transport.clone())

@@ -8,6 +8,16 @@
   Two indexes that both started with `shop`, `unique(shop, a), unique(shop, b)`,
   failed `cargo clippy -- -D warnings` with `duplicated_attributes`. The old
   form is refused with the new one in the error (#67).
+- `cors_origins` in `app!`: origins besides Shopify's and the app's URL that
+  may call `/proxy` and `/ext` cross-origin, and `/api` where CORS is on. A
+  headless storefront on its own domain, or `null` for an extension a local
+  simulator runs in a sandboxed frame. A value that is not an origin is a
+  configuration error, and `null` stops a production server. The `custom`
+  template reads them from `CORS_ALLOWED_ORIGINS` (#68).
+- A `HOST` or `SHOPIFY_APP_URL` that is not an `http(s)` URL no longer becomes
+  an allowed CORS origin as it is: `SHOPIFY_APP_URL=null` allowed
+  `Origin: null`, the origin of any sandboxed page, in production too. Such a
+  value allows no origin, and the server warns when it starts (#68).
 
 - The README and the guide install the CLI from crates.io
   (`cargo install --locked openshop-cli --version 0.1.0-rc.1`), and show

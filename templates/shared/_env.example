@@ -22,6 +22,12 @@ SHOPIFY_API_SECRET=
 # `worker` do not start. `dev` stores secrets in plaintext when it is unset.
 # ENCRYPTION_KEY=
 
+# Origins, comma-separated, that may call /proxy and /ext besides Shopify's
+# and HOST's, read by the templates that serve proxies: a headless storefront
+# on its own domain, or `null` in development for an extension a local
+# simulator runs in a sandboxed frame (refused in production).
+# CORS_ALLOWED_ORIGINS=https://shop.example
+
 # Password of the operator dashboard at /ops: every shop, read-only, outside
 # Shopify admin. Without it the dashboard does not exist. At least 16
 # characters in production.
