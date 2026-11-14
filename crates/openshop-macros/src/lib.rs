@@ -7,6 +7,7 @@ mod app;
 mod block;
 mod function;
 mod input;
+mod locales;
 mod model;
 mod provider;
 mod test;
@@ -133,5 +134,31 @@ pub fn test(arguments: proc_macro::TokenStream, item: proc_macro::TokenStream) -
 #[proc_macro]
 pub fn app(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
     let declaration = syn::parse_macro_input!(input as app::Declaration);
-    app::expand(declaration).into()
+    // The languages of `locales/`, unless the declaration sets them.
+    let locales = if declaration.sets("locales") {
+        Ok(None)
+    } else {
+        locales::app_locales()
+    };
+    match locales {
+        Ok(locales) => app::expand(declaration, locales).into(),
+        Err(error) => error.into_compile_error().into(),
+    }
+}
+
+/// See `openshop::t!`.
+#[proc_macro]
+pub fn t(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
+    let translation = syn::parse_macro_input!(input as locales::Translation);
+    locales::translate(translation)
+        .unwrap_or_else(syn::Error::into_compile_error)
+        .into()
+}
+
+/// See `openshop::locales!`.
+#[proc_macro]
+pub fn locales(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
+    locales::locales_macro(input.into())
+        .unwrap_or_else(syn::Error::into_compile_error)
+        .into()
 }

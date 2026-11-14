@@ -1,0 +1,11 @@
+error: no text `home.titel` in locales/en.default.json
+ --> tests/macros/i18n/fail/missing_key.rs:5:26
+  |
+5 |     let _ = openshop::t!("home.titel");
+  |                          ^^^^^^^^^^^^
+
+error: `home.low` is a plural in locales/en.default.json: give the count it is chosen by, `t!("home.low", count = n)`
+ --> tests/macros/i18n/fail/missing_key.rs:6:26
+  |
+6 |     let _ = openshop::t!("home.low");
+  |                          ^^^^^^^^^^

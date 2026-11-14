@@ -15,7 +15,10 @@ use tokio::sync::{Mutex, mpsc, watch};
 use crate::{legacy, metadata};
 
 /// Directories watched recursively, including ones created after startup.
-const WATCHED_DIRECTORIES: [&str; 2] = ["src", "migrations"];
+const WATCHED_DIRECTORIES: [&str; 3] = ["src", "migrations", "locales"];
+/// The files of `locales/`, which `t!` and `app!` read when the crate
+/// compiles: cargo compiles it again when they are not the same files.
+const LOCALE_FILES_VARIABLE: &str = "OPENSHOP_LOCALE_FILES";
 const DEBOUNCE: Duration = Duration::from_millis(500);
 /// A worker may be finishing a flow run: give it one lease before killing it.
 const PROCESS_EXIT_GRACE: Duration = Duration::from_secs(35);
@@ -345,6 +348,21 @@ impl Drop for AppProcess {
     }
 }
 
+/// The names of the files of `locales/`, sorted: a file added or removed
+/// changes them.
+fn locale_files(cwd: &Path) -> String {
+    let mut names: Vec<String> = std::fs::read_dir(cwd.join("locales"))
+        .map(|entries| {
+            entries
+                .flatten()
+                .filter_map(|entry| entry.file_name().into_string().ok())
+                .collect()
+        })
+        .unwrap_or_default();
+    names.sort();
+    names.join(",")
+}
+
 struct DevProcess {
     cwd: PathBuf,
     cargo_args: Vec<String>,
@@ -360,7 +378,8 @@ impl DevProcess {
             Command::new("cargo")
                 .args(["run"])
                 .args(&self.cargo_args)
-                .args(["--", "dev"]),
+                .args(["--", "dev"])
+                .env(LOCALE_FILES_VARIABLE, locale_files(&self.cwd)),
         )
         .context("[openshop] Failed to run cargo")
     }
@@ -612,6 +631,7 @@ mod tests {
             source("migrations/0001_init.sql").as_deref(),
             Some("migrations/0001_init.sql")
         );
+        assert_eq!(source("locales/fr.json").as_deref(), Some("locales/fr.json"));
         assert_eq!(source("Cargo.toml").as_deref(), Some("Cargo.toml"));
         assert_eq!(source(".env").as_deref(), Some(".env"));
         assert_eq!(source("shopify.app.toml").as_deref(), Some("shopify.app.toml"));

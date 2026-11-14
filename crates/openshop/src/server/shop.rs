@@ -26,6 +26,10 @@ pub struct ShopSession {
     /// Handle of the Shopify app the session token was issued for.
     pub shopify_app: String,
     pub actor: AdminActor,
+    /// The locale of the staff member's admin for this request, as Shopify
+    /// gives it (`de-CH`): `None` when the request does not say it and the
+    /// server knows none. Set for the admin pages.
+    pub locale: Option<String>,
 }
 
 impl ShopSession {
@@ -99,6 +103,7 @@ pub(crate) async fn session_of(app: &OpenShop, session_token: &str, path: &str) 
             id: staff,
             session_id: verified.session_id().unwrap_or_default().to_string(),
         },
+        locale: None,
     })
 }
 

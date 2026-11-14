@@ -14,12 +14,14 @@ use crate::config::validate::validate_openshop_config;
 use crate::db::Table;
 use crate::declare::Declared;
 use crate::engine::dispatch::{DispatchOptions, QueuedRun, dispatch_flow};
+use crate::i18n::Locales;
 #[cfg(feature = "sentry")]
 use crate::runtime::SentryConfig;
 use crate::runtime::{ReqwestTransport, RuntimeEnv, Transport};
 use crate::server::UiSource;
 use crate::server::connectors::Connectors;
 use crate::server::crypto::Crypto;
+use crate::server::locale::StaffLocales;
 use crate::server::mcp::core::create_core_mcp_capabilities;
 use crate::server::mcp::registry::{McpRegistry, build_mcp_registry};
 use crate::server::shopify_apps::ShopifyApps;
@@ -95,6 +97,11 @@ pub struct OpenShopConfig {
     /// The application's own texts for what openshop writes on the admin
     /// pages, before the built-in table of `admin_locale`.
     pub admin_texts: Option<AdminTextsFn>,
+    /// The languages of the `locales/` folder of the application, which
+    /// `app!` reads: the staff member's language, among them, is the language
+    /// of their admin pages, `ctx.locale`. `None`: the pages are in
+    /// `admin_locale`. Set by [`OpenShopBuilder::locales`].
+    pub locales: Option<Locales>,
     /// The password of the operator dashboard, served under `/ops` when set.
     pub ops_password: Option<String>,
     /// The development store whose token work no Shopify request vouches for
@@ -142,7 +149,27 @@ impl OpenShopConfig {
     /// application's `admin_texts`, then the built-in table of `admin_locale`
     /// (English and French), then English.
     pub fn admin_text(&self, text: &AdminText) -> String {
-        crate::admin::admin_text(self.admin_lang(), self.admin_texts.as_ref(), text)
+        self.admin_text_in(self.admin_lang(), text)
+    }
+
+    /// A text openshop writes on the admin pages, in `language`, the language
+    /// of a request ([`admin_language`](Self::admin_language)): the built-in
+    /// table of that language (English and French), or `admin_texts` when it
+    /// is the language of `admin_locale`; else the texts of `admin_locale`, as
+    /// [`admin_text`](Self::admin_text) gives them.
+    pub fn admin_text_in(&self, language: &str, text: &AdminText) -> String {
+        crate::admin::admin_text(language, self.admin_lang(), self.admin_texts.as_ref(), text)
+    }
+
+    /// The language of the admin pages for a staff member whose admin is in
+    /// `staff_locale` (`de-CH`), `ctx.locale`: with `locales/`, the same
+    /// language, then its primary subtag (`de`), else the default file's;
+    /// without, `admin_locale`.
+    pub fn admin_language(&self, staff_locale: Option<&str>) -> &str {
+        match &self.locales {
+            Some(locales) => locales.resolve(staff_locale),
+            None => self.admin_lang(),
+        }
     }
 
     /// Custom admin pages sorted by specificity. Fails on reserved or ambiguous routes.
@@ -546,6 +573,16 @@ impl OpenShopBuilder {
         self
     }
 
+    /// The languages of the admin pages, from the files of `locales/`: what
+    /// `app!` sets by itself when the package has the folder, and
+    /// [`locales!`](crate::locales) gives. The staff member's language is the
+    /// one of their admin pages, and of [`t!`](crate::t): see
+    /// [`admin_language`](OpenShopConfig::admin_language).
+    pub fn locales(mut self, locales: Locales) -> Self {
+        self.config.locales = Some(locales);
+        self
+    }
+
     /// Serves the operator dashboard under `/ops`, behind this password: what
     /// happens in every shop, read-only, outside Shopify admin. Without a
     /// password, or with an empty one, `/ops` does not exist.
@@ -630,6 +667,7 @@ struct Inner {
     custom_pages: Vec<CustomAdminPage>,
     mcp_registry: McpRegistry,
     webhook_deliveries: WebhookDeliveries,
+    staff_locales: StaffLocales,
 }
 
 /// A running application: configuration plus the database pool and environment.
@@ -695,6 +733,7 @@ impl OpenShop {
                 custom_pages,
                 mcp_registry,
                 webhook_deliveries: WebhookDeliveries::default(),
+                staff_locales: StaffLocales::default(),
             }),
         })
     }
@@ -760,6 +799,11 @@ impl OpenShop {
     /// `client_credentials_shop` setting background work may use it for.
     pub(crate) fn client_credentials(&self) -> &ClientCredentials {
         &self.inner.client_credentials
+    }
+
+    /// The locale of each staff member, as their last request gave it.
+    pub(crate) fn staff_locales(&self) -> &StaffLocales {
+        &self.inner.staff_locales
     }
 
     /// The webhook deliveries this process ran, to run none of them twice.

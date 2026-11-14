@@ -1,0 +1,3 @@
+# Not a package: the root of the one `t!` and `app!` read `locales/` next to,
+# for the tests of this folder. They take the folder of the closest
+# `Cargo.toml` above the file they are written in.

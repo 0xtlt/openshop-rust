@@ -31,6 +31,15 @@ enum Entry {
 
 pub struct Declaration(Vec<Entry>);
 
+impl Declaration {
+    /// Whether the declaration sets `key` itself: `locales: …`.
+    pub fn sets(&self, key: &str) -> bool {
+        self.0
+            .iter()
+            .any(|entry| matches!(entry, Entry::Setting { key: given, .. } if plain_name(given) == key))
+    }
+}
+
 impl Parse for Declaration {
     fn parse(input: ParseStream) -> syn::Result<Self> {
         let mut entries = Vec::new();
@@ -74,7 +83,9 @@ impl Parse for Declaration {
     }
 }
 
-pub fn expand(declaration: Declaration) -> TokenStream {
+/// The application of the declaration. `locales` is the `.locales(…)` of the
+/// `locales/` folder of the package, first, when it has one.
+pub fn expand(declaration: Declaration, locales: Option<TokenStream>) -> TokenStream {
     let calls = declaration.0.iter().map(|entry| match entry {
         Entry::Blocks { kind, blocks } => {
             let kind = format_ident!("{}", kind);
@@ -88,7 +99,7 @@ pub fn expand(declaration: Declaration) -> TokenStream {
     });
     // A setting can fail: `shopify: shopify_apps()?`.
     quote! {
-        ::openshop::App::new(|| ::openshop::Result::Ok(::openshop::OpenShopConfig::builder() #(#calls)*))
+        ::openshop::App::new(|| ::openshop::Result::Ok(::openshop::OpenShopConfig::builder() #locales #(#calls)*))
     }
 }
 
@@ -97,7 +108,7 @@ mod tests {
     use super::*;
 
     fn expanded(tokens: TokenStream) -> String {
-        expand(syn::parse2(tokens).unwrap()).to_string()
+        expand(syn::parse2(tokens).unwrap(), None).to_string()
     }
 
     fn refusal(tokens: TokenStream) -> String {

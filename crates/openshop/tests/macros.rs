@@ -9,4 +9,6 @@ fn macros() {
     let tests = trybuild::TestCases::new();
     tests.pass("tests/macros/pass/*.rs");
     tests.compile_fail("tests/macros/fail/*.rs");
+    // `t!` reads the `locales/` next to `tests/macros/i18n/Cargo.toml`.
+    tests.compile_fail("tests/macros/i18n/fail/*.rs");
 }

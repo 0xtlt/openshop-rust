@@ -23,8 +23,10 @@
  *   answers, or with `data-openshop-download-from="<id>"` the text of that element, under the
  *   name of its `data-openshop-filename`.
  *
- * Every request carries `X-OpenShop-Fetch: 1`: the server answers it this way. Without this
- * script, a form posts as usual and the server answers with a redirect.
+ * Every request carries `X-OpenShop-Fetch: 1`: the server answers it this way, and
+ * `X-OpenShop-Locale`, the language of the staff member's admin (`shopify.config.locale`), which
+ * the server keeps for their later requests. Without this script, a form posts as usual and the
+ * server answers with a redirect.
  */
 'use strict'
 ;(() => {
@@ -53,6 +55,11 @@
   }
   const toast = (message, isError = false) => attempt(() => app().toast.show(message, { isError }))
   const loading = (on) => attempt(() => app().loading(on))
+  // The headers of a request of the script.
+  const headers = (extra) => {
+    const locale = attempt(() => app().config.locale)
+    return { 'X-OpenShop-Fetch': '1', ...(locale ? { 'X-OpenShop-Locale': locale } : {}), ...extra }
+  }
   const decoded = (response, name) => {
     const value = response.headers.get(name)
     return value === null ? null : attempt(() => decodeURIComponent(value)) ?? value
@@ -131,7 +138,7 @@
   async function download(url, name) {
     loading(true)
     try {
-      const response = await fetch(url, { headers: { 'X-OpenShop-Fetch': '1' } })
+      const response = await fetch(url, { headers: headers() })
       if (!response.ok) return toast(decoded(response, 'X-OpenShop-Toast-Error') || GENERIC_ERROR, true)
       save(await response.blob(), name)
     } catch {
@@ -150,8 +157,7 @@
     button?.setAttribute('loading', '')
     if (!quiet) loading(true)
     try {
-      const headers = { 'X-OpenShop-Fetch': '1', Accept: 'text/html' }
-      const response = await fetch(url, { method, body, headers, signal: request.signal })
+      const response = await fetch(url, { method, body, headers: headers({ Accept: 'text/html' }), signal: request.signal })
       const message = decoded(response, 'X-OpenShop-Toast')
       const failure = decoded(response, 'X-OpenShop-Toast-Error')
       if (message) toast(message)

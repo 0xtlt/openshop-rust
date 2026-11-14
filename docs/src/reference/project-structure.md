@@ -164,6 +164,14 @@ their loaders, actions, access rules, and views, functions of what the loaders
 return that the server renders into HTML with `maud`. See
 [Custom admin pages](custom-admin-pages.md).
 
+## `locales/`
+
+The texts of the admin pages in each language the application has, next to
+`Cargo.toml`: `en.default.json` for the default language, `fr.json`,
+`de.json`…, in the format of Shopify's locale files. `t!("home.title")` reads
+them when the crate compiles; the `public` template has one. See [The staff
+member's language](custom-admin-pages.md#the-staff-members-language).
+
 ## `migrations/`
 
 Contains committed SQL migrations owned by the app. The first file holds the

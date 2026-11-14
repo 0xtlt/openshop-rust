@@ -88,26 +88,28 @@ impl HomePage {
         use crate::flows::check_stock::check_stock;
 
         check_stock::dispatch(&ctx).await?;
-        Ok(Outcome::toast("Stock check started"))
+        // In the language of the merchant's admin, from `locales/`.
+        Ok(Outcome::toast(t!("home.check_started")))
     }
 
-    /// Rendered by the server with what `summary` returns. While a check runs,
+    /// Rendered by the server with what `summary` returns, in the language of
+    /// the merchant's admin: the texts are in `locales/`. While a check runs,
     /// the page is fetched again every 5 seconds.
     #[view]
     fn view(summary: Summary) -> Markup {
         let found = match &summary.checked_at {
-            Some(at) => format!("{} variants run low. Last check: {at}.", summary.low_stock.len()),
-            None => "No check yet.".to_string(),
+            Some(at) => t!("home.low", count = summary.low_stock.len(), at = at),
+            None => t!("home.no_check"),
         };
         html! {
-            s-page heading="Stock watch" {
+            s-page heading=(t!("home.title")) {
                 @if summary.checking {
                     s-banner tone="info" data-openshop-refresh="5000" {
-                        "A check is running. "
-                        s-link href=(Self::PATH) { "Refresh" }
+                        (t!("home.checking")) " "
+                        s-link href=(Self::PATH) { (t!("home.refresh")) }
                     }
                 }
-                s-section heading=(format!("Under {} units", summary.threshold)) {
+                s-section heading=(t!("home.threshold", threshold = summary.threshold)) {
                     s-paragraph { (found) }
                     s-stack gap="small" {
                         @for variant in &summary.low_stock {
@@ -119,7 +121,7 @@ impl HomePage {
                                     }
                                 }
                                 s-badge tone=(if variant.available > 0 { "warning" } else { "critical" }) {
-                                    (variant.available) " left"
+                                    (t!("home.left", count = variant.available))
                                 }
                             }
                         }
@@ -127,7 +129,7 @@ impl HomePage {
                 }
                 form method="post" {
                     input type="hidden" name="_action" value=(Self::CHECK_NOW);
-                    s-button type="submit" variant="primary" { "Check now" }
+                    s-button type="submit" variant="primary" { (t!("home.check_now")) }
                 }
             }
         }

@@ -9,6 +9,7 @@ run low.
 | The hourly stock check of every shop | `src/flows` |
 | The settings of each shop, in their table | `src/models` |
 | The admin of a merchant: a home and a settings page | `src/admin` |
+| Their texts, in the language of the merchant's admin: English, French | `locales` |
 | The cleanup when a shop uninstalls the app | `src/webhooks` |
 
 A merchant sees the pages of the application and nothing of the flows, the

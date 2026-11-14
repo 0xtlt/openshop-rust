@@ -17,6 +17,7 @@ pub mod jwt;
 mod launch;
 mod limits;
 mod linger;
+pub(crate) mod locale;
 pub mod log_query;
 pub mod mcp;
 pub mod ops;

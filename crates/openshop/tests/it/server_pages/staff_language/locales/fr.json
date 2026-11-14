@@ -1,0 +1,11 @@
+{
+  "home": {
+    "title": "Veille des stocks",
+    "hello": "Bonjour {{ name }}",
+    "low": {
+      "one": "1 variante est presque épuisée",
+      "other": "{{ count }} variantes sont presque épuisées"
+    }
+  },
+  "saved": "Enregistré pour {{ shop }}"
+}

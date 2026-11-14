@@ -23,6 +23,10 @@ pub struct AdminTestOptions {
     pub actor_id: String,
     pub params: IndexMap<String, String>,
     pub request_id: String,
+    /// The locale of the staff member's admin (`de-CH`), matched to the
+    /// languages of the application for `ctx.locale`. `None`: the default
+    /// language.
+    pub locale: Option<String>,
 }
 
 impl Default for AdminTestOptions {
@@ -33,6 +37,7 @@ impl Default for AdminTestOptions {
             actor_id: "test-actor".to_string(),
             params: IndexMap::new(),
             request_id: "test-request".to_string(),
+            locale: None,
         }
     }
 }
@@ -44,6 +49,7 @@ pub async fn admin_context(app: &OpenShop, options: AdminTestOptions) -> Result<
             session_id: "test-session".to_string(),
         },
         params: options.params,
+        locale: app.config().admin_language(options.locale.as_deref()).to_string(),
         db: app.db().clone(),
         // As in production: the client of the session's shop, which renews a
         // token the Admin API refuses.
@@ -84,7 +90,9 @@ impl TestContext {
     /// the page `/reviews/:id`) as staff user `sub` of `shop` calls it from
     /// the view of the page: the access rules of the page and of the pages it
     /// is nested under, the `authorize` rule of the loader, its input schema,
-    /// then the loader, which returns a `T`.
+    /// then the loader, which returns a `T`. Its `ctx.locale` is the language
+    /// of the staff user's last page, as the server kept it
+    /// (`ctx.page(…).locale("de")`), else the default one.
     ///
     /// The error is the one the page receives: an [`AdminPublicError`] the
     /// loader or a rule returned (`402 PLAN_REQUIRED` of
@@ -148,15 +156,18 @@ impl TestContext {
         let Some((page, params, function)) = find_function(pages, path, kind, name) else {
             panic!("{}", no_such_function(pages, path, kind, name));
         };
-        // What the session token of the staff user gives the RPC of the page.
-        let session = ShopSession {
+        // What the session token of the staff user gives the RPC of the page,
+        // in the locale the server kept for them.
+        let mut session = ShopSession {
             shop: shop.to_string(),
             shopify_app: DEFAULT_SHOPIFY_APP_HANDLE.to_string(),
             actor: AdminActor {
                 id: sub.to_string(),
                 session_id: "test-sid".to_string(),
             },
+            locale: None,
         };
+        session.locale = self.app.staff_locales().recall(&session);
         let context = create_context(&self.app, &session, params, Uuid::new_v4().to_string(), None);
         let input = serde_json::to_value(input)
             .unwrap_or_else(|error| panic!("[openshop] The input of the {kind_name} `{name}` is not JSON: {error}"));

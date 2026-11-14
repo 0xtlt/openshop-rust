@@ -1,0 +1,12 @@
+{
+  "home": {
+    "title": "Lagerwache",
+    "hello": "Hallo {{ name }}",
+    "low": {
+      "one": "1 Variante wird knapp",
+      "other": "{{ count }} Varianten werden knapp"
+    },
+    "since": "Seit Version {{ version }}"
+  },
+  "saved": "Gespeichert für {{ shop }}"
+}

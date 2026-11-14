@@ -1,0 +1,12 @@
+{
+  "home": {
+    "title": "Stock watch",
+    "hello": "Hello {{ name }}",
+    "low": {
+      "one": "1 variant runs low",
+      "other": "{{ count }} variants run low"
+    },
+    "since": "Since version {{ version }}"
+  },
+  "saved": "Saved for {{ shop }}"
+}
