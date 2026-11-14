@@ -808,6 +808,38 @@ async fn the_session_token_of_a_staff_user_is_refused_on_proxy_and_ext_routes(ct
 }
 
 #[openshop::test(TestContext::new(ping_config()))]
+async fn the_token_of_a_customer_account_extension_is_accepted_on_ext_routes_only(ctx: &TestContext) {
+    // The claims Shopify gives a customer account extension: `iss` is the
+    // shop's `/checkouts`, not its `/admin`, and there is no `sid` (#83).
+    let shop = "jwt-shop.myshopify.com";
+    let now = chrono::Utc::now().timestamp();
+    let token = sign_session_token(
+        &json!({
+            "iss": format!("https://{shop}/checkouts"),
+            "dest": shop,
+            "aud": ctx.api_key,
+            "sub": CUSTOMER_GID,
+            "exp": now + 60,
+            "nbf": now - 10,
+            "iat": now,
+            "jti": "customer-account-jti",
+        }),
+        &ctx.secret,
+    );
+
+    let response = get(ctx, "/ext/ping").bearer_auth(&token).send().await.unwrap();
+    assert_eq!(response.status(), 200);
+    let body = json_body(response).await;
+    assert_eq!(body["shop"], shop);
+    assert_eq!(body["customerId"], "123");
+    assert_eq!(body["authKind"], "customerAccountJwt");
+
+    // The Admin API takes the session tokens of the admin only: this `iss` is refused there.
+    let response = get(ctx, "/api/functions").bearer_auth(&token).send().await.unwrap();
+    assert_error(response, 401, "Unauthorized: invalid session token").await;
+}
+
+#[openshop::test(TestContext::new(ping_config()))]
 async fn proxy_mode_accepts_session_tokens_and_prefers_them_over_the_signature(ctx: &TestContext) {
     let query = signed_query(
         &[("shop", "test.myshopify.com"), ("logged_in_customer_id", "42")],
