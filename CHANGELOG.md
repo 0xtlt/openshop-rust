@@ -13,6 +13,11 @@
   `Access-Control-Allow-Credentials`: the session token in `Authorization`
   authenticates the request. `/proxy` and `/api` keep their origin list, and
   `cors_origins` no longer applies to `/ext` (#82).
+- `/ext` routes accept the session token of a customer account extension,
+  whose `iss` is `https://{shop}/checkouts`: they answered `401`, as only an
+  `iss` of `https://{shop}/admin` was accepted. An extension token's `iss` may
+  now be any path on the shop of its `dest`; the Admin API still takes only
+  `/admin`. `shopify_api` 1.0.0-rc.5 (#83).
 
 ## 0.1.0-rc.4
 
