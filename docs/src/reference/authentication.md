@@ -360,10 +360,10 @@ answer like any other bad signature.
 
 ## Browser origins
 
-OpenShop allows known Shopify origins, configured app origins,
-`https://extensions.shopifycdn.com`, and in development (`OPENSHOP_ENV` other
-than `production`) local origins. Arbitrary origins are not reflected in CORS
-responses. In production a page on `localhost` is never allowed: it runs on the
+On `/proxy/*` and `/api/*`, OpenShop allows known Shopify origins, configured
+app origins, `https://extensions.shopifycdn.com`, and in development
+(`OPENSHOP_ENV` other than `production`) local origins. Arbitrary origins are
+not reflected in CORS responses. In production a page on `localhost` is never allowed: it runs on the
 visitor's own machine, not on an origin of the application, unless `HOST` or
 `SHOPIFY_APP_URL` is itself that address.
 
@@ -381,6 +381,13 @@ and the server logs a warning when it starts. `null`, the origin of a sandboxed
 frame or a local file, is allowed only when `cors_origins` lists it, and a
 production server with `null` in `cors_origins` does not start: any site can
 send it.
+
+`/ext/*` answers `Access-Control-Allow-Origin: *` to any origin, `null`
+included, preflight too, and never `Access-Control-Allow-Credentials`. Shopify
+asks this of a backend that UI extensions call: the origin of their worker may
+change without notice ([Network access](https://shopify.dev/docs/apps/build/checkout/capabilities)).
+The session token in `Authorization`, not the origin, authenticates these
+requests, and the table above and `cors_origins` do not apply to them.
 
 CORS applies to `/proxy/*` and `/ext/*` always, and to `/api/*` in `dev` and
 when the server runs without an admin UI. In production the admin UI and the

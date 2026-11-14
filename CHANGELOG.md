@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- `/ext` routes answer `Access-Control-Allow-Origin: *` to any origin,
+  preflight included, as Shopify asks of a backend that UI extensions call
+  (their worker's origin may change without notice). They answered
+  `https://extensions.shopifycdn.com` and the allowed origins only, so a
+  preflight from `https://extensions-v2.shopifycdn.com` or `Origin: null` (a
+  sandboxed extension frame) got no CORS headers. No
+  `Access-Control-Allow-Credentials`: the session token in `Authorization`
+  authenticates the request. `/proxy` and `/api` keep their origin list, and
+  `cors_origins` no longer applies to `/ext` (#82).
+
 ## 0.1.0-rc.4
 
 - `ProviderStore::save_form` takes the `#[input]` of an action, as its

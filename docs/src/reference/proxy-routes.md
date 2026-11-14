@@ -269,11 +269,14 @@ Enable network access in the extension's TOML:
 network_access = true
 ```
 
-Send the session token as `Authorization: Bearer ...`. CORS allows Shopify
-admin, Shopify storefront domains, Shopify's extension CDN, configured
-`HOST` / `SHOPIFY_APP_URL` origins, the `cors_origins` of `app!`, and in development local origins. Other origins receive no
-`Access-Control-Allow-Origin` header. Preflight `OPTIONS` requests are answered
-with `204`.
+Send the session token as `Authorization: Bearer ...`. `/ext/*` answers
+`Access-Control-Allow-Origin: *` to any origin, as Shopify asks of a backend
+that UI extensions call, without `Access-Control-Allow-Credentials`. On
+`/proxy/*`, CORS allows Shopify admin, Shopify storefront domains, Shopify's
+extension CDN, configured `HOST` / `SHOPIFY_APP_URL` origins, the
+`cors_origins` of `app!`, and in development local origins; other origins
+receive no `Access-Control-Allow-Origin` header. Preflight `OPTIONS` requests
+are answered with `204`.
 
 ## Errors
 

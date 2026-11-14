@@ -859,49 +859,83 @@ async fn session_tokens_are_rejected_on_routes_limited_to_proxy_signatures(ctx: 
 }
 
 #[openshop::test(TestContext::new(ping_config()))]
-async fn server_proxy_routes_allow_shopify_ui_extension_cors(ctx: &TestContext) {
+async fn proxy_routes_allow_the_shopify_extension_origin(ctx: &TestContext) {
     let token = ctx.session_token_for("jwt-shop.myshopify.com", CUSTOMER_GID);
 
-    for prefix in ["/proxy", "/ext"] {
-        let path = format!("{prefix}/ping");
+    let preflight = request(ctx, Method::OPTIONS, "/proxy/ping")
+        .header("Origin", EXTENSION_ORIGIN)
+        .header("Access-Control-Request-Method", "GET")
+        .header("Access-Control-Request-Headers", "authorization")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(preflight.status(), 204);
+    assert_eq!(
+        header(&preflight, "access-control-allow-origin"),
+        Some(EXTENSION_ORIGIN)
+    );
 
-        let preflight = request(ctx, Method::OPTIONS, &path)
-            .header("Origin", EXTENSION_ORIGIN)
-            .header("Access-Control-Request-Method", "GET")
-            .header("Access-Control-Request-Headers", "authorization")
+    let response = get(ctx, "/proxy/ping")
+        .header("Origin", EXTENSION_ORIGIN)
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    assert_eq!(header(&response, "access-control-allow-origin"), Some(EXTENSION_ORIGIN));
+}
+
+/// Shopify asks a backend that UI extensions call for
+/// `Access-Control-Allow-Origin: *`: the origin of their worker may change.
+#[openshop::test(TestContext::new(ping_config()))]
+async fn extension_routes_allow_any_origin(ctx: &TestContext) {
+    let token = ctx.session_token_for("jwt-shop.myshopify.com", CUSTOMER_GID);
+
+    for origin in [
+        EXTENSION_ORIGIN,
+        "https://extensions-v2.shopifycdn.com",
+        "https://anything.example.com",
+        // A sandboxed frame, as a local simulator runs an extension.
+        "null",
+    ] {
+        let preflight = request(ctx, Method::OPTIONS, "/ext/ping")
+            .header("Origin", origin)
+            .header("Access-Control-Request-Method", "POST")
+            .header("Access-Control-Request-Headers", "authorization,content-type")
             .send()
             .await
             .unwrap();
-        assert_eq!(preflight.status(), 204, "{prefix}");
-        assert_eq!(
-            header(&preflight, "access-control-allow-origin"),
-            Some(EXTENSION_ORIGIN)
-        );
+        assert_eq!(preflight.status(), 204, "{origin}");
+        assert_eq!(header(&preflight, "access-control-allow-origin"), Some("*"), "{origin}");
         assert_eq!(
             header(&preflight, "access-control-allow-headers"),
-            Some("authorization")
+            Some("authorization,content-type")
         );
+        assert_eq!(header(&preflight, "access-control-allow-credentials"), None);
         let methods = header(&preflight, "access-control-allow-methods").unwrap_or_default();
-        assert!(methods.contains("GET") && methods.contains("POST"), "{methods}");
+        for method in ["GET", "HEAD", "PUT", "POST", "DELETE", "PATCH"] {
+            assert!(methods.contains(method), "{methods}");
+        }
 
-        let response = get(ctx, &path)
-            .header("Origin", EXTENSION_ORIGIN)
+        let response = get(ctx, "/ext/ping")
+            .header("Origin", origin)
             .bearer_auth(&token)
             .send()
             .await
             .unwrap();
-        assert_eq!(response.status(), 200, "{prefix}");
-        assert_eq!(header(&response, "access-control-allow-origin"), Some(EXTENSION_ORIGIN));
+        assert_eq!(response.status(), 200, "{origin}");
+        assert_eq!(header(&response, "access-control-allow-origin"), Some("*"), "{origin}");
+        assert_eq!(header(&response, "access-control-allow-credentials"), None);
 
         // Rejections are readable by the extension too.
-        let rejected = get(ctx, &path)
-            .header("Origin", EXTENSION_ORIGIN)
+        let rejected = get(ctx, "/ext/ping")
+            .header("Origin", origin)
             .bearer_auth("not-a-valid-token")
             .send()
             .await
             .unwrap();
-        assert_eq!(rejected.status(), 401, "{prefix}");
-        assert_eq!(header(&rejected, "access-control-allow-origin"), Some(EXTENSION_ORIGIN));
+        assert_eq!(rejected.status(), 401, "{origin}");
+        assert_eq!(header(&rejected, "access-control-allow-origin"), Some("*"), "{origin}");
     }
 }
 
@@ -920,7 +954,7 @@ async fn cors_headers_are_limited_to_allowed_origins() {
         "http://localhost:3000",
         "https://app.example.com",
     ] {
-        let response = get(&ctx, "/ext/ping")
+        let response = get(&ctx, "/proxy/ping")
             .header("Origin", origin)
             .bearer_auth(&token)
             .send()
@@ -931,7 +965,7 @@ async fn cors_headers_are_limited_to_allowed_origins() {
     }
 
     for origin in ["https://evil.example.com", "https://extensions.shopifycdn.com.evil.com"] {
-        let response = get(&ctx, "/ext/ping")
+        let response = get(&ctx, "/proxy/ping")
             .header("Origin", origin)
             .bearer_auth(&token)
             .send()
@@ -977,20 +1011,16 @@ async fn cors_origins_of_the_application_are_allowed() {
     let config = cors_origins_config(&["https://shop.example/", "", "null"]);
     assert_eq!(config.cors_origins, ["https://shop.example", "null"]);
     let ctx = TestContext::with_options(config, TestOptions::default()).await.unwrap();
-    for path in ["/proxy/ping", "/ext/ping"] {
-        for origin in ["https://shop.example", "null", EXTENSION_ORIGIN] {
-            assert_eq!(
-                preflight_origin(&ctx, path, origin).await.as_deref(),
-                Some(origin),
-                "{path}"
-            );
-        }
+    for origin in ["https://shop.example", "null", EXTENSION_ORIGIN] {
         assert_eq!(
-            preflight_origin(&ctx, path, "https://evil.example").await,
-            None,
-            "{path}"
+            preflight_origin(&ctx, "/proxy/ping", origin).await.as_deref(),
+            Some(origin)
         );
     }
+    assert_eq!(
+        preflight_origin(&ctx, "/proxy/ping", "https://evil.example").await,
+        None
+    );
     ctx.shutdown().await.unwrap();
 
     let error = match OpenShopConfig::builder()
@@ -1014,7 +1044,7 @@ async fn null_is_an_origin_only_when_listed_and_never_in_production() {
         ..Default::default()
     };
     let ctx = TestContext::with_options(ping_config(), options).await.unwrap();
-    assert_eq!(preflight_origin(&ctx, "/ext/ping", "null").await, None);
+    assert_eq!(preflight_origin(&ctx, "/proxy/ping", "null").await, None);
     ctx.shutdown().await.unwrap();
 
     let options = TestOptions {
