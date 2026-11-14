@@ -1825,7 +1825,7 @@ checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 
 [[package]]
 name = "openshop"
-version = "0.1.0-rc.5"
+version = "0.1.0-rc.6"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -1868,7 +1868,7 @@ dependencies = [
 
 [[package]]
 name = "openshop-cli"
-version = "0.1.0-rc.5"
+version = "0.1.0-rc.6"
 dependencies = [
  "anyhow",
  "dialoguer",
@@ -1881,7 +1881,7 @@ dependencies = [
 
 [[package]]
 name = "openshop-macros"
-version = "0.1.0-rc.5"
+version = "0.1.0-rc.6"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1891,7 +1891,7 @@ dependencies = [
 
 [[package]]
 name = "openshop-preview"
-version = "0.1.0-rc.5"
+version = "0.1.0-rc.6"
 dependencies = [
  "openshop",
  "tokio",
@@ -1899,7 +1899,7 @@ dependencies = [
 
 [[package]]
 name = "openshop-template-custom"
-version = "0.1.0-rc.5"
+version = "0.1.0-rc.6"
 dependencies = [
  "maud",
  "openshop",
@@ -1909,7 +1909,7 @@ dependencies = [
 
 [[package]]
 name = "openshop-template-minimal"
-version = "0.1.0-rc.5"
+version = "0.1.0-rc.6"
 dependencies = [
  "openshop",
  "serde",
@@ -1917,7 +1917,7 @@ dependencies = [
 
 [[package]]
 name = "openshop-template-public"
-version = "0.1.0-rc.5"
+version = "0.1.0-rc.6"
 dependencies = [
  "maud",
  "openshop",
