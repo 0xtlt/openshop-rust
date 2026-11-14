@@ -1,6 +1,6 @@
 mod common;
 
-use openshop::testing::{TestContext, toast};
+use openshop::testing::{TestContext, WithLocale, assert_translated, toast};
 use openshop::{FlowRun, Outcome, RunOutcome, Value, json};
 
 use openshop_template_public::APP;
@@ -116,4 +116,41 @@ async fn a_merchant_saves_the_threshold_of_their_shop(ctx: &TestContext) {
     assert_eq!(refused.status(), 422);
     let page = refused.text().await.unwrap();
     assert!(page.contains(r#"value="0" error="Must be at least 1""#), "{page}");
+}
+
+#[openshop::test(APP)]
+async fn a_merchant_whose_admin_is_in_french_reads_the_pages_in_french(ctx: &TestContext) {
+    // The language of the merchant's admin, which `openshop.js` sends with each request.
+    let page = ctx
+        .page(SettingsPage::PATH)
+        .locale("fr-FR")
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(page.contains(r#"<html lang="fr""#), "{page}");
+    assert!(page.contains(r#"<s-page heading="Réglages">"#), "{page}");
+
+    // The server keeps it for the requests that follow: the errors of a refused form too.
+    let refused = ctx
+        .submit(
+            SettingsPage::PATH,
+            &[("_action", SettingsPage::SAVE_SETTINGS), ("threshold", "0")],
+        )
+        .send()
+        .await
+        .unwrap();
+    let page = refused.text().await.unwrap();
+    assert!(
+        page.contains(r#"value="0" error="Doit être supérieur ou égal à 1""#),
+        "{page}"
+    );
+}
+
+/// Every text of `locales/en.default.json` is in the other files of `locales/`.
+#[test]
+fn every_text_is_translated() {
+    assert_translated(&APP);
 }

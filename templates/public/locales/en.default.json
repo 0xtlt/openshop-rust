@@ -1,0 +1,27 @@
+{
+  "home": {
+    "title": "Stock watch",
+    "checking": "A check is running.",
+    "refresh": "Refresh",
+    "threshold": "Under {{ threshold }} units",
+    "low": {
+      "one": "1 variant runs low. Last check: {{ at }}.",
+      "other": "{{ count }} variants run low. Last check: {{ at }}."
+    },
+    "no_check": "No check yet.",
+    "left": {
+      "one": "{{ count }} left",
+      "other": "{{ count }} left"
+    },
+    "check_now": "Check now",
+    "check_started": "Stock check started"
+  },
+  "settings": {
+    "title": "Settings",
+    "low_stock": "Low stock",
+    "threshold": "A variant runs low under",
+    "units": "units",
+    "save": "Save",
+    "saved": "A variant runs low under {{ threshold }} units"
+  }
+}

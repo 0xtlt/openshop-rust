@@ -1,5 +1,37 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- The admin pages in the language of the staff member (#87). A `locales/`
+  folder next to `Cargo.toml`, in Shopify's locale-file format
+  (`en.default.json`, exactly one `*.default.json`, then `fr.json`,
+  `de.json`…; nested keys, `{{ name }}`, `one`/`other` plurals chosen by
+  `count`), which `app!` reads when the crate compiles. `ctx.locale` on
+  `AdminContext` is the staff member's `locale` (the launch's, then
+  `shopify.config.locale`, which `openshop.js` sends in `X-OpenShop-Locale`,
+  else the last one the server kept for them) matched to its files: the same
+  tag, then the primary subtag (`de-CH` is `de`), else the default file's
+  language. `t!("home.title")`, `t!("home.low", count = n)`, `t!("home.hello",
+  name = value)` give a text in that language in a view, a loader, an action
+  or an access rule, the default file's for a text another file lacks; a key
+  the default file does not have, a plural without `count` or a placeholder
+  without its value does not compile, nor does a file that is not JSON, a
+  second default file, or a plural of another shape. `<html lang>` and the
+  texts openshop writes (field errors, error pages, the toasts of
+  `openshop.js`) follow `ctx.locale` when openshop has them (English, French,
+  or `admin_texts` in the language of `admin_locale`), else the ones of
+  `admin_locale`. Without `locales/`, nothing changes. `locales!()` for an
+  application built with `OpenShopConfig::builder()`;
+  `OpenShopConfig::admin_language` and `admin_text_in`.
+- Testing: `ctx.page(path).locale("de")` and `ctx.submit(…).locale("de")`
+  (`openshop::testing::WithLocale`), `AdminTestOptions::locale`, and
+  `assert_translated(&APP)`, which fails with the texts another locale file
+  lacks. The `public` template is in English and French.
+- `openshop dev` watches `locales/`, and compiles the crate again when a file
+  is added there or removed.
+
 ## 0.1.0-rc.5
 
 ### Fixed

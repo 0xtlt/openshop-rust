@@ -44,6 +44,7 @@ use super::api::pages::resolved_admin_pages;
 use super::http::{catch_panic, header, not_found, parse_query, report_failure};
 use super::jwt::read_jwt_audience;
 use super::launch::{forget_plan_on_welcome, is_installed_for_launch, is_ui_shell_path, open_from_shopify_admin};
+use super::locale::staff_locale;
 use super::reload::Served;
 use super::shop::{ShopSession, session_of};
 use super::shop_domain::normalize_shop_domain;
@@ -82,6 +83,14 @@ struct PageCall<'a> {
     query: String,
     /// Sent by `openshop.js`.
     fetch: bool,
+}
+
+impl PageCall<'_> {
+    /// A text openshop writes on the page, in the language of the staff member.
+    fn text(&self, text: &AdminText) -> String {
+        let config = self.app.config();
+        config.admin_text_in(config.admin_language(self.session.locale.as_deref()), text)
+    }
 }
 
 /// The page at `pathname`: a page of the application, or one of the framework.
@@ -149,7 +158,7 @@ pub(crate) async fn serve(
         Some(token) => session_of(&app, token, &pathname).await.ok(),
         None => None,
     };
-    let Some(session) = session else {
+    let Some(mut session) = session else {
         if fetch {
             // App Bridge asks again with a fresh token.
             return (StatusCode::UNAUTHORIZED, [(RETRY_HEADER, "1")]).into_response();
@@ -167,6 +176,7 @@ pub(crate) async fn serve(
         };
     };
 
+    session.locale = staff_locale(&app, &headers, &query, &session);
     let shop = session.shop.clone();
     let call = PageCall {
         app: &app,
@@ -272,7 +282,9 @@ pub(crate) async fn bounce_page(State(app): State<OpenShop>, request: Request) -
         .ok()
         .or_else(|| app.apps().all().first());
     let api_key = shopify_app.map_or("", |shopify_app| shopify_app.api_key.as_str());
-    let markup = shell::bounce(app.config().admin_lang(), api_key, app.endpoints());
+    // The page it bounces keeps its query, and the `locale` of a launch.
+    let language = app.config().admin_language(query.get("locale").map(String::as_str));
+    let markup = shell::bounce(language, api_key, app.endpoints());
     (
         [
             (CONTENT_TYPE, "text/html; charset=utf-8"),
@@ -310,8 +322,8 @@ async fn render(
     let (status, page) = match content {
         Ok(Shown::Page(page)) => (status, page),
         Ok(Shown::Refused(refused, page)) => (refused, page),
-        Err(StatusCode::FORBIDDEN | StatusCode::NOT_FOUND) => (StatusCode::NOT_FOUND, disabled(app)),
-        Err(failed) => (failed, unavailable(app)),
+        Err(StatusCode::FORBIDDEN | StatusCode::NOT_FOUND) => (StatusCode::NOT_FOUND, disabled(call)),
+        Err(failed) => (failed, unavailable(call)),
     };
     let menu = shell::Menu::of(app, &call.session).await;
     let document = shell::document(app, &call.session, &menu, notice, page, call.reload);
@@ -508,12 +520,13 @@ async fn render_custom(call: &PageCall<'_>, page: &CustomAdminPage, form: &FormS
             .tag("request_id", &request_id);
     });
     let ctx = create_context(app, &call.session, params, request_id, None);
+    let language = ctx.locale.clone();
     let request = PageRequest {
         ctx,
         query: call.query.clone(),
         form: form.clone(),
     };
-    match catch_panic("admin view", view(request)).await {
+    match catch_panic("admin view", crate::i18n::in_language(language, view(request))).await {
         Ok(markup) => Ok(Shown::Page(markup)),
         Err(error) => shown_failure(&error, "[openshop] Custom admin page could not be rendered"),
     }
@@ -577,7 +590,7 @@ async fn submit(call: &PageCall<'_>, body: &[u8]) -> Response {
                     report_failure("[openshop] Admin page action failed", &error);
                     (
                         StatusCode::INTERNAL_SERVER_ERROR,
-                        call.app.config().admin_text(&AdminText::ActionFailed),
+                        call.text(&AdminText::ActionFailed),
                         IndexMap::new(),
                     )
                 }
@@ -758,19 +771,18 @@ fn without_view(name: &str) -> Markup {
     }
 }
 
-fn disabled(app: &OpenShop) -> Markup {
+fn disabled(call: &PageCall<'_>) -> Markup {
     html! {
         s-page {
-            s-section { s-paragraph { (app.config().admin_text(&AdminText::PageDisabled)) } }
+            s-section { s-paragraph { (call.text(&AdminText::PageDisabled)) } }
         }
     }
 }
 
-fn unavailable(app: &OpenShop) -> Markup {
-    let config = app.config();
+fn unavailable(call: &PageCall<'_>) -> Markup {
     html! {
-        s-page heading=(config.admin_text(&AdminText::PageUnavailable)) {
-            s-banner tone="critical" { (config.admin_text(&AdminText::PageUnavailableMessage)) }
+        s-page heading=(call.text(&AdminText::PageUnavailable)) {
+            s-banner tone="critical" { (call.text(&AdminText::PageUnavailableMessage)) }
         }
     }
 }

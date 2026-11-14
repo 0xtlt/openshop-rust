@@ -51,10 +51,7 @@ impl SettingsPage {
                     .await?;
             }
         }
-        Ok(Outcome::toast(format!(
-            "A variant runs low under {} units",
-            input.threshold
-        )))
+        Ok(Outcome::toast(t!("settings.saved", threshold = input.threshold)))
     }
 
     /// Rendered by the server with what `settings` returns, and the form the
@@ -63,20 +60,20 @@ impl SettingsPage {
     fn view(settings: Settings, form: FormState) -> Markup {
         let saved = settings.threshold.to_string();
         html! {
-            s-page heading="Settings" {
-                s-section heading="Low stock" {
+            s-page heading=(t!("settings.title")) {
+                s-section heading=(t!("settings.low_stock")) {
                     form method="post" {
                         input type="hidden" name="_action" value=(Self::SAVE_SETTINGS);
                         s-stack gap="base" {
                             s-number-field
                                 name="threshold"
-                                label="A variant runs low under"
-                                suffix="units"
+                                label=(t!("settings.threshold"))
+                                suffix=(t!("settings.units"))
                                 min="1"
                                 max="1000"
                                 value=(form.value_or("threshold", &saved))
                                 error=[form.error("threshold")] {}
-                            s-button type="submit" variant="primary" { "Save" }
+                            s-button type="submit" variant="primary" { (t!("settings.save")) }
                         }
                     }
                 }

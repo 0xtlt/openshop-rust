@@ -9,6 +9,7 @@ mod home;
 mod locale;
 mod mcp;
 mod providers;
+mod staff_language;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 

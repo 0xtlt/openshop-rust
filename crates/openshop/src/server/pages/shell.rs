@@ -97,13 +97,14 @@ impl Menu {
     }
 }
 
-/// The texts of the toasts of `openshop.js`, in the language of the admin:
-/// JSON, which the script reads from `data-openshop-texts` on `<html>`.
-fn script_texts(config: &OpenShopConfig) -> String {
+/// The texts of the toasts of `openshop.js`, in `language`, the staff
+/// member's: JSON, which the script reads from `data-openshop-texts` on
+/// `<html>`.
+fn script_texts(config: &OpenShopConfig, language: &str) -> String {
     serde_json::json!({
-        "error": config.admin_text(&AdminText::RequestFailed),
-        "copied": config.admin_text(&AdminText::Copied),
-        "copyFailed": config.admin_text(&AdminText::CopyFailed),
+        "error": config.admin_text_in(language, &AdminText::RequestFailed),
+        "copied": config.admin_text_in(language, &AdminText::Copied),
+        "copyFailed": config.admin_text_in(language, &AdminText::CopyFailed),
     })
     .to_string()
 }
@@ -123,9 +124,10 @@ pub(crate) fn document(
     let name = shopify_app.map_or(DEFAULT_APP_NAME, |shopify_app| shopify_app.name.as_str());
     let endpoints = app.endpoints();
     let config = app.config();
+    let language = config.admin_language(session.locale.as_deref());
     let document = html! {
         (DOCTYPE)
-        html lang=(config.admin_lang()) data-openshop-texts=(script_texts(config)) {
+        html lang=(language) data-openshop-texts=(script_texts(config, language)) {
             head {
                 meta charset="utf-8";
                 meta name="viewport" content="width=device-width, initial-scale=1";

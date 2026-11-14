@@ -216,7 +216,7 @@ fn another_shop() -> TestOptions {
 | `call_loader(path, name, input)` / `call_loader_as(path, name, input, shop, sub)` | Calls a loader of the admin page at `path` as its view does, for staff user `1` of the shop of the test or `sub` of `shop`. See [Test admin functions](#test-admin-functions). |
 | `call_action(path, name, input)` / `call_action_as(path, name, input, shop, sub)` | The same for an action. |
 | `page(path)` | A request for the admin page at `path` as the admin asks for it: the HTML of the whole document. See [Test a page](#test-a-page). |
-| `submit(path, fields)` | A form of the admin page at `path`, sent as the admin sends it. `toast(&response)` and `toast_error(&response)` read its toasts, decoded. |
+| `submit(path, fields)` | A form of the admin page at `path`, sent as the admin sends it. `toast(&response)` and `toast_error(&response)` read its toasts, decoded. `.locale("fr")` on either sends the language of the staff member's admin: see [Test a page in a language](#test-a-page-in-a-language). |
 | `webhook(topic, payload)` | A delivery of a webhook to `/webhooks`, signed with the secret of the test and with the headers Shopify sends. See [Deliver a webhook](#deliver-a-webhook). |
 | `get`, `post`, `put`, `patch`, `delete`, `request(method, path)` | Request builders authenticated with a session token for the default shop. |
 | `request_as(method, path, shop, sub)` | Request authenticated as staff user `sub` of `shop`. |
@@ -869,6 +869,34 @@ async fn saves_the_threshold(ctx: &TestContext) {
 | Its status, no body | The action failed with an `AdminPublicError` (`toast_error` is its message; `Internal server error` for any other error), or the form was refused and the view does not read `form` (`toast_error` is the first error, `threshold: Must be at least 1`). |
 | `404`, "This page is disabled." | The page's access rule said no, or no page is at `path`. |
 
+### Test a page in a language
+
+`.locale("fr")` on a request of the admin pages sends the language of the
+staff member's admin, as `openshop.js` does (the trait
+`openshop::testing::WithLocale`); `ctx.page("/?locale=fr")` is the `locale`
+Shopify opens the app with. The server keeps it for the staff member's later
+requests, as it does in production: the pages, the forms, and `call_loader` /
+`call_action` of that staff user. `assert_translated(&APP)` fails with the
+texts of the default file of `locales/` another file lacks:
+
+```rust,ignore
+use my_app::APP;
+use my_app::admin::settings::SettingsPage;
+use openshop::testing::{TestContext, WithLocale, assert_translated};
+
+#[openshop::test(APP)]
+async fn the_settings_in_french(ctx: &TestContext) {
+    let page = ctx.page(SettingsPage::PATH).locale("fr-FR").send().await.unwrap().text().await.unwrap();
+    assert!(page.contains(r#"<html lang="fr""#), "{page}");
+    assert!(page.contains(r#"<s-page heading="Réglages">"#), "{page}");
+}
+
+#[test]
+fn every_text_is_translated() {
+    assert_translated(&APP);
+}
+```
+
 ### Without a context
 
 `admin_context(&app, options)` builds the `AdminContext` a function receives,
@@ -911,8 +939,10 @@ API refuses is renewed once with the
 [client credentials grant](authentication.md#client-credentials-grant), from
 the mock transport.
 `AdminTestOptions` has the fields `shop` (`test.myshopify.com`),
-`shopify_app` (`default`), `actor_id` (`test-actor`), `params` (empty), and
-`request_id` (`test-request`). `invoke_admin_function` applies the function's
+`shopify_app` (`default`), `actor_id` (`test-actor`), `params` (empty),
+`request_id` (`test-request`), and `locale` (`None`): the staff member's
+locale, `Some("de-CH")`, matched to the languages of the application for
+`ctx.locale`. `invoke_admin_function` applies the function's
 own `authorize` rule and input schema, then deserializes the output: its
 errors are `anyhow` errors, not the ones the page receives, and it does not
 evaluate page access rules (`#[access]`), which `ctx.call_loader` does.

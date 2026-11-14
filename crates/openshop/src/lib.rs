@@ -55,6 +55,7 @@ mod config;
 pub mod db;
 pub mod declare;
 pub mod engine;
+pub mod i18n;
 pub mod providers;
 pub mod response;
 pub mod runtime;
@@ -157,7 +158,7 @@ pub mod prelude {
         ShopifyEndpoints, ShopifyLaunch, Uuid, WebhookContext, WorkerConfig, flow, graphql, liquid, mcp_resource,
         mcp_tool, provider, proxy, response, route, tracing, validators, webhook,
     };
-    pub use crate::{Context, Result, Value, admin_page, anyhow, app, bail, json};
+    pub use crate::{Context, Result, Value, admin_page, anyhow, app, bail, json, t};
 }
 
 /// Maps a struct to an application table.
@@ -405,7 +406,7 @@ macro_rules! __shopify_input {
 /// method of that name of [`OpenShopBuilder`](builder::OpenShopBuilder): `crons`, `on_error`, `mcp`,
 /// `shopify`, `worker`, `retry_policy`, `builtin_pages`, `admin_menu`, `admin_ui`,
 /// `max_request_body_bytes`, `request_timeout`, `max_concurrent_requests`, `cors_origins`,
-/// `admin_locale`, `admin_texts`, `ops_password`, `log_retention`, `sentry`… The application reads a secret
+/// `admin_locale`, `admin_texts`, `locales`, `ops_password`, `log_retention`, `sentry`… The application reads a secret
 /// from the environment itself: `ops_password: std::env::var("OPS_PASSWORD").ok()`.
 /// A value can fail with `?`: the error is the one `APP.config()` and
 /// `APP.main()` return.
@@ -415,6 +416,56 @@ macro_rules! __shopify_input {
 /// tests start (`#[openshop::test(APP)]`). Nothing is evaluated before that:
 /// in `dev`, the `.env` file is loaded first.
 pub use openshop_macros::app;
+
+/// A text of the admin pages in the language of the staff member:
+/// `t!("home.title")`, `t!("home.count", count = n)`, `t!("home.hello", name = value)`.
+///
+/// The texts are in `locales/`, next to the `Cargo.toml` of the package, in
+/// Shopify's locale-file format: `en.default.json`, the default language
+/// (exactly one `*.default.json` file), then `fr.json`, `de.json`…, with
+/// nested keys, `{{ name }}` placeholders, and plurals, an object of `one`
+/// and `other` chosen by `count` (`one` when it is 1):
+///
+/// ```json
+/// {
+///   "home": {
+///     "title": "Stock watch",
+///     "hello": "Hello {{ name }}",
+///     "low": { "one": "1 variant runs low", "other": "{{ count }} variants run low" }
+///   }
+/// }
+/// ```
+///
+/// ```ignore
+/// html! {
+///     s-page heading=(t!("home.title")) {
+///         s-paragraph { (t!("home.low", count = summary.low_stock.len())) }
+///     }
+/// }
+/// ```
+///
+/// The macro gives a `String`, in the language of the request,
+/// [`AdminContext::locale`]: in a view, a loader, an action or an access rule
+/// of an admin page. A text the file of that language lacks is the one of its
+/// primary subtag (`fr` for `fr-CA`), then of the default file. Outside a
+/// request (in a flow, or a task the request spawned), it is the default
+/// language. `maud` escapes it, as any `String`.
+///
+/// The files are read when the crate compiles, and embedded: a key that is
+/// not in the default file, a plural without `count`, or a placeholder without
+/// its value does not compile, nor does a file that is not JSON, two default
+/// files, or a plural of another shape. A key another file lacks compiles:
+/// [`testing::assert_translated`](crate::testing::assert_translated) lists it.
+/// A change to a file compiles the crate again; a file added or removed does
+/// with `openshop dev`, and with cargo alone at the next change of the crate.
+pub use openshop_macros::t;
+
+/// The [`Locales`](i18n::Locales) of the `locales/` folder next to the
+/// `Cargo.toml` of the package, read when the crate compiles: what `app!`
+/// sets by itself when the folder exists, for an application built with
+/// [`OpenShopConfig::builder`] instead, `.locales(openshop::locales!())`.
+/// A package without the folder does not compile.
+pub use openshop_macros::locales;
 
 /// Makes an `async` function a flow: `#[flow("syncOrders")]`.
 ///

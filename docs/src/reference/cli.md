@@ -291,8 +291,11 @@ not start a second `dev` process alongside it.
 
 `openshop dev` wraps `cargo run -- dev` with a file watcher:
 
-- it watches `src/` and `migrations/` recursively, and `Cargo.toml`,
-  `Cargo.lock`, `.env`, and `shopify.app*.toml` in the project root;
+- it watches `src/`, `migrations/` and `locales/` recursively, and
+  `Cargo.toml`, `Cargo.lock`, `.env`, and `shopify.app*.toml` in the project
+  root. It gives cargo the names of the files of `locales/`
+  (`OPENSHOP_LOCALE_FILES`), so that a locale file added or removed compiles
+  the crate again, as a changed one does;
 - it watches `src/`, `Cargo.toml`, and `build.rs` of every crate on disk the
   project is compiled with: its path dependencies and theirs, members of its
   workspace or not. `cargo metadata` gives the list at startup and each time a

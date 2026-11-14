@@ -8,6 +8,7 @@ mod admin;
 mod context;
 mod db;
 mod fake;
+mod locale;
 mod page;
 mod shopify;
 mod transport;
@@ -24,6 +25,7 @@ pub use context::{
 pub(crate) use db::connect;
 pub use db::{TestDb, test_database_url};
 pub use fake::{FakeCall, FakeMethod, FakeProviders, TypedCall, TypedFake};
+pub use locale::{WithLocale, assert_translated};
 pub use page::{toast, toast_error};
 pub use shopify::{FakeShopify, GraphqlCall, TEST_APP_GID, TEST_SHOP_GID, app_pricing_subscription, subscription};
 pub use transport::{FORM_CONTENT_TYPE, MockTransport, OutboundRequest, OutboundResponse};

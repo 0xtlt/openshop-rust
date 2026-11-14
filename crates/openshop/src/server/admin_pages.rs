@@ -51,6 +51,7 @@ pub(crate) fn create_context(
         shopify_app: session.shopify_app.clone(),
         actor: session.actor.clone(),
         params,
+        locale: app.config().admin_language(session.locale.as_deref()).to_string(),
         db: app.db().clone(),
         shopify: session.shopify_client(app),
         connectors: app.connectors(&session.shop, &session.shopify_app),
@@ -91,7 +92,9 @@ pub(crate) async fn page_is_allowed(
             return Ok(false);
         };
         let context = create_context(app, session, params, Uuid::new_v4().to_string(), None);
-        is_allowed(&ancestor_access(app.custom_pages(), page), &context, None).await
+        let language = context.locale.clone();
+        let access = ancestor_access(app.custom_pages(), page);
+        crate::i18n::in_language(language, is_allowed(&access, &context, None)).await
     };
     let outcome: anyhow::Result<bool> = catch_panic("access rule", check).await;
 
@@ -181,6 +184,17 @@ pub(crate) async fn call_function(
     context: AdminContext,
     input: Value,
 ) -> anyhow::Result<Value> {
+    let language = context.locale.clone();
+    crate::i18n::in_language(language, call_checked(pages, page, function, context, input)).await
+}
+
+async fn call_checked(
+    pages: &[CustomAdminPage],
+    page: &CustomAdminPage,
+    function: &AdminFunction,
+    context: AdminContext,
+    input: Value,
+) -> anyhow::Result<Value> {
     if !is_allowed(&ancestor_access(pages, page), &context, function.authorize.as_ref()).await? {
         return Err(public_error("FORBIDDEN", "Forbidden", 403));
     }
@@ -207,10 +221,13 @@ pub(crate) async fn call_function(
 }
 
 /// The error of a field the input schema refused, as the form shows it, in
-/// the language of the admin: `is required` is `Required`.
+/// the language of the staff member: `is required` is `Required`.
 fn field_text(context: &AdminContext, error: &str) -> String {
     let field = crate::admin::FieldError::from_schema(error);
-    context.app.config().admin_text(&crate::admin::AdminText::Field(field))
+    context
+        .app
+        .config()
+        .admin_text_in(&context.locale, &crate::admin::AdminText::Field(field))
 }
 
 pub fn create_custom_admin_page_routes() -> Router<OpenShop> {

@@ -19,7 +19,7 @@ use std::process::Command;
 const TEMPLATES: &[&str] = &["minimal", "custom", "public"];
 /// What a project gets from its template. The rest of the directory, such as
 /// `examples/` and `shopify.web.toml`, serves the repository.
-const TEMPLATE_DIRS: &[&str] = &["src", "tests", "migrations"];
+const TEMPLATE_DIRS: &[&str] = &["src", "tests", "migrations", "locales"];
 const TEMPLATE_FILES: &[&str] = &["Cargo.toml", "README.md", "shopify.app.toml"];
 /// The name of the manifest of a template in `bundle/`: cargo leaves out of a
 /// package every directory with a `Cargo.toml`, the root of another package.

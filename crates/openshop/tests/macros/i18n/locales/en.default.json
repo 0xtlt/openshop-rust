@@ -1,0 +1,6 @@
+{
+  "home": {
+    "title": "Stock watch",
+    "low": { "one": "1 variant runs low", "other": "{{ count }} variants run low" }
+  }
+}

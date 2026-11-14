@@ -1,0 +1,27 @@
+{
+  "home": {
+    "title": "Veille des stocks",
+    "checking": "Une vérification est en cours.",
+    "refresh": "Actualiser",
+    "threshold": "Sous {{ threshold }} unités",
+    "low": {
+      "one": "1 variante est presque épuisée. Dernière vérification : {{ at }}.",
+      "other": "{{ count }} variantes sont presque épuisées. Dernière vérification : {{ at }}."
+    },
+    "no_check": "Aucune vérification pour l’instant.",
+    "left": {
+      "one": "{{ count }} restante",
+      "other": "{{ count }} restantes"
+    },
+    "check_now": "Vérifier maintenant",
+    "check_started": "Vérification des stocks lancée"
+  },
+  "settings": {
+    "title": "Réglages",
+    "low_stock": "Stock bas",
+    "threshold": "Une variante est presque épuisée sous",
+    "units": "unités",
+    "save": "Enregistrer",
+    "saved": "Une variante est presque épuisée sous {{ threshold }} unités"
+  }
+}

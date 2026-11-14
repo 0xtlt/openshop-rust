@@ -475,11 +475,101 @@ What the application writes stays as it writes it: its views, its toasts, the
 errors of `Outcome::invalid` and of an `AdminPublicError`. The pages of the
 framework (flows, runs, providers, MCP, crons, functions) stay in English.
 
-The language is the application's, not the merchant's: the pages of an app
-are written in one language, and an error in another would sit in them.
-Shopify gives an embedded app the language of the staff member (the `locale`
-parameter of the URL, `shopify.config.locale`), which `admin_locale` does not
-follow.
+Without a `locales/` folder, the language is the application's, one for
+every page: an error in another language would sit in pages written in this
+one. With the folder, the pages are in the language of the staff member.
+
+### The staff member's language
+
+A public app is installed by merchants who run their admin in different
+languages. Shopify opens the app with the language of the staff member (the
+`locale` of the URL, `shopify.config.locale`: `de`, `de-CH`); an application
+with a `locales/` folder next to its `Cargo.toml` writes its pages in it, with
+the texts of that folder, in the format of Shopify's locale files (themes, UI
+extensions):
+
+```text
+locales/
+├── en.default.json   the default language: exactly one `*.default.json`
+├── fr.json
+└── de.json
+```
+
+```json
+{
+  "home": {
+    "title": "Stock watch",
+    "hello": "Hello {{ name }}",
+    "low": {
+      "one": "1 variant runs low",
+      "other": "{{ count }} variants run low"
+    }
+  }
+}
+```
+
+Keys nest; `{{ name }}` is a value the text is given; a plural is an object
+of `one` and `other`, chosen by `count` (`one` when it is 1; `other` alone for
+a language with one form). `t!` gives a text in the language of the request,
+in a view, a loader, an action or an access rule:
+
+```rust,ignore
+use openshop::prelude::*;
+
+#[admin_page("/")]
+impl HomePage {
+    #[action]
+    async fn check_now(ctx: AdminContext) -> Result<Outcome> {
+        Ok(Outcome::toast(t!("home.checked", shop = ctx.shop)))
+    }
+
+    #[view]
+    fn view(summary: Summary) -> Markup {
+        html! {
+            s-page heading=(t!("home.title")) {
+                s-paragraph { (t!("home.low", count = summary.low_stock.len())) }
+            }
+        }
+    }
+}
+```
+
+`app!` reads the folder when the crate compiles; there is nothing to declare
+(`.locales(openshop::locales!())` for an application built with
+`OpenShopConfig::builder()`). The language of a request, `ctx.locale`, is the
+staff member's matched to the files: the same tag, then its primary subtag
+(`de-CH` is `de`), else the language of the `.default.json` file, which is also
+the language without any `locale`. It is the `<html lang>` of the pages, and
+the language of the texts openshop writes on them when it has them: the
+built-in English and French, or `admin_texts`, the texts of the language of
+`admin_locale`; otherwise those of `admin_locale`.
+
+The `locale` of the launch is kept for the staff member's later requests: the
+bounce page keeps the query of the page, `openshop.js` sends
+`shopify.config.locale` with each request in `X-OpenShop-Locale`, and the
+server remembers the last one per staff member, for a page reached without it.
+That memory is the process's: another instance of the server knows the
+language from the next request of the script.
+
+The files are checked when the crate compiles, and embedded in it:
+
+- a key `t!` names that is not in the default file, a plural without `count`,
+  or a placeholder without its value does not compile:
+  `no text \`home.titel\` in locales/en.default.json`;
+- neither does a file that is not JSON, a second default file, a file name
+  that is not a language tag, a plural with other keys than `one` and `other`,
+  or a key that is a plural in one file and a text in another;
+- a text another file lacks compiles, and is in the default language;
+  `openshop::testing::assert_translated(&APP)`, in a test of the application,
+  lists them (see [Testing](testing.md#test-a-page-in-a-language)).
+
+A change to a file compiles the crate again. `openshop dev` also does when a
+file is added or removed; with cargo alone, a new file is read at the next
+change of the crate.
+
+`t!` gives a `String`, which `maud` escapes. Outside a request (a flow, a task
+the request spawned) it is in the default language. The labels of the menu
+(`nav = "…"`) and the pages of the framework stay as they are written.
 
 ### Set up the application
 
@@ -577,7 +667,9 @@ Page::SAVE), …])` sends a form of it: the page rendered again, its toast in
 decoded, `422` and the errors under the fields when the form is refused.
 `admin_context` and `invoke_admin_function` call a
 function, or code that takes an `AdminContext`, directly. See
-[Testing](testing.md#test-admin-functions).
+[Testing](testing.md#test-admin-functions). A page in a language:
+`ctx.page(path).locale("de")`, see [Test a page in a
+language](testing.md#test-a-page-in-a-language).
 
 ## Without the attribute
 

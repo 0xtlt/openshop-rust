@@ -47,6 +47,12 @@ pub struct AdminContext {
     pub actor: AdminActor,
     /// Dynamic route segments of the page, e.g. `id` for `/reviews/:id`.
     pub params: IndexMap<String, String>,
+    /// The language of the staff member, among the application's: the
+    /// `locale` of their admin matched to the files of `locales/` (`de` for
+    /// `de-CH`, the default file's language when the application does not
+    /// have theirs), `admin_locale` without the folder. What
+    /// [`t!`](crate::t) writes in, and the `<html lang>` of the page.
+    pub locale: String,
     pub db: PgPool,
     pub shopify: ShopifyClient,
     pub connectors: Connectors,
@@ -428,7 +434,9 @@ pub async fn invoke_admin_function<T: DeserializeOwned>(
     if let Some(schema) = &function.input {
         input = schema.parse(input).map_err(anyhow::Error::msg)?;
     }
-    Ok(serde_json::from_value((function.handler)(context, input).await?)?)
+    let language = context.locale.clone();
+    let output = crate::i18n::in_language(language, (function.handler)(context, input)).await?;
+    Ok(serde_json::from_value(output)?)
 }
 
 #[cfg(test)]

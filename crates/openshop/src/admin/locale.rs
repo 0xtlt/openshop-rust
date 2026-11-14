@@ -130,13 +130,26 @@ pub(crate) fn is_language_tag(tag: &str) -> bool {
             .all(|subtag| (1..=8).contains(&subtag.len()) && subtag.bytes().all(|byte| byte.is_ascii_alphanumeric()))
 }
 
-/// The text in the language of `tag`: the application's, then the built-in
-/// table of its language, then English.
-pub(crate) fn admin_text(tag: &str, texts: Option<&AdminTextsFn>, text: &AdminText) -> String {
-    texts
-        .and_then(|texts| texts(text))
-        .or_else(|| builtin(tag, text))
+/// The text in `language`, the language of a request: the application's
+/// `texts` when it is the language of `admin_locale`, `default`, whose texts
+/// they are, then the built-in table of `language`; else the texts of
+/// `default`, then English.
+pub(crate) fn admin_text(language: &str, default: &str, texts: Option<&AdminTextsFn>, text: &AdminText) -> String {
+    let own = || texts.and_then(|texts| texts(text));
+    let first = if same_language(language, default) {
+        own().or_else(|| builtin(language, text))
+    } else {
+        builtin(language, text).or_else(own)
+    };
+    first
+        .or_else(|| builtin(default, text))
         .unwrap_or_else(|| english(text))
+}
+
+/// Whether two tags are the same language: `fr-CA` and `fr`.
+fn same_language(one: &str, other: &str) -> bool {
+    let primary = |tag: &str| tag.split('-').next().unwrap_or_default().to_ascii_lowercase();
+    primary(one) == primary(other)
 }
 
 /// The built-in table of the language of `tag`, by its first subtag:
@@ -144,6 +157,7 @@ pub(crate) fn admin_text(tag: &str, texts: Option<&AdminTextsFn>, text: &AdminTe
 fn builtin(tag: &str, text: &AdminText) -> Option<String> {
     let language = tag.split('-').next().unwrap_or_default().to_ascii_lowercase();
     match language.as_str() {
+        "en" => Some(english(text)),
         "fr" => french(text),
         _ => None,
     }
@@ -320,11 +334,11 @@ mod tests {
             (AdminText::Copied, "Copied", "Copié"),
             (AdminText::CopyFailed, "Could not copy", "Impossible de copier"),
         ] {
-            assert_eq!(admin_text("en", None, &text), en, "{text:?}");
-            assert_eq!(admin_text("fr", None, &text), fr, "{text:?}");
-            assert_eq!(admin_text("fr-CA", None, &text), fr, "{text:?}");
+            assert_eq!(admin_text("en", "en", None, &text), en, "{text:?}");
+            assert_eq!(admin_text("fr", "fr", None, &text), fr, "{text:?}");
+            assert_eq!(admin_text("fr-CA", "fr-CA", None, &text), fr, "{text:?}");
             // A language without a table is English.
-            assert_eq!(admin_text("de", None, &text), en, "{text:?}");
+            assert_eq!(admin_text("de", "de", None, &text), en, "{text:?}");
         }
     }
 
@@ -335,12 +349,37 @@ mod tests {
             AdminText::Field(FieldError::AtLeast(minimum)) => Some(format!("Mindestens {minimum}")),
             _ => None,
         });
-        assert_eq!(admin_text("de", Some(&texts), &field("is required")), "Pflichtfeld");
-        assert_eq!(admin_text("de", Some(&texts), &field("must be >= 2")), "Mindestens 2");
+        assert_eq!(
+            admin_text("de", "de", Some(&texts), &field("is required")),
+            "Pflichtfeld"
+        );
+        assert_eq!(
+            admin_text("de", "de", Some(&texts), &field("must be >= 2")),
+            "Mindestens 2"
+        );
         // The others: the table of the language, then English.
-        assert_eq!(admin_text("de", Some(&texts), &AdminText::Copied), "Copied");
-        assert_eq!(admin_text("fr", Some(&texts), &AdminText::Copied), "Copié");
-        assert_eq!(admin_text("fr", Some(&texts), &field("is required")), "Pflichtfeld");
+        assert_eq!(admin_text("de", "de", Some(&texts), &AdminText::Copied), "Copied");
+        assert_eq!(admin_text("fr", "fr", Some(&texts), &AdminText::Copied), "Copié");
+        assert_eq!(
+            admin_text("fr", "fr", Some(&texts), &field("is required")),
+            "Pflichtfeld"
+        );
+    }
+
+    #[test]
+    fn a_request_in_another_language_has_the_table_of_its_language() {
+        // The texts of the application are the ones of `admin_locale`, German.
+        let texts: AdminTextsFn = Arc::new(|text| match text {
+            AdminText::Copied => Some("Kopiert".to_string()),
+            _ => None,
+        });
+        assert_eq!(admin_text("fr", "de", Some(&texts), &AdminText::Copied), "Copié");
+        assert_eq!(admin_text("en", "de", Some(&texts), &AdminText::Copied), "Copied");
+        assert_eq!(admin_text("de-CH", "de", Some(&texts), &AdminText::Copied), "Kopiert");
+        // A language without a table: the texts of `admin_locale`.
+        assert_eq!(admin_text("ja", "de", Some(&texts), &AdminText::Copied), "Kopiert");
+        assert_eq!(admin_text("ja", "fr", None, &AdminText::Copied), "Copié");
+        assert_eq!(admin_text("ja", "en", None, &AdminText::Copied), "Copied");
     }
 
     #[test]
