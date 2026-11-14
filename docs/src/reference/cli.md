@@ -39,7 +39,7 @@ dependencies it was published with, and a release candidate is installed only
 when its version is named:
 
 ```bash
-cargo install --locked openshop-cli --version 0.1.0-rc.4
+cargo install --locked openshop-cli --version 0.1.0-rc.5
 ```
 
 The CLI of `main`, before a release, installs from the repository:
@@ -54,7 +54,7 @@ openshop --version
 ```
 
 ```text
-openshop 0.1.0-rc.4 (1b8a53a4cac9)
+openshop 0.1.0-rc.5 (1b8a53a4cac9)
 ```
 
 The version of the CLI, then, for a CLI built from the repository, the first

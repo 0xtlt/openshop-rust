@@ -20,7 +20,7 @@ body:
     id: version
     attributes:
       label: OpenShop version or commit
-      placeholder: "0.1.0-rc.4, or the rev in Cargo.toml"
+      placeholder: "0.1.0-rc.5, or the rev in Cargo.toml"
     validations:
       required: true
   - type: dropdown
