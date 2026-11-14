@@ -83,8 +83,9 @@ pub struct OpenShopConfig {
     /// How many requests are served at once; the ones above are answered with
     /// `503`. Defaults to 1024.
     pub max_concurrent_requests: Option<usize>,
-    /// Origins allowed to call the server cross-origin besides Shopify's,
-    /// the app's URL and, in development, the local hosts: `https://shop.example`,
+    /// Origins allowed to call `/proxy` and `/api` cross-origin besides
+    /// Shopify's, the app's URL and, in development, the local hosts (`/ext`
+    /// allows any origin): `https://shop.example`,
     /// or `null` in development. Normalized by [`OpenShopBuilder::cors_origins`].
     pub cors_origins: Vec<String>,
     /// The language of the admin pages, a language tag (`fr`, `fr-CA`): their
@@ -462,16 +463,18 @@ impl OpenShopBuilder {
         self
     }
 
-    /// Origins allowed to call `/proxy` and `/ext` cross-origin, and `/api`
-    /// where the server enables CORS on it (in development, and on an API-only
-    /// server), besides Shopify admin and storefronts,
+    /// Origins allowed to call `/proxy` cross-origin, and `/api` where the
+    /// server enables CORS on it (in development, and on an API-only server),
+    /// besides Shopify admin and storefronts,
     /// `https://extensions.shopifycdn.com`, the app's URL (`HOST`,
     /// `SHOPIFY_APP_URL`) and, in development, the local hosts. A headless
-    /// storefront on its own domain is one: `https://shop.example`.
+    /// storefront on its own domain is one: `https://shop.example`. `/ext`
+    /// does not read them: it answers `Access-Control-Allow-Origin: *`, as
+    /// Shopify asks of a backend that UI extensions call.
     ///
     /// Each value is an origin, a scheme, a host and an optional port, or
-    /// `null`, the origin of a sandboxed frame, such as an extension run by a
-    /// local simulator. `null` is refused in production, where any sandboxed
+    /// `null`, the origin of a sandboxed frame or a local file. `null` is
+    /// refused in production, where any sandboxed
     /// page or local file could send it. An empty value is ignored, another
     /// value that is not an origin is a configuration error. A second call
     /// replaces the first.

@@ -99,9 +99,10 @@ static SHOP_ORIGIN: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)^https://[a-z0-9][a-z0-9-]*\.myshopify\.com$").expect("valid regex"));
 const SHOPIFY_EXTENSION_ORIGIN: &str = "https://extensions.shopifycdn.com";
 
-/// Origins allowed to call the API cross-origin: Shopify admin and
+/// Origins allowed to call `/api` and `/proxy` cross-origin: Shopify admin and
 /// storefronts, checkout extensions, the app's own URL and its
-/// `cors_origins`, and in development the local hosts. In production a page on `localhost` is on the visitor's
+/// `cors_origins`, and in development the local hosts. `/ext` answers any
+/// origin (see `ext_cors_layer`). In production a page on `localhost` is on the visitor's
 /// own machine, not an origin of the application: it is not allowed unless
 /// the application's URL is one.
 pub fn is_allowed_cors_origin(origin: &str, configured_origins: &[String], production: bool) -> bool {
@@ -153,6 +154,15 @@ pub(crate) fn check_cors_origins(origins: &[String], production: bool) -> Result
     Ok(())
 }
 
+const CORS_METHODS: [Method; 6] = [
+    Method::GET,
+    Method::HEAD,
+    Method::PUT,
+    Method::POST,
+    Method::DELETE,
+    Method::PATCH,
+];
+
 fn cors_layer(app: &OpenShop) -> CorsLayer {
     let mut configured_origins = app.env().configured_origins();
     configured_origins.extend(app.config().cors_origins.iter().cloned());
@@ -163,14 +173,18 @@ fn cors_layer(app: &OpenShop) -> CorsLayer {
                 .to_str()
                 .is_ok_and(|origin| is_allowed_cors_origin(origin, &configured_origins, production))
         }))
-        .allow_methods([
-            Method::GET,
-            Method::HEAD,
-            Method::PUT,
-            Method::POST,
-            Method::DELETE,
-            Method::PATCH,
-        ])
+        .allow_methods(CORS_METHODS)
+        .allow_headers(AllowHeaders::mirror_request())
+}
+
+/// CORS of `/ext`: `Access-Control-Allow-Origin: *`, whatever the origin, as
+/// Shopify asks of a backend that UI extensions call: the origin of their
+/// worker may change without notice. No credentials: the session token is in
+/// `Authorization`, and it, not the origin, authenticates the request.
+fn ext_cors_layer() -> CorsLayer {
+    CorsLayer::new()
+        .allow_origin(AllowOrigin::any())
+        .allow_methods(CORS_METHODS)
         .allow_headers(AllowHeaders::mirror_request())
 }
 
@@ -325,7 +339,7 @@ pub(crate) fn create_router(app: &OpenShop, options: ServerOptions, log: bool) -
             ))
             .merge(with_cors(
                 proxy::create_proxy_routes(app, "/ext", EXTENSION_AUTH_MODES, false)?,
-                &cors,
+                &ext_cors_layer(),
             ));
     }
 
