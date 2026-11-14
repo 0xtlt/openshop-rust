@@ -64,7 +64,7 @@ async fn cargo(args: &[&str], passthrough: &[String]) -> Result<()> {
     Ok(())
 }
 
-/// `openshop 0.1.0-rc.4 (1b8a53a4cac9)`: the version of the CLI, and the commit
+/// `openshop 0.1.0-rc.5 (1b8a53a4cac9)`: the version of the CLI, and the commit
 /// of the repository it was built from, when it was built from a checkout
 /// (`cargo install --git`, `cargo install --path`).
 fn version() -> String {
