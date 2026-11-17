@@ -8,7 +8,8 @@
 //! document request without a valid one is sent to the bounce page, where
 //! App Bridge gets a fresh token and loads the page again with it.
 //!
-//! A form posts to the URL of its page, the name of its action in `_action`.
+//! A form posts to the URL of its page, the name of its action in `_action`,
+//! URL-encoded, or `multipart/form-data` when it sends files (`form.rs`).
 //! The script's request is answered with the page rendered again (or
 //! `X-OpenShop-Location`) and the toast the action asked for, in a header; a
 //! plain post with a redirect to the page. A form the page refuses, field by
@@ -18,6 +19,7 @@
 mod crons;
 mod flow_run;
 mod flows;
+pub(crate) mod form;
 mod functions;
 mod home;
 mod mcp;
@@ -28,7 +30,6 @@ mod ui;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use axum::body::to_bytes;
 use axum::extract::{Request, State};
 use axum::http::header::{AUTHORIZATION, CONTENT_TYPE, LOCATION};
 use axum::http::{HeaderValue, Method, StatusCode};
@@ -50,7 +51,7 @@ use super::shop::{ShopSession, session_of};
 use super::shop_domain::normalize_shop_domain;
 use crate::admin::{
     ACTION_FIELD, AdminFunctionKind, AdminPublicError, AdminText, CustomAdminPage, FormState, Outcome, PageRequest,
-    fields_to_json, parse_fields, with_outcome,
+    add_uploads, fields_to_json, parse_fields, with_outcome,
 };
 use crate::admin_paths::rpc::encode_uri_component as encode;
 use crate::admin_paths::{ADMIN_HOME_PATH, AdminPageId, custom_admin_route_params, match_custom_admin_path};
@@ -70,8 +71,6 @@ const TOAST_ERROR_HEADER: &str = "x-openshop-toast-error";
 const LOCATION_HEADER: &str = "x-openshop-location";
 /// What App Bridge's `fetch` answers by asking again with a fresh token.
 const RETRY_HEADER: &str = "x-shopify-retry-invalid-session-request";
-/// What a form may send: its fields, not files.
-const MAX_FORM_BYTES: usize = 256 * 1024;
 
 /// A request of the page, as the script or the browser sent it.
 struct PageCall<'a> {
@@ -188,8 +187,17 @@ pub(crate) async fn serve(
     };
     let is_post = request.method() == Method::POST;
     let response = if is_post {
-        let body = to_bytes(request.into_body(), MAX_FORM_BYTES).await.unwrap_or_default();
-        submit(&call, &body).await
+        match form::read(request).await {
+            Ok(form) => submit(&call, &form).await,
+            Err(status) => {
+                let text = if status == StatusCode::PAYLOAD_TOO_LARGE {
+                    AdminText::FormTooLarge
+                } else {
+                    AdminText::RequestFailed
+                };
+                fail(&call, status, &call.text(&text)).await
+            }
+        }
     } else {
         render(&call, StatusCode::OK, None, &FormState::default(), None).await
     };
@@ -533,8 +541,10 @@ async fn render_custom(call: &PageCall<'_>, page: &CustomAdminPage, form: &FormS
 }
 
 /// A form of the page: the action it names, then what the page shows after it.
-async fn submit(call: &PageCall<'_>, body: &[u8]) -> Response {
-    let fields = parse_fields(body);
+/// The pages of the framework read its fields; an action of the application,
+/// its files too.
+async fn submit(call: &PageCall<'_>, form: &form::Form) -> Response {
+    let fields = &form.fields;
     let action = fields
         .iter()
         .find(|(name, _)| name == ACTION_FIELD)
@@ -542,12 +552,12 @@ async fn submit(call: &PageCall<'_>, body: &[u8]) -> Response {
         .unwrap_or_default();
     let target = target(call.app, &call.pathname);
     let (outcome, revealed) = match &target {
-        Some(Target::Custom(page)) => (run_action(call, page, &action, &fields).await, None),
-        Some(Target::Home) => submit_builtin(call, None, &action, &fields).await,
+        Some(Target::Custom(page)) => (run_action(call, page, &action, form).await, None),
+        Some(Target::Home) => submit_builtin(call, None, &action, fields).await,
         Some(Target::Builtin(page))
             if resolved_admin_pages(call.app.config()).get(*page) != AdminPageMode::Disabled =>
         {
-            submit_builtin(call, Some(*page), &action, &fields).await
+            submit_builtin(call, Some(*page), &action, fields).await
         }
         _ => (Err(no_action()), None),
     };
@@ -700,14 +710,15 @@ async fn answer(call: &PageCall<'_>, outcome: Outcome, revealed: Option<Value>) 
     response
 }
 
-/// Runs the action `name` of a page with the fields of its form, read as its
-/// input schema describes them, through the access rules of the page and of
-/// the function, as an RPC call is. One log line, as for an RPC call.
+/// Runs the action `name` of a page with the fields and the files of its
+/// form, read as its input schema describes them, through the access rules of
+/// the page and of the function, as an RPC call is. One log line, as for an
+/// RPC call.
 async fn run_action(
     call: &PageCall<'_>,
     page: &CustomAdminPage,
     name: &str,
-    fields: &[(String, String)],
+    form: &form::Form,
 ) -> anyhow::Result<Outcome> {
     let not_found = || AdminPublicError::new("NOT_FOUND", "Not found").status(404);
     let function = page
@@ -728,7 +739,8 @@ async fn run_action(
         .input
         .as_ref()
         .map_or(Value::Null, |input| input.json_schema.clone());
-    let input = fields_to_json(&schema, fields);
+    let mut input = fields_to_json(&schema, &form.fields);
+    add_uploads(&schema, &mut input, &form.files);
     let context = create_context(call.app, &call.session, params, request_id.clone(), None);
     let started = Instant::now();
     let (result, outcome) = with_outcome(catch_panic(

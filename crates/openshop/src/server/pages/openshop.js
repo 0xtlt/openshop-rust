@@ -2,7 +2,9 @@
  * openshop.js: the script of the admin pages the server renders. Written by hand, embedded in the
  * binary, no dependency and no build. The server does the work; this script only presents it.
  *
- * - A form is sent in the background with App Bridge's fetch, which adds the session token. Its
+ * - A form is sent in the background with App Bridge's fetch, which adds the session token,
+ *   URL-encoded, or as `multipart/form-data` when it sends files (a file field, an
+ *   `s-drop-zone` with a `name`, `enctype="multipart/form-data"`). Its
  *   submit `s-button` has `loading` while the request runs. A form with `data-openshop-native` is
  *   left to the browser. Enter in a Polaris field submits its form, as in a native field; a
  *   `GET` form with `data-openshop-autosubmit` is sent when one of its fields changes.
@@ -44,6 +46,8 @@
   let changed = false // a field of the page was changed: a refresh would lose it
   // The Polaris fields whose Enter submits their form, as a native `<input>` does.
   const FIELDS = /^s-(text|search|number|email|url|password|money|date|color)-field$/
+  // The fields that send files: their form goes as `multipart/form-data`.
+  const FILES = 'input[type="file"], s-drop-zone[name]'
 
   const app = () => window.shopify
   const attempt = (action) => {
@@ -179,6 +183,14 @@
     }
   }
 
+  // A form that sends files goes as `multipart/form-data`, the `FormData` itself: one that says so
+  // with `enctype`, has a file field, or holds a file. `URLSearchParams` would send each file as
+  // the text `[object File]`.
+  const multipart = (form, data) =>
+    (form.getAttribute('enctype') || '').toLowerCase() === 'multipart/form-data' ||
+    form.querySelector(FILES) !== null ||
+    [...data.values()].some((value) => value instanceof File)
+
   document.addEventListener('submit', (event) => {
     const form = event.target
     if (event.defaultPrevented || !(form instanceof HTMLFormElement) || form.hasAttribute('data-openshop-native')) return
@@ -192,7 +204,7 @@
       url.search = new URLSearchParams(data).toString()
       return visit(url.href, { button })
     }
-    visit(url.href, { method: 'POST', body: new URLSearchParams(data), push: false, button })
+    visit(url.href, { method: 'POST', body: multipart(form, data) ? data : new URLSearchParams(data), push: false, button })
   })
 
   function follow(event, link) {

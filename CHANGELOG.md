@@ -1,5 +1,23 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- A form of an admin page can send files (#90). `openshop.js` posts a form
+  with an `<input type="file">`, an `s-drop-zone` with a `name`,
+  `enctype="multipart/form-data"` or a file among its values as its
+  `FormData`, `multipart/form-data`, through App Bridge's `fetch`; other forms
+  stay URL-encoded, and a `GET` form a navigation. The server reads a
+  multipart body as a form within `max_request_body_bytes` (`413` and the
+  error toast `AdminText::FormTooLarge` above it), and a field of type
+  `openshop::admin::Upload` (`file_name`, `content_type`, `bytes`; `text()`)
+  in the `#[input]` of an action receives a file. A field left empty sends no
+  file: `None` for an `Option<Upload>`, `Required` for an `Upload`. A
+  `Vec<Upload>` takes every file of its name, `[]` without one. In JSON, an
+  `Upload` is `{ fileName, contentType, bytes }`, the bytes in base64.
+- Testing: `ctx.submit_files(path, fields, files)` sends a form with files.
+
 ## 0.1.0-rc.6
 
 ### Added

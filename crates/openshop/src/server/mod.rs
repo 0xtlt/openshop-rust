@@ -222,13 +222,15 @@ async fn health() -> Response {
 }
 
 /// Whether a request is a form sent by a page of the admin: its body is
-/// `application/x-www-form-urlencoded`.
+/// `application/x-www-form-urlencoded`, or `multipart/form-data` when it
+/// sends files.
 fn is_form(request: &Request) -> bool {
     request
         .headers()
         .get(axum::http::header::CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
         .is_some_and(|value| value.starts_with("application/x-www-form-urlencoded"))
+        || pages::form::is_multipart(request.headers())
 }
 
 /// Builds the application router.

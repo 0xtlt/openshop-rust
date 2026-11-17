@@ -629,6 +629,67 @@ impl TestContext {
             .body(serde_urlencoded::to_string(fields).unwrap_or_default())
     }
 
+    /// A form of the page at `path` that sends files, as the admin sends one
+    /// with a file field: `multipart/form-data`, `fields` then `files`, each
+    /// file under the name of its field. The answer is
+    /// [`submit`](Self::submit)'s. An [`Upload`](crate::admin::Upload) whose
+    /// name and content are empty is a file field left empty.
+    ///
+    /// ```no_run
+    /// # async fn example(ctx: &openshop::testing::TestContext) -> openshop::Result<()> {
+    /// use openshop::admin::Upload;
+    ///
+    /// let members = Upload::new("members.csv", "text/csv", "email,points\na@example.com,10\n");
+    /// let imported = ctx
+    ///     .submit_files("/members", &[("_action", "import")], &[("file", &members)])
+    ///     .send()
+    ///     .await?;
+    /// assert_eq!(imported.status(), 200);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn submit_files(
+        &self,
+        path: &str,
+        fields: &[(&str, &str)],
+        files: &[(&str, &crate::admin::Upload)],
+    ) -> reqwest::RequestBuilder {
+        let boundary = format!("openshop-{}", Uuid::new_v4().simple());
+        // The names are escaped as a browser escapes them.
+        let quoted = |name: &str| name.replace('"', "%22").replace('\r', "%0D").replace('\n', "%0A");
+        let mut body = Vec::new();
+        for (name, value) in fields {
+            body.extend_from_slice(
+                format!(
+                    "--{boundary}\r\nContent-Disposition: form-data; name=\"{}\"\r\n\r\n{value}\r\n",
+                    quoted(name)
+                )
+                .as_bytes(),
+            );
+        }
+        for (name, upload) in files {
+            body.extend_from_slice(
+                format!(
+                    "--{boundary}\r\nContent-Disposition: form-data; name=\"{}\"; filename=\"{}\"\r\nContent-Type: {}\r\n\r\n",
+                    quoted(name),
+                    quoted(&upload.file_name),
+                    upload.content_type
+                )
+                .as_bytes(),
+            );
+            body.extend_from_slice(&upload.bytes);
+            body.extend_from_slice(b"\r\n");
+        }
+        body.extend_from_slice(format!("--{boundary}--\r\n").as_bytes());
+        self.post(path)
+            .header("x-openshop-fetch", "1")
+            .header(
+                reqwest::header::CONTENT_TYPE,
+                format!("multipart/form-data; boundary={boundary}"),
+            )
+            .body(body)
+    }
+
     /// Reset all fakes call history
     pub fn reset_fakes(&self) {
         self.fakes.reset();
