@@ -13,6 +13,15 @@
 # dependency starts to compile it, ignore the advisory here with that reason
 # or drop the dependency.
 unmaintained = "workspace"
+# chrono and chrono-tz were declared unmaintained in November 2026, with no
+# fixed version. openshop re-exports chrono (`pub use chrono`) and takes its
+# types in its public API, and croner, shopify_api and sqlx depend on it too, so
+# replacing it (jiff or time) is a breaking change for a later release, not a
+# fix. Neither advisory is a vulnerability.
+ignore = [
+    { id = "RUSTSEC-2026-0543", reason = "chrono unmaintained: in the public API and in croner, shopify_api and sqlx; replacing it is a breaking change" },
+    { id = "RUSTSEC-2026-0555", reason = "chrono-tz unmaintained: follows chrono, replaced with it" },
+]
 
 [licenses]
 # What the dependency tree uses, all permissive. `r-efi` is offered under
