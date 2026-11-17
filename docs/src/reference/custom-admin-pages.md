@@ -377,6 +377,60 @@ of the URL, which the loaders read. Every list, filter and page is a URL. A
 link to another page of the admin is a plain path: `a href="/reviews/42"`,
 `s-link href=…`, `s-button href=…`.
 
+### Files
+
+A form that sends files is posted as `multipart/form-data`: one with an
+`<input type="file">`, an `s-drop-zone` with a `name`, or
+`enctype="multipart/form-data"`. A field of type `openshop::admin::Upload` in
+the input of the action receives a file, next to its text fields:
+
+```rust,ignore
+use openshop::admin::Upload;
+
+#[input]
+pub struct Import {
+    pub file: Upload,
+    pub dry_run: bool,
+}
+
+#[action]
+async fn import(_ctx: AdminContext, input: Import) -> Result<Outcome> {
+    let rows = input.file.text()?.lines().skip(1).count();
+    Ok(Outcome::toast(format!("{rows} rows in {}", input.file.file_name)))
+}
+
+#[view]
+fn view(form: FormState) -> Markup {
+    html! {
+        form method="post" {
+            input type="hidden" name="_action" value=(Self::IMPORT);
+            s-drop-zone name="file" label="Members" accept=".csv" error=[form.error("file")] {}
+            s-checkbox name="dryRun" label="Dry run" {}
+            s-button type="submit" { "Import" }
+        }
+    }
+}
+```
+
+| `Upload` | Contract |
+| --- | --- |
+| `file_name` | The name the browser sends, without a directory: `members.csv`. Whoever sends the form chooses it: never a path to write to as it is. |
+| `content_type` | The media type the browser gives, `application/octet-stream` when it gives none. |
+| `bytes` | The content; `text()` reads it as UTF-8, `len()` gives its size. |
+
+- A field left empty (no file chosen) sends no file: an `Option<Upload>` is
+  `None`, an `Upload` is refused with `Required`.
+- A `Vec<Upload>` takes every file of its name (`multiple`), `[]` when none
+  was chosen. An `Upload` takes one, the last of its name, as a text field
+  does.
+- The whole request is at most `max_request_body_bytes` (2 MB unless `app!`
+  sets it): a larger form is answered `413`, with the error toast `The form
+  is too large to be sent.` A form without files may send 256 KB.
+- A refused form comes back with its text fields; a browser cannot be given a
+  file back, so the merchant chooses it again.
+- In JSON, an RPC call or `ctx.call_action`, an `Upload` is
+  `{ "fileName": …, "contentType": …, "bytes": "<base64>" }`.
+
 ### Form errors
 
 A view that declares a parameter `form: FormState` (or `&FormState`) shows a
@@ -447,7 +501,8 @@ It is the `<html lang>` of every page, and the language of:
   could not be displayed.`), and of a page whose access rule said no (`This
   page is disabled.`);
 - the error toast of an action that failed with an error the merchant may not
-  read (`Internal server error`);
+  read (`Internal server error`), and of a form larger than
+  `max_request_body_bytes` (`The form is too large to be sent.`);
 - the toasts of `openshop.js` (`Something went wrong. Try again.`, `Copied`,
   `Could not copy`), which the server writes on `<html data-openshop-texts>`.
 
@@ -661,7 +716,8 @@ returns an `Outcome` gives back an `Outcome`; `call_loader_as` and
 `call_action_as` for another shop or staff user). `ctx.page(path)` asks for
 the page as the admin does and gives the HTML of the whole document, the page
 in `<main id="openshop-page">`, and `ctx.submit(path, &[("_action",
-Page::SAVE), …])` sends a form of it: the page rendered again, its toast in
+Page::SAVE), …])` sends a form of it (`ctx.submit_files(path, fields, files)`
+one with [files](#files)): the page rendered again, its toast in
 `x-openshop-toast` or `x-openshop-toast-error`, percent-encoded, which
 `openshop::testing::toast(&response)` and `toast_error(&response)` read
 decoded, `422` and the errors under the fields when the form is refused.

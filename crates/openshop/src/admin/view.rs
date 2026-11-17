@@ -301,7 +301,7 @@ pub(crate) fn parse_fields(encoded: &[u8]) -> Vec<(String, String)> {
 /// The JSON types a property of a schema accepts: `"type": "boolean"` or
 /// `"type": ["integer", "null"]`, through a local `$ref` and the alternatives
 /// of `anyOf` and `oneOf` (`Option<Mode>` is `anyOf: [{ "$ref": … }, { "type": "null" }]`).
-fn property_types<'a>(property: &'a Value, root: &'a Value) -> Vec<&'a str> {
+pub(super) fn property_types<'a>(property: &'a Value, root: &'a Value) -> Vec<&'a str> {
     fn collect<'a>(property: &'a Value, root: &'a Value, depth: usize, types: &mut Vec<&'a str>) {
         if depth > 8 {
             return;

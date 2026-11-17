@@ -217,6 +217,7 @@ fn another_shop() -> TestOptions {
 | `call_action(path, name, input)` / `call_action_as(path, name, input, shop, sub)` | The same for an action. |
 | `page(path)` | A request for the admin page at `path` as the admin asks for it: the HTML of the whole document. See [Test a page](#test-a-page). |
 | `submit(path, fields)` | A form of the admin page at `path`, sent as the admin sends it. `toast(&response)` and `toast_error(&response)` read its toasts, decoded. `.locale("fr")` on either sends the language of the staff member's admin: see [Test a page in a language](#test-a-page-in-a-language). |
+| `submit_files(path, fields, files)` | The same for a form that sends files, as `multipart/form-data`: `files` is `&[("file", &upload)]`, each an `openshop::admin::Upload`. |
 | `webhook(topic, payload)` | A delivery of a webhook to `/webhooks`, signed with the secret of the test and with the headers Shopify sends. See [Deliver a webhook](#deliver-a-webhook). |
 | `get`, `post`, `put`, `patch`, `delete`, `request(method, path)` | Request builders authenticated with a session token for the default shop. |
 | `request_as(method, path, shop, sub)` | Request authenticated as staff user `sub` of `shop`. |
@@ -832,6 +833,10 @@ of it, `fields` with the name of the action in `_action`, as the admin's
 script sends it. `toast(&response)` and `toast_error(&response)` read the
 toasts of the answer, decoded: the headers are percent-encoded
 (`Saved%20Great`). Read them before the body, which `text()` consumes.
+`ctx.submit_files(path, fields, files)` sends a form with
+[files](custom-admin-pages.md#files), each an `Upload` under the name of its
+field; `Upload::new("", "application/octet-stream", Vec::new())` is a file
+field left empty.
 
 ```rust,ignore
 use my_app::APP;

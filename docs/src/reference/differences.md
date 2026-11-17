@@ -198,6 +198,9 @@ larger configurations easier to split:
   `/auth/session-token`, the bounce page of Shopify's libraries.
 - Custom admin pages are `#[admin_page]` blocks whose view returns `Markup`,
   in place of `page.tsx` files compiled by Vite.
+- A form of an admin page can send files: `multipart/form-data`, each file in
+  an `openshop::admin::Upload` field of the input of the action (in JSON, its
+  bytes in base64). The TypeScript actions take JSON only.
 - In `dev`, there is no Vite server and no module replacement: a page reloads
   when the app has been started again, which `GET /__openshop/reload`, a route
   of `dev` only, tells it.

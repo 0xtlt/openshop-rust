@@ -33,7 +33,8 @@ schemars.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 aes-gcm.workspace = true
-axum.workspace = true
+# `multipart`: the forms of the admin pages that send files.
+axum = { workspace = true, features = ["multipart"] }
 base64.workspace = true
 chrono.workspace = true
 chrono-tz.workspace = true

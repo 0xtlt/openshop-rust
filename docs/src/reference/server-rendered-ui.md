@@ -196,12 +196,17 @@ https://admin.shopify.com` (any shop and `localhost` in development).
 
 ## `openshop.js`
 
-233 lines, 4.1 KB with Brotli, served at `/__openshop/openshop.js?v=<hash>`
+262 lines, 3.9 KB with Brotli, served at `/__openshop/openshop.js?v=<hash>`
 with `immutable`. Its whole job:
 
 1. **Forms.** `submit` of a same-origin form is sent with `fetch` (App
    Bridge's, which adds the token), `X-OpenShop-Fetch: 1`, the body as
-   `application/x-www-form-urlencoded`. A `GET` form puts its fields in the
+   `application/x-www-form-urlencoded`, or as its `FormData`,
+   `multipart/form-data`, when it sends files: an `<input type="file">`, an
+   `s-drop-zone` with a `name`, `enctype="multipart/form-data"`, or a file
+   among its values. The server reads a multipart body within
+   `max_request_body_bytes`, its files in the `Upload` fields of the input of
+   the action. A `GET` form puts its fields in the
    query and is a navigation. The submit `s-button` has `loading` while the
    request runs, and the admin's loading bar is on (`shopify.loading`). A form
    with `data-openshop-native` is left to the browser. Enter in a Polaris

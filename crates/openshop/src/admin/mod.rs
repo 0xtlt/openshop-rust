@@ -25,10 +25,13 @@ use crate::types::{AdminMenuItem, InputSchema};
 pub use crate::types::{CustomAdminPageAccess, CustomAdminPagesResponse, ResolvedAdminPages};
 
 mod locale;
+mod upload;
 mod view;
 pub use crate::admin_paths::AdminFunctionKind;
 pub use locale::{AdminText, AdminTextsFn, FieldError};
 pub(crate) use locale::{admin_text, is_language_tag};
+pub use upload::Upload;
+pub(crate) use upload::add_uploads;
 pub use view::{ACTION_FIELD, AdminView, FormState, Outcome, PageRequest, output};
 pub(crate) use view::{fields_to_json, parse_fields, with_outcome};
 

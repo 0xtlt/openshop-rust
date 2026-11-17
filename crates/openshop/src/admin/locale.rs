@@ -34,6 +34,9 @@ pub enum AdminText {
     Copied,
     /// The toast of a copy button the browser refused: `Could not copy`.
     CopyFailed,
+    /// The error toast of a form larger than `max_request_body_bytes`, its
+    /// files with it: `The form is too large to be sent.`
+    FormTooLarge,
 }
 
 /// What the input schema of an action says of the value of a field.
@@ -173,6 +176,7 @@ fn english(text: &AdminText) -> String {
         AdminText::RequestFailed => return "Something went wrong. Try again.".to_string(),
         AdminText::Copied => return "Copied".to_string(),
         AdminText::CopyFailed => return "Could not copy".to_string(),
+        AdminText::FormTooLarge => return "The form is too large to be sent.".to_string(),
     };
     match field {
         FieldError::Required => "Required".to_string(),
@@ -209,6 +213,7 @@ fn french(text: &AdminText) -> Option<String> {
         AdminText::RequestFailed => return Some("Une erreur s’est produite. Réessayez.".to_string()),
         AdminText::Copied => return Some("Copié".to_string()),
         AdminText::CopyFailed => return Some("Impossible de copier".to_string()),
+        AdminText::FormTooLarge => return Some("Le formulaire est trop volumineux pour être envoyé.".to_string()),
     };
     Some(match field {
         FieldError::Required => "Obligatoire".to_string(),
@@ -333,6 +338,11 @@ mod tests {
             ),
             (AdminText::Copied, "Copied", "Copié"),
             (AdminText::CopyFailed, "Could not copy", "Impossible de copier"),
+            (
+                AdminText::FormTooLarge,
+                "The form is too large to be sent.",
+                "Le formulaire est trop volumineux pour être envoyé.",
+            ),
         ] {
             assert_eq!(admin_text("en", "en", None, &text), en, "{text:?}");
             assert_eq!(admin_text("fr", "fr", None, &text), fr, "{text:?}");

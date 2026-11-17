@@ -210,4 +210,42 @@ mod tests {
         // Every page that comes back goes through `present`.
         assert_eq!(SCRIPT.matches(".replaceChildren(").count(), 1, "{SCRIPT}");
     }
+
+    /// A form that sends files is posted as its `FormData`, which `fetch`
+    /// sends as `multipart/form-data` (#90): `URLSearchParams` makes each file
+    /// the text `[object File]`. A form without files is URL-encoded as
+    /// before, and a `GET` form stays a navigation.
+    #[test]
+    fn the_script_sends_a_form_with_files_as_multipart() {
+        assert!(
+            SCRIPT.contains(r#"const FILES = 'input[type="file"], s-drop-zone[name]'"#),
+            "{SCRIPT}"
+        );
+        let multipart = SCRIPT
+            .split("const multipart = (form, data) =>")
+            .nth(1)
+            .and_then(|rest| rest.split("\n\n").next())
+            .expect("multipart in openshop.js");
+        for reason in [
+            "(form.getAttribute('enctype') || '').toLowerCase() === 'multipart/form-data'",
+            "form.querySelector(FILES) !== null",
+            "[...data.values()].some((value) => value instanceof File)",
+        ] {
+            assert!(multipart.contains(reason), "{reason} in {multipart}");
+        }
+
+        let submit = SCRIPT
+            .split("document.addEventListener('submit', (event) => {")
+            .nth(1)
+            .and_then(|rest| rest.split("\n  })\n").next())
+            .expect("the submit listener of openshop.js");
+        let get = submit.find("=== 'get'").expect("a GET form");
+        let query = submit
+            .find("url.search = new URLSearchParams(data).toString()")
+            .expect("a GET form puts its fields in the query");
+        let post = submit
+            .find("method: 'POST', body: multipart(form, data) ? data : new URLSearchParams(data)")
+            .expect("a POST form is multipart when it sends files");
+        assert!(get < query && query < post, "{submit}");
+    }
 }

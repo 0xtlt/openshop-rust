@@ -10,6 +10,7 @@ mod locale;
 mod mcp;
 mod providers;
 mod staff_language;
+mod uploads;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -219,7 +220,7 @@ impl SettingsPage {
 }
 
 static APP: App = app! {
-    admin_pages: [HomePage, NewReviewPage, ReviewPage, ReportsPage, PrivatePage, SettingsPage],
+    admin_pages: [HomePage, NewReviewPage, ReviewPage, ReportsPage, PrivatePage, SettingsPage, uploads::ImportPage],
 };
 
 pub(super) async fn context() -> TestContext {
