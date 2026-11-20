@@ -216,7 +216,7 @@ pub(crate) struct ClientCredentials {
 pub(crate) struct Stored {
     pub token: Option<String>,
     /// The token as the row holds it, to write over it only if it is still there.
-    ciphertext: Option<String>,
+    pub ciphertext: Option<String>,
     pub uninstalled: bool,
 }
 
@@ -351,6 +351,19 @@ impl ClientCredentials {
             return false;
         };
         *granted == digest(token) && *expires_at - RENEWAL_MARGIN <= Utc::now()
+    }
+
+    /// Whether `token` of `shop` may be one the grant gave rather than an
+    /// offline token of an installation: `shop` is the one the application
+    /// names for the grant, or this process obtained `token`. Such a token
+    /// expires: a `401` does not tell that the app was uninstalled.
+    pub(crate) fn may_have_granted(&self, shopify_app: &str, shop: &str, token: &str) -> bool {
+        self.configured.as_deref() == Some(shop)
+            || self
+                .entries()
+                .get(&app_shop(shopify_app, shop))
+                .and_then(|entry| entry.granted)
+                .is_some_and(|(granted, _)| granted == digest(token))
     }
 
     /// Whether `token` is one this process obtained, for which the token

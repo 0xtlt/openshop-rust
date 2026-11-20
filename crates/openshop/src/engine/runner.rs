@@ -28,6 +28,7 @@ use crate::runtime::time::to_iso;
 use crate::server::connectors::Connectors;
 use crate::server::shopify_apps::DEFAULT_SHOPIFY_APP_HANDLE;
 use crate::shopify::client::ShopifyClient;
+use crate::shopify::unavailable::run_shop_unavailable;
 use crate::types::{ErrorContext, FlowContext, JsonMap, ResolvedRetryPolicy};
 
 /// Default delay between two lease extensions.
@@ -124,6 +125,17 @@ pub enum RunOutcome {
     Canceled,
     /// Another worker took over the run, or it was canceled from elsewhere.
     LeaseLost,
+    /// The flow failed because the Admin API no longer serves the shop of the
+    /// run: `status` is `401` (the access token is refused: the app was
+    /// uninstalled), `402` (the shop is frozen), `403` (blocked), `404`
+    /// (closed) or `423` (locked). See [`shop_unavailable`](crate::shop_unavailable).
+    ///
+    /// Not a failure: the run is stored `canceled` with the error, is not
+    /// tried again, is not reported to Sentry nor to `on_error`, and logs a
+    /// warning. A shop that pays its bill comes back at the next run.
+    ShopUnavailable {
+        status: u16,
+    },
 }
 
 /// Stops the heartbeat and forgets the cancellation token on every exit path.
@@ -474,6 +486,18 @@ async fn run_attempt(app: &OpenShop, opts: RunFlowOptions) -> Result<RunOutcome>
                         json!({ "flowName": flow_name }),
                     );
                     RunOutcome::Canceled
+                } else {
+                    RunOutcome::LeaseLost
+                }
+            } else if let Some(status) = run_shop_unavailable(&error, &opts.shop, &shopify_app) {
+                // Shopify no longer serves the shop: nothing is wrong with the application.
+                let message = error_message(&error);
+                if finish_run(db, run_id, owner, "canceled", Some(&message), None).await? {
+                    logger.warn_with(
+                        format!("Flow \"{flow_name}\" stopped, the shop is unavailable: {message}"),
+                        json!({ "flowName": flow_name, "status": status, "error": message }),
+                    );
+                    RunOutcome::ShopUnavailable { status }
                 } else {
                     RunOutcome::LeaseLost
                 }

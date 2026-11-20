@@ -153,6 +153,13 @@ integration, set the target explicitly, for example
 `.shop("example.myshopify.com")`. Configure credentials for every targeted shop
 before enabling the schedule.
 
+A shop that Shopify no longer serves (closed, frozen, locked, or the app
+uninstalled without `app/uninstalled`) does not fail the run: the Admin API
+answers `401`, `402`, `403`, `404` or `423`, and the run ends as
+`RunOutcome::ShopUnavailable`, with a warning in the logs and no Sentry event.
+A `401` also marks the installation uninstalled, so later firings skip the
+shop. See [Unavailable shops](../reference/errors.md#unavailable-shops).
+
 The app refuses to start with an invalid schedule, a cron that names a flow
 it does not list, or an `input` its flow does not accept: `{ "limit": 0 }`
 here stops it with

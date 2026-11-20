@@ -209,17 +209,40 @@ pub(crate) async fn record_uninstall(app: &OpenShop, shopify_app: &str, webhook:
     if webhook.verify_payload_shop().is_err() {
         return Ok(false);
     }
-    let shop = webhook.shop().to_string();
-    sqlx::query(
-        "UPDATE installations SET uninstalled_at = now(), access_token = NULL WHERE app_handle = $1 AND shop = $2",
+    mark_uninstalled(app, shopify_app, webhook.shop().as_str(), None).await?;
+    Ok(true)
+}
+
+/// Marks the installation of `shop` uninstalled and deletes its access token,
+/// and forgets the token of the client credentials grant and the plan held
+/// for it: what an `app/uninstalled` delivery does, and a `401` of the Admin
+/// API to the offline token of the installation. With `token`, the access
+/// token as the row held it when it was read, only while the row still holds
+/// it: a shop installed again since keeps its new token. Whether a row was
+/// marked.
+///
+/// An installation by OAuth or the token exchange sets `uninstalled_at` back
+/// to `NULL` (`store_access_token`).
+pub(crate) async fn mark_uninstalled(
+    app: &OpenShop,
+    shopify_app: &str,
+    shop: &str,
+    token: Option<&str>,
+) -> anyhow::Result<bool> {
+    let marked = sqlx::query(
+        "UPDATE installations SET uninstalled_at = now(), access_token = NULL \
+         WHERE app_handle = $1 AND shop = $2 AND ($3::text IS NULL OR access_token = $3)",
     )
     .bind(shopify_app)
-    .bind(&shop)
+    .bind(shop)
+    .bind(token)
     .execute(app.db())
-    .await?;
-    app.client_credentials().forget(shopify_app, &shop);
-    app.plans().forget(shopify_app, &shop).await;
-    Ok(true)
+    .await?
+    .rows_affected()
+        > 0;
+    app.client_credentials().forget(shopify_app, shop);
+    app.plans().forget(shopify_app, shop).await;
+    Ok(marked)
 }
 
 async fn app_uninstalled(State(app): State<OpenShop>, headers: HeaderMap, body: Bytes) -> ApiResult {

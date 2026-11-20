@@ -44,8 +44,9 @@ same value and fails with the same error.
 Normal run states are `pending`, `running`, `sleeping`, `completed`, `failed`,
 and `canceled`. Executing a run, as a worker does and as `ctx.run_flow(…)`
 does in a test, gives a `RunOutcome`: `Completed`, `Sleeping { resume_at }`,
-`Failed { error, will_retry }`, `Canceled`, or `LeaseLost`. A flow that fails
-is the outcome `Failed`, not an `Err`. A worker lease loss
+`Failed { error, will_retry }`, `Canceled`, `LeaseLost`, or
+`ShopUnavailable { status }` (see [Unavailable shops](#unavailable-shops)). A
+flow that fails is the outcome `Failed`, not an `Err`. A worker lease loss
 (`RunOutcome::LeaseLost`) is an execution result used to prevent an outdated
 worker from committing over a newer lease; it is not stored as a run state.
 
@@ -60,6 +61,65 @@ messages the engine stores on runs:
 | `Flow timed out — exceeded maximum allowed duration` | The run passed its deadline before a worker could finish it. |
 | `Flow "<flow>" not registered` | A worker claimed a run of a flow that its binary does not register. |
 | `Worker error: <message>` | The run could not be started, for example because provider configuration could not be decrypted. |
+
+## Unavailable shops
+
+When Shopify no longer serves a shop to the app, the Admin API answers every
+request of its installation with one of these statuses:
+
+| Status | What Shopify means |
+| --- | --- |
+| `401` | The access token is refused: the app was uninstalled, and `app/uninstalled` never arrived. |
+| `402` | The shop is frozen: an unpaid bill, a trial that ended. |
+| `403` | The shop is blocked. |
+| `404` | The shop is closed. |
+| `423` | The shop is locked. |
+
+A call of `ctx.shopify` (`execute`, `graphql`) that gets one fails with
+`openshop::ShopUnavailable` (`shop`, `shopify_app`, `status`), whose message is
+`Shop "<shop>" is unavailable to app "<app>": the Admin API answered <status> (<meaning>)`.
+It wraps the `shopify_api::Error::Http` Shopify answered:
+`downcast_ref::<shopify_api::Error>()` still finds it.
+
+`openshop::shop_unavailable(&error)` reads the status from any error, without
+a downcast: `Some(status)` for one of those statuses of the Admin API, also
+when the error comes from the client of `ctx.shopify.api()`, and `None` for
+anything else.
+
+```rust,ignore
+for shopify in clients {
+    match shopify.execute(graphql!("query { shop { id } }")).await {
+        Ok(data) => keep(data),
+        Err(error) => match openshop::shop_unavailable(&error) {
+            Some(status) => ctx.logger.warn(format!("{} skipped ({status})", shopify.shop)),
+            None => return Err(error),
+        },
+    }
+}
+```
+
+A run whose flow fails with such an error for its own shop is not a failure:
+
+- its outcome is `RunOutcome::ShopUnavailable { status }`;
+- it is stored `canceled`, with the message as its `error`, and is not tried
+  again: a cron runs it again at its next firing, and a frozen shop that pays
+  its bill is served again;
+- it logs a warning, `Flow "<flow>" stopped, the shop is unavailable: <error>`,
+  and is reported neither to [Sentry](sentry.md) nor to `on_error`.
+
+The same status for another shop than the run's, from a client whose `shop`
+was changed, is a failure of the run.
+
+A `401` to the offline access token of the installation also marks the
+installation uninstalled, as `app/uninstalled` does: its `uninstalled_at` is
+set and its token deleted, so that a cron of `.all_shops()` no longer runs for
+the shop. The update applies only while the row still holds the token that
+was refused: a shop installed again meanwhile keeps its new token. A new
+installation by OAuth or the token exchange of a session token sets
+`uninstalled_at` back to `NULL`. A token of the client credentials grant,
+which expires, is not taken for an uninstallation, and the calls made on the
+client of `ctx.shopify.api()` do not mark anything. The other statuses leave
+the shop installed.
 
 ## Admin function errors
 

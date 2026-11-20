@@ -1,5 +1,31 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- A shop Shopify no longer serves no longer fails its runs (#96). When the
+  Admin API answers `401`, `402`, `403`, `404` or `423`, a call of
+  `ctx.shopify` (`execute`, `graphql`) fails with `openshop::ShopUnavailable`
+  (`shop`, `shopify_app`, `status`), around the `shopify_api::Error::Http`,
+  which `downcast_ref` still finds. A run whose flow fails with it for its own
+  shop ends as the new `RunOutcome::ShopUnavailable { status }`: stored
+  `canceled` with the error, not tried again, a warning in the logs, nothing
+  sent to Sentry nor to `on_error`.
+- `openshop::shop_unavailable(&error) -> Option<u16>`: the status when an
+  error says the shop is unavailable, also for the client of
+  `ctx.shopify.api()`, without a downcast.
+
+### Changed
+
+- A `401` of the Admin API to the offline token of an installation marks it
+  uninstalled, as `app/uninstalled` does (`uninstalled_at = now()`, the token
+  deleted), while its row still holds that token: a cron of `.all_shops()` no
+  longer runs for the shop. OAuth or the token exchange installs it again. A
+  token of the client credentials grant is not taken for an uninstallation.
+- `RunOutcome` has a new variant: a `match` without a wildcard arm needs one
+  for `ShopUnavailable`.
+
 ## 0.1.0-rc.7
 
 ### Added

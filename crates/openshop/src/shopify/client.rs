@@ -11,9 +11,12 @@ use serde_json::Value;
 use shopify_api::{ApiVersion, Operation, ShopDomain, Shopify};
 use tokio::sync::Mutex;
 
-use super::client_credentials::{Grant, GrantClient, stored};
+use super::client_credentials::{Grant, GrantClient, Stored, stored};
+use super::unavailable::{ShopUnavailable, refusal};
 use super::{AppShop, app_shop};
 use crate::app::OpenShop;
+use crate::runtime::logger;
+use crate::server::auth::mark_uninstalled;
 use crate::server::shop_domain::strict_shop_domain;
 
 /// The `shopify_api` client of an app and shop, as a client and its clones
@@ -22,8 +25,13 @@ use crate::server::shop_domain::strict_shop_domain;
 enum Resolved {
     /// The shop has no token, and none may be asked for.
     None,
-    /// The stored token, sent as it is.
-    Stored(Shopify),
+    /// The offline token of the installation row, sent as it is.
+    Stored {
+        client: Shopify,
+        token: String,
+        /// The token as the row holds it.
+        ciphertext: Option<String>,
+    },
     /// The shared client that renews the token with the client credentials
     /// grant, for a caller of this kind.
     Granted(GrantClient, Grant),
@@ -54,6 +62,16 @@ type Clients = Arc<Mutex<HashMap<AppShop, Resolved>>>;
 /// request also asks for the shop and app of its verified session token when
 /// it has no token, and for those only: a clone pointed at another shop or
 /// app may do what background work may.
+///
+/// When the Admin API answers that it no longer serves the shop (`401`,
+/// `402`, `403`, `404` or `423`), the call fails with a [`ShopUnavailable`]
+/// (read it with [`shop_unavailable`](crate::shop_unavailable)), and a run
+/// that fails with it for its own shop is not a failure. A `401` to the
+/// offline token of the installation also marks the installation
+/// uninstalled, as `app/uninstalled` does: the token is deleted, and a cron
+/// of `.all_shops()` no longer runs for the shop until it installs the app
+/// again. The calls made on the client of [`api`](Self::api) are not
+/// watched.
 #[derive(Clone)]
 pub struct ShopifyClient {
     pub shop: String,
@@ -125,13 +143,27 @@ impl ShopifyClient {
                 .map(|client| Resolved::Granted(client, grant.clone())),
             None => None,
         };
-        let resolved = match (granted, stored.and_then(|stored| stored.token)) {
+        let resolved = match (granted, stored) {
             (Some(granted), _) => granted,
-            (None, Some(token)) => {
+            (
+                None,
+                Some(Stored {
+                    token: Some(token),
+                    ciphertext,
+                    ..
+                }),
+            ) => {
                 let oauth = &self.app.apps().by_handle(Some(&self.shopify_app))?.oauth;
-                Resolved::Stored(oauth.builder(&ShopDomain::new(&shop)?).access_token(token).build()?)
+                Resolved::Stored {
+                    client: oauth
+                        .builder(&ShopDomain::new(&shop)?)
+                        .access_token(token.clone())
+                        .build()?,
+                    token,
+                    ciphertext,
+                }
             }
-            (None, None) => Resolved::None,
+            _ => Resolved::None,
         };
         // A shop without a token may have one at the next request: a grant
         // held back no longer is, a merchant installed the app.
@@ -150,7 +182,7 @@ impl ShopifyClient {
                 self.shopify_app,
                 self.domain()?,
             ),
-            Resolved::Stored(client) => client.clone(),
+            Resolved::Stored { client, .. } => client.clone(),
             Resolved::Granted(granted, _) => granted.client.clone(),
         };
         let client = match &self.app.config().shopify_retry {
@@ -190,7 +222,7 @@ impl ShopifyClient {
             Err(error) => error,
         };
         let Resolved::Granted(granted, grant) = &resolved else {
-            return Err(error.into());
+            return Err(self.refused(&resolved, error).await);
         };
         let shop = self.domain()?;
         if !self
@@ -198,13 +230,72 @@ impl ShopifyClient {
             .client_credentials()
             .failed(&self.shopify_app, &shop, grant, granted, &error)
         {
-            return Err(error.into());
+            return Err(self.refused(&resolved, error).await);
         }
         self.clients.lock().await.remove(&app_shop(&self.shopify_app, &shop));
         match self.resolved().await? {
             // A token Shopify gave that could not be stored: that is the answer.
             Resolved::None if matches!(error, shopify_api::Error::TokenStore(_)) => Err(error.into()),
-            resolved => Ok(call(self.client_of(&resolved)?).await?),
+            resolved => match call(self.client_of(&resolved)?).await {
+                Ok(value) => Ok(value),
+                Err(error) => Err(self.refused(&resolved, error).await),
+            },
+        }
+    }
+
+    /// The error of a call the client `resolved` sent and Shopify answered
+    /// with `error`. When the Admin API no longer serves the shop, it is a
+    /// [`ShopUnavailable`] around `error`; a `401` to the offline token of the
+    /// installation also marks the installation uninstalled.
+    async fn refused(&self, resolved: &Resolved, error: shopify_api::Error) -> anyhow::Error {
+        let Some((status, _)) = refusal(&error) else {
+            return error.into();
+        };
+        let Ok(shop) = self.domain() else {
+            return error.into();
+        };
+        if status == 401
+            && let Resolved::Stored {
+                token,
+                ciphertext: Some(ciphertext),
+                ..
+            } = resolved
+        {
+            self.uninstalled(&shop, token, ciphertext).await;
+        }
+        anyhow::Error::from(error).context(ShopUnavailable {
+            shop,
+            shopify_app: self.shopify_app.clone(),
+            status,
+        })
+    }
+
+    /// The Admin API refused `token`, the offline token of the installation
+    /// of `shop` (`ciphertext` as its row holds it): the app was uninstalled,
+    /// and `app/uninstalled` did not arrive. The installation is marked
+    /// uninstalled while its row still holds that token. Not a token the
+    /// client credentials grant may have given, which expires.
+    async fn uninstalled(&self, shop: &str, token: &str, ciphertext: &str) {
+        self.clients.lock().await.remove(&app_shop(&self.shopify_app, shop));
+        if self
+            .app
+            .client_credentials()
+            .may_have_granted(&self.shopify_app, shop, token)
+        {
+            return;
+        }
+        match mark_uninstalled(&self.app, &self.shopify_app, shop, Some(ciphertext)).await {
+            Ok(true) => logger::warn(format!(
+                "[openshop] The Admin API refused the access token of shop \"{shop}\" for app \"{}\" (401): \
+                 its installation is marked uninstalled",
+                self.shopify_app
+            )),
+            Ok(false) => {}
+            Err(error) => logger::warn(format!(
+                "[openshop] Could not mark the installation of shop \"{shop}\" for app \"{}\" uninstalled \
+                 after a 401 of the Admin API: {error:#}",
+                self.shopify_app
+            )),
         }
     }
 
