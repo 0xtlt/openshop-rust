@@ -43,4 +43,5 @@ mod server_routes;
 mod shopify_endpoints;
 mod testing_harness;
 mod typed_providers;
+mod unavailable_shops;
 mod webhooks;

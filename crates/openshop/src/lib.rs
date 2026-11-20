@@ -116,7 +116,7 @@ pub use runtime::{ContextLogger, FlowLogger, RuntimeLogger};
 pub use server::UiSource;
 pub use server::connectors::Connectors;
 pub use server::http::PublicError;
-pub use shopify::{PartnerApi, PartnerApiClient, ShopifyClient, ShopifyEndpoints};
+pub use shopify::{PartnerApi, PartnerApiClient, ShopUnavailable, ShopifyClient, ShopifyEndpoints, shop_unavailable};
 pub use template::Liquid;
 pub use types::{
     AdminMenuItem, AdminPageId, AdminPageMode, AdminPagesConfig, Concurrency, Cron, CronShops, ErrorContext,

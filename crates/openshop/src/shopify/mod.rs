@@ -5,6 +5,7 @@ pub(crate) mod client_credentials;
 pub mod endpoints;
 pub mod partner;
 pub(crate) mod token_exchange;
+pub mod unavailable;
 
 pub use client::ShopifyClient;
 pub use endpoints::ShopifyEndpoints;
@@ -14,6 +15,7 @@ pub use partner::{PartnerApi, PartnerApiClient};
 /// Not the [`RetryPolicy`](crate::RetryPolicy) of a flow run.
 pub use shopify_api::RetryPolicy;
 pub use shopify_api::{ApiVersion, IntoVariable, Operation, Page};
+pub use unavailable::{ShopUnavailable, shop_unavailable};
 
 /// A Shopify app and a shop, what the process keeps its tokens and clients by.
 type AppShop = (String, String);

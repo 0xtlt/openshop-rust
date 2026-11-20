@@ -170,6 +170,12 @@ record it, the delivery is answered `500` and Shopify sends it again.
 subscription points there, and only that: it runs no handler, and answers
 `200` to a delivery whose payload names another shop, uninstalling nothing.
 
+When `app/uninstalled` never arrives (the app was uninstalled before it ran on
+OpenShop, its installations were imported from an older app), the first call
+of `ctx.shopify` that the Admin API refuses with a `401` for the offline token
+of the installation marks it uninstalled the same way; no handler runs. See
+[Unavailable shops](errors.md#unavailable-shops).
+
 ## Register with Shopify
 
 Listing a webhook in `app!` does not create a Shopify subscription.

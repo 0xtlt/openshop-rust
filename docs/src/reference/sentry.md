@@ -81,6 +81,9 @@ one of the first.
 ## What is not reported
 
 - A run that is canceled, or that sleeps.
+- A run whose shop Shopify no longer serves (`RunOutcome::ShopUnavailable`:
+  the Admin API answered `401`, `402`, `403`, `404` or `423`); it logs a
+  warning. See [Unavailable shops](errors.md#unavailable-shops).
 - What a handler answers on purpose: `InvalidInput` (`422`), an
   `AdminPublicError`, an authentication that refuses a request.
 - An error returned by an MCP tool or resource. It is answered to the client

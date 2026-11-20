@@ -13,10 +13,10 @@ use openshop::engine::{RunFlowOptions, Scheduler, Worker, run_flow};
 use openshop::response;
 use openshop::sentry::protocol::Event;
 use openshop::sentry::{ClientOptions, Level};
-use openshop::testing::{TestContext, TestOptions, sign_webhook_body};
+use openshop::testing::{MockTransport, TestContext, TestOptions, sign_webhook_body};
 use openshop::{
     AdminPublicError, DispatchOptions, FlowContext, InvalidInput, OpenShopConfig, RunOutcome, SentryConfig, Uuid,
-    WorkerConfig, bail, json,
+    WorkerConfig, bail, graphql, json,
 };
 
 const FLOW: &str = "syncOrders";
@@ -185,6 +185,10 @@ fn a_run_that_does_not_fail_reports_nothing() {
                 ctx.signal.cancel();
                 ctx.step.run("after", || async { Ok(()) }).await
             }))
+            .flow(Flow::new("reads-the-shop", |ctx: FlowContext| async move {
+                ctx.shopify.execute(graphql!("query Shop { shop { id } }")).await?;
+                Ok(())
+            }))
             .build()
             .unwrap();
         let ctx = context(config).await;
@@ -196,6 +200,15 @@ fn a_run_that_does_not_fail_reports_nothing() {
         let slept = ctx.run_flow("sleeps", json!({})).await.unwrap();
         assert!(matches!(slept, RunOutcome::Sleeping { .. }), "{slept:?}");
         assert_eq!(ctx.run_flow("cancels", json!({})).await.unwrap(), RunOutcome::Canceled);
+        // A shop Shopify no longer serves: a warning in the logs, not an event.
+        for status in [404, 402, 401] {
+            ctx.shopify
+                .respond("Shop", MockTransport::json(status, json!({ "errors": "Not Found" })));
+            assert_eq!(
+                ctx.run_flow("reads-the-shop", json!({})).await.unwrap(),
+                RunOutcome::ShopUnavailable { status }
+            );
+        }
         ctx.shutdown().await.unwrap();
     });
 
