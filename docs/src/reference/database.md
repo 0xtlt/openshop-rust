@@ -387,7 +387,7 @@ unless noted.
 | Table | Purpose | Other columns | Unique indexes |
 | --- | --- | --- | --- |
 | `installations` | Installed shops and their access tokens | `access_token`, `scopes`, `nonce` (unused: OAuth states are signed, see [Authentication](authentication.md#oauth-installation)), `installed_at`, `uninstalled_at` | `(app_handle, shop)` |
-| `flow_runs` | Queue and history of flow runs | `flow_name`, `status`, `input`, `error`, `deadline_at`, `parent_run_id`, `attempts`, `available_at`, `worker_id`, `retry_policy`, `started_at`, `completed_at`, `created_at`; `lease_id` (Rust only, null or the uuid of the claim that holds the run; the TypeScript runtime ignores it and the Admin API does not return it) | — |
+| `flow_runs` | Queue and history of flow runs | `flow_name`, `status`, `input`, `error`, `deadline_at`, `parent_run_id`, `attempts`, `available_at`, `worker_id`, `retry_policy`, `started_at`, `completed_at`, `created_at`; `lease_id` (Rust only, null or the uuid of the claim that holds the run; the TypeScript runtime ignores it and the Admin API does not return it); `concurrency_key` (Rust only, the [concurrency key](flows.md#concurrency) of the run or null) | — |
 | `step_results` | Checkpoints; scoped by `flow_run_id` | `step_name`, `attempt`, `status`, `output`, `error`, `duration_ms`, `created_at` | `(flow_run_id, step_name, attempt)` |
 | `provider_configs` | Saved provider configuration | `provider_name`, `config`, `last_checked_at`, `last_check_ok`, `updated_at` | `(app_handle, shop, provider_name)` |
 | `cron_overrides` | Per-shop cron enabled state | `cron_key`, `enabled`, `updated_at` | `(app_handle, shop, cron_key)` |
@@ -407,6 +407,12 @@ Workers read `flow_runs` through two partial indexes limited to `pending`,
 `(available_at, created_at)` to claim runs, and `flow_runs_deadline_idx` on
 `deadline_at` to fail the runs past their deadline. A claim costs the same
 whatever the number of runs waiting.
+
+`flow_runs_concurrency_key_idx` on `(app_handle, shop, flow_name,
+concurrency_key)`, limited to the active runs that have a key, is what a
+dispatch with a [concurrency key](flows.md#concurrency) looks up, and
+`flow_runs_parent_run_idx` on `parent_run_id` gives the page of a run the runs
+it started.
 
 The log lines are read and purged through two indexes on `logs`,
 `logs_created_at_idx` on `(created_at)` and `logs_level_created_at_idx` on

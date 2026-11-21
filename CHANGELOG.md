@@ -1,5 +1,56 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- A flow knows its run, and the runs it starts point back to it (#100).
+  `FlowContext::run_id` is the `Uuid` of the run being executed. A run
+  dispatched from a flow, by the `dispatch` of a `#[flow]` or
+  `DispatchOptions::for_scope(name, &ctx)`, records it as its
+  `parent_run_id` (`ShopScope::run_id`, `None` for the other contexts). The
+  page of a run in the admin links to the run that started it ("Started by")
+  and lists the runs it started: flow, status, start, duration, a link each.
+- `ctx.run_flow(name, flow, input)` and `ctx.run_flow_with(name, options)`
+  run a flow as a child of the run and wait for it to end, sleeping between
+  checks (1 s, 2 s, 4 s… up to a minute) without holding a worker. They
+  resolve to the child's `FlowRun` once it is `completed`, `failed` or
+  `canceled`.
+- A concurrency key: one active run per resource instead of per flow (#101).
+  `DispatchOptions::concurrency_key("order:123")`, or `concurrency_key =
+  |input| input.order_id` in `#[flow(…)]` (`Flow::concurrency_key` without the
+  attribute), refuses a run with a `FlowConcurrencyError { existing_run_id }`
+  while another run of the flow for the shop with the same key is `pending`,
+  `running` or `sleeping`, under the advisory lock of the flow. The key is
+  stored in `flow_runs.concurrency_key` and `FlowRun::concurrency_key`; a
+  retry from the admin checks it too.
+- Framework migrations `0007_openshop_run_concurrency_key` (the column and
+  `flow_runs_concurrency_key_idx`) and `0008_openshop_run_parent_index`
+  (`flow_runs_parent_run_idx`): run `openshop migrate generate`, then
+  `openshop migrate`.
+
+### Fixed
+
+- A worker no longer fails the runs of flows it does not register with
+  `Flow "x" not registered` (#99). It claims only the runs of its
+  application's flows, expired leases included: during a rolling deploy, the
+  run of a flow the new version adds waits for a worker that knows it, as does
+  a sleeping run whose flow another application on the same database does not
+  have.
+- A run that ends no longer leaves steps `sleeping` on its page (#100): its
+  sleeps are marked `completed` when it completes, fails or is canceled while
+  executing, since it woke from them even when its last replay did not call
+  them again; a run canceled while it sleeps has its sleep marked `canceled`.
+
+### Changed
+
+- `FlowContext` has a new public field, `run_id`, `Flow` a new one,
+  `concurrency_key`, and `DispatchOptions` a new one, `concurrency_key`: code
+  that builds them with a struct literal sets them (`..Default::default()` for
+  `DispatchOptions`).
+- `FlowRun` has a new field, `concurrency_key`, which its JSON in the Admin API
+  shows as `concurrencyKey`.
+
 ## 0.1.0-rc.8
 
 ### Added

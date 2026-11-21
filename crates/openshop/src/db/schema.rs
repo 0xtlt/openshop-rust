@@ -118,6 +118,9 @@ pub struct FlowRun {
     pub completed_at: Option<DateTime<Utc>>,
     #[serde(serialize_with = "iso::serialize")]
     pub created_at: DateTime<Utc>,
+    /// The key no other active run of the flow, for the shop, may have:
+    /// [`DispatchOptions::concurrency_key`](crate::DispatchOptions::concurrency_key).
+    pub concurrency_key: Option<String>,
 }
 
 record!(FlowRun, "flow_runs", {
@@ -135,6 +138,7 @@ record!(FlowRun, "flow_runs", {
     STARTED_AT: DateTime<Utc> = "started_at",
     COMPLETED_AT: DateTime<Utc> = "completed_at",
     CREATED_AT: DateTime<Utc> = "created_at",
+    CONCURRENCY_KEY: String = "concurrency_key",
 }, read: ["input", "retry_policy"]);
 
 impl FlowRun {

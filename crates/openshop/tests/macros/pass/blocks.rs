@@ -6,7 +6,14 @@ struct Greeting {
     name: String,
 }
 
-#[flow("greet", timeout = "1h30m", step_timeout = Duration::from_secs(5), concurrency = allow)]
+#[flow(
+    "greet",
+    timeout = "1h30m",
+    step_timeout = Duration::from_secs(5),
+    concurrency = allow,
+    // The closure need not name the type of the input.
+    concurrency_key = |input| input.name.clone()
+)]
 async fn greet(_ctx: FlowContext, _input: Greeting) -> Result<()> {
     Ok(())
 }

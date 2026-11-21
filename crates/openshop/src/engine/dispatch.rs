@@ -24,7 +24,12 @@ pub struct DispatchOptions {
     pub shop: String,
     /// Defaults to the single-app handle `default`.
     pub shopify_app: Option<String>,
+    /// The run that started this one. [`for_scope`](Self::for_scope) sets it
+    /// to the run of a flow context.
     pub parent_run_id: Option<String>,
+    /// While another run of the flow for the shop with this key is active,
+    /// the run is refused: see [`concurrency_key`](Self::concurrency_key).
+    pub concurrency_key: Option<String>,
     /// Delay before the run becomes available to workers.
     pub delay: Option<std::time::Duration>,
     pub retry_policy: Option<RetryPolicy>,
@@ -40,9 +45,12 @@ impl DispatchOptions {
     }
 
     /// A run for the shop and the Shopify app of a context: a flow, a
-    /// webhook, a proxy request…
+    /// webhook, a proxy request… The run of a flow context is the parent of
+    /// the new run.
     pub fn for_scope(flow_name: impl Into<String>, scope: &impl ShopScope) -> Self {
-        Self::new(flow_name, scope.shop()).shopify_app(scope.shopify_app())
+        let mut options = Self::new(flow_name, scope.shop()).shopify_app(scope.shopify_app());
+        options.parent_run_id = scope.run_id().map(|run_id| run_id.to_string());
+        options
     }
 
     pub fn input(mut self, input: Value) -> Self {
@@ -57,6 +65,15 @@ impl DispatchOptions {
 
     pub fn parent_run_id(mut self, run_id: impl Into<String>) -> Self {
         self.parent_run_id = Some(run_id.into());
+        self
+    }
+
+    /// One active run per resource: the run is refused, with a
+    /// [`FlowConcurrencyError`], while another run of the flow for the shop
+    /// with the same key (`order:123`) is `pending`, `running` or `sleeping`.
+    /// It wins over the `concurrency_key` of the flow.
+    pub fn concurrency_key(mut self, key: impl Into<String>) -> Self {
+        self.concurrency_key = Some(key.into());
         self
     }
 
@@ -98,26 +115,31 @@ pub(crate) async fn lock_flow(tx: &mut PgConnection, shopify_app: &str, shop: &s
 }
 
 /// Fails with a [`FlowConcurrencyError`] when another run of the flow is active
-/// for the shop. Meant to be called under [`lock_flow`], for a flow that rejects
-/// concurrent runs; `except` is the run that is about to become active.
+/// for the shop, or with a `concurrency_key`, another run with that key. Meant
+/// to be called under [`lock_flow`], for a flow that rejects concurrent runs or
+/// a run that has a key; `except` is the run that is about to become active.
 pub(crate) async fn reject_when_active(
     tx: &mut PgConnection,
     shopify_app: &str,
     shop: &str,
     flow_name: &str,
+    concurrency_key: Option<&str>,
     except: Option<Uuid>,
 ) -> Result<()> {
+    // With a key, the statement repeats the predicate of `flow_runs_concurrency_key_idx`.
     let existing: Option<(Uuid,)> = sqlx::query_as(
         "SELECT id FROM flow_runs \
          WHERE app_handle = $1 AND shop = $2 AND flow_name = $3 \
            AND status IN ('pending', 'running', 'sleeping') \
            AND ($4::uuid IS NULL OR id <> $4) \
+           AND ($5::text IS NULL OR (concurrency_key IS NOT NULL AND concurrency_key = $5)) \
          LIMIT 1",
     )
     .bind(shopify_app)
     .bind(shop)
     .bind(flow_name)
     .bind(except)
+    .bind(concurrency_key)
     .fetch_optional(tx)
     .await?;
 
@@ -133,8 +155,11 @@ pub(crate) async fn reject_when_active(
 
 /// Inserts a `pending` run. Fails with [`UnknownFlowError`] for a flow that is
 /// not registered, and with [`InvalidFlowInput`] when the input fails the input
-/// schema of the flow. Concurrency is decided under an advisory lock scoped
-/// to `(app, shop, flow)` so that simultaneous dispatches cannot both pass.
+/// schema of the flow, and with [`FlowConcurrencyError`] when the flow rejects
+/// concurrent runs and has an active one for the shop, or the run has a
+/// concurrency key that an active run of the flow for the shop has too.
+/// Concurrency is decided under an advisory lock scoped to `(app, shop, flow)`
+/// so that simultaneous dispatches cannot both pass.
 pub async fn dispatch_flow(db: &PgPool, config: &OpenShopConfig, options: DispatchOptions) -> Result<QueuedRun> {
     Ok(queue_run(db, config, options, None)
         .await?
@@ -167,6 +192,7 @@ pub(crate) async fn queue_run(
         shop,
         shopify_app,
         parent_run_id,
+        concurrency_key,
         delay,
         retry_policy: run_retry_policy,
     } = options;
@@ -186,6 +212,17 @@ pub(crate) async fn queue_run(
             Err(_) => bail!("The input validator of flow \"{flow_name}\" panicked"),
         }
     }
+    let concurrency_key = match (concurrency_key, &flow.concurrency_key) {
+        (Some(key), _) => Some(key),
+        (None, Some(key_of)) => {
+            // The code of the application, like the validator.
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| key_of(&input))) {
+                Ok(key) => key,
+                Err(_) => bail!("The concurrency key of flow \"{flow_name}\" panicked"),
+            }
+        }
+        (None, None) => None,
+    };
 
     let mut tx = db.begin().await?;
     lock_flow(&mut tx, &shopify_app, &shop, &flow_name).await?;
@@ -210,7 +247,9 @@ pub(crate) async fn queue_run(
     }
 
     if flow.concurrency.unwrap_or_default() == Concurrency::Reject {
-        reject_when_active(&mut tx, &shopify_app, &shop, &flow_name, None).await?;
+        reject_when_active(&mut tx, &shopify_app, &shop, &flow_name, None, None).await?;
+    } else if let Some(key) = &concurrency_key {
+        reject_when_active(&mut tx, &shopify_app, &shop, &flow_name, Some(key), None).await?;
     }
 
     // The deadline and the date from which the run can be claimed are dates of the
@@ -223,10 +262,11 @@ pub(crate) async fn queue_run(
 
     let (run_id,): (Uuid,) = sqlx::query_as(
         "INSERT INTO flow_runs \
-           (app_handle, shop, flow_name, status, input, deadline_at, parent_run_id, retry_policy, available_at) \
+           (app_handle, shop, flow_name, status, input, deadline_at, parent_run_id, retry_policy, available_at, \
+            concurrency_key) \
          VALUES ($1, $2, $3, 'pending', $4::json, \
            clock_timestamp() + $5::bigint * interval '1 millisecond', $6, $7::json, \
-           clock_timestamp() + $8::bigint * interval '1 millisecond') \
+           clock_timestamp() + $8::bigint * interval '1 millisecond', $9) \
          RETURNING id",
     )
     .bind(&shopify_app)
@@ -237,6 +277,7 @@ pub(crate) async fn queue_run(
     .bind(parent_run_id)
     .bind(serde_json::to_string(&retry_policy)?)
     .bind(delay_ms)
+    .bind(&concurrency_key)
     .fetch_one(&mut *tx)
     .await?;
     tx.commit().await?;

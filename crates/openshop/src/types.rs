@@ -15,6 +15,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Value, json};
 use sqlx::PgPool;
 use tokio_util::sync::CancellationToken;
+use uuid::Uuid;
 
 use crate::app::OpenShop;
 use crate::engine::step::StepExecutor;
@@ -531,6 +532,13 @@ pub trait ShopScope {
 
     fn app(&self) -> &OpenShop;
 
+    /// The run of the context, when it is the one of a flow: the parent of
+    /// the runs it dispatches ([`DispatchOptions::for_scope`](crate::DispatchOptions::for_scope),
+    /// the `dispatch` of a `#[flow]`).
+    fn run_id(&self) -> Option<Uuid> {
+        None
+    }
+
     /// The connectors of the context, which forget the configuration they
     /// loaded when the context saves or removes one with `config_of`.
     #[doc(hidden)]
@@ -579,8 +587,29 @@ macro_rules! shop_scope {
     )+};
 }
 
+impl ShopScope for FlowContext {
+    fn shop(&self) -> &str {
+        &self.shop
+    }
+
+    fn shopify_app(&self) -> &str {
+        &self.shopify_app
+    }
+
+    fn app(&self) -> &OpenShop {
+        &self.app
+    }
+
+    fn run_id(&self) -> Option<Uuid> {
+        Some(self.run_id)
+    }
+
+    fn scope_connectors(&self) -> Option<&Connectors> {
+        Some(&self.connectors)
+    }
+}
+
 shop_scope!(
-    FlowContext,
     WebhookContext,
     ProxyContext,
     RouteShopContext,
@@ -604,6 +633,9 @@ impl StepOptions {
 /// Everything a flow run can use.
 #[derive(Clone)]
 pub struct FlowContext {
+    /// The run being executed: the `id` of its [`FlowRun`](crate::db::schema::FlowRun).
+    /// The runs the flow dispatches record it as their `parent_run_id`.
+    pub run_id: Uuid,
     /// Validated run input.
     pub input: Value,
     pub connectors: Connectors,
@@ -682,6 +714,9 @@ pub enum Concurrency {
 
 pub type FlowRunFn = Arc<dyn Fn(FlowContext) -> BoxFuture<'static, Result<()>> + Send + Sync>;
 
+/// The concurrency key of a run, from its input: see [`Flow::concurrency_key`].
+pub type ConcurrencyKeyFn = Arc<dyn Fn(&Value) -> Option<String> + Send + Sync>;
+
 /// Background work made of named, checkpointed steps.
 #[derive(Clone)]
 pub struct Flow {
@@ -690,6 +725,8 @@ pub struct Flow {
     pub timeout: Option<Duration>,
     pub step_timeout: Option<Duration>,
     pub concurrency: Option<Concurrency>,
+    /// The key of a run, from its input: see [`Flow::concurrency_key`].
+    pub concurrency_key: Option<ConcurrencyKeyFn>,
     pub retry_policy: RetryPolicy,
     pub run: FlowRunFn,
 }
@@ -706,6 +743,7 @@ impl Flow {
             timeout: None,
             step_timeout: None,
             concurrency: None,
+            concurrency_key: None,
             retry_policy: RetryPolicy::default(),
             run: Arc::new(move |ctx| Box::pin(run(ctx))),
         }
@@ -734,6 +772,29 @@ impl Flow {
 
     pub fn concurrency(mut self, concurrency: Concurrency) -> Self {
         self.concurrency = Some(concurrency);
+        self
+    }
+
+    /// One active run per resource, rather than per flow: a run is refused,
+    /// with a [`FlowConcurrencyError`](crate::FlowConcurrencyError), while
+    /// another run of the flow for the same shop with the same key is
+    /// `pending`, `running` or `sleeping`. `key` reads the input of the run:
+    /// `|input: &ExportOrder| input.order_id`. A run whose input `key` cannot
+    /// read has no key. A key given to the dispatch
+    /// ([`DispatchOptions::concurrency_key`](crate::DispatchOptions::concurrency_key))
+    /// wins over this one.
+    ///
+    /// Use it with `Concurrency::Allow`: a flow that rejects concurrent runs
+    /// already allows one active run per shop, whatever its key.
+    pub fn concurrency_key<T, K>(mut self, key: impl Fn(&T) -> K + Send + Sync + 'static) -> Self
+    where
+        T: DeserializeOwned,
+        K: std::fmt::Display,
+    {
+        self.concurrency_key = Some(Arc::new(move |input: &Value| {
+            let input = T::deserialize(input).ok()?;
+            Some(key(&input).to_string())
+        }));
         self
     }
 

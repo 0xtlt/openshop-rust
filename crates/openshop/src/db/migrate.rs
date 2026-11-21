@@ -66,6 +66,16 @@ pub const FRAMEWORK_MIGRATIONS: &[FrameworkMigration] = &[
         name: "openshop_drop_flow_runs_status_index",
         sql: include_str!("../../migrations/0006_openshop_drop_flow_runs_status_index.sql"),
     },
+    FrameworkMigration {
+        id: "0007_openshop_run_concurrency_key",
+        name: "openshop_run_concurrency_key",
+        sql: include_str!("../../migrations/0007_openshop_run_concurrency_key.sql"),
+    },
+    FrameworkMigration {
+        id: "0008_openshop_run_parent_index",
+        name: "openshop_run_parent_index",
+        sql: include_str!("../../migrations/0008_openshop_run_parent_index.sql"),
+    },
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]

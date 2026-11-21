@@ -143,6 +143,7 @@ fn report_failed_run(run: &FailedRun) {
 }
 
 // The statement of a claim, whose candidates are filtered by `$only` too.
+// `$4` holds the flows the worker registers.
 macro_rules! claim_sql {
     ($only:literal) => { concat!("\
     WITH candidate AS ( \
@@ -152,7 +153,8 @@ macro_rules! claim_sql {
             THEN (retry_policy->>'maxAttempts')::bigint ELSE 1 END, 1) AS exhausted \
       FROM flow_runs \
       WHERE status IN ('pending', 'sleeping', 'running') AND available_at <= now() \
-        AND (deadline_at IS NULL OR deadline_at > now()) ", $only, " \
+        AND (deadline_at IS NULL OR deadline_at > now()) \
+        AND flow_name = ANY($4) ", $only, " \
       ORDER BY available_at ASC, created_at ASC \
       LIMIT $3 \
       FOR UPDATE SKIP LOCKED \
@@ -196,13 +198,20 @@ macro_rules! claim_sql {
 /// attempts allowed are the `maxAttempts` of the retry policy of the run, or
 /// one when it has none, as in [`super::runner`] when a failure is recorded.
 ///
+/// Only the runs of the flows of `$4`, the ones the worker registers, are
+/// candidates. The others are left to a worker that knows their flow: during
+/// a rolling deploy, a worker of the previous version must not take, and fail,
+/// the run of a flow the new version adds, nor a worker of the new version the
+/// run of a flow it removed. A run no worker knows waits in the queue, until
+/// its deadline if it has one.
+///
 /// The candidates repeat the predicate of `flow_runs_claimable_idx`, which
 /// yields them already ordered, and the updates find them by primary key:
 /// the cost of a claim follows its size, not the length of the queue.
 const CLAIM_SQL: &str = claim_sql!("");
 
-/// [`CLAIM_SQL`] for the runs of `$4` only: what a worker of some runs claims.
-const CLAIM_ONLY_SQL: &str = claim_sql!("AND id = ANY($4)");
+/// [`CLAIM_SQL`] for the runs of `$5` only: what a worker of some runs claims.
+const CLAIM_ONLY_SQL: &str = claim_sql!("AND id = ANY($5)");
 
 /// A run the claim returned: leased to this worker, or failed because it used
 /// all its attempts.
@@ -240,6 +249,8 @@ struct Inner {
     worker_id: String,
     /// The runs this worker may claim, when it is a worker of some runs.
     only: Option<Vec<Uuid>>,
+    /// The flows the application registers: the worker claims their runs only.
+    flows: Vec<String>,
     running: AtomicBool,
     active: AtomicUsize,
     /// Signalled when a run finishes, for a loop that waits for a free slot.
@@ -276,12 +287,14 @@ impl Worker {
 
     fn of(app: OpenShop, overrides: WorkerConfig, only: Option<Vec<Uuid>>) -> Self {
         let config = merge(merge(DEFAULT_WORKER_CONFIG, &app.config().worker), &overrides);
+        let flows = app.config().flows.keys().cloned().collect();
         Self {
             inner: Arc::new(Inner {
                 app,
                 config,
                 worker_id: Uuid::new_v4().to_string(),
                 only,
+                flows,
                 running: AtomicBool::new(false),
                 active: AtomicUsize::new(0),
                 slot_freed: Notify::new(),
@@ -440,11 +453,13 @@ impl Inner {
                 .bind(&self.worker_id)
                 .bind(self.lease_ms())
                 .bind(limit as i64)
+                .bind(&self.flows)
                 .bind(runs),
             None => sqlx::query_as::<_, ClaimedRun>(CLAIM_SQL)
                 .bind(&self.worker_id)
                 .bind(self.lease_ms())
-                .bind(limit as i64),
+                .bind(limit as i64)
+                .bind(&self.flows),
         };
         let mut rows = claim.fetch_all(self.app.db()).await?;
         for row in &mut rows {
@@ -595,6 +610,7 @@ impl Inner {
     }
 
     async fn execute(self: &Arc<Self>, claimed: ClaimedRun, interrupt: CancellationToken) {
+        // The claim takes the runs of the registered flows only: this is a guard.
         if !self.app.config().flows.contains_key(&claimed.flow_name) {
             let run = FailedRun {
                 id: claimed.id,
@@ -719,7 +735,7 @@ mod tests {
         let explain = format!("EXPLAIN (FORMAT JSON) {statement}");
         let mut query = sqlx::query_as(sqlx::AssertSqlSafe(&*explain));
         if let Some(limit) = limit {
-            query = query.bind("worker").bind(30_000_i64).bind(limit);
+            query = query.bind("worker").bind(30_000_i64).bind(limit).bind(vec!["flow"]);
         }
         let (plan,): (Value,) = query.fetch_one(&db.pool).await.unwrap();
         plan.to_string()

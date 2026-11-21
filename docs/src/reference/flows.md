@@ -66,6 +66,7 @@ cannot be generic.
 | `timeout = …` | A positive duration as text, `"60s"`, `"10m"`, `"1h30m"`, checked when the crate compiles. An expression of type `Duration` works as well. | None | Per-attempt execution timeout; also anchors the retry deadline at dispatch time. |
 | `step_timeout = …` | Same as `timeout` | None | Default timeout for every step. |
 | `concurrency = …` | `reject` or `allow`, as a word. An expression such as `Concurrency::Allow` works as well. | `reject` | Controls overlapping active runs for the same app, shop, and flow. |
+| `concurrency_key = …` | A closure of the input, `\|input\| input.order_id`, whose result is `Display`. Needs a flow with an input. | None | One active run per key instead of per flow. See [Concurrency](#concurrency). |
 | `retry_policy = …` | `RetryPolicy` | App policy | Overrides the app-level policy. |
 
 The function stays an ordinary function. The attribute adds a type of the same
@@ -159,15 +160,22 @@ what `ctx.for_shop(…)` returns in a server route. A flow without input is
 dispatched with the context alone: `nightly_cleanup::dispatch(&ctx)`. Both
 return `QueuedRun { run_id, status: "pending" }`.
 
+Dispatched from a flow, the new run records the run of the flow as its
+`parent_run_id`: the page of a run in the admin links to the run that started
+it and lists the runs it started. `DispatchOptions::for_scope(name, &ctx)` does
+the same; `.parent_run_id(…)` sets it by hand.
+
 `app.dispatch_flow(DispatchOptions::new(name, shop)…)` queues a flow only
 known by its name, or a run with settings of its own: `.delay(…)` postpones the
-run, and `.retry_policy(…)` overrides the flow and app values for that run.
+run, `.retry_policy(…)` overrides the flow and app values for that run, and
+`.concurrency_key(…)` gives it a [concurrency key](#concurrency).
 See [`app.dispatch_flow`](sdk.md#appdispatch_flowoptions).
 
 ## Runtime context
 
 | Field | Contract |
 | --- | --- |
+| `run_id` | The `Uuid` of the run being executed: the `id` of its `FlowRun`. |
 | `input` | The validated input as a `serde_json::Value`, or the dispatched object when no schema exists. A typed input is the same value, as the second argument of the function. |
 | `input::<T>()` | Method that deserializes `input` into `T`. |
 | `connectors` | `Connectors`: provider methods bound to the shop's stored configuration, read at the first call. |
@@ -184,6 +192,35 @@ See [`app.dispatch_flow`](sdk.md#appdispatch_flowoptions).
 belongs to a shop: `other_flow::dispatch(&ctx, …)` queues another flow for the
 same shop, and `Review::of(&ctx)` gives the rows of a
 [model](database.md#app-models) for it.
+
+## Running a flow and waiting for it
+
+`ctx.run_flow(name, flow, input)` dispatches a run of `flow` for the shop, as a
+child of this run, and waits for it to end. It resolves to the child's
+`FlowRun` once it is `completed`, `failed` or `canceled`: a child that failed
+does not fail the call, check its `status`.
+
+```rust,ignore
+use openshop::prelude::*;
+
+#[flow("hourlyChain")]
+pub async fn hourly_chain(ctx: FlowContext) -> Result<()> {
+    let import = ctx.run_flow("import", import_products::NAME, json!({})).await?;
+    if import.status != "completed" {
+        bail!("The import ended {}: {}", import.status, import.error.unwrap_or_default());
+    }
+    ctx.run_flow("export", export_products::NAME, json!({})).await?;
+    Ok(())
+}
+```
+
+Between two checks the run [sleeps](#sleeping-without-a-worker-slot) and holds
+no worker: 1 second, then 2, 4… up to a minute. `name` names its steps,
+`{name}: dispatch` and `{name}: wait #1`, `#2`…, and is unique within the flow
+like the name of a step; the child is dispatched once, whatever the replays.
+`ctx.run_flow_with(name, options)` takes `DispatchOptions` for the child: a
+delay, a retry policy, a concurrency key. A dispatch that is refused, by a
+child that rejects concurrent runs and has an active one, fails the step.
 
 The logger takes the message first, and a JSON payload with the `_with`
 methods:
@@ -256,6 +293,41 @@ the same `(shopify_app, shop, flow)`. It fails with a `FlowConcurrencyError`,
 whose `existing_run_id` identifies the active run. `Concurrency::Allow`,
 written `concurrency = allow` in `#[flow(…)]`, skips that check.
 
+A concurrency key allows one active run per resource instead of per flow: one
+export per order, while the exports of other orders run beside it. A run with
+a key is refused, with the same `FlowConcurrencyError`, while another run of
+the flow for the shop with the same key is `pending`, `running` or `sleeping`.
+The key is checked under the same advisory lock, so two webhooks that arrive
+together cannot both pass:
+
+```rust,ignore
+#[input]
+pub struct ExportOrderInput {
+    pub order_id: u64,
+}
+
+#[flow("exportOrder", concurrency = allow, concurrency_key = |input| format!("order:{}", input.order_id))]
+pub async fn export_order(ctx: FlowContext, input: ExportOrderInput) -> Result<()> {
+    // …
+    Ok(())
+}
+```
+
+The closure reads the typed input of the run; a run of input it cannot read has
+no key. `DispatchOptions::concurrency_key("order:123")` gives a key to one
+dispatch and wins over the flow's. The key is stored in the `concurrency_key`
+column of the run. With `Concurrency::Reject`, the flow already allows one
+active run per shop, whatever the key.
+
+A retry from the admin is refused in the same way while another active run has
+the key of the run.
+
+A worker claims only the runs of the flows its application registers. During a
+rolling deploy, a worker of the previous version leaves the runs of a flow the
+new version adds to the workers that know it, rather than failing them; a run
+of a flow no worker registers waits in the queue, until its deadline when it has
+one.
+
 ## Checkpointed steps
 
 ```rust,ignore
@@ -313,6 +385,11 @@ worker slot is released. When a worker picks the run up after that timestamp,
 the flow function runs again from the top, completed steps return their stored
 output, the sleep checkpoint completes, and execution continues. Retries reuse
 the stored timestamp rather than adding another full delay.
+
+When a run ends, its sleeps still `sleeping` are marked `completed`: the run
+woke from them, even if its last replay did not call them again (a loop that
+leaves once its condition holds). A run canceled while it sleeps has its
+sleep marked `canceled`.
 
 Do not handle the error returned by `sleep` as an application failure.
 
@@ -378,6 +455,7 @@ logs.
 | `.timeout(duration)` | Positive `Duration` | None | Same as `timeout` of the attribute. |
 | `.step_timeout(duration)` | Positive `Duration` | None | Same as `step_timeout` of the attribute. |
 | `.concurrency(mode)` | `Concurrency::Reject` or `Concurrency::Allow` | `Reject` | Same as `concurrency` of the attribute. |
+| `.concurrency_key(\|input: &T\| key)` | `T: DeserializeOwned`, `key: Display` | None | Same as `concurrency_key` of the attribute. |
 | `.retry_policy(policy)` | `RetryPolicy` | App policy | Same as `retry_policy` of the attribute. |
 
 `InputSchema::custom(json_schema, parse)` replaces both parts of the

@@ -2,6 +2,7 @@
 
 pub mod abort;
 pub mod backoff;
+mod child;
 pub mod dispatch;
 pub mod errors;
 pub mod retention;

@@ -282,3 +282,118 @@ async fn delayed_dispatch_sets_future_available_at() {
     assert!(available_at > before + chrono::Duration::milliseconds(5_000));
     test.cleanup().await;
 }
+
+#[derive(serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
+struct ExportOrder {
+    order_id: u64,
+}
+
+/// One active run per order, not per flow (#101).
+#[tokio::test]
+async fn a_concurrency_key_allows_one_active_run_per_key() {
+    let flow = noop_flow("exportOrder").concurrency(Concurrency::Allow);
+    let test = TestApp::new(create_config([flow])).await;
+    let dispatch = |key: &str| {
+        test.app
+            .dispatch_flow(DispatchOptions::new("exportOrder", TEST_SHOP).concurrency_key(key))
+    };
+
+    let first = dispatch("order:1").await.unwrap();
+    assert_eq!(
+        find_run(&test.db, first.run_id).await.concurrency_key.as_deref(),
+        Some("order:1")
+    );
+    let refused = dispatch("order:1").await.unwrap_err();
+    let refused = refused
+        .downcast_ref::<FlowConcurrencyError>()
+        .expect("a concurrency error");
+    assert_eq!(refused.existing_run_id, first.run_id.to_string());
+    // Another order, and runs without a key, are not held back.
+    dispatch("order:2").await.unwrap();
+    for _ in 0..2 {
+        test.app
+            .dispatch_flow(DispatchOptions::new("exportOrder", TEST_SHOP))
+            .await
+            .unwrap();
+    }
+    // Nor the same order of another shop.
+    test.app
+        .dispatch_flow(DispatchOptions::new("exportOrder", "other.myshopify.com").concurrency_key("order:1"))
+        .await
+        .unwrap();
+
+    // Once the run is over, the key is free again.
+    sqlx::query("UPDATE flow_runs SET status = 'completed' WHERE id = $1")
+        .bind(first.run_id)
+        .execute(&test.db)
+        .await
+        .unwrap();
+    dispatch("order:1").await.unwrap();
+    test.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_flow_derives_the_key_of_its_runs_from_their_input() {
+    let flow = noop_flow("exportOrder")
+        .input::<ExportOrder>()
+        .concurrency(Concurrency::Allow)
+        .concurrency_key(|input: &ExportOrder| format!("order:{}", input.order_id));
+    let test = TestApp::new(create_config([flow])).await;
+    let dispatch = |order_id: u64| {
+        test.app
+            .dispatch_flow(DispatchOptions::new("exportOrder", TEST_SHOP).input(json!({ "order_id": order_id })))
+    };
+
+    let first = dispatch(1).await.unwrap();
+    assert_eq!(
+        find_run(&test.db, first.run_id).await.concurrency_key.as_deref(),
+        Some("order:1")
+    );
+    assert!(
+        dispatch(1)
+            .await
+            .unwrap_err()
+            .downcast_ref::<FlowConcurrencyError>()
+            .is_some()
+    );
+    dispatch(2).await.unwrap();
+    // The key of the dispatch wins.
+    let given = test
+        .app
+        .dispatch_flow(
+            DispatchOptions::new("exportOrder", TEST_SHOP)
+                .input(json!({ "order_id": 1 }))
+                .concurrency_key("manual"),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        find_run(&test.db, given.run_id).await.concurrency_key.as_deref(),
+        Some("manual")
+    );
+    test.cleanup().await;
+}
+
+/// Dispatches that race with the same key: the lock of the flow lets one through.
+#[tokio::test]
+async fn simultaneous_dispatches_with_the_same_key_queue_one_run() {
+    let flow = noop_flow("exportOrder").concurrency(Concurrency::Allow);
+    let test = TestApp::new(create_config([flow])).await;
+    let attempts: Vec<_> = (0..8)
+        .map(|_| {
+            let app = test.app.clone();
+            tokio::spawn(async move {
+                app.dispatch_flow(DispatchOptions::new("exportOrder", TEST_SHOP).concurrency_key("order:7"))
+                    .await
+            })
+        })
+        .collect();
+    let mut accepted = 0;
+    for attempt in attempts {
+        if attempt.await.unwrap().is_ok() {
+            accepted += 1;
+        }
+    }
+    assert_eq!(accepted, 1);
+    test.cleanup().await;
+}

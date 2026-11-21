@@ -343,22 +343,23 @@ fn a_run_the_worker_fails_without_an_attempt_is_reported() {
     let mut runs = Vec::new();
     let events = captured(async {
         let ctx = context(flow_app(Flow::new(FLOW, |_ctx: FlowContext| async { Ok(()) }))).await;
-        // A run past its deadline, and the run of a flow this application does not have.
+        // A run past its deadline, and one whose worker died with its last attempt.
         let expired = ctx.dispatch_flow(FLOW, json!({})).await.unwrap();
         sqlx::query("UPDATE flow_runs SET deadline_at = now() - interval '1 hour' WHERE id = $1")
             .bind(expired)
             .execute(&ctx.db)
             .await
             .unwrap();
-        let (unknown,): (Uuid,) = sqlx::query_as(
-            "INSERT INTO flow_runs (shop, flow_name, status, available_at) \
-             VALUES ($1, 'removed', 'pending', now()) RETURNING id",
+        let (abandoned,): (Uuid,) = sqlx::query_as(
+            "INSERT INTO flow_runs (shop, flow_name, status, attempts, worker_id, available_at) \
+             VALUES ($1, $2, 'running', 1, 'gone', now() - interval '1 minute') RETURNING id",
         )
         .bind(&ctx.shop)
+        .bind(FLOW)
         .fetch_one(&ctx.db)
         .await
         .unwrap();
-        runs = vec![expired, unknown];
+        runs = vec![expired, abandoned];
 
         let worker = Worker::new(
             ctx.app.clone(),
@@ -393,9 +394,12 @@ fn a_run_the_worker_fails_without_an_attempt_is_reported() {
     assert_eq!(message(expired), "Flow timed out — exceeded maximum allowed duration");
     assert_eq!(tag(expired, "flow"), Some(FLOW));
     assert_eq!(tag(expired, "shop"), Some("test.myshopify.com"));
-    let unknown = reported(runs[1]);
-    assert_eq!(message(unknown), "Flow \"removed\" not registered");
-    assert_eq!(unknown.transaction.as_deref(), Some("flow removed"));
+    let abandoned = reported(runs[1]);
+    assert_eq!(
+        message(abandoned),
+        "Run abandoned: its worker stopped after 1 attempts without recording an outcome"
+    );
+    assert_eq!(abandoned.transaction.as_deref(), Some(format!("flow {FLOW}").as_str()));
 }
 
 #[test]

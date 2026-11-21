@@ -5,7 +5,7 @@
 //! selected with checkboxes and deleted together, after a confirmation. The
 //! page is fetched again every 5 seconds while a run it lists is active.
 
-mod format;
+pub(super) mod format;
 mod runs;
 mod schema_example;
 

@@ -1,5 +1,6 @@
 //! `/runs/:id`: a run of a flow. The flow it belongs to, a link back to its
-//! page; its status, its duration, its dates, its input and its error; its
+//! page; its status, its duration, its dates, its input and its error; the
+//! run that started it and the runs it started, linked to their pages; its
 //! steps, each with its status, its duration, its error and its output (in a
 //! modal: copied, and downloaded as a JSON file); its logs, filtered by the
 //! query and the levels of the URL (`?q=…&levels=…`), counted by level and
@@ -14,13 +15,16 @@ use anyhow::Result;
 use chrono::{DateTime, Duration, Utc};
 use maud::{Markup, html};
 
+use super::flows::format::run_duration;
 use super::ui::{status_tone, to_fixed_1};
 use super::{BuiltinPage, field, ui};
 use crate::admin::{AdminPublicError, Outcome};
 use crate::admin_paths::rpc::encode_uri_component as encode;
 use crate::db::schema::{FlowRun, StepResult};
 use crate::runtime::time::to_iso;
-use crate::server::api::runs::{RunRefusal, delete_finished_run, find_run, retry_finished_run, run_steps};
+use crate::server::api::runs::{
+    MAX_CHILD_RUNS, RunRefusal, delete_finished_run, find_run, retry_finished_run, run_children, run_parent, run_steps,
+};
 use crate::types::ACTIVE_RUN_STATUSES;
 use logs::{LogFilters, Logs, help_modal, load_logs, logs_section};
 use steps::{output_modals, step_rows, steps_table};
@@ -89,17 +93,45 @@ fn duration(run: &FlowRun) -> String {
     }
 }
 
+/// The run that started a run, and the runs it started.
+#[derive(Default)]
+struct Related {
+    parent: Option<FlowRun>,
+    children: Vec<FlowRun>,
+}
+
 pub(super) async fn render(page: &BuiltinPage<'_>) -> Result<Markup> {
     let Some(run) = find_run(page.app, page.session, run_id(page)).await? else {
         return Err(run_not_found());
     };
     let steps = run_steps(page.app, &run).await?;
+    let related = Related {
+        parent: run_parent(page.app, &run).await?,
+        children: run_children(page.app, &run).await?,
+    };
     let filters = LogFilters::read(page.param("q"), page.param("levels"));
     let logs = load_logs(page.app, &run, &filters).await?;
-    Ok(view(&run, &steps, &filters, &logs, Utc::now()))
+    Ok(view(&run, &steps, &related, &filters, &logs, Utc::now()))
 }
 
-fn view(run: &FlowRun, steps: &[StepResult], filters: &LogFilters, logs: &Logs, now: DateTime<Utc>) -> Markup {
+fn run_href(run: &FlowRun) -> String {
+    format!("/runs/{}", run.id)
+}
+
+/// `syncOrders #0f1e2d3c`: the flow of a run and the beginning of its id.
+fn run_label(run: &FlowRun) -> String {
+    let short: String = run.id.to_string().chars().take(8).collect();
+    format!("{} #{short}", run.flow_name)
+}
+
+fn view(
+    run: &FlowRun,
+    steps: &[StepResult],
+    related: &Related,
+    filters: &LogFilters,
+    logs: &Logs,
+    now: DateTime<Utc>,
+) -> Markup {
     let id = run.id.to_string();
     let active = is_active(&run.status);
     let finished = is_finished(&run.status);
@@ -119,8 +151,9 @@ fn view(run: &FlowRun, steps: &[StepResult], filters: &LogFilters, logs: &Logs, 
             @if let Some(error) = error {
                 s-banner tone="critical" heading="Error" { (error) }
             }
-            (summary(run, input.is_some()))
+            (summary(run, related.parent.as_ref(), input.is_some()))
             (steps_table(&rows))
+            @if !related.children.is_empty() { (children_section(&related.children)) }
             (logs_section(&format!("/runs/{id}"), &id, filters, logs, fresh_since))
 
             (output_modals(&rows))
@@ -134,7 +167,7 @@ fn view(run: &FlowRun, steps: &[StepResult], filters: &LogFilters, logs: &Logs, 
     }
 }
 
-fn summary(run: &FlowRun, has_input: bool) -> Markup {
+fn summary(run: &FlowRun, parent: Option<&FlowRun>, has_input: bool) -> Markup {
     html! {
         s-section heading="Summary" {
             s-stack direction="inline" gap="large-200" alignItems="center" {
@@ -161,8 +194,52 @@ fn summary(run: &FlowRun, has_input: bool) -> Markup {
                         s-text { (ui::time(&to_iso(&completed))) }
                     }
                 }
+                @if let Some(parent) = parent {
+                    s-stack direction="inline" gap="small" alignItems="center" {
+                        s-text color="subdued" { "Started by" }
+                        s-link href=(run_href(parent)) { (run_label(parent)) }
+                    }
+                }
                 @if has_input {
                     s-button variant="secondary" commandFor=(INPUT_MODAL) command="--show" { "Input" }
+                }
+            }
+        }
+    }
+}
+
+/// The runs this run started: a row each, which follows the link to its page,
+/// with its flow, its status and how long it took.
+fn children_section(children: &[FlowRun]) -> Markup {
+    let heading = if children.len() as i64 >= MAX_CHILD_RUNS {
+        format!("Runs started (first {MAX_CHILD_RUNS})")
+    } else {
+        "Runs started".to_string()
+    };
+    html! {
+        s-section heading=(heading) padding="none" {
+            s-table {
+                s-table-header-row {
+                    s-table-header listSlot="primary" { "Run" }
+                    s-table-header listSlot="inline" { "Status" }
+                    s-table-header listSlot="labeled" { "Started" }
+                    s-table-header listSlot="labeled" { "Duration" }
+                }
+                s-table-body {
+                    @for child in children {
+                        @let link = format!("child-link-{}", child.id);
+                        s-table-row clickDelegate=(link) {
+                            s-table-cell { s-link id=(link) href=(run_href(child)) { (run_label(child)) } }
+                            s-table-cell { s-badge tone=(status_tone(&child.status)) { (child.status) } }
+                            s-table-cell {
+                                @match child.started_at {
+                                    Some(started) => { (ui::time(&to_iso(&started))) }
+                                    None => { "—" }
+                                }
+                            }
+                            s-table-cell { (run_duration(child)) }
+                        }
+                    }
                 }
             }
         }
@@ -273,6 +350,7 @@ mod tests {
             started_at: Some(date("2026-11-09T12:00:00.123Z")),
             completed_at: None,
             created_at: date("2026-11-09T11:59:59Z"),
+            concurrency_key: None,
         }
     }
 
@@ -289,7 +367,15 @@ mod tests {
     }
 
     fn render(run: &FlowRun) -> String {
-        view(run, &[], &LogFilters::read(None, None), &no_logs(), date(NOW)).into_string()
+        view(
+            run,
+            &[],
+            &Related::default(),
+            &LogFilters::read(None, None),
+            &no_logs(),
+            date(NOW),
+        )
+        .into_string()
     }
 
     #[test]
@@ -377,6 +463,52 @@ mod tests {
     }
 
     #[test]
+    fn links_the_run_that_started_it_and_lists_the_runs_it_started() {
+        let mut parent = run("sleeping");
+        parent.id = Uuid::from_u128(1);
+        parent.flow_name = "chain".to_string();
+        let mut child = run("completed");
+        child.id = Uuid::from_u128(9);
+        child.flow_name = "step <one>".to_string();
+        child.completed_at = Some(date("2026-11-09T12:00:00.973Z"));
+        let related = Related {
+            parent: Some(parent),
+            children: vec![child],
+        };
+        let html = view(
+            &run("running"),
+            &[],
+            &related,
+            &LogFilters::read(None, None),
+            &no_logs(),
+            date(NOW),
+        )
+        .into_string();
+        assert!(
+            html.contains(r#"<s-text color="subdued">Started by</s-text><s-link href="/runs/00000000-0000-0000-0000-000000000001">chain #00000000</s-link>"#),
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"<s-section heading="Runs started" padding="none">"#),
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"<s-table-row clickDelegate="child-link-00000000-0000-0000-0000-000000000009"><s-table-cell><s-link id="child-link-00000000-0000-0000-0000-000000000009" href="/runs/00000000-0000-0000-0000-000000000009">step &lt;one&gt; #00000000</s-link>"#),
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"<s-badge tone="success">completed</s-badge>"#),
+            "{html}"
+        );
+        assert!(html.contains("<s-table-cell>850ms</s-table-cell>"), "{html}");
+
+        // Neither, without them.
+        let html = render(&run("running"));
+        assert!(!html.contains("Started by"), "{html}");
+        assert!(!html.contains("Runs started"), "{html}");
+    }
+
+    #[test]
     fn new_lines_are_highlighted_only_while_the_run_is_active() {
         let line = |status: &str| {
             let logs = Logs {
@@ -398,7 +530,15 @@ mod tests {
                 },
                 refused: None,
             };
-            view(&run(status), &[], &LogFilters::read(None, None), &logs, date(NOW)).into_string()
+            view(
+                &run(status),
+                &[],
+                &Related::default(),
+                &LogFilters::read(None, None),
+                &logs,
+                date(NOW),
+            )
+            .into_string()
         };
         assert!(line("running").contains("background:#fff3cd"));
         assert!(!line("completed").contains("background:#fff3cd"));
