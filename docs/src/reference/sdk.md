@@ -347,7 +347,8 @@ async fn queue_sync(app: &OpenShop) -> Result<()> {
 | `shop` | `DispatchOptions::new` | `String` | Target `*.myshopify.com` domain, or the cron global sentinel when used internally. |
 | `input` | `.input(…)` | `serde_json::Value` | Defaults to `{}`. A dispatch fails with `InvalidFlowInput` when it fails the input schema of the flow, and with `UnknownFlowError` for a flow that is not registered; no run is queued. |
 | `shopify_app` | `.shopify_app(…)` | `String` | Defaults to the `default` app handle. |
-| `parent_run_id` | `.parent_run_id(…)` | `String` | Optional parent run relationship. |
+| `parent_run_id` | `.parent_run_id(…)` | `String` | The run that started this one. `for_scope` sets it to the run of a flow context. |
+| `concurrency_key` | `.concurrency_key(…)` | `String` | Refuses the run while another active run of the flow for the shop has the same key. See [Concurrency](flows.md#concurrency). |
 | `delay` | `.delay(…)` | `Duration` | Delays the initial `available_at`. |
 | `retry_policy` | `.retry_policy(…)` | `RetryPolicy` | Highest-priority retry override for this run. |
 

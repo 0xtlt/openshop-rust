@@ -176,6 +176,7 @@ pub(crate) fn panic_message(payload: &Box<dyn std::any::Any + Send>) -> &str {
 /// none.
 ///
 /// The update applies only while the run is owned, and reports whether it was.
+/// A run it ends has its `sleeping` steps closed: see [`close_sleeping_steps`].
 ///
 /// A transient error is retried; the ownership is checked again by every try,
 /// so one that comes after the run was taken over writes nothing. If the first
@@ -189,7 +190,7 @@ async fn finish_run(
     error: Option<&str>,
     available_at: Option<DateTime<Utc>>,
 ) -> Result<bool> {
-    retry(format!("recording the outcome of run {run_id}"), || async {
+    let owned = retry(format!("recording the outcome of run {run_id}"), || async {
         let result = sqlx::query(
             "UPDATE flow_runs SET \
            status = $2, \
@@ -211,7 +212,30 @@ async fn finish_run(
         .await?;
         Ok(result.rows_affected() > 0)
     })
-    .await
+    .await?;
+    if owned && matches!(status, "completed" | "failed" | "canceled") {
+        close_sleeping_steps(db, run_id).await;
+    }
+    Ok(owned)
+}
+
+/// Completes the sleeps of a run that ended while executing: it woke from
+/// each of them, whether or not the flow called them again on its last
+/// replay (a loop that waits for a condition leaves it once the condition
+/// holds, before the sleep that woke it). Without this, the page of the run
+/// would show them `sleeping` for good. Tried once: the run is over, and
+/// only its page reads them.
+async fn close_sleeping_steps(db: &PgPool, run_id: Uuid) {
+    let closed =
+        sqlx::query("UPDATE step_results SET status = 'completed' WHERE flow_run_id = $1 AND status = 'sleeping'")
+            .bind(run_id.to_string())
+            .execute(db)
+            .await;
+    if let Err(error) = closed {
+        logger::warn(format!(
+            "[openshop] The sleeping steps of run {run_id} could not be closed: {error:#}"
+        ));
+    }
 }
 
 /// Names a run for the failures reported about it.
@@ -398,6 +422,7 @@ async fn run_attempt(app: &OpenShop, opts: RunFlowOptions) -> Result<RunOutcome>
         );
 
         let context = FlowContext {
+            run_id,
             input: validated_input,
             connectors,
             shopify,

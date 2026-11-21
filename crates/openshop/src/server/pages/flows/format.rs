@@ -11,7 +11,7 @@ fn seconds(ms: i64) -> String {
 
 /// How long the run took, `850ms`, `12.4s`, `2m 5s`; `…` while it runs and
 /// `—` when it has not started or not finished.
-pub(super) fn run_duration(run: &FlowRun) -> String {
+pub(in crate::server::pages) fn run_duration(run: &FlowRun) -> String {
     let elapsed = match (run.started_at, run.completed_at) {
         (Some(started), Some(completed)) => Some((completed - started).num_milliseconds()),
         _ => None,
@@ -56,6 +56,7 @@ pub(super) mod tests {
             started_at: started.map(|ms| base + Duration::milliseconds(ms)),
             completed_at: completed.map(|ms| base + Duration::milliseconds(ms)),
             created_at: base,
+            concurrency_key: None,
         }
     }
 

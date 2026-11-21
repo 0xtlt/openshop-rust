@@ -60,7 +60,13 @@ fn declare(item: &ItemFn, kind: &str, doc: String, constants: TokenStream, regis
 
 // ─── #[flow] ─────────────────────────────────────────────────────────
 
-const FLOW_OPTIONS: [&str; 4] = ["timeout", "step_timeout", "concurrency", "retry_policy"];
+const FLOW_OPTIONS: [&str; 5] = [
+    "timeout",
+    "step_timeout",
+    "concurrency",
+    "concurrency_key",
+    "retry_policy",
+];
 
 const DURATION: &str =
     "expected a duration such as \"30s\", \"10m\" or \"1h30m\" (units: ms, s, m, h, d), or an expression";
@@ -146,6 +152,17 @@ pub fn flow(arguments: Arguments, item: ItemFn) -> syn::Result<TokenStream> {
             Argument::Value(option, value) if option == "concurrency" => {
                 options.push(concurrency(value));
             }
+            // The key reads the input of the flow, whose type the closure need not repeat.
+            Argument::Value(option, value) if option == "concurrency_key" => match extra.first() {
+                Some(input) => options.push(quote!(.concurrency_key::<#input, _>(#value))),
+                None => {
+                    return Err(syn::Error::new(
+                        argument.span(),
+                        "`concurrency_key` reads the input of the flow, and this flow takes none: \
+                         add an input, `async fn(ctx: FlowContext, input: Input)`",
+                    ));
+                }
+            },
             Argument::Value(option, value) if option == "timeout" || option == "step_timeout" => {
                 let duration = duration(value)?;
                 options.push(quote!(.#option(#duration)));
@@ -156,7 +173,7 @@ pub fn flow(arguments: Arguments, item: ItemFn) -> syn::Result<TokenStream> {
             _ => {
                 return Err(syn::Error::new(
                     argument.span(),
-                    "unknown flow option; expected the name of the flow, `timeout`, `step_timeout`, `concurrency` or `retry_policy`",
+                    "unknown flow option; expected the name of the flow, `timeout`, `step_timeout`, `concurrency`, `concurrency_key` or `retry_policy`",
                 ));
             }
         }
@@ -758,6 +775,24 @@ mod tests {
         );
         assert_contains(&allowed, &[". concurrency (:: openshop :: Concurrency :: Allow)"]);
         assert!(!plain.contains(". input ::"), "{plain}");
+        // A concurrency key reads the input, typed by the flow.
+        let keyed = generated(
+            flow,
+            quote!(concurrency_key = |input| input.order_id),
+            parse_quote! { async fn export_order(ctx: FlowContext, input: ExportOrder) -> Result<()> { Ok(()) } },
+        );
+        assert_contains(
+            &keyed,
+            &[". concurrency_key :: < ExportOrder , _ > (| input | input . order_id)"],
+        );
+        assert!(
+            refusal(
+                flow,
+                quote!(concurrency_key = |input| input.order_id),
+                parse_quote! { async fn nightly_cleanup(ctx: FlowContext) -> Result<()> { Ok(()) } },
+            )
+            .starts_with("`concurrency_key` reads the input of the flow, and this flow takes none")
+        );
     }
 
     #[test]
@@ -782,7 +817,7 @@ mod tests {
         );
         assert_eq!(
             refusal(flow, quote!("sync", retries = 3), item.clone()),
-            "unknown flow option; expected the name of the flow, `timeout`, `step_timeout`, `concurrency` or `retry_policy`"
+            "unknown flow option; expected the name of the flow, `timeout`, `step_timeout`, `concurrency`, `concurrency_key` or `retry_policy`"
         );
         assert_eq!(refusal(flow, quote!("a", "b"), item.clone()), "given twice");
         for (arguments, option) in [

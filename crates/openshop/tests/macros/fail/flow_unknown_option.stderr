@@ -1,4 +1,4 @@
-error: unknown flow option; expected the name of the flow, `timeout`, `step_timeout`, `concurrency` or `retry_policy`
+error: unknown flow option; expected the name of the flow, `timeout`, `step_timeout`, `concurrency`, `concurrency_key` or `retry_policy`
  --> tests/macros/fail/flow_unknown_option.rs:3:8
   |
 3 | #[flow(retries = 3)]

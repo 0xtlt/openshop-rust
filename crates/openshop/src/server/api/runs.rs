@@ -130,6 +130,38 @@ fn run_not_found() -> axum::response::Response {
     json_error(StatusCode::NOT_FOUND, "Run not found")
 }
 
+/// How many of the runs a run started its page lists.
+pub(crate) const MAX_CHILD_RUNS: i64 = 100;
+
+/// The runs a run started (whose `parent_run_id` it is), oldest first, of the
+/// same shop and app: up to [`MAX_CHILD_RUNS`].
+pub(crate) async fn run_children(app: &OpenShop, run: &FlowRun) -> Result<Vec<FlowRun>, sqlx::Error> {
+    sqlx::query_as(
+        "SELECT * FROM flow_runs WHERE parent_run_id = $1 AND app_handle = $2 AND shop = $3 \
+         ORDER BY created_at ASC, id ASC LIMIT $4",
+    )
+    .bind(run.id.to_string())
+    .bind(&run.app_handle)
+    .bind(&run.shop)
+    .bind(MAX_CHILD_RUNS)
+    .fetch_all(app.db())
+    .await
+}
+
+/// The run that started this one, when it is still there and is of the same
+/// shop and app.
+pub(crate) async fn run_parent(app: &OpenShop, run: &FlowRun) -> Result<Option<FlowRun>, sqlx::Error> {
+    let Some(parent) = run.parent_run_id.as_deref().and_then(|id| Uuid::parse_str(id).ok()) else {
+        return Ok(None);
+    };
+    sqlx::query_as("SELECT * FROM flow_runs WHERE id = $1 AND app_handle = $2 AND shop = $3 LIMIT 1")
+        .bind(parent)
+        .bind(&run.app_handle)
+        .bind(&run.shop)
+        .fetch_optional(app.db())
+        .await
+}
+
 /// The steps of a run, each attempt, in the order they were created.
 pub(crate) async fn run_steps(app: &OpenShop, run: &FlowRun) -> Result<Vec<StepResult>, sqlx::Error> {
     sqlx::query_as("SELECT * FROM step_results WHERE flow_run_id = $1 ORDER BY created_at ASC")
@@ -364,7 +396,8 @@ const FINISHED_RUN_STATUSES: [&str; 3] = ["failed", "completed", "canceled"];
 /// Retries a run of the session that is over, and returns its id: `mode`
 /// `reset` discards its steps, any other (`resume`) keeps those that
 /// completed. Refused when the run is not there, is not over, or its flow
-/// rejects concurrent runs and has an active one.
+/// rejects concurrent runs and has an active one, or another active run has
+/// its concurrency key.
 pub(crate) async fn retry_finished_run(
     app: &OpenShop,
     session: &ShopSession,
@@ -410,8 +443,11 @@ pub(crate) async fn retry_finished_run(
         .await?;
         return Ok(Err(refusal));
     }
-    if rejects_concurrency
-        && let Err(error) = reject_when_active(&mut tx, &run.app_handle, &run.shop, &run.flow_name, Some(run.id)).await
+    // A flow that rejects concurrent runs checks them all, the key of the run aside.
+    let key = run.concurrency_key.as_deref().filter(|_| !rejects_concurrency);
+    if (rejects_concurrency || key.is_some())
+        && let Err(error) =
+            reject_when_active(&mut tx, &run.app_handle, &run.shop, &run.flow_name, key, Some(run.id)).await
     {
         return match error.downcast::<FlowConcurrencyError>() {
             Ok(conflict) => Ok(Err(RunRefusal::Concurrent(conflict))),
@@ -497,6 +533,11 @@ async fn cancel(
     // of the run can register itself before this signal and receive it. The
     // writes of the worker are refused once the run is canceled.
     cancel_run(&run_id.to_string());
+    // A run canceled while it sleeps does not wake from its sleep.
+    sqlx::query("UPDATE step_results SET status = 'canceled' WHERE flow_run_id = $1 AND status = 'sleeping'")
+        .bind(run_id.to_string())
+        .execute(&mut *tx)
+        .await?;
     tx.commit().await?;
     Ok(json_response(StatusCode::OK, json!({ "ok": true })))
 }

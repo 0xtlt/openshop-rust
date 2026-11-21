@@ -18,6 +18,7 @@ mod client_credentials;
 mod contexts;
 mod custom_admin_pages;
 mod declared;
+mod engine_child;
 mod engine_dispatch;
 mod engine_runner;
 mod engine_scheduler;

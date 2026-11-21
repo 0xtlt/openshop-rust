@@ -315,19 +315,19 @@ async fn graceful_stop_waits_for_active_runs() {
 }
 
 #[tokio::test]
-async fn handles_unregistered_flow_name() {
+async fn leaves_a_run_whose_flow_is_not_registered_in_the_queue() {
     let test = TestApp::new(create_config([noop_flow("quick-flow")])).await;
     let run_id = dispatch(&test, "quick-flow").await;
 
     // The worker runs an application definition that no longer has the flow.
     let worker = worker(&test.sibling(create_config(Vec::new())), 1);
     worker.start().await;
-    let run = wait_for_status(&test, run_id, "failed").await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
     worker.stop().await;
 
-    assert_eq!(run.error.as_deref(), Some("Flow \"quick-flow\" not registered"));
+    let run = find_run(&test.db, run_id).await;
+    assert_eq!((run.status.as_str(), run.attempts, run.error), ("pending", 0, None));
     assert_eq!(run.worker_id, None);
-    assert!(run.completed_at.is_some());
     test.cleanup().await;
 }
 
@@ -1947,4 +1947,68 @@ async fn lease_overlap(slow_first_claim: bool) {
     first_pool.close().await;
     test.cleanup().await;
     assert_eq!(alive_with_the_new_owner, 1, "two flows of one run were alive at once");
+}
+
+/// A worker of another version of the application, or of another application
+/// on the same database, leaves alone the runs of the flows it does not
+/// register: a worker that knows them takes them (#99).
+#[tokio::test]
+async fn leaves_the_runs_of_flows_it_does_not_register() {
+    let test = TestApp::new(create_config([noop_flow("alpha")])).await;
+    // A run of `beta` that is due, and one whose lease expired with its last attempt.
+    let (due,): (Uuid,) = sqlx::query_as(
+        "INSERT INTO flow_runs (shop, flow_name, status, available_at) \
+         VALUES ($1, 'beta', 'pending', now()) RETURNING id",
+    )
+    .bind(TEST_SHOP)
+    .fetch_one(&test.db)
+    .await
+    .unwrap();
+    let (expired,): (Uuid,) = sqlx::query_as(
+        "INSERT INTO flow_runs (shop, flow_name, status, attempts, worker_id, available_at) \
+         VALUES ($1, 'beta', 'running', 1, 'gone', now() - interval '1 minute') RETURNING id",
+    )
+    .bind(TEST_SHOP)
+    .fetch_one(&test.db)
+    .await
+    .unwrap();
+    let alpha = dispatch(&test, "alpha").await;
+
+    let alpha_worker = worker(&test.app, 2);
+    alpha_worker.start().await;
+    wait_for_status(&test, alpha, "completed").await;
+    // A few more polls, which take nothing.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    alpha_worker.stop().await;
+
+    let due = find_run(&test.db, due).await;
+    assert_eq!((due.status.as_str(), due.attempts, due.error), ("pending", 0, None));
+    let expired = find_run(&test.db, expired).await;
+    assert_eq!(
+        (expired.status.as_str(), expired.worker_id.as_deref(), expired.error),
+        ("running", Some("gone"), None)
+    );
+
+    // The worker of the version that registers `beta` takes both.
+    let beta_worker = worker(&test.sibling(create_config([noop_flow("beta")])), 2);
+    beta_worker.start().await;
+    wait_for_status(&test, due.id, "completed").await;
+    let expired = wait_until_finished(&test, expired.id).await;
+    beta_worker.stop().await;
+    // Its last attempt was used: it is failed as abandoned, by a worker that knows its flow.
+    assert_eq!(expired.status, "failed");
+    assert!(expired.error.unwrap().starts_with("Run abandoned"));
+    test.cleanup().await;
+}
+
+async fn wait_until_finished(test: &TestApp, run_id: Uuid) -> FlowRun {
+    let deadline = Instant::now() + TIMEOUT;
+    loop {
+        let run = find_run(&test.db, run_id).await;
+        if ["completed", "failed", "canceled"].contains(&run.status.as_str()) {
+            return run;
+        }
+        assert!(Instant::now() < deadline, "run is still \"{}\"", run.status);
+        tokio::time::sleep(POLL).await;
+    }
 }
