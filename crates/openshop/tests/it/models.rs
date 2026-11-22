@@ -2,7 +2,7 @@
 //! typed rows, and migrations generated from what changed.
 
 use crate::common::{TempProject, empty_database};
-use chrono::{DateTime, Utc};
+use openshop::Timestamp;
 use openshop::db::migrate::{FRAMEWORK_MIGRATIONS, check_migrations, generate_migrations, migrate_schema};
 use openshop::testing::TestDb;
 use openshop::{Model, OpenShopConfig, PgPool, Record, Value, json};
@@ -20,8 +20,8 @@ const OTHER_SHOP: &str = "two.myshopify.com";
 struct Review {
     id: Uuid,
     shop: String,
-    created_at: DateTime<Utc>,
-    updated_at: DateTime<Utc>,
+    created_at: Timestamp,
+    updated_at: Timestamp,
     product_id: String,
     author: String,
     rating: i32,
@@ -333,7 +333,7 @@ async fn saving_writes_the_fields_and_touches_updated_at() {
     review.tags.push("edited".to_string());
     // What the database owns is not written back.
     review.shop = OTHER_SHOP.to_string();
-    review.created_at = Utc::now();
+    review.created_at = Timestamp::now();
 
     let saved = reviews.save(&review).await.unwrap().expect("the row exists");
     assert_eq!(
@@ -402,8 +402,8 @@ async fn a_model_without_shop_has_plain_rows() {
 struct ReviewV2 {
     id: Uuid,
     shop: String,
-    created_at: DateTime<Utc>,
-    updated_at: DateTime<Utc>,
+    created_at: Timestamp,
+    updated_at: Timestamp,
     product_id: String,
     author: String,
     #[model(renamed_from = "rating")]

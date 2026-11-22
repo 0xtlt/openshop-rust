@@ -8,11 +8,11 @@
 
 use std::collections::{BTreeMap, VecDeque};
 
+use crate::Timestamp;
 use anyhow::Result;
 use axum::body::{Body, Bytes};
 use axum::http::header::{CONTENT_DISPOSITION, CONTENT_TYPE};
 use axum::response::Response;
-use chrono::{DateTime, Utc};
 use futures::stream::{self, Stream};
 use serde::Serialize;
 use serde_json::Value;
@@ -56,7 +56,7 @@ pub struct FilteredRunLogs {
 /// The position of a line in the order of a run: where a page stops.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LogCursor {
-    created_at: DateTime<Utc>,
+    created_at: Timestamp,
     id: Uuid,
     /// Lines of context still to show after this one, when a page stopped
     /// inside the context of a match.
@@ -76,7 +76,7 @@ impl LogCursor {
             return None;
         }
         Some(Self {
-            created_at: DateTime::from_timestamp_micros(micros.parse().ok()?)?,
+            created_at: Timestamp::from_microsecond(micros.parse().ok()?)?,
             id: Uuid::parse_str(id).ok()?,
             after_left,
         })
@@ -91,7 +91,7 @@ impl LogCursor {
     }
 
     pub fn encode(&self) -> String {
-        let (micros, id) = (self.created_at.timestamp_micros(), self.id);
+        let (micros, id) = (self.created_at.as_microsecond(), self.id);
         match self.after_left {
             0 => format!("{micros}.{id}"),
             left => format!("{micros}.{id}.{left}"),
@@ -117,8 +117,8 @@ pub struct RunLogOptions<'a> {
 struct Scan {
     run_id: String,
     levels: Vec<String>,
-    from: Option<DateTime<Utc>>,
-    to: Option<DateTime<Utc>>,
+    from: Option<Timestamp>,
+    to: Option<Timestamp>,
     after: Option<LogCursor>,
     done: bool,
 }
@@ -477,7 +477,7 @@ fn export_stream(export: Export) -> impl Stream<Item = Result<Bytes>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::{TimeZone, Utc};
+
     use serde_json::json;
     use uuid::Uuid;
 
@@ -489,7 +489,7 @@ mod tests {
                 level: "info".into(),
                 message: message.map(str::to_string),
                 payload,
-                created_at: Utc.with_ymd_and_hms(2026, 3, 1, 10, 0, 0).unwrap(),
+                created_at: crate::timestamp::utc(2026, 3, 1, 10, 0, 0),
             },
             matched: None,
         }

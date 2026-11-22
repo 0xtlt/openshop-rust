@@ -75,7 +75,7 @@ pub async fn sync_orders(ctx: FlowContext, input: SyncOrdersInput) -> Result<()>
     let transformed: Vec<WarehouseRecord> = ctx
         .step
         .run("transform-data", async || {
-            let exported_at = openshop::runtime::time::to_iso(&openshop::chrono::Utc::now());
+            let exported_at = openshop::Timestamp::now().to_iso();
             Ok(orders
                 .iter()
                 .map(|order| WarehouseRecord {

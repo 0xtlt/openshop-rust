@@ -112,7 +112,7 @@ mod tests {
     const SECRET: &str = "test-hmac-secret";
 
     /// A timestamp `shopify_api` takes as fresh while the tests run.
-    static TIMESTAMP: LazyLock<String> = LazyLock::new(|| chrono::Utc::now().timestamp().to_string());
+    static TIMESTAMP: LazyLock<String> = LazyLock::new(|| crate::Timestamp::now().as_second().to_string());
 
     /// The message Shopify signs for an app proxy request.
     fn proxy_message<'a>(pairs: impl IntoIterator<Item = (&'a str, &'a str)>) -> String {

@@ -662,7 +662,7 @@ async fn a_route_knows_a_launch_shopify_signed_and_which_app_signed_it(ctx: &Tes
     assert_eq!(seen["plan"], Value::Null);
 
     let none = json!({ "auth": null, "handler": null });
-    let old = (chrono::Utc::now().timestamp() - 3600).to_string();
+    let old = (openshop::Timestamp::now().as_second() - 3600).to_string();
     for query in [
         // Not signed.
         "shop=demo.myshopify.com&plan_handle=pro".to_string(),

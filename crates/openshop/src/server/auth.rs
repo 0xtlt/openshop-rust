@@ -3,6 +3,7 @@
 use std::collections::BTreeMap;
 use std::sync::Mutex;
 
+use crate::Timestamp;
 use axum::Router;
 use axum::body::Bytes;
 use axum::extract::{RawQuery, State};
@@ -10,7 +11,6 @@ use axum::http::header::{COOKIE as COOKIE_HEADER, LOCATION, SET_COOKIE};
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
-use chrono::Utc;
 use rand::Rng;
 use serde_json::json;
 use shopify_api::ShopDomain;
@@ -86,7 +86,7 @@ fn verify_state(secret: &str, app_handle: &str, shop: &str, state: &str, headers
     let browser = browser_id(headers)?;
     let expiry: i64 = expiry.parse().ok()?;
     let expected = sign_state(secret, app_handle, shop, expiry, nonce, &browser);
-    if !constant_time_eq(expected.as_bytes(), signature.as_bytes()) || expiry < Utc::now().timestamp() {
+    if !constant_time_eq(expected.as_bytes(), signature.as_bytes()) || expiry < Timestamp::now().as_second() {
         return None;
     }
     Some((signature.to_string(), expiry))
@@ -95,7 +95,7 @@ fn verify_state(secret: &str, app_handle: &str, shop: &str, state: &str, headers
 /// Spends a state: false if it was already.
 fn spend(key: String, expiry: i64) -> bool {
     let mut spent = SPENT.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-    spent.retain(|_, expiry| *expiry >= Utc::now().timestamp());
+    spent.retain(|_, expiry| *expiry >= Timestamp::now().as_second());
     spent.insert(key, expiry).is_none()
 }
 
@@ -122,7 +122,7 @@ async fn start(State(app): State<OpenShop>, headers: HeaderMap, RawQuery(raw): R
     // The browser keeps its cookie while it has one: its other pending
     // installations stay valid.
     let browser = browser_id(&headers).unwrap_or_else(random_hex);
-    let expiry = Utc::now().timestamp() + STATE_TTL;
+    let expiry = Timestamp::now().as_second() + STATE_TTL;
     let nonce = random_hex();
     let signature = sign_state(
         &shopify_app.api_secret,
@@ -267,7 +267,7 @@ mod tests {
 
     #[test]
     fn spent_states_are_forgotten_once_they_would_have_expired() {
-        let now = Utc::now().timestamp();
+        let now = Timestamp::now().as_second();
         assert!(spend("spent-test-old".into(), now - 1));
         assert!(spend("spent-test-live".into(), now + 60));
         assert!(!spend("spent-test-live".into(), now + 60));

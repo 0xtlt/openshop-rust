@@ -13,7 +13,7 @@ fn seconds(ms: i64) -> String {
 /// `—` when it has not started or not finished.
 pub(in crate::server::pages) fn run_duration(run: &FlowRun) -> String {
     let elapsed = match (run.started_at, run.completed_at) {
-        (Some(started), Some(completed)) => Some((completed - started).num_milliseconds()),
+        (Some(started), Some(completed)) => Some((completed - started).as_millis() as i64),
         _ => None,
     };
     match elapsed {
@@ -31,14 +31,12 @@ pub(in crate::server::pages) fn run_duration(run: &FlowRun) -> String {
 #[cfg(test)]
 pub(super) mod tests {
     use super::*;
-    use chrono::Duration;
-    use chrono::{DateTime, Utc};
+    use crate::Timestamp;
+    use jiff::SignedDuration;
 
     /// A run of `syncOrders` that started and finished `started` and `completed` ms after 2026-10-06 12:00 UTC.
     pub(in crate::server::pages::flows) fn run(status: &str, started: Option<i64>, completed: Option<i64>) -> FlowRun {
-        let base = DateTime::parse_from_rfc3339("2026-10-06T12:00:00Z")
-            .unwrap()
-            .with_timezone(&Utc);
+        let base = "2026-10-06T12:00:00Z".parse::<Timestamp>().unwrap();
         FlowRun {
             id: uuid::Uuid::nil(),
             app_handle: "default".to_string(),
@@ -53,8 +51,8 @@ pub(super) mod tests {
             available_at: None,
             worker_id: None,
             retry_policy: None,
-            started_at: started.map(|ms| base + Duration::milliseconds(ms)),
-            completed_at: completed.map(|ms| base + Duration::milliseconds(ms)),
+            started_at: started.map(|ms| base + SignedDuration::from_millis(ms)),
+            completed_at: completed.map(|ms| base + SignedDuration::from_millis(ms)),
             created_at: base,
             concurrency_key: None,
         }

@@ -2,7 +2,7 @@
 //! configuration and the form it is read from, a date, how long ago it was,
 //! the tone of a status, a JSON document in a modal.
 
-use chrono::{DateTime, Utc};
+use crate::Timestamp;
 use maud::{Markup, html};
 use serde_json::Value;
 
@@ -16,18 +16,19 @@ pub(super) const PRE: &str = "font-family:ui-monospace,SFMono-Regular,Menlo,mono
 /// A date, written by the server in UTC, which `openshop.js` writes again in
 /// the language and the time zone of the browser.
 pub(super) fn time(iso: &str) -> Markup {
-    let shown = DateTime::parse_from_rfc3339(iso)
-        .map(|date| date.with_timezone(&Utc).format("%Y-%m-%d %H:%M:%S UTC").to_string())
+    let shown = iso
+        .parse::<Timestamp>()
+        .map(|date| date.strftime("%Y-%m-%d %H:%M:%S UTC").to_string())
         .unwrap_or_else(|_| iso.to_string());
     html! { time datetime=(iso) { (shown) } }
 }
 
 /// How long ago `then` was: `just now`, `45m ago`, `4h ago`, `3d ago`.
-pub(super) fn time_ago(now: DateTime<Utc>, then: DateTime<Utc>) -> String {
+pub(super) fn time_ago(now: Timestamp, then: Timestamp) -> String {
     const MINUTE_MS: i64 = 60_000;
     const HOUR_MS: i64 = 3_600_000;
     const DAY_MS: i64 = 86_400_000;
-    let ms = (now - then).num_milliseconds();
+    let ms = (now - then).as_millis() as i64;
     if ms < MINUTE_MS {
         "just now".to_string()
     } else if ms < HOUR_MS {
@@ -254,10 +255,8 @@ mod tests {
 
     #[test]
     fn says_what_a_run_shows() {
-        let now = DateTime::parse_from_rfc3339("2026-10-06T12:00:00Z")
-            .unwrap()
-            .with_timezone(&Utc);
-        let ago = |seconds: i64| time_ago(now, now - chrono::Duration::seconds(seconds));
+        let now = "2026-10-06T12:00:00Z".parse::<Timestamp>().unwrap();
+        let ago = |seconds: i64| time_ago(now, now - jiff::SignedDuration::from_secs(seconds));
         assert_eq!(ago(30), "just now");
         assert_eq!(ago(-300), "just now");
         assert_eq!(ago(45 * 60), "45m ago");

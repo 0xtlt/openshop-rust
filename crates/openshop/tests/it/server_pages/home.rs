@@ -1,6 +1,7 @@
 //! The page `home` of the framework, rendered by the server.
 
-use chrono::{Duration, Utc};
+use jiff::SignedDuration;
+use openshop::Timestamp;
 use openshop::builder::{Field, Provider};
 use openshop::server::ServerOptions;
 use openshop::testing::{TestContext, TestOptions};
@@ -46,8 +47,8 @@ async fn context(pages: &[(AdminPageId, AdminPageMode)]) -> TestContext {
 
 /// A run of the shop, created `minutes` ago, that took `elapsed_ms` when it has ended.
 async fn seed_run(ctx: &TestContext, status: &str, minutes: i64, elapsed_ms: Option<i64>) -> Uuid {
-    let created_at = Utc::now() - Duration::minutes(minutes);
-    let completed_at = elapsed_ms.map(|elapsed| created_at + Duration::milliseconds(elapsed));
+    let created_at = Timestamp::now() - SignedDuration::from_mins(minutes);
+    let completed_at = elapsed_ms.map(|elapsed| created_at + SignedDuration::from_millis(elapsed));
     let (id,): (Uuid,) = sqlx::query_as(
         "INSERT INTO flow_runs (app_handle, shop, flow_name, status, input, available_at, created_at, started_at, completed_at) \
          VALUES ('default', $1, 'syncOrders', $2, '{}'::json, $3, $3, $3, $4) RETURNING id",

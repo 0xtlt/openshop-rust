@@ -18,7 +18,7 @@
 //! }
 //! ```
 
-use chrono::{DateTime, Utc};
+use crate::Timestamp;
 use serde::Serialize;
 use serde_json::Value;
 use sqlx::{FromRow, PgPool};
@@ -61,10 +61,10 @@ pub struct Installation {
     pub shop: String,
     pub scopes: Option<String>,
     #[serde(serialize_with = "iso::serialize")]
-    pub installed_at: DateTime<Utc>,
+    pub installed_at: Timestamp,
     /// Set when the shop uninstalled the app.
     #[serde(serialize_with = "iso_option::serialize")]
-    pub uninstalled_at: Option<DateTime<Utc>>,
+    pub uninstalled_at: Option<Timestamp>,
 }
 
 record!(Installation, "installations", {
@@ -72,8 +72,8 @@ record!(Installation, "installations", {
     APP_HANDLE: String = "app_handle",
     SHOP: String = "shop",
     SCOPES: String = "scopes",
-    INSTALLED_AT: DateTime<Utc> = "installed_at",
-    UNINSTALLED_AT: DateTime<Utc> = "uninstalled_at",
+    INSTALLED_AT: Timestamp = "installed_at",
+    UNINSTALLED_AT: Timestamp = "uninstalled_at",
 });
 
 impl Installation {
@@ -105,19 +105,19 @@ pub struct FlowRun {
     pub input: Option<Value>,
     pub error: Option<String>,
     #[serde(serialize_with = "iso_option::serialize")]
-    pub deadline_at: Option<DateTime<Utc>>,
+    pub deadline_at: Option<Timestamp>,
     pub parent_run_id: Option<String>,
     pub attempts: i32,
     #[serde(serialize_with = "iso_option::serialize")]
-    pub available_at: Option<DateTime<Utc>>,
+    pub available_at: Option<Timestamp>,
     pub worker_id: Option<String>,
     pub retry_policy: Option<Value>,
     #[serde(serialize_with = "iso_option::serialize")]
-    pub started_at: Option<DateTime<Utc>>,
+    pub started_at: Option<Timestamp>,
     #[serde(serialize_with = "iso_option::serialize")]
-    pub completed_at: Option<DateTime<Utc>>,
+    pub completed_at: Option<Timestamp>,
     #[serde(serialize_with = "iso::serialize")]
-    pub created_at: DateTime<Utc>,
+    pub created_at: Timestamp,
     /// The key no other active run of the flow, for the shop, may have:
     /// [`DispatchOptions::concurrency_key`](crate::DispatchOptions::concurrency_key).
     pub concurrency_key: Option<String>,
@@ -130,14 +130,14 @@ record!(FlowRun, "flow_runs", {
     FLOW_NAME: String = "flow_name",
     STATUS: String = "status",
     ERROR: String = "error",
-    DEADLINE_AT: DateTime<Utc> = "deadline_at",
+    DEADLINE_AT: Timestamp = "deadline_at",
     PARENT_RUN_ID: String = "parent_run_id",
     ATTEMPTS: i32 = "attempts",
-    AVAILABLE_AT: DateTime<Utc> = "available_at",
+    AVAILABLE_AT: Timestamp = "available_at",
     WORKER_ID: String = "worker_id",
-    STARTED_AT: DateTime<Utc> = "started_at",
-    COMPLETED_AT: DateTime<Utc> = "completed_at",
-    CREATED_AT: DateTime<Utc> = "created_at",
+    STARTED_AT: Timestamp = "started_at",
+    COMPLETED_AT: Timestamp = "completed_at",
+    CREATED_AT: Timestamp = "created_at",
     CONCURRENCY_KEY: String = "concurrency_key",
 }, read: ["input", "retry_policy"]);
 
@@ -167,7 +167,7 @@ pub struct StepResult {
     pub error: Option<String>,
     pub duration_ms: Option<i32>,
     #[serde(serialize_with = "iso::serialize")]
-    pub created_at: DateTime<Utc>,
+    pub created_at: Timestamp,
     pub flow_run_id: String,
 }
 
@@ -178,7 +178,7 @@ record!(StepResult, "step_results", {
     STATUS: String = "status",
     ERROR: String = "error",
     DURATION_MS: i32 = "duration_ms",
-    CREATED_AT: DateTime<Utc> = "created_at",
+    CREATED_AT: Timestamp = "created_at",
     FLOW_RUN_ID: String = "flow_run_id",
 }, read: ["output"]);
 
@@ -200,10 +200,10 @@ pub struct ProviderConfigRow {
     pub provider_name: String,
     pub config: Option<Value>,
     #[serde(serialize_with = "iso_option::serialize")]
-    pub last_checked_at: Option<DateTime<Utc>>,
+    pub last_checked_at: Option<Timestamp>,
     pub last_check_ok: Option<bool>,
     #[serde(serialize_with = "iso::serialize")]
-    pub updated_at: DateTime<Utc>,
+    pub updated_at: Timestamp,
 }
 
 impl std::fmt::Debug for ProviderConfigRow {
@@ -231,7 +231,7 @@ pub struct LogRow {
     pub message: Option<String>,
     pub payload: Option<Value>,
     #[serde(serialize_with = "iso::serialize")]
-    pub created_at: DateTime<Utc>,
+    pub created_at: Timestamp,
 }
 
 record!(LogRow, "logs", {
@@ -239,7 +239,7 @@ record!(LogRow, "logs", {
     FLOW_RUN_ID: String = "flow_run_id",
     LEVEL: String = "level",
     MESSAGE: String = "message",
-    CREATED_AT: DateTime<Utc> = "created_at",
+    CREATED_AT: Timestamp = "created_at",
 }, read: ["payload"]);
 
 impl LogRow {
@@ -263,15 +263,15 @@ pub struct McpToken {
     pub token_fingerprint: String,
     pub status: String,
     #[serde(serialize_with = "iso_option::serialize")]
-    pub expires_at: Option<DateTime<Utc>>,
+    pub expires_at: Option<Timestamp>,
     #[serde(serialize_with = "iso_option::serialize")]
-    pub revoked_at: Option<DateTime<Utc>>,
+    pub revoked_at: Option<Timestamp>,
     #[serde(serialize_with = "iso_option::serialize")]
-    pub last_used_at: Option<DateTime<Utc>>,
+    pub last_used_at: Option<Timestamp>,
     #[serde(serialize_with = "iso::serialize")]
-    pub created_at: DateTime<Utc>,
+    pub created_at: Timestamp,
     #[serde(serialize_with = "iso::serialize")]
-    pub updated_at: DateTime<Utc>,
+    pub updated_at: Timestamp,
 }
 
 impl std::fmt::Debug for McpToken {
@@ -310,5 +310,5 @@ pub struct McpAuditLog {
     pub duration_ms: Option<i32>,
     pub request_id: Option<String>,
     #[serde(serialize_with = "iso::serialize")]
-    pub created_at: DateTime<Utc>,
+    pub created_at: Timestamp,
 }

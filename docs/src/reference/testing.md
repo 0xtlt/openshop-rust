@@ -407,11 +407,13 @@ trial, with one item of that handle and description and a flat rate of
 
 ```rust,ignore
 use openshop::billing::AppPricingSubscription;
+use openshop::jiff::SignedDuration;
 use openshop::testing::app_pricing_subscription;
+use openshop::Timestamp;
 
 // A shop in the trial of the Pro plan.
 ctx.shopify.active_subscription(AppPricingSubscription {
-    trial_ends_at: Some(chrono::Utc::now() + chrono::Duration::days(7)),
+    trial_ends_at: Some(Timestamp::now() + SignedDuration::from_hours(7 * 24)),
     ..app_pricing_subscription("pro")
 });
 ```

@@ -13,8 +13,8 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::Timestamp;
 use anyhow::{Context, Result, bail};
-use chrono::Utc;
 use sha2::{Digest, Sha256};
 use sqlx::{Executor, PgPool};
 
@@ -394,10 +394,10 @@ pub fn generate_migrations(
     }
     std::fs::create_dir_all(&folder)?;
 
-    let mut timestamp = Utc::now();
+    let mut timestamp = Timestamp::now();
     let mut next_path = |suffix: &str| loop {
-        let prefix = timestamp.format("%Y%m%d%H%M%S").to_string();
-        timestamp += chrono::Duration::seconds(1);
+        let prefix = timestamp.strftime("%Y%m%d%H%M%S").to_string();
+        timestamp += jiff::SignedDuration::from_secs(1);
         if !files.iter().any(|file| file.tag.starts_with(&prefix)) {
             break folder.join(format!("{prefix}_{suffix}.sql"));
         }

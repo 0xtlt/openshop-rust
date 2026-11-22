@@ -73,7 +73,7 @@ pub fn sign_session_token(claims: &serde_json::Value, secret: &str) -> String {
 
 /// A session token as issued by Shopify App Bridge, valid for one minute.
 pub fn session_token(shop: &str, secret: &str, api_key: &str, sub: &str) -> String {
-    let now = chrono::Utc::now().timestamp();
+    let now = crate::Timestamp::now().as_second();
     sign_session_token(
         &json!({
             "iss": format!("https://{shop}/admin"),
@@ -105,7 +105,7 @@ pub fn sign_query(params: &[(&str, &str)], secret: &str) -> IndexMap<String, Str
         .collect();
     query
         .entry("timestamp".to_string())
-        .or_insert_with(|| chrono::Utc::now().timestamp().to_string());
+        .or_insert_with(|| crate::Timestamp::now().as_second().to_string());
     let hmac = ShopifyApp::new("", secret)
         .sign_query(&to_query_string(&query))
         .expect("a query string");

@@ -1,5 +1,39 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- chrono is gone: the dates are `openshop::Timestamp`, an instant of
+  [jiff](https://docs.rs/jiff) (`jiff::Timestamp`), chrono and chrono-tz being
+  no longer maintained (RUSTSEC-2026-0543, RUSTSEC-2026-0555). Every
+  `DateTime<Utc>` of the API is a `Timestamp`: the rows of the framework
+  tables (`FlowRun`, `Installation`, `LogRow`, `StepResult`…),
+  `RunOutcome::Sleeping`, the subscriptions of `billing`, a column of a
+  `#[derive(Model)]`. `openshop::chrono` is replaced by `openshop::jiff`, and
+  `Timestamp` is in the prelude. To migrate:
+  - `use openshop::chrono::{DateTime, Utc}` and `DateTime<Utc>`: `Timestamp`;
+    `Utc::now()`: `Timestamp::now()`.
+  - `chrono::Duration::seconds(n)`: `SignedDuration::from_secs(n)` (from
+    `openshop::jiff`), and `from_mins`, `from_hours`, `from_millis`; the
+    difference of two `Timestamp`s is a `SignedDuration`.
+  - `.timestamp()`: `.as_second()`; `.to_rfc3339()`: `.to_string()`, which
+    writes `Z` and not `+00:00`; `.format("%Y-%m-%d")`: `.strftime("%Y-%m-%d")`.
+  - A model read with `sqlx::query_as!` names the type of a `timestamp with
+    time zone` column, `created_at AS "created_at: _"`: `sqlx` has no type of
+    its own for it without chrono.
+
+  The JSON is unchanged: a `Timestamp` serializes as before, an RFC 3339
+  string in UTC with 0, 3, 6 or 9 digits of fractional seconds, and the
+  columns stay `timestamp with time zone`. The time zone of a cron is read in
+  the IANA database the binary bundles, a name in any case (`europe/paris`).
+- shopify_api 1.0.0-rc.6, whose dates are jiff's too
+  (`TokenData::expires_at`). croner 5, notify 9, and the compatible updates
+  of `Cargo.lock` (sqlx 0.9.1, sentry 0.49.6, url 2.5.9 for
+  RUSTSEC-2026-0592…).
+- `deny.toml` no longer ignores the chrono and chrono-tz advisories: neither
+  crate is in the tree.
+
 ## 0.1.0-rc.9
 
 ### Added

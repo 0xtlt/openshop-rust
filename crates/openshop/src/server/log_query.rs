@@ -10,7 +10,7 @@
 
 use std::sync::LazyLock;
 
-use chrono::{DateTime, Utc};
+use crate::Timestamp;
 use regex::{Captures, Regex, RegexBuilder};
 use serde_json::Value;
 
@@ -32,8 +32,8 @@ pub struct LogFilter {
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct TimeRange {
-    pub from: Option<DateTime<Utc>>,
-    pub to: Option<DateTime<Utc>>,
+    pub from: Option<Timestamp>,
+    pub to: Option<Timestamp>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -204,7 +204,7 @@ pub fn parse_log_query(query: &str) -> Result<ParsedLogQuery, InvalidLogQuery> {
             let amount: i64 = captures[1].parse().unwrap_or(i64::MAX);
             let ms = amount.saturating_mul(duration_unit_ms(&captures[2]));
             if ms > 0 {
-                let from = chrono::Duration::try_milliseconds(ms).and_then(|span| Utc::now().checked_sub_signed(span));
+                let from = Timestamp::now().checked_sub(jiff::SignedDuration::from_millis(ms));
                 match from {
                     Some(from) => parsed.time.from = Some(from),
                     None => {
@@ -377,17 +377,17 @@ mod tests {
 
     #[test]
     fn last_sets_from_date() {
-        let before = Utc::now();
+        let before = Timestamp::now();
         let from = parse_log_query("last:5m").unwrap().time.from.unwrap();
-        let diff = (before - from).num_milliseconds();
+        let diff = (before - from).as_millis() as i64;
         assert!((5 * 60_000 - 100..5 * 60_000 + 100).contains(&diff));
     }
 
     #[test]
     fn from_and_to_set_date_range() {
         let time = parse_log_query("from:2026-03-01 to:2026-03-02").unwrap().time;
-        assert_eq!(time.from.unwrap().date_naive().to_string(), "2026-03-01");
-        assert_eq!(time.to.unwrap().date_naive().to_string(), "2026-03-02");
+        assert_eq!(time.from.unwrap().strftime("%Y-%m-%d").to_string(), "2026-03-01");
+        assert_eq!(time.to.unwrap().strftime("%Y-%m-%d").to_string(), "2026-03-02");
     }
 
     #[test]

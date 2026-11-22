@@ -7,8 +7,8 @@
 use std::future::Future;
 use std::time::{Duration, Instant};
 
+use crate::Timestamp;
 use anyhow::{Result, anyhow, bail};
-use chrono::{DateTime, Utc};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
@@ -386,15 +386,14 @@ impl StepExecutor {
         let duration_ms = duration.as_millis().min(i32::MAX as u128) as i32;
         // The wake-up is dated with the clock of the database, the one the workers
         // claim the run with.
-        let (now,): (DateTime<Utc>,) = sqlx::query_as("SELECT now()").fetch_one(&self.db).await?;
-        let resume_at = now + chrono::Duration::milliseconds(duration.as_millis().min(i64::MAX as u128) as i64);
+        let (now,): (Timestamp,) = sqlx::query_as("SELECT now()").fetch_one(&self.db).await?;
+        let resume_at = now + jiff::SignedDuration::from_millis(duration.as_millis().min(i64::MAX as u128) as i64);
 
         if let Some((id, output)) = sleeping {
             let stored_resume_at = output
                 .as_ref()
                 .and_then(Value::as_str)
-                .and_then(|text| DateTime::parse_from_rfc3339(text).ok())
-                .map(|date| date.with_timezone(&Utc))
+                .and_then(|text| text.parse::<Timestamp>().ok())
                 .unwrap_or(resume_at);
             if stored_resume_at <= now {
                 self.store(id, "completed", None, None, duration_ms).await?;

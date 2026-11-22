@@ -14,10 +14,10 @@ use std::panic::AssertUnwindSafe;
 use std::time::Instant;
 
 use anyhow::{Result, anyhow, bail};
-use chrono::{DateTime, Duration, Utc};
-use chrono_tz::Tz;
 use croner::parser::{CronParser, Seconds};
 use futures::FutureExt;
+use jiff::SignedDuration;
+use jiff::tz::TimeZone;
 use serde_json::Value;
 use tokio::task::JoinHandle;
 
@@ -25,6 +25,7 @@ use super::dispatch::{CronTick, DispatchOptions, QueuedRun, queue_run};
 use super::errors::FlowConcurrencyError;
 use super::runner::panic_message;
 use super::step::error_message;
+use crate::Timestamp;
 use crate::app::OpenShop;
 use crate::runtime::{logger, report};
 use crate::server::shopify_apps::DEFAULT_SHOPIFY_APP_HANDLE;
@@ -169,11 +170,11 @@ pub fn parse_schedule(schedule: &str, flow: &str) -> Result<croner::Cron> {
 }
 
 /// The time zone a cron is read in: the one it declares, else UTC.
-pub fn parse_timezone(cron: &Cron) -> Result<Tz> {
+pub fn parse_timezone(cron: &Cron) -> Result<TimeZone> {
     let Some(name) = &cron.timezone else {
-        return Ok(Tz::UTC);
+        return Ok(TimeZone::UTC);
     };
-    name.trim().parse::<Tz>().map_err(|_| {
+    TimeZone::get(name.trim()).map_err(|_| {
         anyhow!(
             "[openshop] Invalid time zone \"{name}\" for the cron of flow \"{}\": expected an IANA name such as \"Europe/Paris\"",
             cron.flow
@@ -185,7 +186,7 @@ pub fn parse_timezone(cron: &Cron) -> Result<Tz> {
 #[derive(Clone)]
 struct Schedule {
     cron: croner::Cron,
-    zone: Tz,
+    zone: TimeZone,
 }
 
 impl Schedule {
@@ -197,19 +198,19 @@ impl Schedule {
     }
 
     /// The first occurrence after an instant.
-    fn after(&self, instant: DateTime<Utc>) -> Option<DateTime<Utc>> {
+    fn after(&self, instant: Timestamp) -> Option<Timestamp> {
         let next = self
             .cron
-            .find_next_occurrence(&instant.with_timezone(&self.zone), false);
-        next.ok().map(|next| next.with_timezone(&Utc))
+            .find_next_occurrence(&instant.to_zoned_datetime(self.zone.clone()), false);
+        next.ok().map(|next| next.timestamp().into())
     }
 
     /// The last occurrence up to an instant.
-    fn until(&self, instant: DateTime<Utc>) -> Option<DateTime<Utc>> {
+    fn until(&self, instant: Timestamp) -> Option<Timestamp> {
         let previous = self
             .cron
-            .find_previous_occurrence(&instant.with_timezone(&self.zone), true);
-        previous.ok().map(|previous| previous.with_timezone(&Utc))
+            .find_previous_occurrence(&instant.to_zoned_datetime(self.zone.clone()), true);
+        previous.ok().map(|previous| previous.timestamp().into())
     }
 
     /// The occurrence to fire when the wait for `next` ends at `now`: `next`
@@ -217,7 +218,7 @@ impl Schedule {
     /// forward) the latest occurrence since, so that what was missed is one
     /// firing and not one per occurrence. `None` when `now` is before `next`.
     /// How late an occurrence may still be fired is decided once, by `run_entry`.
-    fn due(&self, next: DateTime<Utc>, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
+    fn due(&self, next: Timestamp, now: Timestamp) -> Option<Timestamp> {
         if now < next {
             return None;
         }
@@ -227,7 +228,7 @@ impl Schedule {
 
 /// When a cron fires next after an instant, in the time zone it declares.
 /// `None` when its schedule or its time zone is invalid, or has no more occurrence.
-pub fn next_occurrence(cron: &Cron, after: DateTime<Utc>) -> Option<DateTime<Utc>> {
+pub fn next_occurrence(cron: &Cron, after: Timestamp) -> Option<Timestamp> {
     Schedule::of(cron).ok()?.after(after)
 }
 
@@ -285,7 +286,7 @@ fn tick_keys(crons: &[Cron]) -> Vec<String> {
             // The effective time zone: "UTC" and no time zone are the same cron.
             let zone = parse_timezone(entry).map_or_else(
                 |_| entry.timezone.clone().unwrap_or_default(),
-                |zone| zone.name().to_string(),
+                |zone| zone.iana_name().unwrap_or("UTC").to_string(),
             );
             let identity = serde_json::json!([entry.name, entry.shops_json(), entry.input, zone]).to_string();
             let digest = Sha256::digest(identity.as_bytes());
@@ -315,9 +316,9 @@ async fn prune_ticks(app: &OpenShop) {
 
 /// Fires an occurrence of a cron. `scheduled_at` is the same instant in every
 /// process, and is what makes the run be queued once.
-async fn run_entry(app: &OpenShop, entry: &Cron, tick_key: &str, scheduled_at: DateTime<Utc>) {
+async fn run_entry(app: &OpenShop, entry: &Cron, tick_key: &str, scheduled_at: Timestamp) {
     let flow = &entry.flow;
-    if Utc::now() - scheduled_at > Duration::minutes(MAX_TICK_LATENESS_MINUTES) {
+    if Timestamp::now() - scheduled_at > SignedDuration::from_mins(MAX_TICK_LATENESS_MINUTES) {
         logger::warn(format!(
             "[openshop] Cron \"{flow}\": skipping the occurrence of {scheduled_at}, too late to fire"
         ));
@@ -512,16 +513,16 @@ fn report_cron(flow: &str, error: &anyhow::Error) {
 /// Waits for each occurrence of a schedule and fires it. Returns when the
 /// schedule has none left.
 async fn fire_on_schedule(app: &OpenShop, entry: &Cron, tick_key: &str, schedule: &Schedule) {
-    let mut after = Utc::now();
+    let mut after = Timestamp::now();
     while let Some(next) = schedule.after(after) {
-        tokio::time::sleep((next - Utc::now()).to_std().unwrap_or_default()).await;
-        let now = Utc::now();
+        tokio::time::sleep((next - Timestamp::now()).try_into().unwrap_or_default()).await;
+        let now = Timestamp::now();
         // Woken before the time, such as by a clock set back: wait again.
         let Some(due) = schedule.due(next, now) else { continue };
         after = now.max(due);
 
         // Whole seconds: every process must name the occurrence alike.
-        let Some(scheduled_at) = DateTime::from_timestamp(due.timestamp(), 0) else {
+        let Some(scheduled_at) = Timestamp::from_second(due.as_second()) else {
             continue;
         };
         let (app, entry, tick_key) = (app.clone(), entry.clone(), tick_key.to_string());
@@ -724,7 +725,7 @@ mod tests {
         assert!(parse_schedule("0 3 * e* *", "sync").is_err());
     }
 
-    fn utc(text: &str) -> DateTime<Utc> {
+    fn utc(text: &str) -> Timestamp {
         text.parse().unwrap()
     }
 
@@ -830,8 +831,8 @@ mod tests {
             .unwrap()
     }
 
-    fn whole_seconds_ago(age: Duration) -> DateTime<Utc> {
-        DateTime::from_timestamp((Utc::now() - age).timestamp(), 0).unwrap()
+    fn whole_seconds_ago(age: SignedDuration) -> Timestamp {
+        Timestamp::from_second((Timestamp::now() - age).as_second()).unwrap()
     }
 
     #[tokio::test]
@@ -841,10 +842,10 @@ mod tests {
 
         // A process paused for two days wakes up on occurrences the others fired
         // long ago, whose claims are gone: it must not queue them again.
-        run_entry(&app, &cron, "sync", whole_seconds_ago(Duration::hours(48))).await;
+        run_entry(&app, &cron, "sync", whole_seconds_ago(SignedDuration::from_hours(48))).await;
         assert_eq!(run_count(&db).await, 0);
 
-        run_entry(&app, &cron, "sync", whole_seconds_ago(Duration::zero())).await;
+        run_entry(&app, &cron, "sync", whole_seconds_ago(SignedDuration::ZERO)).await;
         assert_eq!(run_count(&db).await, 1);
         db.cleanup().await.unwrap();
     }
@@ -868,14 +869,14 @@ mod tests {
         // A process that passed the check of `run_entry`, then stalled past the
         // retention while the claim of the occurrence was pruned: it has no
         // claim to find, and must not make a new one for a run already queued.
-        let stale = whole_seconds_ago(Duration::hours(TICK_RETENTION_HOURS + 1));
+        let stale = whole_seconds_ago(SignedDuration::from_hours(TICK_RETENTION_HOURS + 1));
         assert!(claim(stale).await.is_none());
-        let late = whole_seconds_ago(Duration::minutes(MAX_TICK_LATENESS_MINUTES + 1));
+        let late = whole_seconds_ago(SignedDuration::from_mins(MAX_TICK_LATENESS_MINUTES + 1));
         assert!(claim(late).await.is_none());
         assert_eq!(run_count(&db).await, 0);
 
         // A fresh occurrence is claimed once.
-        let fresh = whole_seconds_ago(Duration::seconds(5));
+        let fresh = whole_seconds_ago(SignedDuration::from_secs(5));
         assert!(claim(fresh).await.is_some());
         assert!(claim(fresh).await.is_none());
         assert_eq!(run_count(&db).await, 1);

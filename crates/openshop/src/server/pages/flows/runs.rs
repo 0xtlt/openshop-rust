@@ -2,7 +2,7 @@
 //! filters, page, selection), their table and its pages, and the
 //! confirmation of the deletion of those selected.
 
-use chrono::{DateTime, NaiveDate, Utc};
+use crate::Timestamp;
 use indexmap::IndexMap;
 use maud::{Markup, html};
 
@@ -52,7 +52,7 @@ impl RunsQuery {
     /// says whether another page follows.
     pub(super) fn api(&self) -> IndexMap<String, String> {
         // A day, `to`, ends at its last millisecond.
-        let to = match NaiveDate::parse_from_str(&self.to, "%Y-%m-%d") {
+        let to = match jiff::civil::Date::strptime("%Y-%m-%d", &self.to) {
             Ok(_) => format!("{}T23:59:59.999Z", self.to),
             Err(_) => self.to.clone(),
         };
@@ -211,7 +211,7 @@ fn capitalized(text: &str) -> String {
 /// A run: its checkbox, which belongs to the form of the confirmation, a
 /// link to its page (the whole row follows it), its status, when it
 /// started and how long it took.
-fn run_row(run: &FlowRun, every_flow: bool, checked: bool, now: DateTime<Utc>) -> Markup {
+fn run_row(run: &FlowRun, every_flow: bool, checked: bool, now: Timestamp) -> Markup {
     let id = run.id.to_string();
     let short: String = id.chars().take(8).collect();
     let link = format!("run-link-{id}");

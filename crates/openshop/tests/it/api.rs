@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::common::{LogCapture, create_config, find_run, noop_flow, run_exists, send, two_shopify_apps};
-use chrono::{DateTime, SubsecRound, Utc};
+use openshop::Timestamp;
 use openshop::builder::{Field, FieldOption, Flow, Function, FunctionType, Provider};
 use openshop::engine::abort::register_abort;
 use openshop::engine::{RunFlowOptions, run_flow};
@@ -79,20 +79,16 @@ fn error(message: &str) -> Value {
 }
 
 /// A whole-second instant in the recent past, so that ISO strings round-trip exactly.
-fn base_time() -> DateTime<Utc> {
-    (Utc::now() - chrono::Duration::hours(1)).trunc_subsecs(0)
+fn base_time() -> Timestamp {
+    Timestamp::from_second((Timestamp::now() - jiff::SignedDuration::from_hours(1)).as_second()).unwrap()
 }
 
 fn assert_iso_millis(value: &Value) {
     let text = value
         .as_str()
         .unwrap_or_else(|| panic!("expected a timestamp, got {value}"));
-    let parsed = DateTime::parse_from_rfc3339(text).unwrap_or_else(|_| panic!("not ISO-8601: {text}"));
-    assert_eq!(
-        to_iso(&parsed.with_timezone(&Utc)),
-        text,
-        "expected UTC with millisecond precision"
-    );
+    let parsed: Timestamp = text.parse().unwrap_or_else(|_| panic!("not ISO-8601: {text}"));
+    assert_eq!(to_iso(&parsed), text, "expected UTC with millisecond precision");
 }
 
 async fn seed_run_for(
@@ -101,7 +97,7 @@ async fn seed_run_for(
     shop: &str,
     flow_name: &str,
     status: &str,
-    created_at: DateTime<Utc>,
+    created_at: Timestamp,
 ) -> Uuid {
     let (id,): (Uuid,) = sqlx::query_as(
         "INSERT INTO flow_runs (app_handle, shop, flow_name, status, input, available_at, created_at) \
@@ -118,11 +114,11 @@ async fn seed_run_for(
     id
 }
 
-async fn seed_run(ctx: &TestContext, flow_name: &str, status: &str, created_at: DateTime<Utc>) -> Uuid {
+async fn seed_run(ctx: &TestContext, flow_name: &str, status: &str, created_at: Timestamp) -> Uuid {
     seed_run_for(&ctx.db, "default", &ctx.shop, flow_name, status, created_at).await
 }
 
-async fn seed_step(db: &PgPool, run_id: Uuid, name: &str, status: &str, created_at: DateTime<Utc>) {
+async fn seed_step(db: &PgPool, run_id: Uuid, name: &str, status: &str, created_at: Timestamp) {
     sqlx::query(
         "INSERT INTO step_results (flow_run_id, step_name, status, output, created_at) \
          VALUES ($1, $2, $3, 'null'::json, $4)",
@@ -142,7 +138,7 @@ async fn seed_log(
     level: &str,
     message: &str,
     payload: Value,
-    created_at: DateTime<Utc>,
+    created_at: Timestamp,
 ) -> Uuid {
     let (id,): (Uuid,) = sqlx::query_as(
         "INSERT INTO logs (flow_run_id, level, message, payload, created_at) \
@@ -521,7 +517,7 @@ async fn get_flow_runs_returns_filtered_runs(ctx: &TestContext) {
 #[openshop::test(api_context())]
 async fn get_runs_filters_by_status_and_date_range(ctx: &TestContext) {
     let base = base_time();
-    let hours_ago = |hours: i64| base - chrono::Duration::hours(hours);
+    let hours_ago = |hours: i64| base - jiff::SignedDuration::from_hours(hours);
     let completed = seed_run(ctx, "test-flow", "completed", hours_ago(3)).await.to_string();
     let failed = seed_run(ctx, "test-flow", "failed", hours_ago(2)).await.to_string();
     let canceled = seed_run(ctx, "other-flow", "canceled", hours_ago(1)).await.to_string();
@@ -576,7 +572,7 @@ async fn get_runs_paginates_newest_first_with_clamped_limits(ctx: &TestContext) 
     .execute(&ctx.db)
     .await
     .unwrap();
-    let minutes_ago = |minutes: i64| to_iso(&(base - chrono::Duration::minutes(minutes)));
+    let minutes_ago = |minutes: i64| to_iso(&(base - jiff::SignedDuration::from_mins(minutes)));
 
     let created_at = |path: String| {
         let request = ctx.get(&path);
@@ -659,7 +655,7 @@ async fn get_run_returns_run_with_steps() {
 #[openshop::test(api_context())]
 async fn get_run_orders_steps_by_creation_time(ctx: &TestContext) {
     let base = base_time();
-    let seconds = chrono::Duration::seconds;
+    let seconds = jiff::SignedDuration::from_secs;
     let run_id = seed_run(ctx, "test-flow", "completed", base).await;
     let unrelated = seed_run(ctx, "test-flow", "completed", base).await;
     seed_step(&ctx.db, run_id, "third", "completed", base + seconds(3)).await;
@@ -851,7 +847,7 @@ async fn post_run_cancel_releases_the_lease_of_a_running_run(ctx: &TestContext) 
     assert_eq!(status, StatusCode::OK);
 
     // A canceled run is held by no worker: its lease ends with it.
-    let (worker_id, lease_id, available_at): (Option<String>, Option<Uuid>, Option<chrono::DateTime<chrono::Utc>>) =
+    let (worker_id, lease_id, available_at): (Option<String>, Option<Uuid>, Option<Timestamp>) =
         sqlx::query_as("SELECT worker_id, lease_id, available_at FROM flow_runs WHERE id = $1")
             .bind(run_id)
             .fetch_one(&ctx.db)
@@ -940,8 +936,8 @@ async fn post_run_retry_retries_a_failed_run(ctx: &TestContext) {
     assert_eq!(run.started_at, None);
     assert_eq!(run.completed_at, None);
     assert_eq!(run.deadline_at, None);
-    let available_in = (run.available_at.expect("availableAt") - Utc::now())
-        .num_seconds()
+    let available_in = (run.available_at.expect("availableAt") - Timestamp::now())
+        .as_secs()
         .abs();
     assert!(available_in < 60, "{available_in}");
 
@@ -974,7 +970,7 @@ async fn post_run_retry_resume_keeps_completed_steps_and_reset_discards_them() {
     assert_eq!(run_status(&ctx.db, run_id).await, "failed");
     assert_eq!(step_names(&ctx.db, run_id).await, ["fetch", "push"]);
 
-    let before = Utc::now();
+    let before = Timestamp::now();
     let (status, body) = send(ctx.post(&format!("/api/runs/{run_id}/retry"))).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["mode"], "resume");
@@ -983,7 +979,7 @@ async fn post_run_retry_resume_keeps_completed_steps_and_reset_discards_them() {
     let run = find_run(&ctx.db, run_id).await;
     assert_eq!(run.status, "pending");
     assert_eq!(run.error, None);
-    let deadline_in = (run.deadline_at.expect("deadline from the flow timeout") - before).num_seconds();
+    let deadline_in = (run.deadline_at.expect("deadline from the flow timeout") - before).as_secs();
     assert!((55..=65).contains(&deadline_in), "{deadline_in}");
 
     let result = execute(&ctx, run_id, "test-flow").await;
@@ -1443,7 +1439,7 @@ async fn get_run_logs_returns_logs_with_filters(ctx: &TestContext) {
 }
 
 /// Six log lines one second apart; the API returns them newest first.
-async fn seed_order_logs(ctx: &TestContext) -> (Uuid, DateTime<Utc>) {
+async fn seed_order_logs(ctx: &TestContext) -> (Uuid, Timestamp) {
     let base = base_time();
     let run_id = seed_run(ctx, "test-flow", "completed", base).await;
     let lines = [
@@ -1459,7 +1455,7 @@ async fn seed_order_logs(ctx: &TestContext) -> (Uuid, DateTime<Utc>) {
         ("info", "Done", json!({})),
     ];
     for (index, (level, message, payload)) in lines.into_iter().enumerate() {
-        let at = base + chrono::Duration::seconds(index as i64);
+        let at = base + jiff::SignedDuration::from_secs(index as i64);
         seed_log(&ctx.db, run_id, level, message, payload, at).await;
     }
     (run_id, base)
@@ -1584,7 +1580,7 @@ async fn get_run_logs_caps_the_context_around_matches(ctx: &TestContext) {
     let base = base_time();
     let run_id = seed_run(ctx, "test-flow", "completed", base).await;
     for index in 0..300 {
-        let at = base + chrono::Duration::seconds(index);
+        let at = base + jiff::SignedDuration::from_secs(index);
         seed_log(&ctx.db, run_id, "info", &format!("line {index:03}"), json!({}), at).await;
     }
     // Newest first: the match is the 150th newest line, line 150.
@@ -1659,7 +1655,7 @@ async fn get_run_logs_expands_context_around_matches(ctx: &TestContext) {
 #[openshop::test(api_context())]
 async fn get_run_logs_restricts_by_time_range(ctx: &TestContext) {
     let (run_id, base) = seed_order_logs(ctx).await;
-    let at = |seconds: i64| to_iso(&(base + chrono::Duration::seconds(seconds)));
+    let at = |seconds: i64| to_iso(&(base + jiff::SignedDuration::from_secs(seconds)));
 
     let from = query_logs(ctx, run_id, &[("q", &format!("from:{}", at(3)))]).await;
     assert_eq!(
@@ -1772,7 +1768,7 @@ async fn get_run_logs_export_returns_csv(ctx: &TestContext) {
         lines[5],
         format!(
             "{first_id},info,\"Order 1001 synced\",\"{{\"\"orderId\"\":1001}}\",{}",
-            to_iso(&(base + chrono::Duration::seconds(1)))
+            to_iso(&(base + jiff::SignedDuration::from_secs(1)))
         )
     );
 
@@ -1847,7 +1843,7 @@ async fn get_run_logs_pages_with_a_cursor(ctx: &TestContext) {
     let run_id = seed_run(ctx, "test-flow", "completed", base).await;
     // Lines that share a timestamp, to check that the order is total.
     for index in 0..25 {
-        let at = base + chrono::Duration::seconds(index / 5);
+        let at = base + jiff::SignedDuration::from_secs(index / 5);
         seed_log(&ctx.db, run_id, "info", &format!("line {index}"), json!({}), at).await;
     }
 
@@ -1902,7 +1898,7 @@ async fn get_run_logs_pages_are_bounded_with_consecutive_matches_and_wide_contex
         } else {
             format!("line {index}")
         };
-        let at = base + chrono::Duration::seconds(index);
+        let at = base + jiff::SignedDuration::from_secs(index);
         seed_log(&ctx.db, run_id, "info", &message, json!({}), at).await;
     }
 

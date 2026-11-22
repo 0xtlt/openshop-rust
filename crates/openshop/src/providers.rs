@@ -10,8 +10,8 @@
 
 use std::marker::PhantomData;
 
+use crate::Timestamp;
 use anyhow::{Result, anyhow, bail};
-use chrono::{DateTime, Utc};
 use serde::Serialize;
 use serde_json::Value;
 
@@ -83,7 +83,7 @@ pub struct ProviderStatus {
     pub values: JsonMap,
     /// The password fields that have a value saved.
     pub saved_secrets: Vec<String>,
-    pub last_checked_at: Option<DateTime<Utc>>,
+    pub last_checked_at: Option<Timestamp>,
     /// What the last check answered.
     pub last_check_ok: Option<bool>,
 }

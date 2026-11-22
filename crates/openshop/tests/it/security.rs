@@ -5,8 +5,8 @@
 use crate::common::{find_run, json_body, run_exists};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use chrono::Utc;
 use hmac::{Hmac, KeyInit, Mac};
+use openshop::Timestamp;
 use openshop::builder::{Field, Flow, Provider};
 use openshop::testing::{
     TestContext, TestOptions, proxy_signature, sign_query, sign_session_token, sign_webhook_body, to_query_string,
@@ -315,7 +315,7 @@ async fn run_id_and_flow_name_path_params_with_injection_are_safe(ctx: &TestCont
 // ─── Session-token edge cases ────────────────────────────────────────
 
 fn claims(shop: &str) -> Value {
-    let now = Utc::now().timestamp();
+    let now = Timestamp::now().as_second();
     json!({
         "iss": format!("https://{shop}/admin"),
         "dest": format!("https://{shop}"),
@@ -390,7 +390,7 @@ async fn assert_unauthorized(ctx: &TestContext, token: &str, reason: &str) {
 
 #[openshop::test(context())]
 async fn expired_jwt_is_rejected(ctx: &TestContext) {
-    let now = Utc::now().timestamp();
+    let now = Timestamp::now().as_second();
 
     let token = token_with(json!({ "exp": now - 3600, "nbf": now - 7200, "iat": now - 7200 }));
     assert_unauthorized(ctx, &token, "JWT expired").await;
@@ -436,7 +436,7 @@ async fn tampered_jwt_payload_is_rejected(ctx: &TestContext) {
 
 #[openshop::test(context())]
 async fn not_yet_valid_jwt_is_rejected(ctx: &TestContext) {
-    let now = Utc::now().timestamp();
+    let now = Timestamp::now().as_second();
 
     let token = token_with(json!({ "nbf": now + 3600 }));
     assert_unauthorized(ctx, &token, "JWT not yet valid").await;
@@ -451,7 +451,7 @@ async fn not_yet_valid_jwt_is_rejected(ctx: &TestContext) {
 
 #[openshop::test(context())]
 async fn jwt_without_numeric_time_claims_is_rejected(ctx: &TestContext) {
-    let now = Utc::now().timestamp();
+    let now = Timestamp::now().as_second();
 
     for exp in [Value::Null, json!((now + 3600).to_string()), json!(true)] {
         let token = token_with(json!({ "exp": exp }));
@@ -584,7 +584,7 @@ async fn jwt_with_shop_domain_attacks_is_rejected(ctx: &TestContext) {
 #[openshop::test(context())]
 async fn credentials_of_one_surface_are_not_accepted_on_another(ctx: &TestContext) {
     dispatch(ctx, SHOP_A).await;
-    let timestamp = Utc::now().timestamp().to_string();
+    let timestamp = Timestamp::now().as_second().to_string();
     let missing = json!({ "error": "Unauthorized: missing session token" });
 
     // A signed app-launch or OAuth query is not an Admin API session.

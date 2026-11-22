@@ -3,8 +3,8 @@
 //! the search form, a link per level that turns it on or off, the exports,
 //! and the syntax of the query in a modal.
 
+use crate::Timestamp;
 use anyhow::Result;
-use chrono::{DateTime, Utc};
 use maud::{Markup, html};
 use serde_json::Value;
 use url::form_urlencoded::Serializer;
@@ -167,7 +167,7 @@ pub(super) fn logs_section(
     run_id: &str,
     filters: &LogFilters,
     logs: &Logs,
-    fresh_since: Option<DateTime<Utc>>,
+    fresh_since: Option<Timestamp>,
 ) -> Markup {
     let lines = &logs.page.logs;
     let searching = !filters.query.is_empty();
@@ -241,7 +241,7 @@ fn level_color(level: &str) -> &'static str {
 /// A line: its time, its level, its message and its payload. A line of the
 /// context of a match is faded; a match of a search, and a new line, are
 /// highlighted.
-fn log_line(row: &LogResponseRow, searching: bool, fresh_since: Option<DateTime<Utc>>) -> Markup {
+fn log_line(row: &LogResponseRow, searching: bool, fresh_since: Option<Timestamp>) -> Markup {
     let log = &row.log;
     let opacity = if row.matched == Some(false) { "opacity:0.5;" } else { "" };
     let background = if fresh_since.is_some_and(|since| log.created_at >= since) {

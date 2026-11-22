@@ -4,7 +4,7 @@
 use std::sync::{Arc, Mutex};
 
 use crate::common::{graphql_requests, install, send, two_shopify_apps};
-use chrono::{DateTime, Utc};
+use openshop::Timestamp;
 use openshop::builder::{
     CombinesWith, DiscountMode, Field, FieldOption, Function, FunctionOwner, FunctionType, OpenShopBuilder,
 };
@@ -1053,7 +1053,7 @@ async fn create_applies_defaults_for_fields_the_request_omits() {
     let (ctx, _shopify) = setup().await;
 
     // Without a mode the function's first mode is used; the discount starts now.
-    let before = Utc::now() - chrono::Duration::seconds(1);
+    let before = Timestamp::now() - jiff::SignedDuration::from_secs(1);
     for body in [
         json!({ "config": { "percent": 12.5 } }),
         json!({ "mode": "weekly", "config": { "percent": 12.5 } }),
@@ -1067,8 +1067,8 @@ async fn create_applies_defaults_for_fields_the_request_omits() {
         assert_eq!(input["endsAt"], Value::Null);
         let starts_at = input["startsAt"].as_str().expect("startsAt");
         assert!(starts_at.len() == 24 && starts_at.ends_with('Z'), "{starts_at}");
-        let starts_at = DateTime::parse_from_rfc3339(starts_at).unwrap();
-        assert!(starts_at >= before && starts_at <= Utc::now() + chrono::Duration::seconds(1));
+        let starts_at: Timestamp = starts_at.parse().unwrap();
+        assert!(starts_at >= before && starts_at <= Timestamp::now() + jiff::SignedDuration::from_secs(1));
     }
 
     let (status, _) = send(

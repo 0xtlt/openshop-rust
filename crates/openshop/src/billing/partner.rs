@@ -3,7 +3,7 @@
 //!
 //! See <https://shopify.dev/docs/api/partner/2026-07/active-subscription>.
 
-use chrono::{DateTime, Utc};
+use crate::Timestamp;
 use serde::de::Deserializer;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -50,7 +50,7 @@ pub struct AppPricingSubscription {
     pub cancel_at_end_of_cycle: bool,
     /// When its trial ends; `None` without a trial, or after it.
     #[serde(default)]
-    pub trial_ends_at: Option<DateTime<Utc>>,
+    pub trial_ends_at: Option<Timestamp>,
     /// The billing cycle the shop is in; `None` during the trial.
     #[serde(default)]
     pub current_billing_cycle: Option<BillingCycle>,
@@ -79,9 +79,9 @@ impl AppPricingSubscription {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BillingCycle {
-    pub start_time: DateTime<Utc>,
+    pub start_time: Timestamp,
     /// When the next charge happens.
-    pub end_time: DateTime<Utc>,
+    pub end_time: Timestamp,
 }
 
 /// An item of a subscription: a plan, or an event of the App Events API.
@@ -165,7 +165,7 @@ pub struct AppPricingDiscount {
     #[serde(default)]
     pub remaining_discount_cycles: Option<u32>,
     #[serde(default)]
-    pub discount_ends_at: Option<DateTime<Utc>>,
+    pub discount_ends_at: Option<Timestamp>,
 }
 
 /// The usage of an item in the current billing cycle.
@@ -285,8 +285,8 @@ mod tests {
                 .as_ref()
                 .unwrap()
                 .end_time
-                .to_rfc3339(),
-            "2026-05-01T00:00:00+00:00"
+                .to_string(),
+            "2026-05-01T00:00:00Z"
         );
         let plan = subscription.plan_item().unwrap();
         assert_eq!(plan.handle.as_deref(), Some("pro_plan"));

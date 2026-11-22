@@ -1,7 +1,7 @@
 //! Resolves an MCP bearer token to its shop, app and granted permissions.
 
+use crate::Timestamp;
 use anyhow::Result;
-use chrono::Utc;
 
 use super::tokens::{extract_bearer_token, parse_mcp_token};
 use super::verifier::{TokenVerifier, Verification};
@@ -73,7 +73,10 @@ pub async fn resolve_mcp_bearer_token(app: &OpenShop, authorization: Option<&str
             Some(stored.token_id),
         ));
     }
-    if stored.expires_at.is_some_and(|expires_at| expires_at <= Utc::now()) {
+    if stored
+        .expires_at
+        .is_some_and(|expires_at| expires_at <= Timestamp::now())
+    {
         return Ok(rejected(403, "Forbidden: MCP token has expired", Some(stored.token_id)));
     }
 

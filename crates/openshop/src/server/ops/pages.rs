@@ -1,10 +1,10 @@
 //! The pages of the operator dashboard: what happens in every shop, over a
 //! period, with the runs, the log lines, the flows and the shops behind it.
 
+use crate::Timestamp;
 use axum::extract::{Path, RawQuery, State};
 use axum::http::StatusCode;
 use axum::response::Response;
-use chrono::{DateTime, Utc};
 use indexmap::IndexMap;
 use uuid::Uuid;
 
@@ -172,7 +172,7 @@ fn filters(path: &str, range: Range, fields: &[String]) -> String {
 
 /// A chart of counts over the period, above what its lines stand for. `bad`
 /// names the line of what went wrong; a page already filtered on it has none.
-fn chart(start: DateTime<Utc>, range: Range, counts: &Counts, total: &str, bad: Option<&str>) -> String {
+fn chart(start: Timestamp, range: Range, counts: &Counts, total: &str, bad: Option<&str>) -> String {
     let mut series = vec![Series {
         name: total,
         class: "total",
@@ -240,7 +240,7 @@ fn runs_of_flow_link(flow: &str, range: Range) -> String {
 
 fn run_duration(run: &FlowRun) -> String {
     match (run.started_at, run.completed_at) {
-        (Some(started), Some(completed)) => duration((completed - started).num_milliseconds()),
+        (Some(started), Some(completed)) => duration((completed - started).as_millis() as i64),
         _ => "—".to_string(),
     }
 }
@@ -322,7 +322,7 @@ pub(super) async fn overview(State(app): State<OpenShop>, RawQuery(raw): RawQuer
     let db = app.db();
     let params = Params::new(raw.as_deref());
     let range = Range::parse(params.get("range"));
-    let now = Utc::now();
+    let now = Timestamp::now();
     let start = range.start(now);
     let everything = RunFilter::default();
 
@@ -344,7 +344,10 @@ pub(super) async fn overview(State(app): State<OpenShop>, RawQuery(raw): RawQuer
     .await?;
 
     let waiting = match queue.oldest_waiting {
-        Some(oldest) => format!("the oldest for {}", duration((now - oldest).num_milliseconds().max(0))),
+        Some(oldest) => format!(
+            "the oldest for {}",
+            duration(((now - oldest).as_millis() as i64).max(0))
+        ),
         None => "none is late".to_string(),
     };
     let content = [
@@ -403,7 +406,7 @@ pub(super) async fn runs(State(app): State<OpenShop>, RawQuery(raw): RawQuery) -
     let db = app.db();
     let params = Params::new(raw.as_deref());
     let range = Range::parse(params.get("range"));
-    let now = Utc::now();
+    let now = Timestamp::now();
     let start = range.start(now);
     let state = params.get("status").filter(|status| ALL_RUN_STATUSES.contains(status));
     let filter = RunFilter {
@@ -621,7 +624,7 @@ pub(super) async fn logs(State(app): State<OpenShop>, RawQuery(raw): RawQuery) -
     let db = app.db();
     let params = Params::new(raw.as_deref());
     let range = Range::parse(params.get("range"));
-    let now = Utc::now();
+    let now = Timestamp::now();
     let start = range.start(now);
     let severity = params.get("level").filter(|level| LOG_LEVELS.contains(level));
     let filter = LogFilter {
@@ -693,7 +696,7 @@ pub(super) async fn logs(State(app): State<OpenShop>, RawQuery(raw): RawQuery) -
 pub(super) async fn flows(State(app): State<OpenShop>, RawQuery(raw): RawQuery) -> ApiResult {
     let params = Params::new(raw.as_deref());
     let range = Range::parse(params.get("range"));
-    let start = range.start(Utc::now());
+    let start = range.start(Timestamp::now());
     let mut tallies = queries::flows(app.db(), start, false, MAX_SHOPS).await?;
     // A registered flow that did not run has its line too.
     let registered = &app.config().flows;
@@ -796,7 +799,7 @@ pub(super) async fn shops(State(app): State<OpenShop>, RawQuery(raw): RawQuery) 
     const KEEP: [&str; 3] = ["range", "q", "state"];
     let params = Params::new(raw.as_deref());
     let range = Range::parse(params.get("range"));
-    let start = range.start(Utc::now());
+    let start = range.start(Timestamp::now());
     let state = params.get("state").filter(|state| SHOP_STATES.contains(state));
     let shops = queries::shops(app.db(), start, params.get("q"), false, state, MAX_SHOPS).await?;
 
@@ -848,7 +851,7 @@ pub(super) async fn shop(
     let db = app.db();
     let params = Params::new(raw.as_deref());
     let range = Range::parse(params.get("range"));
-    let now = Utc::now();
+    let now = Timestamp::now();
     let start = range.start(now);
     let installations = queries::shops(db, start, Some(&domain), true, None, MAX_SHOPS).await?;
     if installations.is_empty() {
@@ -991,7 +994,7 @@ pub(super) async fn shop(
 pub(super) async fn crons(State(app): State<OpenShop>) -> ApiResult {
     let config = app.config();
     let turned_off = queries::crons_off(app.db()).await?;
-    let now = Utc::now();
+    let now = Timestamp::now();
     let rows: Vec<Row> = config
         .crons
         .iter()

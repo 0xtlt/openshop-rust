@@ -2,8 +2,8 @@
 
 use std::future::Future;
 
+use crate::Timestamp;
 use anyhow::Result;
-use chrono::{DateTime, Datelike, TimeZone, Utc};
 use indexmap::IndexMap;
 use serde_json::{Value, json};
 
@@ -61,10 +61,12 @@ async fn assert_run_visible(ctx: &McpContext, run_id: &str) -> Result<()> {
 
 /// Shopify releases a stable Admin API version on the first of January, April,
 /// July and October at 17:00 UTC.
-pub fn latest_stable_shopify_admin_api_version(now: DateTime<Utc>) -> String {
-    let year = now.year();
+pub fn latest_stable_shopify_admin_api_version(now: Timestamp) -> String {
+    let year = now.to_zoned_datetime(jiff::tz::TimeZone::UTC).year();
     for month in [10, 7, 4, 1] {
-        let release = Utc.with_ymd_and_hms(year, month, 1, 17, 0, 0).single().unwrap_or(now);
+        let release = jiff::tz::TimeZone::UTC
+            .to_timestamp(jiff::civil::date(year, month, 1).at(17, 0, 0, 0))
+            .map_or(now, Timestamp::from);
         if now >= release {
             return format!("{year}-{month:02}");
         }
@@ -74,7 +76,7 @@ pub fn latest_stable_shopify_admin_api_version(now: DateTime<Utc>) -> String {
 
 fn api_version_input(input: &JsonMap) -> Result<ApiVersion> {
     let value = match string_input(input, "apiVersion") {
-        None | Some("latest") => latest_stable_shopify_admin_api_version(Utc::now()),
+        None | Some("latest") => latest_stable_shopify_admin_api_version(Timestamp::now()),
         Some(requested) => requested.to_string(),
     };
     match ApiVersion::new(&value) {
@@ -608,7 +610,7 @@ mod tests {
 
     #[test]
     fn picks_the_latest_released_api_version() {
-        let at = |year, month, day, hour| Utc.with_ymd_and_hms(year, month, day, hour, 0, 0).unwrap();
+        let at = |year, month, day, hour| crate::timestamp::utc(year, month, day, hour, 0, 0);
         assert_eq!(latest_stable_shopify_admin_api_version(at(2026, 4, 1, 16)), "2026-01");
         assert_eq!(latest_stable_shopify_admin_api_version(at(2026, 4, 1, 17)), "2026-04");
         assert_eq!(latest_stable_shopify_admin_api_version(at(2026, 12, 31, 0)), "2026-10");

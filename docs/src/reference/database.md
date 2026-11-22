@@ -63,7 +63,6 @@ and that `migrate generate` writes migrations for, and they type the rows you
 read and write.
 
 ```rust,ignore
-use openshop::chrono::{DateTime, Utc};
 use openshop::prelude::*;
 
 #[derive(Debug, Clone, Model)]
@@ -71,8 +70,8 @@ use openshop::prelude::*;
 pub struct Review {
     pub id: Uuid,
     pub shop: String,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
+    pub created_at: Timestamp,
+    pub updated_at: Timestamp,
     pub product_id: String,
     pub rating: i32,
     pub note: Option<String>,
@@ -94,8 +93,8 @@ definition is fixed:
 | --- | --- | --- |
 | `id: Uuid` | `uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL` | Yes |
 | `shop: String` | `text NOT NULL` | No. Without it the table is not scoped by shop. |
-| `created_at: DateTime<Utc>` | `timestamp with time zone DEFAULT now() NOT NULL` | No |
-| `updated_at: DateTime<Utc>` | `timestamp with time zone DEFAULT now() NOT NULL` | No |
+| `created_at: Timestamp` | `timestamp with time zone DEFAULT now() NOT NULL` | No |
+| `updated_at: Timestamp` | `timestamp with time zone DEFAULT now() NOT NULL` | No |
 
 Every other field is a column named after it, `NOT NULL` unless its type is an
 `Option`:
@@ -107,7 +106,7 @@ Every other field is a column named after it, `NOT NULL` unless its type is an
 | `i16`, `i32`, `i64` | `smallint`, `integer`, `bigint` |
 | `f32`, `f64` | `real`, `double precision` |
 | `Uuid` | `uuid` |
-| `DateTime<Utc>` | `timestamp with time zone` |
+| `Timestamp` | `timestamp with time zone` |
 | `serde_json::Value` | `jsonb` |
 | `Vec<String>`, `Vec<i32>`, `Vec<i64>`, `Vec<Uuid>` | `text[]`, `integer[]`, `bigint[]`, `uuid[]` |
 | `Option<T>` | The type of `T`, nullable |
@@ -312,8 +311,9 @@ async fn list_and_add(db: &PgPool, shop: &str) -> Result<Vec<(String, i32)>> {
 }
 ```
 
-`openshop::sqlx` re-exports the `sqlx` crate with its PostgreSQL, `chrono`,
-`uuid`, and JSON support. A `#[derive(Model)]` struct already implements
+`openshop::sqlx` re-exports the `sqlx` crate with its PostgreSQL, `uuid`, and
+JSON support. A `timestamp with time zone` is read and bound as an
+`openshop::Timestamp`. A `#[derive(Model)]` struct already implements
 `sqlx::FromRow`; to derive it on another type, add `sqlx` to your own
 dependencies.
 
@@ -344,10 +344,18 @@ for row in rows {
     println!("{} {} {:?}", row.product_id, row.rating, row.score);
 }
 
-// The struct of a model, from free SQL.
-let best: Vec<Review> = sqlx::query_as!(Review, "SELECT * FROM reviews WHERE shop = $1 AND rating >= $2", ctx.shop, 4)
-    .fetch_all(&ctx.db)
-    .await?;
+// The struct of a model, from free SQL. `sqlx` has no type of its own for a
+// `timestamp with time zone`: `AS "created_at: _"` reads it as the type of the field.
+let best: Vec<Review> = sqlx::query_as!(
+    Review,
+    r#"SELECT id, shop, created_at AS "created_at: _", updated_at AS "updated_at: _",
+              product_id, rating, note, approved
+       FROM reviews WHERE shop = $1 AND rating >= $2"#,
+    ctx.shop,
+    4
+)
+.fetch_all(&ctx.db)
+.await?;
 ```
 
 A column that does not exist, a parameter of the wrong type and a result read
@@ -360,7 +368,7 @@ These are macros of `sqlx` itself, with its requirements:
   re-export.
 
   ```toml
-  sqlx = { version = "0.8", default-features = false, features = ["macros", "postgres", "runtime-tokio", "uuid", "chrono", "json"] }
+  sqlx = { version = "0.9", default-features = false, features = ["macros", "postgres", "runtime-tokio", "uuid", "json"] }
   ```
 
 - **A database while compiling.** The macros connect to `DATABASE_URL`, read

@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use chrono::{DateTime, Utc};
+use crate::Timestamp;
 use serde_json::{Map, Value};
 use sqlx::PgPool;
 use tokio::sync::{mpsc, oneshot};
@@ -32,7 +32,7 @@ struct Line {
     message: String,
     /// The JSON text of the payload.
     payload: String,
-    at: DateTime<Utc>,
+    at: Timestamp,
 }
 
 impl Line {
@@ -115,7 +115,7 @@ impl FlowLogger {
                         level: "warn",
                         message: notice,
                         payload: "{}".to_string(),
-                        at: Utc::now(),
+                        at: Timestamp::now(),
                     });
                 }
                 write(&db, &flow_run_id, &lines).await;
@@ -166,7 +166,7 @@ impl FlowLogger {
             level,
             message: without_nul(message).into_owned(),
             payload: payload.to_string(),
-            at: Utc::now(),
+            at: Timestamp::now(),
         };
         // A full queue loses the line; a closed one belongs to a stopped runtime.
         if let Err(mpsc::error::TrySendError::Full(_)) = self.sender.try_send(Message::Line(line)) {
@@ -261,7 +261,7 @@ async fn write(db: &PgPool, flow_run_id: &str, lines: &[Line]) {
     // Sent as text: the `json` column keeps it as it is, where a `jsonb` parameter
     // would come back with spaces and its keys in another order.
     let payloads: Vec<&str> = lines.iter().map(|line| line.payload.as_str()).collect();
-    let dates: Vec<DateTime<Utc>> = lines.iter().map(|line| line.at).collect();
+    let dates: Vec<Timestamp> = lines.iter().map(|line| line.at).collect();
 
     // A failed log write must not crash the flow: it is told to the process logger.
     let written = sqlx::query(

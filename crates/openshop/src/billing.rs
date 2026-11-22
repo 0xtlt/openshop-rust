@@ -70,7 +70,7 @@ mod partner;
 
 use std::time::Instant;
 
-use chrono::{DateTime, Utc};
+use crate::Timestamp;
 use serde::de::{self, Deserializer};
 use serde::{Deserialize, Serialize, Serializer};
 use serde_json::{Value, json};
@@ -248,10 +248,10 @@ pub struct AppSubscription {
     pub test: bool,
     /// The free trial of the subscription, in days; `0` without one.
     pub trial_days: u32,
-    pub created_at: DateTime<Utc>,
+    pub created_at: Timestamp,
     /// The end of the billing period, or of the trial.
     #[serde(default)]
-    pub current_period_end: Option<DateTime<Utc>>,
+    pub current_period_end: Option<Timestamp>,
     pub line_items: Vec<SubscriptionLineItem>,
 }
 
@@ -480,9 +480,9 @@ struct SubscriptionData {
     status: SubscriptionStatus,
     test: bool,
     trial_days: u32,
-    created_at: DateTime<Utc>,
+    created_at: Timestamp,
     #[serde(default)]
-    current_period_end: Option<DateTime<Utc>>,
+    current_period_end: Option<Timestamp>,
     line_items: Vec<LineItemData>,
 }
 
@@ -873,9 +873,9 @@ pub struct UpdatedAppSubscription {
     #[serde(default)]
     pub admin_graphql_api_shop_id: Option<String>,
     #[serde(default)]
-    pub created_at: Option<DateTime<Utc>>,
+    pub created_at: Option<Timestamp>,
     #[serde(default)]
-    pub updated_at: Option<DateTime<Utc>>,
+    pub updated_at: Option<Timestamp>,
     /// The currency of its price, `USD`.
     #[serde(default)]
     pub currency: Option<String>,
@@ -965,7 +965,7 @@ mod tests {
         assert_eq!(pro.name, "Pro");
         assert!(pro.is_active() && pro.test);
         assert_eq!(pro.trial_days, 7);
-        assert_eq!(pro.created_at.to_rfc3339(), "2026-11-01T10:00:00+00:00");
+        assert_eq!(pro.created_at.to_string(), "2026-11-01T10:00:00Z");
         assert_eq!(pro.plan_handle(), Some("pro"));
         let SubscriptionPricing::Usage(usage) = &pro.line_items[1].pricing else {
             panic!("a usage line");
@@ -1024,10 +1024,7 @@ mod tests {
         .unwrap();
         let subscription = update.app_subscription;
         assert_eq!(subscription.status, SubscriptionStatus::Pending);
-        assert_eq!(
-            subscription.created_at.unwrap().to_rfc3339(),
-            "2022-01-01T00:00:00+00:00"
-        );
+        assert_eq!(subscription.created_at.unwrap().to_string(), "2022-01-01T00:00:00Z");
         assert_eq!(subscription.price.as_deref(), Some("10.00"));
         assert_eq!(subscription.capped_amount.as_deref(), Some("20.0"));
         assert_eq!(subscription.plan_handle.as_deref(), Some("plan-123"));

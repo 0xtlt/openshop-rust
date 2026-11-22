@@ -1,6 +1,6 @@
 //! Shopify Admin GraphQL mutations that manage Shopify Function instances.
 
-use chrono::Utc;
+use crate::Timestamp;
 use serde_json::{Value, json};
 
 use crate::runtime::time::to_iso;
@@ -130,7 +130,7 @@ pub fn build_create_mutation(
     body: &JsonMap,
 ) -> MutationRequest {
     let metafield = build_metafield(handle, config);
-    let now = || Value::from(to_iso(&Utc::now()));
+    let now = || Value::from(to_iso(&Timestamp::now()));
 
     match definition.function_type {
         FunctionType::Discount if mode == DiscountMode::Automatic => MutationRequest {

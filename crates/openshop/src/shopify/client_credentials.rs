@@ -47,7 +47,7 @@ use std::sync::{Arc, Mutex as StdMutex, MutexGuard};
 use std::time::Duration;
 
 use anyhow::{Result, bail};
-use chrono::{DateTime, TimeDelta, Utc};
+use jiff::{SignedDuration, Timestamp};
 use sha2::{Digest, Sha256};
 use shopify_api::transport::BoxFuture;
 use shopify_api::{Auth, ShopDomain, Shopify, TokenData, TokenStore};
@@ -64,7 +64,7 @@ use crate::server::crypto::Crypto;
 use crate::server::shop_domain::strict_shop_domain;
 
 /// A token this process obtained is taken as expiring this long before it does.
-const RENEWAL_MARGIN: TimeDelta = TimeDelta::minutes(5);
+const RENEWAL_MARGIN: SignedDuration = SignedDuration::from_mins(5);
 
 /// How long a definite refusal (a `4xx` with Shopify's error code, such as
 /// `shop_not_permitted`) holds back another request for the same app and shop.
@@ -120,7 +120,7 @@ struct Entry {
     /// request.
     vouched_held: Option<Instant>,
     /// The token this process obtained, as a digest, and when it expires.
-    granted: Option<([u8; 32], DateTime<Utc>)>,
+    granted: Option<([u8; 32], Timestamp)>,
     /// Whether the token exchange was tried in place of that token.
     exchange_tried: bool,
 }
@@ -147,7 +147,9 @@ impl Entry {
     fn live(&self) -> bool {
         held_back(self.background_held)
             || held_back(self.vouched_held)
-            || self.granted.is_some_and(|(_, expires_at)| Utc::now() < expires_at)
+            || self
+                .granted
+                .is_some_and(|(_, expires_at)| Timestamp::now() < expires_at)
     }
 }
 
@@ -350,7 +352,7 @@ impl ClientCredentials {
         else {
             return false;
         };
-        *granted == digest(token) && *expires_at - RENEWAL_MARGIN <= Utc::now()
+        *granted == digest(token) && *expires_at - RENEWAL_MARGIN <= Timestamp::now()
     }
 
     /// Whether `token` of `shop` may be one the grant gave rather than an
@@ -799,20 +801,20 @@ mod tests {
     fn only_a_token_this_process_obtained_expires() {
         let credentials = ClientCredentials::new(None).unwrap();
         let shop = "dev-store-1.myshopify.com";
-        let set = |expires_at: DateTime<Utc>| {
+        let set = |expires_at: Timestamp| {
             credentials.remember("default", shop, |entry| {
                 entry.granted = Some((digest("granted"), expires_at))
             });
         };
         assert!(!credentials.expiring("default", shop, "granted"));
 
-        set(Utc::now() + TimeDelta::minutes(6));
+        set(Timestamp::now() + SignedDuration::from_mins(6));
         assert!(!credentials.expiring("default", shop, "granted"));
-        set(Utc::now() + TimeDelta::minutes(4));
+        set(Timestamp::now() + SignedDuration::from_mins(4));
         assert!(credentials.expiring("default", shop, "granted"));
         assert!(!credentials.expiring("default", shop, "oauth-token"));
         assert!(!credentials.expiring("other", shop, "granted"));
-        set(Utc::now() - TimeDelta::minutes(1));
+        set(Timestamp::now() - SignedDuration::from_mins(1));
         assert!(!credentials.expiring("default", shop, "granted"));
         assert!(credentials.entries().is_empty());
     }

@@ -5,8 +5,8 @@
 //! page of the framework is not disabled. Fetched again every 10 seconds.
 //! An application with its own page at `/` shows that one instead.
 
+use crate::Timestamp;
 use anyhow::Result;
-use chrono::{DateTime, Utc};
 use indexmap::IndexMap;
 use maud::{Markup, html};
 use serde_json::Value;
@@ -36,7 +36,7 @@ struct Run {
     id: String,
     flow: String,
     status: String,
-    created_at: DateTime<Utc>,
+    created_at: Timestamp,
     /// From its start to its end, when it has both.
     elapsed_ms: Option<i64>,
 }
@@ -44,7 +44,7 @@ struct Run {
 impl From<FlowRun> for Run {
     fn from(run: FlowRun) -> Self {
         let elapsed_ms = match (run.started_at, run.completed_at) {
-            (Some(started), Some(completed)) => Some((completed - started).num_milliseconds()),
+            (Some(started), Some(completed)) => Some((completed - started).as_millis() as i64),
             _ => None,
         };
         Self {
@@ -66,7 +66,7 @@ struct ProviderRow {
 
 /// What the dashboard shows; a part is `None` when its page is disabled.
 struct Dashboard {
-    now: DateTime<Utc>,
+    now: Timestamp,
     /// The number of flows, and the latest runs, newest first.
     flows: Option<(usize, Vec<Run>)>,
     /// The crons enabled, and those disabled.
@@ -115,7 +115,7 @@ pub(super) async fn render(page: &BuiltinPage<'_>) -> Result<Markup> {
         None
     };
     Ok(view(&Dashboard {
-        now: Utc::now(),
+        now: Timestamp::now(),
         flows,
         crons,
         providers,
@@ -211,7 +211,7 @@ fn stats(dashboard: &Dashboard) -> Markup {
     }
 }
 
-fn recent_runs(now: DateTime<Utc>, runs: &[Run]) -> Markup {
+fn recent_runs(now: Timestamp, runs: &[Run]) -> Markup {
     html! {
         s-section heading="Recent runs" {
             s-table {
@@ -291,12 +291,10 @@ pub(super) async fn submit(_page: &BuiltinPage<'_>, _action: &str, _fields: &[(S
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::Duration;
+    use jiff::SignedDuration;
 
-    fn now() -> DateTime<Utc> {
-        DateTime::parse_from_rfc3339("2026-11-09T12:00:00Z")
-            .unwrap()
-            .with_timezone(&Utc)
+    fn now() -> Timestamp {
+        "2026-11-09T12:00:00Z".parse::<Timestamp>().unwrap()
     }
 
     fn run(id: &str, flow: &str, status: &str, minutes_ago: i64, elapsed_ms: Option<i64>) -> Run {
@@ -304,7 +302,7 @@ mod tests {
             id: id.to_string(),
             flow: flow.to_string(),
             status: status.to_string(),
-            created_at: now() - Duration::minutes(minutes_ago),
+            created_at: now() - SignedDuration::from_mins(minutes_ago),
             elapsed_ms,
         }
     }
@@ -486,11 +484,14 @@ mod tests {
     #[test]
     fn writes_ages_and_durations_as_the_dashboard_did() {
         let now = now();
-        assert_eq!(time_ago(now, now - Duration::seconds(30)), "just now");
-        assert_eq!(time_ago(now, now + Duration::minutes(5)), "just now");
-        assert_eq!(time_ago(now, now - Duration::minutes(45)), "45m ago");
-        assert_eq!(time_ago(now, now - Duration::seconds(4 * 3_600 + 3_599)), "4h ago");
-        assert_eq!(time_ago(now, now - Duration::days(3)), "3d ago");
+        assert_eq!(time_ago(now, now - SignedDuration::from_secs(30)), "just now");
+        assert_eq!(time_ago(now, now + SignedDuration::from_mins(5)), "just now");
+        assert_eq!(time_ago(now, now - SignedDuration::from_mins(45)), "45m ago");
+        assert_eq!(
+            time_ago(now, now - SignedDuration::from_secs(4 * 3_600 + 3_599)),
+            "4h ago"
+        );
+        assert_eq!(time_ago(now, now - SignedDuration::from_hours(24 * 3)), "3d ago");
 
         assert_eq!(duration(Some(1_250), "completed"), "1.3s");
         assert_eq!(duration(Some(1_150), "completed"), "1.1s");

@@ -1,7 +1,7 @@
 //! Typed errors of the engine. They travel inside `anyhow::Error` and are
 //! recovered with `downcast_ref`.
 
-use chrono::{DateTime, Utc};
+use crate::Timestamp;
 
 use crate::runtime::time::to_iso;
 
@@ -116,7 +116,7 @@ impl std::error::Error for InvalidFlowInput {}
 /// Raised by `step.sleep()` to suspend the run until `resume_at`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SleepSignal {
-    pub resume_at: DateTime<Utc>,
+    pub resume_at: Timestamp,
 }
 
 impl std::fmt::Display for SleepSignal {
@@ -130,7 +130,6 @@ impl std::error::Error for SleepSignal {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::TimeZone;
 
     #[test]
     fn flow_canceled_error_has_a_fixed_message() {
@@ -170,7 +169,7 @@ mod tests {
 
     #[test]
     fn sleep_signal_formats_the_resume_date() {
-        let resume_at = Utc.with_ymd_and_hms(2026, 1, 2, 3, 4, 5).unwrap();
+        let resume_at = crate::timestamp::utc(2026, 1, 2, 3, 4, 5);
         assert_eq!(
             SleepSignal { resume_at }.to_string(),
             "Flow sleeping until 2026-01-02T03:04:05.000Z"

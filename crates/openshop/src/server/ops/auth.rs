@@ -6,10 +6,10 @@ use std::net::IpAddr;
 use std::sync::Mutex;
 use std::time::Duration;
 
+use crate::Timestamp;
 use anyhow::{Result, bail};
 use axum::http::HeaderMap;
 use axum::http::header::COOKIE;
-use chrono::Utc;
 use sha2::{Digest, Sha256};
 use tokio::time::Instant;
 
@@ -121,7 +121,7 @@ impl OpsAuth {
 
     /// Whether the request carries a session this server signed and that has not expired.
     pub(crate) fn has_session(&self, headers: &HeaderMap) -> bool {
-        let now = Utc::now().timestamp();
+        let now = Timestamp::now().as_second();
         headers
             .get_all(COOKIE)
             .iter()
@@ -179,7 +179,7 @@ impl OpsAuth {
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .remove(&client);
-            return Login::Granted(self.cookie(&self.session_token(Utc::now().timestamp()), SESSION_SECONDS));
+            return Login::Granted(self.cookie(&self.session_token(Timestamp::now().as_second()), SESSION_SECONDS));
         }
         Login::Refused
     }
@@ -253,7 +253,7 @@ mod tests {
     #[test]
     fn a_session_is_refused_when_forged_expired_or_signed_for_another_password() {
         let auth = auth();
-        let now = Utc::now().timestamp();
+        let now = Timestamp::now().as_second();
         let token = auth.session_token(now);
         assert!(auth.is_valid_token(&token, now));
         assert!(!auth.is_valid_token(&token, now + SESSION_SECONDS));

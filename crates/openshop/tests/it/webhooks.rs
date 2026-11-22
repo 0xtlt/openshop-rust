@@ -875,8 +875,8 @@ async fn a_test_delivers_a_webhook_with_the_headers_shopify_sends() {
     assert_eq!(first["contentType"], "application/json");
     assert_eq!(first["authorization"], Value::Null);
     assert_eq!(first["payload"], json!({ "id": 1 }));
-    let triggered_at = chrono::DateTime::parse_from_rfc3339(first["triggeredAt"].as_str().unwrap()).unwrap();
-    assert!((chrono::Utc::now() - triggered_at.to_utc()).num_seconds() < 60);
+    let triggered_at: openshop::Timestamp = first["triggeredAt"].as_str().unwrap().parse().unwrap();
+    assert!((openshop::Timestamp::now() - triggered_at).as_secs() < 60);
     // Each delivery has ids of its own.
     let second = deliver("orders/create").await;
     for id in ["webhookId", "eventId"] {

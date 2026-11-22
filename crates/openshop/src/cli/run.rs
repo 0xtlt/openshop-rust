@@ -4,8 +4,8 @@
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
+use crate::Timestamp;
 use anyhow::{Context, Result, anyhow, bail};
-use chrono::{DateTime, Utc};
 use serde_json::Value;
 use uuid::Uuid;
 
@@ -238,7 +238,7 @@ enum Ended {
     Failed(String),
     Canceled,
     /// The flow sleeps until then: the workers of the application wake it.
-    Sleeping(Option<DateTime<Utc>>),
+    Sleeping(Option<Timestamp>),
 }
 
 /// A run of the command, once it ended.
@@ -297,7 +297,7 @@ async fn finish(
             }
             Ended::Sleeping(until) => println!(
                 "[openshop] Run {run_id} for {shop}: sleeping until {}. A worker of the application (`dev`, `worker`) wakes it then.",
-                until.map_or_else(|| "it is woken".to_string(), |until| until.to_rfc3339())
+                until.map_or_else(|| "it is woken".to_string(), |until| until.to_string())
             ),
         }
     }
@@ -345,7 +345,7 @@ async fn execute(
 /// Waits until each of `runs` is over, and says how. An attempt that failed
 /// and will be made again is said as it happens.
 async fn wait_for(app: &OpenShop, runs: &[Uuid]) -> Result<HashMap<Uuid, Ended>> {
-    type Row = (Uuid, String, Option<String>, Option<DateTime<Utc>>, i32);
+    type Row = (Uuid, String, Option<String>, Option<Timestamp>, i32);
     let mut ended = HashMap::new();
     let mut retries_said = HashSet::new();
     loop {
@@ -371,9 +371,7 @@ async fn wait_for(app: &OpenShop, runs: &[Uuid]) -> Result<HashMap<Uuid, Ended>>
                     println!(
                         "[openshop] Run {run_id}: attempt {attempts} failed{}, tried again{}",
                         error.as_deref().map(|error| format!(": {error}")).unwrap_or_default(),
-                        available_at
-                            .map(|at| format!(" at {}", at.to_rfc3339()))
-                            .unwrap_or_default()
+                        available_at.map(|at| format!(" at {at}")).unwrap_or_default()
                     );
                     continue;
                 }

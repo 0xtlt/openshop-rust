@@ -1,7 +1,8 @@
 //! The charts of the operator dashboard, drawn by the server as inline SVG:
 //! counts over time, one point per bucket of the period.
 
-use chrono::{DateTime, Duration, Utc};
+use crate::Timestamp;
+use jiff::SignedDuration;
 
 /// The counts of one thing, bucket by bucket.
 pub(crate) struct Series<'a> {
@@ -70,14 +71,14 @@ pub(crate) fn grouped(value: i64) -> String {
 }
 
 /// How a bucket is named: the hour within a day, the day beyond.
-fn time_label(at: &DateTime<Utc>, bucket: Duration, buckets: usize) -> String {
+fn time_label(at: &Timestamp, bucket: SignedDuration, buckets: usize) -> String {
     let period = bucket * buckets as i32;
-    if period <= Duration::hours(24) {
-        at.format("%H:%M").to_string()
-    } else if bucket < Duration::hours(12) {
-        at.format("%b %d, %H:%M").to_string()
+    if period <= SignedDuration::from_hours(24) {
+        at.strftime("%H:%M").to_string()
+    } else if bucket < SignedDuration::from_hours(12) {
+        at.strftime("%b %d, %H:%M").to_string()
     } else {
-        at.format("%b %d").to_string()
+        at.strftime("%b %d").to_string()
     }
 }
 
@@ -85,14 +86,14 @@ fn time_label(at: &DateTime<Utc>, bucket: Duration, buckets: usize) -> String {
 /// for a wide page and for a narrow one, the style sheet showing the one that
 /// fits. The first series is filled under its line. Each bucket says its
 /// counts on hover.
-pub(crate) fn area_chart(start: DateTime<Utc>, bucket: Duration, series: &[Series<'_>]) -> String {
+pub(crate) fn area_chart(start: Timestamp, bucket: SignedDuration, series: &[Series<'_>]) -> String {
     [WIDE, NARROW]
         .iter()
         .map(|shape| draw(shape, start, bucket, series))
         .collect()
 }
 
-fn draw(shape: &Shape, start: DateTime<Utc>, bucket: Duration, series: &[Series<'_>]) -> String {
+fn draw(shape: &Shape, start: Timestamp, bucket: SignedDuration, series: &[Series<'_>]) -> String {
     let buckets = series.iter().map(|series| series.values.len()).max().unwrap_or(0);
     if buckets < 2 {
         return String::new();
@@ -189,7 +190,7 @@ fn draw(shape: &Shape, start: DateTime<Utc>, bucket: Duration, series: &[Series<
             "<rect class=\"hit\" x=\"{:.1}\" y=\"{TOP}\" width=\"{strip:.1}\" height=\"{:.0}\"><title>{}: {}</title></rect>",
             x(index) - strip / 2.0,
             BOTTOM - TOP,
-            (start + bucket * index as i32).format("%b %d, %H:%M"),
+            (start + bucket * index as i32).strftime("%b %d, %H:%M"),
             counts.join(", ")
         ));
     }
@@ -200,7 +201,6 @@ fn draw(shape: &Shape, start: DateTime<Utc>, bucket: Duration, series: &[Series<
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::TimeZone;
 
     #[test]
     fn the_scale_ends_on_a_round_number_that_holds_the_largest_count() {
@@ -228,10 +228,10 @@ mod tests {
 
     #[test]
     fn draws_each_series_on_one_scale_and_says_the_counts_of_a_bucket() {
-        let start = Utc.with_ymd_and_hms(2026, 10, 10, 8, 0, 0).unwrap();
+        let start = crate::timestamp::utc(2026, 10, 10, 8, 0, 0);
         let svg = area_chart(
             start,
-            Duration::hours(1),
+            SignedDuration::from_hours(1),
             &[
                 Series {
                     name: "runs",
@@ -278,21 +278,21 @@ mod tests {
 
     #[test]
     fn names_the_day_when_the_period_is_longer_than_one() {
-        let at = Utc.with_ymd_and_hms(2026, 10, 10, 14, 0, 0).unwrap();
-        assert_eq!(time_label(&at, Duration::minutes(30), 48), "14:00");
-        assert_eq!(time_label(&at, Duration::hours(3), 56), "Oct 10, 14:00");
-        assert_eq!(time_label(&at, Duration::hours(12), 60), "Oct 10");
+        let at = crate::timestamp::utc(2026, 10, 10, 14, 0, 0);
+        assert_eq!(time_label(&at, SignedDuration::from_mins(30), 48), "14:00");
+        assert_eq!(time_label(&at, SignedDuration::from_hours(3), 56), "Oct 10, 14:00");
+        assert_eq!(time_label(&at, SignedDuration::from_hours(12), 60), "Oct 10");
     }
 
     #[test]
     fn a_chart_needs_two_buckets() {
-        let start = Utc.with_ymd_and_hms(2026, 10, 10, 8, 0, 0).unwrap();
+        let start = crate::timestamp::utc(2026, 10, 10, 8, 0, 0);
         let single = [Series {
             name: "runs",
             class: "total",
             values: &[3],
         }];
-        assert_eq!(area_chart(start, Duration::hours(1), &single), "");
-        assert_eq!(area_chart(start, Duration::hours(1), &[]), "");
+        assert_eq!(area_chart(start, SignedDuration::from_hours(1), &single), "");
+        assert_eq!(area_chart(start, SignedDuration::from_hours(1), &[]), "");
     }
 }

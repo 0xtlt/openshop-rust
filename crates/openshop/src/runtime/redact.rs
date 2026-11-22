@@ -185,12 +185,12 @@ mod tests {
 
     #[test]
     fn debug_never_shows_the_secrets_of_a_stored_row() {
-        use chrono::Utc;
+        use crate::Timestamp;
         use uuid::Uuid;
 
         use crate::db::schema::{McpToken, ProviderConfigRow};
 
-        let now = Utc::now();
+        let now = Timestamp::now();
         let provider = ProviderConfigRow {
             id: Uuid::nil(),
             app_handle: "default".into(),

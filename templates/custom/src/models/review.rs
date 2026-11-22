@@ -1,4 +1,4 @@
-use openshop::chrono::{DateTime, Utc};
+use openshop::Timestamp;
 use openshop::prelude::*;
 
 /// A product review left by a customer.
@@ -11,8 +11,8 @@ use openshop::prelude::*;
 pub struct Review {
     pub id: Uuid,
     pub shop: String,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
+    pub created_at: Timestamp,
+    pub updated_at: Timestamp,
     pub product_id: String,
     pub customer_id: String,
     pub rating: i32,

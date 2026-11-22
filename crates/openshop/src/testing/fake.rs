@@ -3,8 +3,8 @@
 use std::marker::PhantomData;
 use std::sync::{Arc, Mutex, MutexGuard};
 
+use crate::Timestamp;
 use anyhow::{Result, anyhow};
-use chrono::{DateTime, Utc};
 use indexmap::IndexMap;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -19,7 +19,7 @@ pub struct FakeCall {
     pub args: Value,
     pub returned_value: Option<Value>,
     pub thrown_error: Option<String>,
-    pub timestamp: DateTime<Utc>,
+    pub timestamp: Timestamp,
 }
 
 #[derive(Default)]
@@ -82,7 +82,7 @@ impl FakeMethod {
             args,
             returned_value: outcome.clone().ok(),
             thrown_error: outcome.clone().err(),
-            timestamp: Utc::now(),
+            timestamp: Timestamp::now(),
         });
         outcome.map_err(|error| anyhow!(error))
     }
@@ -94,7 +94,7 @@ pub struct TypedCall<A> {
     pub args: A,
     pub returned_value: Option<Value>,
     pub thrown_error: Option<String>,
-    pub timestamp: DateTime<Utc>,
+    pub timestamp: Timestamp,
 }
 
 /// The fake of a typed call, such as `Warehouse::PUSH`: what it returns has
