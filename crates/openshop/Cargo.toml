@@ -36,13 +36,13 @@ aes-gcm.workspace = true
 # `multipart`: the forms of the admin pages that send files.
 axum = { workspace = true, features = ["multipart"] }
 base64.workspace = true
-chrono.workspace = true
-chrono-tz.workspace = true
 croner.workspace = true
 futures.workspace = true
 hex.workspace = true
 hmac.workspace = true
 indexmap.workspace = true
+jiff.workspace = true
+jiff-sqlx.workspace = true
 maud.workspace = true
 rand.workspace = true
 regex.workspace = true

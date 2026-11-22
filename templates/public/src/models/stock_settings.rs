@@ -1,4 +1,4 @@
-use openshop::chrono::{DateTime, Utc};
+use openshop::Timestamp;
 use openshop::prelude::*;
 
 /// What a merchant chose for their shop: one row per shop, once they saved.
@@ -7,8 +7,8 @@ use openshop::prelude::*;
 pub struct StockSettings {
     pub id: Uuid,
     pub shop: String,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
+    pub created_at: Timestamp,
+    pub updated_at: Timestamp,
     /// A variant with fewer units than this runs low.
     pub threshold: i32,
 }

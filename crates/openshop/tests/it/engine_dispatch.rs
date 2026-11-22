@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use crate::common::{TEST_SHOP, TestApp, create_config, find_run, noop_flow};
-use chrono::{DateTime, Utc};
+use openshop::Timestamp;
 use openshop::builder::InputSchema;
 use openshop::{
     Concurrency, DispatchOptions, FlowConcurrencyError, InvalidFlowInput, RetryPolicy, UnknownFlowError, Value, json,
@@ -210,17 +210,17 @@ async fn concurrency_allow_permits_multiple_runs() {
 async fn sets_deadline_from_flow_timeout() {
     let flow = noop_flow("timeout-flow").timeout(Duration::from_millis(30_000));
     let test = TestApp::new(create_config([flow, noop_flow("no-timeout")])).await;
-    let before = Utc::now();
+    let before = Timestamp::now();
     let dispatched = test
         .app
         .dispatch_flow(DispatchOptions::new("timeout-flow", TEST_SHOP))
         .await
         .unwrap();
-    let deadline: DateTime<Utc> = find_run(&test.db, dispatched.run_id)
+    let deadline: Timestamp = find_run(&test.db, dispatched.run_id)
         .await
         .deadline_at
         .expect("deadline");
-    let delta = (deadline - before).num_milliseconds();
+    let delta = (deadline - before).as_millis() as i64;
     assert!((29_000..=31_000).contains(&delta), "{delta}");
 
     let dispatched = test
@@ -271,7 +271,7 @@ async fn stores_the_merged_retry_policy() {
 #[tokio::test]
 async fn delayed_dispatch_sets_future_available_at() {
     let test = TestApp::new(create_config([noop_flow("test-flow")])).await;
-    let before = Utc::now();
+    let before = Timestamp::now();
     let dispatched = test
         .app
         .dispatch_flow(DispatchOptions::new("test-flow", TEST_SHOP).delay(Duration::from_millis(10_000)))
@@ -279,7 +279,7 @@ async fn delayed_dispatch_sets_future_available_at() {
         .unwrap();
 
     let available_at = find_run(&test.db, dispatched.run_id).await.available_at.unwrap();
-    assert!(available_at > before + chrono::Duration::milliseconds(5_000));
+    assert!(available_at > before + jiff::SignedDuration::from_millis(5_000));
     test.cleanup().await;
 }
 

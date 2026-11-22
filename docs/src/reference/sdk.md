@@ -96,7 +96,8 @@ app does not need to depend on them directly:
 | `PgPool`, `sqlx` | `sqlx` |
 | `Uuid` | `uuid` |
 | `CancellationToken` | `tokio_util` |
-| `chrono` | `chrono` |
+| `Timestamp` | An instant, a [`jiff::Timestamp`](https://docs.rs/jiff/latest/jiff/struct.Timestamp.html) that PostgreSQL stores in a `timestamp with time zone`; see [Columns](database.md#models) |
+| `jiff` | `jiff`, the dates and time zones of `Timestamp` |
 | `tracing` | `tracing`, which the runtime logger forwards to; see [Logging](logging.md#tracing) |
 | `serde` | `serde` |
 | `JsonSchema`, `schemars` | `schemars` |
@@ -481,7 +482,6 @@ fields are the columns, it gets typed rows limited to a shop, and
 first argument of `#[model(…)]`.
 
 ```rust,ignore
-use openshop::chrono::{DateTime, Utc};
 use openshop::prelude::*;
 
 #[derive(Debug, Clone, Model)]
@@ -489,7 +489,7 @@ use openshop::prelude::*;
 pub struct Review {
     pub id: Uuid,
     pub shop: String,
-    pub created_at: DateTime<Utc>,
+    pub created_at: Timestamp,
     pub product_id: String,
     pub rating: i32,
 }

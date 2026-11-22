@@ -3,8 +3,9 @@
 //! statement only reads, and none reads the access token of a shop or the
 //! configuration of a provider.
 
+use crate::Timestamp;
 use anyhow::Result;
-use chrono::{DateTime, Duration, SecondsFormat, Utc};
+use jiff::SignedDuration;
 use sqlx::{FromRow, PgPool, Postgres, QueryBuilder, Transaction};
 use uuid::Uuid;
 
@@ -66,37 +67,37 @@ impl Range {
         }
     }
 
-    fn duration(self) -> Duration {
+    fn duration(self) -> SignedDuration {
         match self {
-            Range::Hour => Duration::hours(1),
-            Range::Day => Duration::hours(24),
-            Range::Week => Duration::days(7),
-            Range::Month => Duration::days(30),
+            Range::Hour => SignedDuration::from_hours(1),
+            Range::Day => SignedDuration::from_hours(24),
+            Range::Week => SignedDuration::from_hours(24 * 7),
+            Range::Month => SignedDuration::from_hours(24 * 30),
         }
     }
 
     /// The time one point of a chart covers.
-    pub(super) fn bucket(self) -> Duration {
+    pub(super) fn bucket(self) -> SignedDuration {
         match self {
-            Range::Hour => Duration::minutes(2),
-            Range::Day => Duration::minutes(30),
-            Range::Week => Duration::hours(3),
-            Range::Month => Duration::hours(12),
+            Range::Hour => SignedDuration::from_mins(2),
+            Range::Day => SignedDuration::from_mins(30),
+            Range::Week => SignedDuration::from_hours(3),
+            Range::Month => SignedDuration::from_hours(12),
         }
     }
 
     /// Where the period starts for `now`: on a bucket boundary, so that the
     /// points of a chart keep their place from one load to the next.
-    pub(super) fn start(self, now: DateTime<Utc>) -> DateTime<Utc> {
-        let bucket = self.bucket().num_seconds();
-        let start = (now - self.duration()).timestamp().div_euclid(bucket) * bucket;
-        DateTime::from_timestamp(start, 0).unwrap_or(now)
+    pub(super) fn start(self, now: Timestamp) -> Timestamp {
+        let bucket = self.bucket().as_secs();
+        let start = (now - self.duration()).as_second().div_euclid(bucket) * bucket;
+        Timestamp::from_second(start).unwrap_or(now)
     }
 
     /// How many buckets lead from the start of the period to `now`.
-    pub(super) fn buckets(self, now: DateTime<Utc>) -> usize {
-        let elapsed = (now - self.start(now)).num_seconds();
-        (elapsed / self.bucket().num_seconds()) as usize + 1
+    pub(super) fn buckets(self, now: Timestamp) -> usize {
+        let elapsed = (now - self.start(now)).as_secs();
+        (elapsed / self.bucket().as_secs()) as usize + 1
     }
 }
 
@@ -107,12 +108,12 @@ type Sql = QueryBuilder<Postgres>;
 /// skipped nor shown twice between two pages.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct Cursor {
-    pub at: DateTime<Utc>,
+    pub at: Timestamp,
     pub id: Uuid,
 }
 
 impl Cursor {
-    pub(super) fn new(at: DateTime<Utc>, id: Uuid) -> Self {
+    pub(super) fn new(at: Timestamp, id: Uuid) -> Self {
         Self { at, id }
     }
 
@@ -120,13 +121,13 @@ impl Cursor {
     pub(super) fn parse(value: &str) -> Option<Self> {
         let (at, id) = value.split_once('_')?;
         Some(Self {
-            at: DateTime::parse_from_rfc3339(at).ok()?.with_timezone(&Utc),
+            at: at.parse().ok()?,
             id: Uuid::parse_str(id).ok()?,
         })
     }
 
     pub(super) fn param(&self) -> String {
-        format!("{}_{}", self.at.to_rfc3339_opts(SecondsFormat::Micros, true), self.id)
+        format!("{:.6}_{}", self.at.to_jiff(), self.id)
     }
 
     fn push(&self, query: &mut Sql, at: &str, id: &str) {
@@ -139,7 +140,7 @@ impl Cursor {
 /// `shop` a part of the shop domain, or the whole of it when `exact_shop`.
 #[derive(Debug, Clone, Default)]
 pub(super) struct RunFilter {
-    pub since: Option<DateTime<Utc>>,
+    pub since: Option<Timestamp>,
     pub before: Option<Cursor>,
     pub status: Option<String>,
     pub flow: Option<String>,
@@ -211,12 +212,12 @@ fn spread(rows: Vec<(i64, i64, i64)>, buckets: usize) -> Counts {
 }
 
 /// The number of the bucket a timestamp falls in, counted from `start`.
-fn push_bucket(query: &mut Sql, column: &str, start: DateTime<Utc>, bucket: Duration) {
+fn push_bucket(query: &mut Sql, column: &str, start: Timestamp, bucket: SignedDuration) {
     query
         .push(format!("floor(extract(epoch FROM ({column} - "))
         .push_bind(start)
         .push("))::float8 / ")
-        .push_bind(bucket.num_seconds() as f64)
+        .push_bind(bucket.as_secs() as f64)
         .push(")::bigint");
 }
 
@@ -224,8 +225,8 @@ fn push_bucket(query: &mut Sql, column: &str, start: DateTime<Utc>, bucket: Dura
 pub(super) async fn run_counts(
     db: &PgPool,
     filter: &RunFilter,
-    start: DateTime<Utc>,
-    bucket: Duration,
+    start: Timestamp,
+    bucket: SignedDuration,
     buckets: usize,
 ) -> Result<Counts> {
     let mut tx = bounded(db).await?;
@@ -246,7 +247,7 @@ pub(super) async fn run_counts(
 /// shop domain and of the message.
 #[derive(Debug, Clone, Default)]
 pub(super) struct LogFilter {
-    pub since: Option<DateTime<Utc>>,
+    pub since: Option<Timestamp>,
     pub before: Option<Cursor>,
     pub level: Option<String>,
     pub flow: Option<String>,
@@ -283,7 +284,7 @@ impl LogFilter {
 #[derive(Debug, FromRow)]
 pub(super) struct LogLine {
     pub id: Uuid,
-    pub created_at: DateTime<Utc>,
+    pub created_at: Timestamp,
     pub level: String,
     pub message: Option<String>,
     pub flow_run_id: Option<String>,
@@ -320,8 +321,8 @@ fn logs_query(prefix: &str, filter: &LogFilter, limit: i64) -> Sql {
 pub(super) async fn log_counts(
     db: &PgPool,
     filter: &LogFilter,
-    start: DateTime<Utc>,
-    bucket: Duration,
+    start: Timestamp,
+    bucket: SignedDuration,
     buckets: usize,
 ) -> Result<Counts> {
     let mut tx = bounded(db).await?;
@@ -346,7 +347,7 @@ pub(super) struct Totals {
     pub failed: i64,
 }
 
-pub(super) async fn totals(db: &PgPool, since: DateTime<Utc>) -> Result<Totals> {
+pub(super) async fn totals(db: &PgPool, since: Timestamp) -> Result<Totals> {
     let mut tx = bounded(db).await?;
     Ok(sqlx::query_as(
         "SELECT count(*) AS runs, count(*) FILTER (WHERE status = 'failed') AS failed \
@@ -363,7 +364,7 @@ pub(super) struct Queue {
     pub waiting: i64,
     pub running: i64,
     /// Since when the run that has waited the longest could start.
-    pub oldest_waiting: Option<DateTime<Utc>>,
+    pub oldest_waiting: Option<Timestamp>,
 }
 
 pub(super) async fn queue(db: &PgPool) -> Result<Queue> {
@@ -388,16 +389,10 @@ pub(super) struct Tally {
     pub failed: i64,
     /// The mean time between the start and the end of the runs that ended.
     pub mean_ms: Option<f64>,
-    pub latest: Option<DateTime<Utc>>,
+    pub latest: Option<Timestamp>,
 }
 
-async fn tallies(
-    db: &PgPool,
-    column: &str,
-    since: DateTime<Utc>,
-    only_failing: bool,
-    limit: i64,
-) -> Result<Vec<Tally>> {
+async fn tallies(db: &PgPool, column: &str, since: Timestamp, only_failing: bool, limit: i64) -> Result<Vec<Tally>> {
     let mut tx = bounded(db).await?;
     let failing = if only_failing {
         " HAVING count(*) FILTER (WHERE status = 'failed') > 0"
@@ -420,12 +415,12 @@ async fn tallies(
 }
 
 /// The flows that ran in a period, the ones with the most failures first.
-pub(super) async fn flows(db: &PgPool, since: DateTime<Utc>, only_failing: bool, limit: i64) -> Result<Vec<Tally>> {
+pub(super) async fn flows(db: &PgPool, since: Timestamp, only_failing: bool, limit: i64) -> Result<Vec<Tally>> {
     tallies(db, "flow_name", since, only_failing, limit).await
 }
 
 /// The shops with failures in a period, the ones with the most first.
-pub(super) async fn failing_shops(db: &PgPool, since: DateTime<Utc>, limit: i64) -> Result<Vec<Tally>> {
+pub(super) async fn failing_shops(db: &PgPool, since: Timestamp, limit: i64) -> Result<Vec<Tally>> {
     tallies(db, "shop", since, true, limit).await
 }
 
@@ -435,19 +430,19 @@ pub(super) struct Shop {
     pub app_handle: String,
     pub shop: String,
     pub scopes: Option<String>,
-    pub installed_at: DateTime<Utc>,
-    pub uninstalled_at: Option<DateTime<Utc>>,
+    pub installed_at: Timestamp,
+    pub uninstalled_at: Option<Timestamp>,
     pub has_token: bool,
     pub runs: i64,
     pub failed: i64,
-    pub latest: Option<DateTime<Utc>>,
+    pub latest: Option<Timestamp>,
 }
 
 impl Shop {
     /// `installed`, `uninstalled`, or `pending` when the row has no token and
     /// is not uninstalled (an installation started before `/auth` wrote no
     /// row), with the time it has been so.
-    pub(super) fn state(&self) -> (&'static str, &DateTime<Utc>) {
+    pub(super) fn state(&self) -> (&'static str, &Timestamp) {
         match (&self.uninstalled_at, self.has_token) {
             (Some(uninstalled_at), _) => ("uninstalled", uninstalled_at),
             (None, true) => ("installed", &self.installed_at),
@@ -462,7 +457,7 @@ pub(super) const SHOP_STATES: [&str; 3] = ["installed", "uninstalled", "pending"
 /// a part of the domain, or the whole of it when `exact`.
 pub(super) async fn shops(
     db: &PgPool,
-    since: DateTime<Utc>,
+    since: Timestamp,
     shop: Option<&str>,
     exact: bool,
     state: Option<&str>,
@@ -511,9 +506,9 @@ pub(super) async fn shops(
 pub(super) struct ProviderState {
     pub app_handle: String,
     pub provider_name: String,
-    pub last_checked_at: Option<DateTime<Utc>>,
+    pub last_checked_at: Option<Timestamp>,
     pub last_check_ok: Option<bool>,
-    pub updated_at: DateTime<Utc>,
+    pub updated_at: Timestamp,
 }
 
 pub(super) async fn providers_of(db: &PgPool, shop: &str) -> Result<Vec<ProviderState>> {
@@ -556,8 +551,8 @@ pub(super) fn run_id(line: &LogLine) -> Option<Uuid> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Timestamp;
     use crate::testing::TestDb;
-    use chrono::TimeZone;
     use serde_json::Value;
 
     #[test]
@@ -572,7 +567,7 @@ mod tests {
 
     #[test]
     fn a_period_starts_on_a_bucket_and_reaches_now() {
-        let now = Utc.with_ymd_and_hms(2026, 10, 11, 8, 47, 13).unwrap();
+        let now = crate::timestamp::utc(2026, 10, 11, 8, 47, 13);
         for (range, start, buckets) in [
             (Range::Hour, (2026, 10, 11, 7, 46), 31),
             (Range::Day, (2026, 10, 10, 8, 30), 49),
@@ -580,7 +575,7 @@ mod tests {
             (Range::Month, (2026, 9, 11, 0, 0), 61),
         ] {
             let (year, month, day, hour, minute) = start;
-            let expected = Utc.with_ymd_and_hms(year, month, day, hour, minute, 0).unwrap();
+            let expected = crate::timestamp::utc(year, month, day, hour, minute, 0);
             assert_eq!(range.start(now), expected, "{range:?}");
             assert_eq!(range.buckets(now), buckets, "{range:?}");
             // The last bucket holds `now`.
@@ -604,8 +599,8 @@ mod tests {
 
     #[test]
     fn an_installation_says_its_state() {
-        let at = Utc.with_ymd_and_hms(2026, 10, 1, 0, 0, 0).unwrap();
-        let later = Utc.with_ymd_and_hms(2026, 10, 5, 0, 0, 0).unwrap();
+        let at = crate::timestamp::utc(2026, 10, 1, 0, 0, 0);
+        let later = crate::timestamp::utc(2026, 10, 5, 0, 0, 0);
         let shop = |uninstalled_at, has_token| Shop {
             app_handle: "default".into(),
             shop: "one.myshopify.com".into(),
@@ -683,7 +678,7 @@ mod tests {
         .unwrap();
 
         let latest = LogFilter {
-            since: Some(Utc::now() - Duration::hours(2)),
+            since: Some(Timestamp::now() - SignedDuration::from_hours(2)),
             ..LogFilter::default()
         };
         let (plan, found) = logs_plan(&db, &latest).await;

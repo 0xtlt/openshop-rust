@@ -1253,7 +1253,7 @@ async fn takes_the_actor_from_the_session_token() {
         assert_eq!(page.output(), Some(json!({ "id": sub, "sessionId": "test-sid" })));
     }
 
-    let now = chrono::Utc::now().timestamp();
+    let now = openshop::Timestamp::now().as_second();
     let token = sign_session_token(
         &json!({
             "iss": format!("https://{TEST_SHOP}/admin"),

@@ -76,7 +76,7 @@ impl HomePage {
             checking: waiting > 0,
             checked_at: last
                 .and_then(|run| run.completed_at)
-                .map(|at| at.format("%-d %B %Y, %H:%M UTC").to_string()),
+                .map(|at| at.strftime("%-d %B %Y, %H:%M UTC").to_string()),
             low_stock,
         })
     }

@@ -217,7 +217,7 @@ async fn page_gate(State(app): State<OpenShop>, request: Request, next: Next) ->
 async fn health() -> Response {
     json_response(
         StatusCode::OK,
-        json!({ "status": "ok", "timestamp": to_iso(&chrono::Utc::now()) }),
+        json!({ "status": "ok", "timestamp": to_iso(&crate::Timestamp::now()) }),
     )
 }
 

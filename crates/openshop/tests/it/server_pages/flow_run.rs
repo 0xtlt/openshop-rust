@@ -2,7 +2,8 @@
 //! its logs and their filters, read from the URL; retried and deleted by its
 //! forms; fetched again while it is active.
 
-use chrono::{DateTime, Duration, SubsecRound, Utc};
+use jiff::SignedDuration;
+use openshop::Timestamp;
 use openshop::builder::Flow;
 use openshop::prelude::*;
 use openshop::server::ServerOptions;
@@ -38,11 +39,11 @@ async fn context() -> TestContext {
 }
 
 /// A whole second of the recent past: dates that the page writes as they are.
-fn base_time() -> DateTime<Utc> {
-    (Utc::now() - Duration::hours(1)).trunc_subsecs(0)
+fn base_time() -> Timestamp {
+    Timestamp::from_second((Timestamp::now() - SignedDuration::from_hours(1)).as_second()).unwrap()
 }
 
-async fn seed_run(db: &PgPool, shop: &str, status: &str, created_at: DateTime<Utc>) -> Uuid {
+async fn seed_run(db: &PgPool, shop: &str, status: &str, created_at: Timestamp) -> Uuid {
     let (id,): (Uuid,) = sqlx::query_as(
         "INSERT INTO flow_runs (app_handle, shop, flow_name, status, input, error, available_at, created_at, \
            started_at, completed_at) \
@@ -53,14 +54,17 @@ async fn seed_run(db: &PgPool, shop: &str, status: &str, created_at: DateTime<Ut
     .bind(status)
     .bind((status == "failed").then_some("Shopify said <no>"))
     .bind(created_at)
-    .bind((!["pending", "running", "sleeping"].contains(&status)).then_some(created_at + Duration::milliseconds(1_250)))
+    .bind(
+        (!["pending", "running", "sleeping"].contains(&status))
+            .then_some(created_at + SignedDuration::from_millis(1_250)),
+    )
     .fetch_one(db)
     .await
     .unwrap();
     id
 }
 
-async fn seed_step(db: &PgPool, run_id: Uuid, name: &str, status: &str, output: Value, created_at: DateTime<Utc>) {
+async fn seed_step(db: &PgPool, run_id: Uuid, name: &str, status: &str, output: Value, created_at: Timestamp) {
     sqlx::query(
         "INSERT INTO step_results (flow_run_id, step_name, status, output, error, duration_ms, created_at) \
          VALUES ($1, $2, $3, $4::json, $5, 42, $6)",
@@ -76,7 +80,7 @@ async fn seed_step(db: &PgPool, run_id: Uuid, name: &str, status: &str, output: 
     .unwrap();
 }
 
-async fn seed_log(db: &PgPool, run_id: Uuid, level: &str, message: &str, payload: Value, created_at: DateTime<Utc>) {
+async fn seed_log(db: &PgPool, run_id: Uuid, level: &str, message: &str, payload: Value, created_at: Timestamp) {
     sqlx::query(
         "INSERT INTO logs (flow_run_id, level, message, payload, created_at) VALUES ($1, $2, $3, $4::json, $5)",
     )
@@ -112,7 +116,15 @@ async fn seed_failed_run(ctx: &TestContext) -> Uuid {
         base,
     )
     .await;
-    seed_step(&ctx.db, run, "push", "failed", Value::Null, base + Duration::seconds(1)).await;
+    seed_step(
+        &ctx.db,
+        run,
+        "push",
+        "failed",
+        Value::Null,
+        base + SignedDuration::from_secs(1),
+    )
+    .await;
     seed_log(&ctx.db, run, "info", "Fetched <1> order", json!({ "count": 1 }), base).await;
     seed_log(
         &ctx.db,
@@ -120,7 +132,7 @@ async fn seed_failed_run(ctx: &TestContext) -> Uuid {
         "warn",
         "Shopify is slow",
         json!(null),
-        base + Duration::seconds(1),
+        base + SignedDuration::from_secs(1),
     )
     .await;
     seed_log(
@@ -129,7 +141,7 @@ async fn seed_failed_run(ctx: &TestContext) -> Uuid {
         "error",
         "Push failed",
         json!({}),
-        base + Duration::seconds(2),
+        base + SignedDuration::from_secs(2),
     )
     .await;
     run
@@ -316,7 +328,7 @@ async fn an_active_run_is_fetched_again_and_a_missing_one_is_not_found() {
     let ctx = context().await;
     let base = base_time();
     let running = seed_run(&ctx.db, SHOP, "running", base).await;
-    seed_log(&ctx.db, running, "info", "Just now", json!(null), Utc::now()).await;
+    seed_log(&ctx.db, running, "info", "Just now", json!(null), Timestamp::now()).await;
 
     let reply = page(&ctx, &format!("/runs/{running}")).await;
     assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);

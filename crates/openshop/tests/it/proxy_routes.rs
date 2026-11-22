@@ -94,7 +94,7 @@ fn signed_query(params: &[(&str, &str)], secret: &str) -> String {
 
 /// A session token with full control over its claims.
 fn session_token(shop: &str, sub: &str, audience: &str, expires_in_seconds: i64, secret: &str) -> String {
-    let now = chrono::Utc::now().timestamp();
+    let now = openshop::Timestamp::now().as_second();
     sign_session_token(
         &json!({
             "iss": format!("https://{shop}/admin"),
@@ -812,7 +812,7 @@ async fn the_token_of_a_customer_account_extension_is_accepted_on_ext_routes_onl
     // The claims Shopify gives a customer account extension: `iss` is the
     // shop's `/checkouts`, not its `/admin`, and there is no `sid` (#83).
     let shop = "jwt-shop.myshopify.com";
-    let now = chrono::Utc::now().timestamp();
+    let now = openshop::Timestamp::now().as_second();
     let token = sign_session_token(
         &json!({
             "iss": format!("https://{shop}/checkouts"),

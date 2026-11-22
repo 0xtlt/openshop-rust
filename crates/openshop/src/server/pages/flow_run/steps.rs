@@ -30,8 +30,8 @@ pub(super) fn step_rows(steps: &[StepResult]) -> Vec<StepRow<'_>> {
     let mut sorted: Vec<&StepResult> = steps.iter().collect();
     // As the page of the browser compared them: the date to the millisecond, then the id.
     sorted.sort_by(|left, right| {
-        (left.created_at.timestamp_millis(), left.id.to_string())
-            .cmp(&(right.created_at.timestamp_millis(), right.id.to_string()))
+        (left.created_at.as_millisecond(), left.id.to_string())
+            .cmp(&(right.created_at.as_millisecond(), right.id.to_string()))
     });
     let mut positions: HashMap<&str, usize> = HashMap::new();
     let mut attempts: HashMap<&str, usize> = HashMap::new();
@@ -178,7 +178,7 @@ fn output_modal(step: &StepResult, output: &Value) -> Markup {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::{DateTime, Utc};
+    use crate::Timestamp;
     use serde_json::json;
     use uuid::Uuid;
 
@@ -191,7 +191,7 @@ mod tests {
             output: None,
             error: None,
             duration_ms: None,
-            created_at: created_at.parse::<DateTime<Utc>>().unwrap(),
+            created_at: created_at.parse::<Timestamp>().unwrap(),
             flow_run_id: "run".to_string(),
         }
     }

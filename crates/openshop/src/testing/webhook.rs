@@ -1,7 +1,6 @@
 //! Webhook deliveries, signed and sent as Shopify sends them.
 
 use anyhow::Result;
-use chrono::SecondsFormat;
 use indexmap::IndexMap;
 use serde::Serialize;
 use uuid::Uuid;
@@ -118,9 +117,6 @@ impl TestContext {
             .header("X-Shopify-API-Version", ApiVersion::DEFAULT.to_string())
             .header("X-Shopify-Webhook-Id", Uuid::new_v4().to_string())
             .header("X-Shopify-Event-Id", Uuid::new_v4().to_string())
-            .header(
-                "X-Shopify-Triggered-At",
-                chrono::Utc::now().to_rfc3339_opts(SecondsFormat::Nanos, true),
-            )
+            .header("X-Shopify-Triggered-At", format!("{:.9}", jiff::Timestamp::now()))
     }
 }

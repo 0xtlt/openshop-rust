@@ -6,7 +6,7 @@ use crate::common::{
     DropProxy, LogCapture, TEST_SHOP, TestApp, create_config, find_steps, inject_write_fault, noop_flow, within,
     write_fault_hits,
 };
-use chrono::Utc;
+use openshop::Timestamp;
 use openshop::engine::{LeaseLostError, RunOwner, SleepSignal, StepExecutor};
 use openshop::runtime::time::to_iso;
 use openshop::{
@@ -300,12 +300,12 @@ async fn sleep_raises_sleep_signal_on_first_call() {
     let test = new_test().await;
     let run_id = create_run(&test).await;
     let step = executor(&test, run_id);
-    let before = Utc::now();
+    let before = Timestamp::now();
 
     let error = step.sleep("wait-a-bit", Duration::from_secs(60)).await.unwrap_err();
     let resume_at = error.downcast_ref::<SleepSignal>().expect("sleep signal").resume_at;
-    assert!(resume_at >= before + chrono::Duration::seconds(60));
-    assert!(resume_at <= Utc::now() + chrono::Duration::seconds(60));
+    assert!(resume_at >= before + jiff::SignedDuration::from_secs(60));
+    assert!(resume_at <= Timestamp::now() + jiff::SignedDuration::from_secs(60));
     assert_eq!(error.to_string(), format!("Flow sleeping until {}", to_iso(&resume_at)));
 
     let stored = find_steps(&test.db, run_id).await;
@@ -339,7 +339,7 @@ async fn sleep_keeps_its_first_resume_time_until_it_has_passed() {
     assert_eq!(stored.len(), 1);
     assert_eq!(stored[0].status, "sleeping");
 
-    let past = to_iso(&(Utc::now() - chrono::Duration::seconds(1)));
+    let past = to_iso(&(Timestamp::now() - jiff::SignedDuration::from_secs(1)));
     sqlx::query("UPDATE step_results SET output = to_json($1::text) WHERE flow_run_id = $2")
         .bind(past)
         .bind(run_id.to_string())
@@ -368,7 +368,7 @@ async fn sleep_returns_once_the_duration_has_elapsed() {
     let error = step.sleep("blink", Duration::from_millis(40)).await.unwrap_err();
     let resume_at = error.downcast_ref::<SleepSignal>().expect("sleep signal").resume_at;
 
-    let remaining = (resume_at - Utc::now()).to_std().unwrap_or_default();
+    let remaining: std::time::Duration = (resume_at - Timestamp::now()).try_into().unwrap_or_default();
     tokio::time::sleep(remaining + Duration::from_millis(5)).await;
 
     step.sleep("blink", Duration::from_millis(40)).await.unwrap();

@@ -2,7 +2,8 @@
 //! their runs filtered and paged by the URL, the form that starts a flow and
 //! the deletion of the runs selected.
 
-use chrono::{DateTime, Duration, Utc};
+use jiff::SignedDuration;
+use openshop::Timestamp;
 use openshop::builder::{Flow, InputSchema};
 use openshop::server::ServerOptions;
 use openshop::testing::{TestContext, TestOptions};
@@ -58,10 +59,10 @@ async fn context() -> TestContext {
 
 /// A run of the shop, created `minutes_ago`; one that is over took 1.25 s.
 async fn seed_run(ctx: &TestContext, flow: &str, status: &str, minutes_ago: i64) -> Uuid {
-    let created: DateTime<Utc> = Utc::now() - Duration::minutes(minutes_ago);
+    let created: Timestamp = Timestamp::now() - SignedDuration::from_mins(minutes_ago);
     let started = (status != "pending").then_some(created);
     let completed =
-        matches!(status, "completed" | "failed" | "canceled").then(|| created + Duration::milliseconds(1_250));
+        matches!(status, "completed" | "failed" | "canceled").then(|| created + SignedDuration::from_millis(1_250));
     let (id,): (Uuid,) = sqlx::query_as(
         "INSERT INTO flow_runs (app_handle, shop, flow_name, status, input, available_at, created_at, started_at, completed_at) \
          VALUES ('default', $1, $2, $3, '{}'::json, $4, $4, $5, $6) RETURNING id",
@@ -163,10 +164,10 @@ async fn the_flows_page_lists_the_flows_and_their_runs() {
         failures.body
     );
     assert!(!failures.body.contains("data-openshop-refresh"), "{}", failures.body);
-    let tomorrow = (Utc::now() + Duration::days(1)).format("%Y-%m-%d");
+    let tomorrow = (Timestamp::now() + SignedDuration::from_hours(24)).strftime("%Y-%m-%d");
     let later = send(fetch(&ctx, Method::GET, &format!("/flows?from={tomorrow}"))).await;
     assert!(later.body.contains("No runs match these filters"), "{}", later.body);
-    let today = Utc::now().format("%Y-%m-%d");
+    let today = Timestamp::now().strftime("%Y-%m-%d");
     let until_today = send(fetch(&ctx, Method::GET, &format!("/flows?to={today}"))).await;
     assert!(
         until_today.body.contains(&format!("/runs/{running}")),

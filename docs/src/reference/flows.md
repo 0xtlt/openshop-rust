@@ -37,7 +37,7 @@ pub async fn sync_orders(ctx: FlowContext, input: SyncOrdersInput) -> Result<()>
         .run("prepare-batch", async || {
             Ok(Batch {
                 requested: input.limit,
-                prepared_at: openshop::chrono::Utc::now().to_rfc3339(),
+                prepared_at: Timestamp::now().to_string(),
             })
         })
         .await?;

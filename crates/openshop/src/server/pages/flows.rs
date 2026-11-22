@@ -9,8 +9,8 @@ pub(super) mod format;
 mod runs;
 mod schema_example;
 
+use crate::Timestamp;
 use anyhow::Result;
-use chrono::{DateTime, Utc};
 use maud::{Markup, html};
 use serde_json::Value;
 
@@ -122,7 +122,7 @@ pub(super) async fn render(page: &BuiltinPage<'_>) -> Result<Markup> {
         runs: &runs,
         has_next,
         load_error: load_error.as_deref(),
-        now: Utc::now(),
+        now: Timestamp::now(),
         form: page.form.of(RUN),
     }))
 }
@@ -142,7 +142,7 @@ struct FlowsView<'a> {
     /// Why the runs could not be listed.
     load_error: Option<&'a str>,
     /// When the page is rendered: how long ago a run started.
-    now: DateTime<Utc>,
+    now: Timestamp,
     /// The "Run" form the page refused, shown again in its modal.
     form: &'a FormState,
 }
@@ -333,10 +333,8 @@ mod tests {
         ]
     }
 
-    fn now() -> DateTime<Utc> {
-        DateTime::parse_from_rfc3339("2026-10-06T12:05:00Z")
-            .unwrap()
-            .with_timezone(&Utc)
+    fn now() -> Timestamp {
+        "2026-10-06T12:05:00Z".parse::<Timestamp>().unwrap()
     }
 
     fn render(

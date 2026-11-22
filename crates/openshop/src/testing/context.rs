@@ -84,7 +84,7 @@ impl ProxyRequestBuilder {
     pub async fn send(self) -> Result<ProxyResponse> {
         let mut params: IndexMap<String, String> = IndexMap::from([
             ("shop".to_string(), self.shop.clone()),
-            ("timestamp".to_string(), chrono::Utc::now().timestamp().to_string()),
+            ("timestamp".to_string(), crate::Timestamp::now().as_second().to_string()),
             ("path_prefix".to_string(), "/apps/openshop".to_string()),
             ("logged_in_customer_id".to_string(), self.customer_id.clone()),
         ]);

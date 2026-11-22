@@ -1131,14 +1131,14 @@ async fn get_health_returns_ok_with_a_timestamp() {
         let health = reply.json();
         assert_eq!(health["status"], "ok");
         let timestamp = health["timestamp"].as_str().expect("timestamp");
-        let parsed = chrono::DateTime::parse_from_rfc3339(timestamp).expect("ISO timestamp");
+        let parsed = timestamp.parse::<openshop::Timestamp>().expect("ISO timestamp");
         assert!(
             timestamp.ends_with('Z') && timestamp.len() == "2026-01-01T00:00:00.000Z".len(),
             "{timestamp}"
         );
         assert!(
-            (chrono::Utc::now() - parsed.with_timezone(&chrono::Utc))
-                .num_seconds()
+            (openshop::Timestamp::now() - parsed)
+                .as_secs()
                 .abs()
                 < 60
         );

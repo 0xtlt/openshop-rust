@@ -5,7 +5,7 @@
 //! changes: the other modules check the exact addresses and pages of Shopify.
 
 use crate::common::{noop_flow, test_env};
-use chrono::Utc;
+use openshop::Timestamp;
 use openshop::runtime::RuntimeEnv;
 use openshop::server::ServerOptions;
 use openshop::testing::{
@@ -130,7 +130,7 @@ async fn oauth_goes_through_the_admin_origin_and_back_to_its_admin() {
         .unwrap();
 
     // The admin approves, and signs the callback as Shopify's does.
-    let timestamp = Utc::now().timestamp().to_string();
+    let timestamp = Timestamp::now().as_second().to_string();
     let callback = sign_query(
         &[
             ("shop", shop),

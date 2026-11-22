@@ -11,8 +11,9 @@
 mod logs;
 mod steps;
 
+use crate::Timestamp;
 use anyhow::Result;
-use chrono::{DateTime, Duration, Utc};
+use jiff::SignedDuration;
 use maud::{Markup, html};
 
 use super::flows::format::run_duration;
@@ -85,7 +86,7 @@ fn duration(run: &FlowRun) -> String {
     match (run.started_at, run.completed_at) {
         // To the millisecond, as the dates the browser read.
         (Some(started), Some(completed)) => {
-            let ms = completed.timestamp_millis() - started.timestamp_millis();
+            let ms = completed.as_millisecond() - started.as_millisecond();
             format!("{}s", to_fixed_1(ms as f64 / 1_000.0))
         }
         _ if run.status == "running" => "Running…".to_string(),
@@ -111,7 +112,7 @@ pub(super) async fn render(page: &BuiltinPage<'_>) -> Result<Markup> {
     };
     let filters = LogFilters::read(page.param("q"), page.param("levels"));
     let logs = load_logs(page.app, &run, &filters).await?;
-    Ok(view(&run, &steps, &related, &filters, &logs, Utc::now()))
+    Ok(view(&run, &steps, &related, &filters, &logs, Timestamp::now()))
 }
 
 fn run_href(run: &FlowRun) -> String {
@@ -130,7 +131,7 @@ fn view(
     related: &Related,
     filters: &LogFilters,
     logs: &Logs,
-    now: DateTime<Utc>,
+    now: Timestamp,
 ) -> Markup {
     let id = run.id.to_string();
     let active = is_active(&run.status);
@@ -138,7 +139,7 @@ fn view(
     let rows = step_rows(steps);
     let error = run.error.as_deref().filter(|error| !error.is_empty());
     let input = run.input.as_ref().filter(|input| ui::is_truthy(Some(input)));
-    let fresh_since = active.then(|| now - Duration::milliseconds(NEW_LINE_MS));
+    let fresh_since = active.then(|| now - SignedDuration::from_millis(NEW_LINE_MS));
     html! {
         s-page heading=(format!("Run #{id}")) data-openshop-refresh=[active.then_some(REFRESH_MS)] {
             s-link slot="breadcrumb-actions" href=(flow_href(&run.flow_name)) { (run.flow_name) }
@@ -328,7 +329,7 @@ mod tests {
 
     const NOW: &str = "2026-11-09T12:00:10Z";
 
-    fn date(iso: &str) -> DateTime<Utc> {
+    fn date(iso: &str) -> Timestamp {
         iso.parse().unwrap()
     }
 

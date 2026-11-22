@@ -1,6 +1,7 @@
 //! Retry policies and exponential backoff.
 
-use chrono::{DateTime, Duration, Utc};
+use crate::Timestamp;
+use jiff::SignedDuration;
 use rand::RngExt;
 
 use crate::runtime::time::millis;
@@ -63,9 +64,9 @@ pub(crate) fn jitter_ms(delay_ms: u64, unit: f64) -> u64 {
 pub fn compute_next_retry_at(
     attempts: i64,
     policy: &ResolvedRetryPolicy,
-    deadline_at: Option<DateTime<Utc>>,
-    now: DateTime<Utc>,
-) -> Option<DateTime<Utc>> {
+    deadline_at: Option<Timestamp>,
+    now: Timestamp,
+) -> Option<Timestamp> {
     next_retry_at(attempts, policy, deadline_at, now, rand::rng().random())
 }
 
@@ -73,10 +74,10 @@ pub fn compute_next_retry_at(
 fn next_retry_at(
     attempts: i64,
     policy: &ResolvedRetryPolicy,
-    deadline_at: Option<DateTime<Utc>>,
-    now: DateTime<Utc>,
+    deadline_at: Option<Timestamp>,
+    now: Timestamp,
     unit: f64,
-) -> Option<DateTime<Utc>> {
+) -> Option<Timestamp> {
     if attempts >= policy.max_attempts as i64 {
         return None;
     }
@@ -87,7 +88,7 @@ fn next_retry_at(
         attempts,
     );
     let delay_ms = jitter_ms(backoff_ms, unit);
-    let next_at = now + Duration::milliseconds(delay_ms.min(i64::MAX as u64) as i64);
+    let next_at = now + SignedDuration::from_millis(delay_ms.min(i64::MAX as u64) as i64);
     if deadline_at.is_some_and(|deadline| next_at >= deadline) {
         return None;
     }
@@ -139,24 +140,24 @@ mod tests {
 
     #[test]
     fn returns_a_date_when_attempts_remain() {
-        assert!(compute_next_retry_at(0, &DEFAULT_RETRY_POLICY, None, Utc::now()).is_some());
+        assert!(compute_next_retry_at(0, &DEFAULT_RETRY_POLICY, None, Timestamp::now()).is_some());
     }
 
     #[test]
     fn returns_none_when_max_attempts_reached() {
-        assert!(compute_next_retry_at(3, &DEFAULT_RETRY_POLICY, None, Utc::now()).is_none());
+        assert!(compute_next_retry_at(3, &DEFAULT_RETRY_POLICY, None, Timestamp::now()).is_none());
     }
 
     #[test]
     fn returns_none_when_next_retry_exceeds_deadline() {
-        let deadline = Utc::now() + Duration::milliseconds(100);
-        assert!(compute_next_retry_at(0, &DEFAULT_RETRY_POLICY, Some(deadline), Utc::now()).is_none());
+        let deadline = Timestamp::now() + SignedDuration::from_millis(100);
+        assert!(compute_next_retry_at(0, &DEFAULT_RETRY_POLICY, Some(deadline), Timestamp::now()).is_none());
     }
 
     #[test]
     fn returns_a_date_when_deadline_is_far_enough() {
-        let deadline = Utc::now() + Duration::milliseconds(60_000);
-        assert!(compute_next_retry_at(0, &DEFAULT_RETRY_POLICY, Some(deadline), Utc::now()).is_some());
+        let deadline = Timestamp::now() + SignedDuration::from_millis(60_000);
+        assert!(compute_next_retry_at(0, &DEFAULT_RETRY_POLICY, Some(deadline), Timestamp::now()).is_some());
     }
 
     #[test]
@@ -174,24 +175,24 @@ mod tests {
 
     #[test]
     fn the_retry_is_dated_with_the_clock_it_is_given_and_the_jitter_drawn() {
-        let now = Utc::now() + Duration::hours(3);
+        let now = Timestamp::now() + SignedDuration::from_hours(3);
         let policy = DEFAULT_RETRY_POLICY;
         let earliest = next_retry_at(2, &policy, None, now, 0.0).unwrap();
         let latest = next_retry_at(2, &policy, None, now, 0.999).unwrap();
-        assert_eq!(earliest - now, Duration::milliseconds(1_000));
-        assert!(latest - now <= Duration::milliseconds(2_000), "{}", latest - now);
-        assert!(latest - now >= Duration::milliseconds(1_998), "{}", latest - now);
+        assert_eq!(earliest - now, SignedDuration::from_millis(1_000));
+        assert!(latest - now <= SignedDuration::from_millis(2_000), "{}", latest - now);
+        assert!(latest - now >= SignedDuration::from_millis(1_998), "{}", latest - now);
     }
 
     #[test]
     fn retries_of_the_same_attempt_do_not_all_land_together() {
-        let now = Utc::now();
+        let now = Timestamp::now();
         let dates: std::collections::HashSet<_> = (0..50)
             .filter_map(|_| compute_next_retry_at(1, &DEFAULT_RETRY_POLICY, None, now))
             .collect();
         assert!(dates.len() > 1);
         for date in dates {
-            let delay = (date - now).num_milliseconds();
+            let delay = (date - now).as_millis() as i64;
             assert!((500..=1_000).contains(&delay), "{delay}");
         }
     }
@@ -203,10 +204,10 @@ mod tests {
             max_interval_ms: 2_000,
             ..DEFAULT_RETRY_POLICY
         };
-        let now = Utc::now();
+        let now = Timestamp::now();
         for _ in 0..50 {
             let date = compute_next_retry_at(10, &policy, None, now).unwrap();
-            assert!((date - now).num_milliseconds() <= 2_000);
+            assert!(((date - now).as_millis() as i64) <= 2_000);
         }
     }
 }

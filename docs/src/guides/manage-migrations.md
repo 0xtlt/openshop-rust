@@ -65,7 +65,6 @@ cargo run -- migrate generate --name=add_reviews
 For this model:
 
 ```rust,ignore
-use openshop::chrono::{DateTime, Utc};
 use openshop::prelude::*;
 
 #[derive(Debug, Clone, Model)]
@@ -73,8 +72,8 @@ use openshop::prelude::*;
 pub struct Review {
     pub id: Uuid,
     pub shop: String,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
+    pub created_at: Timestamp,
+    pub updated_at: Timestamp,
     pub product_id: String,
     pub rating: i32,
 }

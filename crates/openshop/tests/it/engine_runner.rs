@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 use crate::common::{
     TEST_SHOP, TestApp, app_with_a_clock_ahead, create_config, explode, find_run, find_steps, noop_flow, within,
 };
-use chrono::Utc;
+use openshop::Timestamp;
 use openshop::builder::Flow;
 use openshop::db::schema::LogRow;
 use openshop::engine::{RunFlowOptions, cancel_run, run_flow};
@@ -348,7 +348,7 @@ async fn flow_with_retry_stays_pending_after_failure() {
         .retry_policy(RetryPolicy::new().max_attempts(3));
     let test = TestApp::new(create_config([flow])).await;
     let run_id = dispatch(&test).await;
-    let before = Utc::now();
+    let before = Timestamp::now();
 
     let result = run_flow(&test.app, options(run_id)).await.unwrap();
     assert_eq!(
@@ -367,11 +367,11 @@ async fn flow_with_retry_stays_pending_after_failure() {
     // 500ms, of which the jitter keeps between half and all.
     let available_at = run.available_at.expect("retry time");
     assert!(
-        available_at >= before + chrono::Duration::milliseconds(240),
+        available_at >= before + jiff::SignedDuration::from_millis(240),
         "{available_at}"
     );
     assert!(
-        available_at <= Utc::now() + chrono::Duration::milliseconds(500),
+        available_at <= Timestamp::now() + jiff::SignedDuration::from_millis(500),
         "{available_at}"
     );
     test.cleanup().await;
@@ -762,19 +762,19 @@ async fn sleeping_flow_resumes_once_the_resume_time_has_passed() {
     });
     let test = TestApp::new(create_config([flow])).await;
     let run_id = dispatch(&test).await;
-    let before = Utc::now();
+    let before = Timestamp::now();
 
     let first = run_flow(&test.app, options(run_id)).await.unwrap();
     let RunOutcome::Sleeping { resume_at } = first else {
         panic!("expected the run to sleep, got {first:?}");
     };
-    assert!(resume_at >= before + chrono::Duration::seconds(60));
+    assert!(resume_at >= before + jiff::SignedDuration::from_secs(60));
 
     let run = find_run(&test.db, run_id).await;
     assert_eq!(run.status, "sleeping");
     assert_eq!(run.worker_id, None);
     assert!(run.completed_at.is_none());
-    let drift = (run.available_at.expect("resume time") - resume_at).num_milliseconds();
+    let drift = (run.available_at.expect("resume time") - resume_at).as_millis() as i64;
     assert!(drift.abs() <= 1, "{drift}");
 
     let steps = find_steps(&test.db, run_id).await;
@@ -788,10 +788,8 @@ async fn sleeping_flow_resumes_once_the_resume_time_has_passed() {
         .as_ref()
         .and_then(|output| output.as_str())
         .expect("resume time");
-    let stored = chrono::DateTime::parse_from_rfc3339(stored)
-        .unwrap()
-        .with_timezone(&Utc);
-    assert!((stored - resume_at).num_milliseconds().abs() <= 1);
+    let stored = stored.parse::<openshop::Timestamp>().unwrap();
+    assert!(((stored - resume_at).as_millis() as i64).abs() <= 1);
 
     // Too early: the run goes back to sleep until the stored time, without repeating anything.
     let early = run_flow(&test.app, options(run_id)).await.unwrap();
@@ -800,7 +798,7 @@ async fn sleeping_flow_resumes_once_the_resume_time_has_passed() {
     assert_eq!(after_runs.load(Ordering::SeqCst), 0);
 
     // Move the stored resume time into the past instead of waiting a minute.
-    let past = (Utc::now() - chrono::Duration::seconds(1)).to_rfc3339();
+    let past = (Timestamp::now() - jiff::SignedDuration::from_secs(1)).to_string();
     sqlx::query("UPDATE step_results SET output = to_json($1::text) WHERE flow_run_id = $2 AND step_name = 'pause'")
         .bind(past)
         .bind(run_id.to_string())
@@ -1230,7 +1228,7 @@ async fn a_retry_and_a_wake_up_are_dated_by_the_clock_of_the_database() {
     .concurrency(Concurrency::Allow);
     let test = TestApp::new(create_config([flow.clone()])).await;
     let (ahead, pool) = app_with_a_clock_ahead(&test, create_config([flow])).await;
-    let an_hour_ahead = Utc::now() + chrono::Duration::minutes(59);
+    let an_hour_ahead = Timestamp::now() + jiff::SignedDuration::from_mins(59);
 
     for then in ["fail", "sleep"] {
         let run_id = dispatch(&test).await;

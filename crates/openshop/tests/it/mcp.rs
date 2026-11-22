@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::common::{LogCapture, graphql_requests, install, send, two_shopify_apps};
-use chrono::{DateTime, Utc};
+use openshop::Timestamp;
 use openshop::builder::{Flow, InputSchema, McpResource, McpTool};
 use openshop::db::schema::McpAuditLog;
 use openshop::engine::{RunFlowOptions, run_flow};
@@ -248,18 +248,16 @@ fn sorted(values: &Value) -> Vec<String> {
 }
 
 /// Timestamps are ISO-8601 UTC with millisecond precision.
-fn timestamp(value: &Value) -> DateTime<Utc> {
+fn timestamp(value: &Value) -> Timestamp {
     let text = value
         .as_str()
         .unwrap_or_else(|| panic!("expected a timestamp, got {value}"));
     assert!(text.len() == 24 && text.ends_with('Z'), "{text}");
-    DateTime::parse_from_rfc3339(text)
-        .expect("ISO timestamp")
-        .with_timezone(&Utc)
+    text.parse::<openshop::Timestamp>().expect("ISO timestamp")
 }
 
 fn days_from_now(value: &Value) -> f64 {
-    (timestamp(value) - Utc::now()).num_seconds() as f64 / 86_400.0
+    (timestamp(value) - Timestamp::now()).as_secs() as f64 / 86_400.0
 }
 
 // ─── Database helpers ────────────────────────────────────────────────
@@ -705,7 +703,7 @@ async fn revoking_a_token_records_the_revocation_and_blocks_it(ctx: &TestContext
     let detail = token_detail(ctx, &issued).await;
     assert_eq!(detail["status"], "revoked");
     let revoked_at = timestamp(&detail["revokedAt"]);
-    assert!((Utc::now() - revoked_at).num_seconds().abs() < 60);
+    assert!((Timestamp::now() - revoked_at).as_secs().abs() < 60);
 
     let (status, body) = initialize_status(ctx, &issued.token).await;
     assert_eq!(status, 403);
@@ -1037,7 +1035,7 @@ async fn mcp_rejects_missing_and_invalid_bearer_tokens(ctx: &TestContext) {
 async fn mcp_rejects_expired_and_revoked_tokens(ctx: &TestContext) {
     let shop = ctx.shop.clone();
 
-    let expires_at = (Utc::now() - chrono::Duration::seconds(60)).to_rfc3339();
+    let expires_at = (Timestamp::now() - jiff::SignedDuration::from_secs(60)).to_string();
     let expired = create_token_as(ctx, &shop, &[], json!({ "expiresAt": expires_at })).await;
     let (status, body) = initialize_status(ctx, &expired.token).await;
     assert_eq!(status, 403);
@@ -1097,14 +1095,14 @@ async fn mcp_calls_update_last_used_at(ctx: &TestContext) {
     let issued = create_token(ctx, &[]).await;
     assert_eq!(issued.item["lastUsedAt"], Value::Null);
 
-    let before = Utc::now() - chrono::Duration::seconds(1);
+    let before = Timestamp::now() - jiff::SignedDuration::from_secs(1);
     let (status, _) = initialize_status(ctx, &issued.token).await;
     assert_eq!(status, 200);
 
     let detail = token_detail(ctx, &issued).await;
     let last_used_at = timestamp(&detail["lastUsedAt"]);
     assert!(last_used_at >= before, "{last_used_at} < {before}");
-    assert!(timestamp(&detail["updatedAt"]) >= last_used_at - chrono::Duration::milliseconds(1));
+    assert!(timestamp(&detail["updatedAt"]) >= last_used_at - jiff::SignedDuration::from_millis(1));
 }
 
 #[tokio::test]
@@ -2323,7 +2321,7 @@ async fn openshop_admin_graphql_defaults_omitted_api_version_to_the_latest_stabl
     install(&ctx.db, "default", &shop, Some("offline-admin-token"), false).await;
     respond_to_graphql(ctx, 200, json!({ "data": { "shop": { "name": "Latest Shop" } } }));
     let issued = create_token(ctx, &["shopify_admin_graphql"]).await;
-    let latest = latest_stable_shopify_admin_api_version(Utc::now());
+    let latest = latest_stable_shopify_admin_api_version(Timestamp::now());
 
     for arguments in [
         json!({ "shop": shop, "query": "query { shop { name } }" }),

@@ -1,11 +1,12 @@
+use crate::Timestamp;
 use axum::Router;
 use axum::body::Bytes;
 use axum::extract::{Extension, Path, RawQuery, State};
 use axum::http::StatusCode;
 use axum::response::Response;
 use axum::routing::{get, post};
-use chrono::{DateTime, Duration, Utc};
 use indexmap::IndexMap;
+use jiff::SignedDuration;
 use serde_json::{Value, json};
 use sqlx::{Postgres, QueryBuilder};
 use uuid::Uuid;
@@ -409,9 +410,9 @@ pub(crate) async fn retry_finished_run(
     };
 
     let flow = app.config().flows.get(&run.flow_name);
-    let deadline_at: Option<DateTime<Utc>> = flow
+    let deadline_at: Option<Timestamp> = flow
         .and_then(|flow| flow.timeout)
-        .map(|timeout| Utc::now() + Duration::milliseconds(timeout.as_millis() as i64));
+        .map(|timeout| Timestamp::now() + SignedDuration::from_millis(timeout.as_millis() as i64));
     let rejects_concurrency = flow.is_some_and(|flow| flow.concurrency.unwrap_or_default() == Concurrency::Reject);
     let run_id = run.id.to_string();
     let reset = mode == "reset";

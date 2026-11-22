@@ -4,8 +4,8 @@ use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::Timestamp;
 use anyhow::{Result, anyhow};
-use chrono::{DateTime, Utc};
 use futures::FutureExt;
 use futures::future::BoxFuture;
 use serde_json::{Value, json};
@@ -116,7 +116,7 @@ impl RunFlowOptions {
 pub enum RunOutcome {
     Completed,
     Sleeping {
-        resume_at: DateTime<Utc>,
+        resume_at: Timestamp,
     },
     Failed {
         error: String,
@@ -188,7 +188,7 @@ async fn finish_run(
     owner: Option<&RunOwner>,
     status: &str,
     error: Option<&str>,
-    available_at: Option<DateTime<Utc>>,
+    available_at: Option<Timestamp>,
 ) -> Result<bool> {
     let owned = retry(format!("recording the outcome of run {run_id}"), || async {
         let result = sqlx::query(
@@ -540,10 +540,10 @@ async fn run_attempt(app: &OpenShop, opts: RunFlowOptions) -> Result<RunOutcome>
 #[derive(sqlx::FromRow)]
 struct RetryState {
     attempts: i32,
-    deadline_at: Option<DateTime<Utc>>,
+    deadline_at: Option<Timestamp>,
     retry_policy: Option<Value>,
     /// The time of the database.
-    now: DateTime<Utc>,
+    now: Timestamp,
 }
 
 async fn record_failure(

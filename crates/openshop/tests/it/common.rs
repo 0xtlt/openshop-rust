@@ -263,7 +263,7 @@ pub fn graphql_requests(ctx: &TestContext) -> Vec<OutboundRequest> {
 
 /// Now, in seconds since the Unix epoch.
 pub fn now() -> i64 {
-    chrono::Utc::now().timestamp()
+    openshop::Timestamp::now().as_second()
 }
 
 /// Lets `duration` pass for the process, as a timer sees it.

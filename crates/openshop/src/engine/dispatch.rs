@@ -1,7 +1,7 @@
 //! Queueing a flow run.
 
+use crate::Timestamp;
 use anyhow::{Result, bail};
-use chrono::{DateTime, Utc};
 use serde::Serialize;
 use serde_json::Value;
 use sqlx::{PgConnection, PgPool};
@@ -170,7 +170,7 @@ pub async fn dispatch_flow(db: &PgPool, config: &OpenShopConfig, options: Dispat
 /// scheduler agree on to queue its run once.
 pub(crate) struct CronTick<'a> {
     pub cron_key: &'a str,
-    pub scheduled_at: DateTime<Utc>,
+    pub scheduled_at: Timestamp,
 }
 
 /// Queues a run, or with a `tick`, the run of a cron occurrence unless a

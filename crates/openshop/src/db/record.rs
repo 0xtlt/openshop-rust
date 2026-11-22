@@ -10,8 +10,8 @@
 
 use std::marker::PhantomData;
 
+use crate::Timestamp;
 use anyhow::{Result, bail};
-use chrono::{DateTime, Utc};
 use serde_json::Value;
 use sqlx::postgres::{PgHasArrayType, PgRow};
 use sqlx::{Encode, FromRow, PgPool, Postgres, QueryBuilder, Type};
@@ -32,7 +32,7 @@ use super::model::{Table, quote};
 /// | `i16`, `i32`, `i64` | `smallint`, `integer`, `bigint` |
 /// | `f32`, `f64` | `real`, `double precision` |
 /// | `Uuid` | `uuid` |
-/// | `DateTime<Utc>` | `timestamp with time zone` |
+/// | `Timestamp` | `timestamp with time zone` |
 /// | `serde_json::Value` | `jsonb` |
 /// | `Vec<String>`, `Vec<i32>`, `Vec<i64>`, `Vec<Uuid>` | `text[]`, `integer[]`, `bigint[]`, `uuid[]` |
 #[diagnostic::on_unimplemented(
@@ -67,7 +67,7 @@ column_type!(
     f32 => "real",
     f64 => "double precision",
     Uuid => "uuid",
-    DateTime<Utc> => "timestamp with time zone",
+    Timestamp => "timestamp with time zone",
     Value => "jsonb",
     Vec<String> => "text[]",
     Vec<i32> => "integer[]",

@@ -6,8 +6,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
+use crate::Timestamp;
 use anyhow::Result;
-use chrono::{DateTime, Utc};
 use futures::FutureExt;
 use rand::RngExt;
 use serde_json::Value;
@@ -430,11 +430,9 @@ impl Inner {
         let Some(retention) = self.app.config().log_retention.filter(|_| self.only.is_none()) else {
             return;
         };
-        let retention = chrono::Duration::from_std(retention).unwrap_or(chrono::Duration::MAX);
+        let retention = jiff::SignedDuration::try_from(retention).unwrap_or(jiff::SignedDuration::MAX);
         while self.running.load(Ordering::SeqCst) {
-            let cutoff = Utc::now()
-                .checked_sub_signed(retention)
-                .unwrap_or(DateTime::<Utc>::MIN_UTC);
+            let cutoff = Timestamp::now().saturating_sub(retention);
             match purge_logs(self.app.db(), cutoff).await {
                 Ok(0) => {}
                 Ok(removed) => logger::info(format!("[openshop] Removed {removed} log lines past their retention")),

@@ -192,8 +192,8 @@ purpose keeps the call, and gets this line once per process.
 | `status` | `SubscriptionStatus` | `status`: `Pending`, `Accepted`, `Active`, `Declined`, `Expired`, `Frozen`, `Cancelled`, or `Other(String)` for one OpenShop does not know |
 | `test` | `bool` | `test`: a subscription that charges nothing, such as those of development stores |
 | `trial_days` | `u32` | `trialDays` |
-| `created_at` | `DateTime<Utc>` | `createdAt` |
-| `current_period_end` | `Option<DateTime<Utc>>` | `currentPeriodEnd` |
+| `created_at` | `Timestamp` | `createdAt` |
+| `current_period_end` | `Option<Timestamp>` | `currentPeriodEnd` |
 | `line_items` | `Vec<SubscriptionLineItem>` | `lineItems`: `id`, and `pricing`, `SubscriptionPricing::Recurring` (`price`, `interval`, `plan_handle`, `discount`), `::Usage` (`terms`, `interval`, `capped_amount`, `balance_used`), or `::Other` |
 
 `ActiveSubscriptions` has `plan(&[…])`, `has_plan(&[…])` and `into_vec()`
@@ -207,7 +207,7 @@ too. An amount is a `Money`, whose `amount` is the decimal written as text
 | --- | --- | --- |
 | `billing_period` | `String` | `billingPeriod`: `EVERY_30_DAYS` or `ANNUAL` |
 | `cancel_at_end_of_cycle` | `bool` | `cancelAtEndOfCycle` |
-| `trial_ends_at` | `Option<DateTime<Utc>>` | `trialEndsAt`: `None` without a trial, or after it |
+| `trial_ends_at` | `Option<Timestamp>` | `trialEndsAt`: `None` without a trial, or after it |
 | `current_billing_cycle` | `Option<BillingCycle>` | `currentBillingCycle` (`start_time`, `end_time`): `None` during the trial |
 | `items` | `Vec<AppPricingItem>` | `items`: `handle`, `description`, `price` (`AppPricingPrice::FlatRate` with `active`, `amount`, `currency`; `::Tiered` with `tiers_mode` and `tiers`; or `::Other`), `discount`, `usage` |
 | `pending_update` | `Option<PendingUpdate>` | `pendingUpdate`: what changes at the next billing cycle |
@@ -446,7 +446,7 @@ pub async fn subscription_updated(ctx: WebhookContext, update: AppSubscriptionsU
 | `name` | `String` | The name of the plan |
 | `status` | `SubscriptionStatus` | Read in any case: `ACTIVE`, `active` |
 | `admin_graphql_api_shop_id` | `Option<String>` | `gid://shopify/Shop/…` |
-| `created_at`, `updated_at` | `Option<DateTime<Utc>>` | |
+| `created_at`, `updated_at` | `Option<Timestamp>` | |
 | `currency` | `Option<String>` | `USD` |
 | `price`, `capped_amount` | `Option<String>` | Decimals as text, `"10.00"`; a number is read as text too |
 | `interval` | `Option<String>` | `every_30_days` or `annual` |

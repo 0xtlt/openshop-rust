@@ -435,7 +435,7 @@ mod tests {
     }
 
     fn now() -> String {
-        chrono::Utc::now().timestamp().to_string()
+        crate::Timestamp::now().as_second().to_string()
     }
 
     fn keys(api_key: &str, api_secret: &str, app_url: &str) -> ShopifyAppConfig {

@@ -850,7 +850,7 @@ async fn an_execution_that_lost_its_run_stops_at_its_next_heartbeat() {
             ("running", attempts),
             "{takeover:?}"
         );
-        assert!(run.available_at.is_some_and(|lease| lease > chrono::Utc::now()));
+        assert!(run.available_at.is_some_and(|lease| lease > openshop::Timestamp::now()));
         assert_eq!(stopped[1].load(Ordering::SeqCst), 0, "{takeover:?}");
 
         // A cancellation still reaches the current execution.
@@ -1546,7 +1546,7 @@ async fn a_lease_is_dated_by_the_clock_of_the_database() {
     // clock of the worker says.
     let run = find_run(&test.db, run_id).await;
     let lease = run.available_at.expect("a lease");
-    let hour_ahead = chrono::Utc::now() + chrono::Duration::minutes(59);
+    let hour_ahead = openshop::Timestamp::now() + jiff::SignedDuration::from_mins(59);
     assert!(
         lease > hour_ahead,
         "the lease ends at {lease}, by the clock of the worker"
@@ -1623,7 +1623,7 @@ async fn shutdown_hands_back_the_runs_it_still_holds() {
     assert_eq!(run.worker_id, None);
     assert_eq!(run.error, None);
     assert!(run.completed_at.is_none());
-    assert!(run.available_at.is_some_and(|at| at <= chrono::Utc::now()));
+    assert!(run.available_at.is_some_and(|at| at <= openshop::Timestamp::now()));
     assert_eq!(first.active_count(), 0);
     assert_eq!(stopped.load(Ordering::SeqCst), 1, "the flow was dropped");
     // Nothing of the flow runs any more: it would go on beside the next owner.

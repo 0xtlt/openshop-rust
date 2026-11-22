@@ -2,13 +2,14 @@
 
 use std::collections::HashMap;
 
+use crate::Timestamp;
 use axum::Router;
 use axum::body::Bytes;
 use axum::extract::{Extension, Path, State};
 use axum::http::StatusCode;
 use axum::response::Response;
 use axum::routing::{get, post, put};
-use chrono::{DateTime, Duration, Utc};
+use jiff::SignedDuration;
 use serde_json::{Value, json};
 use sqlx::{Postgres, QueryBuilder};
 use uuid::Uuid;
@@ -34,7 +35,7 @@ fn string_value<'a>(body: &'a JsonMap, key: &str) -> Option<&'a str> {
 
 /// `expiresAt` (date or null) wins over `expiresInDays` (positive integer or null).
 /// Without either, tokens expire after 90 days.
-fn expires_at_from_body(body: &JsonMap) -> Result<Option<DateTime<Utc>>, &'static str> {
+fn expires_at_from_body(body: &JsonMap) -> Result<Option<Timestamp>, &'static str> {
     if let Some(expires_at) = body.get("expiresAt") {
         return match expires_at {
             Value::Null => Ok(None),
@@ -50,20 +51,22 @@ fn expires_at_from_body(body: &JsonMap) -> Result<Option<DateTime<Utc>>, &'stati
         return match expires_in_days {
             Value::Null => Ok(None),
             Value::Number(number) => match number.as_f64() {
-                Some(days) if days.fract() == 0.0 && days > 0.0 && days < 1e7 => {
-                    Ok(Some(Utc::now() + Duration::milliseconds(days as i64 * DAY_MS)))
-                }
+                Some(days) if days.fract() == 0.0 && days > 0.0 && days < 1e7 => Ok(Some(
+                    Timestamp::now() + SignedDuration::from_millis(days as i64 * DAY_MS),
+                )),
                 _ => Err(invalid),
             },
             _ => Err(invalid),
         };
     }
 
-    Ok(Some(Utc::now() + Duration::days(DEFAULT_EXPIRATION_DAYS)))
+    Ok(Some(
+        Timestamp::now() + SignedDuration::from_hours(24 * DEFAULT_EXPIRATION_DAYS),
+    ))
 }
 
 /// [`expires_at_from_body`], its refusal naming the field it is about.
-fn expiration(body: &JsonMap) -> Result<Option<DateTime<Utc>>, TokenRefusal> {
+fn expiration(body: &JsonMap) -> Result<Option<Timestamp>, TokenRefusal> {
     expires_at_from_body(body).map_err(|message| TokenRefusal::Invalid {
         field: if body.contains_key("expiresAt") {
             "expiresAt"
@@ -277,7 +280,7 @@ async fn insert_grants(
         return Ok(());
     }
     // Distinct timestamps keep the order in which permissions were selected.
-    let now = Utc::now();
+    let now = Timestamp::now();
     let mut insert: QueryBuilder<Postgres> = QueryBuilder::new(
         "INSERT INTO mcp_permission_grants (app_handle, shop, token_id, permission_key, granted, created_at) ",
     );
@@ -287,7 +290,7 @@ async fn insert_grants(
             .push_bind(token_id)
             .push_bind(permission)
             .push_bind(true)
-            .push_bind(now + Duration::microseconds(index as i64));
+            .push_bind(now + SignedDuration::from_micros(index as i64));
     });
     insert.build().execute(&mut **tx).await?;
     Ok(())
@@ -661,7 +664,7 @@ mod tests {
     #[test]
     fn defaults_to_ninety_days() {
         let expires_at = expires_at_from_body(&JsonMap::new()).unwrap().unwrap();
-        let days = (expires_at - Utc::now()).num_hours();
+        let days = (expires_at - Timestamp::now()).as_hours();
         assert!((90 * 24 - 1..=90 * 24).contains(&days));
     }
 
@@ -688,7 +691,7 @@ mod tests {
         let relative = expires_at_from_body(&body(json!({ "expiresInDays": 30 })))
             .unwrap()
             .unwrap();
-        assert!((29 * 24..=30 * 24).contains(&(relative - Utc::now()).num_hours()));
+        assert!((29 * 24..=30 * 24).contains(&(relative - Timestamp::now()).as_hours()));
         for invalid in [json!(0), json!(-1), json!(1.5), json!("30")] {
             assert_eq!(
                 expires_at_from_body(&body(json!({ "expiresInDays": invalid }))),

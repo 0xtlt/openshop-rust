@@ -4,7 +4,7 @@
 use std::time::Duration;
 
 use crate::common::{assert_error, noop_flow, two_shopify_apps, wait};
-use chrono::{DateTime, Utc};
+use openshop::Timestamp;
 use openshop::testing::{
     MockTransport, TestContext, TestOptions, session_token, sign_query, sign_webhook_body, to_query_string,
 };
@@ -69,7 +69,7 @@ struct InstallationRow {
     access_token: Option<String>,
     scopes: Option<String>,
     nonce: Option<String>,
-    uninstalled_at: Option<DateTime<Utc>>,
+    uninstalled_at: Option<Timestamp>,
 }
 
 async fn find_installation(ctx: &TestContext, app_handle: &str, shop: &str) -> Option<InstallationRow> {
@@ -124,7 +124,7 @@ fn location(response: &Response) -> String {
 }
 
 fn signed_callback(shop: &str, code: &str, state: &str, secret: &str) -> IndexMap<String, String> {
-    let timestamp = Utc::now().timestamp().to_string();
+    let timestamp = Timestamp::now().as_second().to_string();
     sign_query(
         &[
             ("shop", shop),
@@ -290,7 +290,7 @@ async fn get_auth_with_shop_builds_shopify_oauth_redirect() {
     let parts: Vec<&str> = state.split('.').collect();
     assert_eq!(parts.len(), 3, "{state}");
     let expiry: i64 = parts[0].parse().unwrap();
-    let ttl = expiry - Utc::now().timestamp();
+    let ttl = expiry - Timestamp::now().as_second();
     assert!((595..=600).contains(&ttl), "{ttl}");
     for part in &parts[1..] {
         assert!(part.bytes().all(|byte| byte.is_ascii_hexdigit()), "{state}");
@@ -544,7 +544,7 @@ async fn get_auth_callback_refuses_an_expired_state(ctx: &TestContext) {
     let cookie = format!("openshop_oauth={browser}");
     grant_access_token(ctx, "must-not-be-stored");
 
-    let now = Utc::now().timestamp();
+    let now = Timestamp::now().as_second();
     let expired = signed_state(SECRET, "default", shop, now - 1, "b", &browser);
     let path = callback_path(shop, "code", &expired, SECRET);
     assert_error(get_with(ctx, &path, Some(&cookie)).await, 401, "Invalid state/nonce").await;

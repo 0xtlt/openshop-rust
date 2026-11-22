@@ -15,7 +15,6 @@ Create `src/flows/prepare_report.rs`:
 ```rust
 use std::time::Duration;
 
-use openshop::chrono::Utc;
 use openshop::prelude::*;
 use serde::{Deserialize, Serialize};
 
@@ -40,7 +39,7 @@ pub async fn prepare_report(ctx: FlowContext, input: PrepareReportInput) -> Resu
         .run("prepare-report", async || {
             let report = Report {
                 label: input.label.clone(),
-                prepared_at: Utc::now().to_rfc3339(),
+                prepared_at: Timestamp::now().to_string(),
             };
             ctx.logger.info_with("Prepared report", json!(report));
             Ok(report)

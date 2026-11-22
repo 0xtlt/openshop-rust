@@ -67,6 +67,7 @@ mod types;
 pub mod validators;
 // `liquid!`, which this module exports, is named by its path.
 mod template;
+mod timestamp;
 
 /// Locks `mutex`, even when a thread panicked while holding it: what it
 /// guards stays usable.
@@ -81,8 +82,8 @@ pub(crate) fn locked<T>(mutex: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_
 #[cfg(feature = "sentry")]
 pub use ::sentry;
 pub use anyhow::{Context, Error, Result, anyhow, bail};
-pub use chrono;
 pub use indexmap::IndexMap;
+pub use jiff;
 /// What a server-rendered `#[view]` returns, `maud::Markup`, written with
 /// `maud::html!` (the application depends on `maud`, which `html!` names).
 pub use maud::{self, Markup};
@@ -118,6 +119,7 @@ pub use server::connectors::Connectors;
 pub use server::http::PublicError;
 pub use shopify::{PartnerApi, PartnerApiClient, ShopUnavailable, ShopifyClient, ShopifyEndpoints, shop_unavailable};
 pub use template::Liquid;
+pub use timestamp::Timestamp;
 pub use types::{
     AdminMenuItem, AdminPageId, AdminPageMode, AdminPagesConfig, Concurrency, Cron, CronShops, ErrorContext,
     FlowContext, FunctionConfig, JsonMap, McpConfig, McpContext, McpPermission, McpResourceContent, McpRiskLevel,
@@ -155,8 +157,8 @@ pub mod prelude {
         AdminContext, App, Cron, ErrorContext, FlowContext, FormState, FunctionConfig, InvalidInput, Liquid, Markup,
         McpConfig, McpContext, McpPermission, McpRiskLevel, Model, Outcome, PartnerApi, ProviderConfig, ProxyContext,
         PublicError, QueuedRun, RetryPolicy, RouteAuthContext, RouteAuthOutcome, RouteContext, RunOutcome, ShopScope,
-        ShopifyEndpoints, ShopifyLaunch, Uuid, WebhookContext, WorkerConfig, flow, graphql, liquid, mcp_resource,
-        mcp_tool, provider, proxy, response, route, tracing, validators, webhook,
+        ShopifyEndpoints, ShopifyLaunch, Timestamp, Uuid, WebhookContext, WorkerConfig, flow, graphql, liquid,
+        mcp_resource, mcp_tool, provider, proxy, response, route, tracing, validators, webhook,
     };
     pub use crate::{Context, Result, Value, admin_page, anyhow, app, bail, json, t};
 }
@@ -168,16 +170,15 @@ pub mod prelude {
 /// `migrate generate` writes, and for typed reads and writes.
 ///
 /// ```
-/// use openshop::chrono::{DateTime, Utc};
-/// use openshop::{Model, Uuid};
+/// use openshop::{Model, Timestamp, Uuid};
 ///
 /// #[derive(Debug, Clone, Model)]
 /// #[model("reviews", index([shop, product_id]))]
 /// pub struct Review {
 ///     pub id: Uuid,
 ///     pub shop: String,
-///     pub created_at: DateTime<Utc>,
-///     pub updated_at: DateTime<Utc>,
+///     pub created_at: Timestamp,
+///     pub updated_at: Timestamp,
 ///     pub product_id: String,
 ///     pub rating: i32,
 ///     pub note: Option<String>,

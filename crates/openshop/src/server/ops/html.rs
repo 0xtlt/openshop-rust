@@ -3,7 +3,7 @@
 //! top, then panels of charts and dense tables. Everything a page shows goes
 //! through [`escape`].
 
-use chrono::{DateTime, Utc};
+use crate::Timestamp;
 use serde_json::Value;
 
 use crate::server::http::escape;
@@ -256,14 +256,14 @@ pub(crate) fn message_page(title: &str, message: &str) -> String {
 }
 
 /// `Oct 11, 09:42:07`, in UTC: a line of a table.
-pub(crate) fn time(value: &DateTime<Utc>) -> String {
-    value.format("%b %d, %H:%M:%S").to_string()
+pub(crate) fn time(value: &Timestamp) -> String {
+    value.strftime("%b %d, %H:%M:%S").to_string()
 }
 
 /// `2026-10-11 09:42:07 UTC`: the summary of a run.
-pub(crate) fn full_time(value: Option<&DateTime<Utc>>) -> String {
+pub(crate) fn full_time(value: Option<&Timestamp>) -> String {
     value
-        .map(|value| value.format("%Y-%m-%d %H:%M:%S UTC").to_string())
+        .map(|value| value.strftime("%Y-%m-%d %H:%M:%S UTC").to_string())
         .unwrap_or_else(|| "—".to_string())
 }
 
@@ -511,7 +511,7 @@ pub(crate) fn note(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::TimeZone;
+
     use serde_json::json;
 
     #[test]
@@ -688,7 +688,7 @@ mod tests {
 
     #[test]
     fn times_and_durations_are_short() {
-        let at = Utc.with_ymd_and_hms(2026, 10, 11, 9, 42, 7).unwrap();
+        let at = crate::timestamp::utc(2026, 10, 11, 9, 42, 7);
         assert_eq!(time(&at), "Oct 11, 09:42:07");
         assert_eq!(full_time(Some(&at)), "2026-10-11 09:42:07 UTC");
         assert_eq!(full_time(None), "—");

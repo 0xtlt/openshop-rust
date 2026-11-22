@@ -52,7 +52,7 @@ The first execution returns the closure's value; a replay deserializes its
 JSON-stored representation into the same type. `ctx.step.run()` therefore only
 accepts a result type that implements both `Serialize` and `DeserializeOwned`.
 Return structs that derive both, `Vec`, `String`, numbers, `bool`, `Option`, or
-`serde_json::Value`. A `chrono::DateTime<Utc>` is stored as an RFC 3339 string
+`serde_json::Value`. A `Timestamp` is stored as an RFC 3339 string
 and read back as the same instant.
 
 The compiler checks that a type can be written and read, not that it reads back

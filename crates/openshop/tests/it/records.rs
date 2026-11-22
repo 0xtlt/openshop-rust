@@ -2,7 +2,8 @@
 //! their steps and their logs.
 
 use crate::common::{TestApp, create_config, install, noop_flow};
-use chrono::{Duration, Utc};
+use jiff::SignedDuration;
+use openshop::Timestamp;
 use openshop::testing::{AdminTestOptions, admin_context};
 use openshop::{FlowRun, Installation, LogRow, PgPool, Record, StepResult, Uuid, json};
 
@@ -18,7 +19,7 @@ async fn run(db: &PgPool, app_handle: &str, shop: &str, status: &str, minutes_ag
     .bind(app_handle)
     .bind(shop)
     .bind(status)
-    .bind(Utc::now() - Duration::minutes(minutes_ago))
+    .bind(Timestamp::now() - SignedDuration::from_mins(minutes_ago))
     .fetch_one(db)
     .await
     .unwrap();
@@ -92,7 +93,7 @@ async fn runs_are_filtered_sorted_and_counted_across_shops() {
     assert_eq!(failed[0].input, Some(json!({ "limit": 10 })));
 
     let recent = FlowRun::all_shops(&test.db)
-        .filter(FlowRun::CREATED_AT.gte(Utc::now() - Duration::minutes(30)))
+        .filter(FlowRun::CREATED_AT.gte(Timestamp::now() - SignedDuration::from_mins(30)))
         .count()
         .await
         .unwrap();

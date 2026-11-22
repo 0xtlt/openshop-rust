@@ -695,8 +695,8 @@ mod tests {
             pub struct Review {
                 pub id: Uuid,
                 pub shop: String,
-                pub created_at: DateTime<Utc>,
-                pub updated_at: DateTime<Utc>,
+                pub created_at: Timestamp,
+                pub updated_at: Timestamp,
                 #[model(index)]
                 pub product_id: String,
                 #[model(column = "headline", unique)]
@@ -870,7 +870,7 @@ mod tests {
         );
         assert_eq!(
             refusal(
-                parse_quote! { #[model("reviews")] struct Review { id: Uuid, #[model(default = "now()")] created_at: DateTime<Utc> } }
+                parse_quote! { #[model("reviews")] struct Review { id: Uuid, #[model(default = "now()")] created_at: Timestamp } }
             ),
             "`created_at` is a conventional column: its type and default are fixed"
         );

@@ -3,8 +3,8 @@
 use std::time::{Duration, Instant};
 
 use crate::common::{TestApp, create_config};
-use chrono::Utc;
 use openshop::OpenShopConfig;
+use openshop::Timestamp;
 use openshop::engine::Worker;
 use openshop::engine::retention::{purge_logs, purge_logs_batch};
 use sqlx::PgPool;
@@ -38,7 +38,7 @@ fn config_keeping(retention: Option<Duration>) -> OpenShopConfig {
 async fn a_purge_removes_the_old_lines_in_batches_and_only_them() {
     let test = TestApp::new(create_config([])).await;
     seed(&test.db, 12, 40).await;
-    let cutoff = Utc::now() - chrono::Duration::days(30);
+    let cutoff = Timestamp::now() - jiff::SignedDuration::from_hours(24 * 30);
 
     // One batch removes no more than its size, the oldest or not.
     assert_eq!(purge_logs_batch(&test.db, cutoff, 5).await.unwrap(), 5);
@@ -57,7 +57,7 @@ async fn a_purge_removes_the_old_lines_in_batches_and_only_them() {
 async fn a_purge_skips_the_lines_another_purge_holds() {
     let test = TestApp::new(create_config([])).await;
     seed(&test.db, 4, 40).await;
-    let cutoff = Utc::now() - chrono::Duration::days(30);
+    let cutoff = Timestamp::now() - jiff::SignedDuration::from_hours(24 * 30);
 
     let mut holder = test.db.begin().await.unwrap();
     sqlx::query("SELECT 1 FROM logs WHERE message = 'old' FOR UPDATE")

@@ -366,7 +366,7 @@ pub fn subscription(name: &str) -> AppSubscription {
         status: SubscriptionStatus::Active,
         test: true,
         trial_days: 0,
-        created_at: chrono::Utc::now(),
+        created_at: crate::Timestamp::now(),
         current_period_end: None,
         line_items: Vec::new(),
     }

@@ -131,8 +131,8 @@ async fn the_mcp_page_creates_a_token_and_shows_its_secret_once() {
     assert_eq!(initialize(&ctx, &secret).await, StatusCode::OK);
     let token = token_named(&ctx, "Claude Desktop").await;
     assert_eq!(token["permissions"], json!(["read_logs", "demo:read_status"]));
-    let expires = chrono::DateTime::parse_from_rfc3339(token["expiresAt"].as_str().unwrap()).unwrap();
-    let days = (expires.with_timezone(&chrono::Utc) - chrono::Utc::now()).num_hours();
+    let expires: openshop::Timestamp = token["expiresAt"].as_str().unwrap().parse().unwrap();
+    let days = (expires - openshop::Timestamp::now()).as_hours();
     assert!((29 * 24..=30 * 24).contains(&days), "{days}");
 
     // Never again.

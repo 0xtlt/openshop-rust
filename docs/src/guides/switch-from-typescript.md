@@ -29,9 +29,9 @@ same table and column names. See the
 
 | Drizzle | Rust field |
 | --- | --- |
-| `id`, `shop`, `createdAt`, `updatedAt` of `defineModel` | `id: Uuid`, `shop: String`, `created_at: DateTime<Utc>`, `updated_at: DateTime<Utc>` |
+| `id`, `shop`, `createdAt`, `updatedAt` of `defineModel` | `id: Uuid`, `shop: String`, `created_at: Timestamp`, `updated_at: Timestamp` |
 | `text`, `integer`, `boolean`, `uuid` | `String`, `i32`, `bool`, `Uuid` |
-| `timestamp(…, { withTimezone: true })` | `DateTime<Utc>` |
+| `timestamp(…, { withTimezone: true })` | `Timestamp` |
 | `json` | `serde_json::Value`, which is `jsonb` |
 | without `.notNull()` | `Option<…>` |
 | `.default(false)` | `#[model(default = "false")]` |
