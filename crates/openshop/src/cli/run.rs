@@ -371,9 +371,7 @@ async fn wait_for(app: &OpenShop, runs: &[Uuid]) -> Result<HashMap<Uuid, Ended>>
                     println!(
                         "[openshop] Run {run_id}: attempt {attempts} failed{}, tried again{}",
                         error.as_deref().map(|error| format!(": {error}")).unwrap_or_default(),
-                        available_at
-                            .map(|at| format!(" at {at}"))
-                            .unwrap_or_default()
+                        available_at.map(|at| format!(" at {at}")).unwrap_or_default()
                     );
                     continue;
                 }
