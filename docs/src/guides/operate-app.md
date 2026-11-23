@@ -54,6 +54,7 @@ In the embedded admin UI:
 2. Open a run to inspect step status and structured logs.
 3. Select **Retry**, then **Resume** on a finished run to keep completed steps.
 4. Use **Restart** (the API's `reset` mode) only when completed steps are safe to execute again.
+5. Select **Cancel run** on a `pending`, `running`, or `sleeping` run to stop it.
 
 The embedded admin shows one shop, to its staff. To see every shop at once,
 or when the application
@@ -138,10 +139,13 @@ run that writes to another system.
 
 ## Cancel, retry, and delete safely
 
-- A cancel request marks an active run `canceled` and interrupts the step being
-  executed. A worker in another process notices at its next heartbeat, within
-  a quarter of the `lease_duration` of the worker: 7.5 seconds with the
-  default lease, 15 seconds at most.
+- A cancel request, the **Cancel run** button of the run's page or
+  `POST /api/runs/:id/cancel`, marks an active run `canceled` and interrupts
+  the step being executed; no new step starts. A worker in another process
+  notices at its next heartbeat, within a quarter of the `lease_duration` of
+  the worker: 7.5 seconds with the default lease, 15 seconds at most.
+- Calls a step already sent are not undone: a Shopify bulk operation that was
+  submitted keeps running on Shopify's side.
 - Work that a step moved off its own future, such as a `tokio::spawn` task or
   `spawn_blocking` code, keeps running unless it watches `ctx.signal`.
 - Resume retry keeps completed steps; reset retry discards all step results.

@@ -498,13 +498,17 @@ async fn retry_run(
     })
 }
 
-async fn cancel(
-    State(app): State<OpenShop>,
-    Extension(session): Extension<ShopSession>,
-    Path(id): Path<String>,
-) -> ApiResult {
-    let Ok(run_id) = Uuid::parse_str(&id) else {
-        return Ok(run_not_found());
+/// Cancels an active run of the session: it is marked `canceled`, the worker
+/// that executes it stops it (at its next heartbeat when it is another
+/// process), and a sleep it is in does not wake. Refused when the run is not
+/// there, or is over.
+pub(crate) async fn cancel_active_run(
+    app: &OpenShop,
+    session: &ShopSession,
+    id: &str,
+) -> Result<Result<(), RunRefusal>, sqlx::Error> {
+    let Ok(run_id) = Uuid::parse_str(id) else {
+        return Ok(Err(RunRefusal::NotFound));
     };
     // The status is checked by the update itself: a run that finished since it
     // was read is not overwritten.
@@ -522,11 +526,11 @@ async fn cancel(
     .await?;
     if canceled.rows_affected() == 0 {
         tx.rollback().await?;
-        let refusal = refused_transition(&app, &session, &id, &ACTIVE_RUN_STATUSES, |run| {
+        let refusal = refused_transition(app, session, id, &ACTIVE_RUN_STATUSES, |run| {
             format!("Cannot cancel a run with status \"{}\"", run.status)
         })
         .await?;
-        return Ok(refusal.response());
+        return Ok(Err(refusal));
     }
 
     // The worker that executes the run, when it is this process, is told while
@@ -540,7 +544,18 @@ async fn cancel(
         .execute(&mut *tx)
         .await?;
     tx.commit().await?;
-    Ok(json_response(StatusCode::OK, json!({ "ok": true })))
+    Ok(Ok(()))
+}
+
+async fn cancel(
+    State(app): State<OpenShop>,
+    Extension(session): Extension<ShopSession>,
+    Path(id): Path<String>,
+) -> ApiResult {
+    Ok(match cancel_active_run(&app, &session, &id).await? {
+        Ok(()) => json_response(StatusCode::OK, json!({ "ok": true })),
+        Err(refusal) => refusal.response(),
+    })
 }
 
 /// Deletes the runs of the session that are over, with their steps and logs, and
