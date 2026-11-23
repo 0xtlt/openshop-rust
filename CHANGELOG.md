@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- A **Cancel run** button on the page of a run in the admin while it is
+  `pending`, `running` or `sleeping` (#106). It opens a confirmation, which
+  says that the run stops within about 15 seconds, possibly in the middle of
+  a step, and that calls already sent are not undone, and posts
+  `_action=cancel`: the same cancellation as `POST /api/runs/:id/cancel`,
+  refused with the same message when the run is over.
+
 ## 0.1.0-rc.10
 
 ### Changed

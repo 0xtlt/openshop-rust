@@ -1,6 +1,6 @@
 //! The page of a run, rendered by the server: its steps, the output of each,
-//! its logs and their filters, read from the URL; retried and deleted by its
-//! forms; fetched again while it is active.
+//! its logs and their filters, read from the URL; retried, canceled and
+//! deleted by its forms; fetched again while it is active.
 
 use jiff::SignedDuration;
 use openshop::Timestamp;
@@ -338,8 +338,16 @@ async fn an_active_run_is_fetched_again_and_a_missing_one_is_not_found() {
         "{}",
         reply.body
     );
-    // Nothing to retry or delete while it runs; the line it just wrote is highlighted.
-    assert!(!reply.body.contains(r#"name="_action""#), "{}", reply.body);
+    // Nothing to retry or delete while it runs, only to cancel; the line it just wrote is highlighted.
+    assert!(!reply.body.contains(r#"value="retry""#), "{}", reply.body);
+    assert!(!reply.body.contains(r#"value="delete""#), "{}", reply.body);
+    assert!(
+        reply
+            .body
+            .contains(r#"<input type="hidden" name="_action" value="cancel">"#),
+        "{}",
+        reply.body
+    );
     assert!(reply.body.contains("background:#fff3cd"), "{}", reply.body);
     assert!(reply.body.contains("Just now"), "{}", reply.body);
 
@@ -365,12 +373,10 @@ async fn an_active_run_is_fetched_again_and_a_missing_one_is_not_found() {
             decoded(&action, "x-openshop-toast-error").as_deref(),
             Some("Run not found")
         );
-        let action = send(form(
-            fetch(&ctx, Method::POST, &format!("/runs/{id}")),
-            "_action=delete",
-        ))
-        .await;
-        assert_eq!(action.status, StatusCode::NOT_FOUND, "{id}");
+        for action in ["_action=delete", "_action=cancel"] {
+            let reply = send(form(fetch(&ctx, Method::POST, &format!("/runs/{id}")), action)).await;
+            assert_eq!(reply.status, StatusCode::NOT_FOUND, "{id} {action}");
+        }
     }
     assert!(run_exists(&ctx.db, elsewhere).await);
     assert_eq!(find_run(&ctx.db, elsewhere).await.status, "failed");
@@ -462,9 +468,59 @@ async fn a_run_is_retried_by_the_form_of_its_mode() {
         decoded(&sideways, "x-openshop-toast-error").as_deref(),
         Some("mode must be resume or reset")
     );
-    let unknown = send(form(fetch(&ctx, Method::POST, &path), "_action=cancel")).await;
+    let unknown = send(form(fetch(&ctx, Method::POST, &path), "_action=pause")).await;
     assert_eq!(unknown.status, StatusCode::NOT_FOUND);
     assert_eq!(find_run(&ctx.db, run).await.status, "completed");
+    ctx.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn an_active_run_is_canceled_by_its_form() {
+    let ctx = context().await;
+    let base = base_time();
+    let path_of = |run: Uuid| format!("/runs/{run}");
+
+    // Running: canceled, said in a toast, and the page shows it over.
+    let running = seed_run(&ctx.db, SHOP, "running", base).await;
+    let canceled = send(form(fetch(&ctx, Method::POST, &path_of(running)), "_action=cancel")).await;
+    assert_eq!(canceled.status, StatusCode::OK, "{}", canceled.body);
+    assert_eq!(decoded(&canceled, "x-openshop-toast").as_deref(), Some("Run canceled"));
+    assert!(
+        canceled.body.contains(r#"<s-badge tone="neutral">canceled</s-badge>"#),
+        "{}",
+        canceled.body
+    );
+    assert!(!canceled.body.contains("data-openshop-refresh"), "{}", canceled.body);
+    assert!(!canceled.body.contains("cancel-modal"), "{}", canceled.body);
+    assert!(canceled.body.contains("retry-modal"), "{}", canceled.body);
+    let run = find_run(&ctx.db, running).await;
+    assert_eq!(run.status, "canceled");
+    assert!(run.completed_at.is_some());
+
+    // Sleeping: its sleep does not wake.
+    let sleeping = seed_run(&ctx.db, SHOP, "sleeping", base).await;
+    seed_step(&ctx.db, sleeping, "wait", "sleeping", Value::Null, base).await;
+    let canceled = send(form(fetch(&ctx, Method::POST, &path_of(sleeping)), "_action=cancel")).await;
+    assert_eq!(canceled.status, StatusCode::OK, "{}", canceled.body);
+    assert_eq!(find_run(&ctx.db, sleeping).await.status, "canceled");
+    let steps = find_steps(&ctx.db, sleeping).await;
+    assert_eq!(steps[0].status, "canceled");
+
+    // Over: refused, and left as it is.
+    let again = send(form(fetch(&ctx, Method::POST, &path_of(running)), "_action=cancel")).await;
+    assert_eq!(again.status, StatusCode::CONFLICT);
+    assert_eq!(
+        decoded(&again, "x-openshop-toast-error").as_deref(),
+        Some(r#"Cannot cancel a run with status "canceled""#)
+    );
+    let failed = seed_failed_run(&ctx).await;
+    let refused = send(form(fetch(&ctx, Method::POST, &path_of(failed)), "_action=cancel")).await;
+    assert_eq!(refused.status, StatusCode::CONFLICT);
+    assert_eq!(
+        decoded(&refused, "x-openshop-toast-error").as_deref(),
+        Some(r#"Cannot cancel a run with status "failed""#)
+    );
+    assert_eq!(find_run(&ctx.db, failed).await.status, "failed");
     ctx.shutdown().await.unwrap();
 }
 

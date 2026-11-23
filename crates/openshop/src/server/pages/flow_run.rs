@@ -5,8 +5,9 @@
 //! modal: copied, and downloaded as a JSON file); its logs, filtered by the
 //! query and the levels of the URL (`?q=…&levels=…`), counted by level and
 //! exported as JSON or CSV. A run that is over is retried, resumed or
-//! restarted, or deleted, by the forms of two modals. While the run is
-//! active, the page is fetched again every 3 seconds, its logs with it.
+//! restarted, or deleted, by the forms of two modals; an active run is
+//! canceled by the form of a third. While the run is active, the page is
+//! fetched again every 3 seconds, its logs with it.
 
 mod logs;
 mod steps;
@@ -24,7 +25,8 @@ use crate::admin_paths::rpc::encode_uri_component as encode;
 use crate::db::schema::{FlowRun, StepResult};
 use crate::runtime::time::to_iso;
 use crate::server::api::runs::{
-    MAX_CHILD_RUNS, RunRefusal, delete_finished_run, find_run, retry_finished_run, run_children, run_parent, run_steps,
+    MAX_CHILD_RUNS, RunRefusal, cancel_active_run, delete_finished_run, find_run, retry_finished_run, run_children,
+    run_parent, run_steps,
 };
 use crate::types::ACTIVE_RUN_STATUSES;
 use logs::{LogFilters, Logs, help_modal, load_logs, logs_section};
@@ -34,12 +36,15 @@ use steps::{output_modals, step_rows, steps_table};
 const RETRY: &str = "retry";
 /// The form of the delete modal.
 const DELETE: &str = "delete";
+/// The form of the cancel modal.
+const CANCEL: &str = "cancel";
 /// Keeps the steps that completed.
 const RESUME: &str = "resume";
 /// Discards every step.
 const RESET: &str = "reset";
 const RETRY_MODAL: &str = "retry-modal";
 const DELETE_MODAL: &str = "delete-modal";
+const CANCEL_MODAL: &str = "cancel-modal";
 const INPUT_MODAL: &str = "run-input";
 /// How often the page of an active run is fetched again, in milliseconds: as
 /// often as the WebAssembly admin read the run and its logs.
@@ -55,7 +60,7 @@ fn run_not_found() -> anyhow::Error {
     AdminPublicError::new("NOT_FOUND", "Run not found").status(404).into()
 }
 
-/// A run the JSON API would refuse to retry or delete: the same status and
+/// A run the JSON API would refuse to retry, cancel or delete: the same status and
 /// message, in an error toast.
 fn refused(refusal: RunRefusal) -> anyhow::Error {
     let code = match refusal {
@@ -149,6 +154,11 @@ fn view(
                 }
                 s-button slot="primary-action" variant="primary" commandFor=(RETRY_MODAL) command="--show" { "Retry" }
             }
+            @if active {
+                s-button slot="secondary-actions" variant="secondary" tone="critical" commandFor=(CANCEL_MODAL) command="--show" {
+                    "Cancel run"
+                }
+            }
             @if let Some(error) = error {
                 s-banner tone="critical" heading="Error" { (error) }
             }
@@ -164,6 +174,7 @@ fn view(
                 (retry_modal())
                 (delete_modal())
             }
+            @if active { (cancel_modal()) }
         }
     }
 }
@@ -284,8 +295,29 @@ fn delete_modal() -> Markup {
     }
 }
 
-/// The forms of the modals: the run retried, said in a toast, or deleted, and
-/// the page of its flow shown.
+/// Like the delete modal: the form holds it.
+fn cancel_modal() -> Markup {
+    html! {
+        form method="post" {
+            input type="hidden" name="_action" value=(CANCEL);
+            s-modal id=(CANCEL_MODAL) heading="Cancel run" accessibilityLabel="Confirm run cancellation" {
+                s-stack direction="block" gap="base" {
+                    s-text {
+                        "The run stops within about 15 seconds, possibly in the middle of a step, and no new step starts."
+                    }
+                    s-text {
+                        "Calls it already sent are not undone, such as a Shopify bulk operation that was already submitted."
+                    }
+                }
+                s-button slot="primary-action" type="submit" variant="primary" tone="critical" { "Cancel run" }
+                s-button slot="secondary-actions" variant="secondary" commandFor=(CANCEL_MODAL) command="--hide" { "Keep running" }
+            }
+        }
+    }
+}
+
+/// The forms of the modals: the run retried or canceled, said in a toast, or
+/// deleted, and the page of its flow shown.
 pub(super) async fn submit(page: &BuiltinPage<'_>, action: &str, fields: &[(String, String)]) -> Result<Outcome> {
     let id = run_id(page);
     match action {
@@ -313,6 +345,10 @@ pub(super) async fn submit(page: &BuiltinPage<'_>, action: &str, fields: &[(Stri
                 .await?
                 .map_err(refused)?;
             Ok(Outcome::redirect(flow_href(&run.flow_name)).with_toast("Run deleted"))
+        }
+        CANCEL => {
+            cancel_active_run(page.app, page.session, id).await?.map_err(refused)?;
+            Ok(Outcome::toast("Run canceled"))
         }
         _ => Err(super::no_action()),
     }
@@ -380,12 +416,24 @@ mod tests {
     }
 
     #[test]
-    fn a_run_in_progress_is_fetched_again_and_has_no_action() {
+    fn a_run_in_progress_is_fetched_again_and_is_only_canceled() {
         for status in ACTIVE_RUN_STATUSES {
             let html = render(&run(status));
             assert!(html.contains(r#"data-openshop-refresh="3000""#), "{status}: {html}");
-            assert!(!html.contains(r#"name="_action""#), "{status}: {html}");
             assert!(!html.contains("retry-modal"), "{status}: {html}");
+            assert!(!html.contains("delete-modal"), "{status}: {html}");
+            // The header opens the confirmation, whose form cancels the run.
+            assert!(
+                html.contains(r#"<s-button slot="secondary-actions" variant="secondary" tone="critical" commandFor="cancel-modal" command="--show">Cancel run</s-button>"#),
+                "{status}: {html}"
+            );
+            assert!(
+                html.contains(r#"<form method="post"><input type="hidden" name="_action" value="cancel"><s-modal id="cancel-modal" heading="Cancel run""#),
+                "{status}: {html}"
+            );
+            assert!(html.contains("within about 15 seconds"), "{status}: {html}");
+            assert!(html.contains("are not undone"), "{status}: {html}");
+            assert_eq!(html.matches(r#"name="_action""#).count(), 1, "{status}: {html}");
         }
         let html = render(&run("running"));
         assert!(
@@ -412,6 +460,7 @@ mod tests {
         failed.input = Some(json!({ "limit": "<10>" }));
         let html = render(&failed);
         assert!(!html.contains("data-openshop-refresh"), "{html}");
+        assert!(!html.contains("cancel-modal"), "{html}");
         assert!(html.contains(r#"<s-badge tone="critical">failed</s-badge>"#), "{html}");
         assert!(html.contains(r#"<s-text type="strong">1.3s</s-text>"#), "{html}");
         assert!(html.contains(r#"<time datetime="2026-11-09T12:00:01.373Z">"#), "{html}");
